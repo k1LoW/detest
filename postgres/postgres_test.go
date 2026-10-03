@@ -58,6 +58,7 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a = ANY ((ARRAY['a'])::app.text[])`,
 		`SELECT lower(DISTINCT name) FROM t`,
 		`SELECT app.lower(name) FROM t`,
+		`SELECT pg_catalog.other.lower(name) FROM t`,
 		`SELECT sum() FROM t`,
 		`SELECT sum(*) FROM t`,
 		`SELECT sum(1, 2) FROM t`,

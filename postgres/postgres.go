@@ -1372,7 +1372,7 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(fc.Funcname) > 1 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
+		if len(fc.Funcname) > 2 || len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
 			// A function of another schema is the user's, which detest
 			// would otherwise take for the built-in of the same name.
 			return nil, c.unsupported("function " + fc.Funcname[0].GetString_().GetSval() + "." + fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
