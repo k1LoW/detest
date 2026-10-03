@@ -207,3 +207,71 @@ func TestForUpdateLocksOffsetRows(t *testing.T) {
 		s.Sometimes("the row OFFSET skipped is locked", func(*State) bool { return refused })
 	})
 }
+
+// A statement that waited on a row whose primary key the holder changed
+// follows the row to its new key, as Postgres follows the update chain,
+// rather than taking it for deleted.
+func TestWaitFollowsPrimaryKeyChange(t *testing.T) {
+	for _, tc := range []struct{ name, query string }{
+		{"locking read", `SELECT id FROM jobs WHERE status = 'pending' FOR UPDATE`},
+		{"update", `UPDATE jobs SET status = 'done' WHERE status = 'pending'`},
+		{"delete", `DELETE FROM jobs WHERE status = 'pending'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`)
+				s.Seed(func() { mustExec(t, db, `INSERT INTO jobs VALUES (1, 'pending')`) })
+				var n int64
+				s.Seed(func() { n = -1 })
+				s.Manual("mover", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					if _, err := tx.Exec(`UPDATE jobs SET id = 2 WHERE id = 1`); err != nil {
+						return err
+					}
+					p.Step("holds the row")
+					return tx.Commit()
+				})
+				s.Manual("worker", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					if tc.name == "locking read" {
+						rows, err := tx.Query(tc.query)
+						if err != nil {
+							return err
+						}
+						n = 0
+						for rows.Next() {
+							n++
+						}
+						if err := rows.Close(); err != nil {
+							return err
+						}
+					} else {
+						res, err := tx.Exec(tc.query)
+						if err != nil {
+							return err
+						}
+						if n, err = res.RowsAffected(); err != nil {
+							return err
+						}
+					}
+					return tx.Commit()
+				})
+				s.AtQuiescence(func(*State) error {
+					if n != 1 {
+						return fmt.Errorf("%s found %d rows, want the moved row", tc.name, n)
+					}
+					return nil
+				})
+			})
+		})
+	}
+}

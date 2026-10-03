@@ -122,6 +122,9 @@ type DB struct {
 	committed map[string]map[string]Row
 	locks     map[lockKey]rowLock
 	touched   map[string]bool // tables committed to since the run's last snapshot
+	// moved maps the key of a row an UPDATE gave a new primary key to that
+	// key, so a transaction that waited on the row can follow it.
+	moved map[lockKey]string
 
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
@@ -756,6 +759,7 @@ type Tx struct {
 	p        *Proc
 	writes   map[lockKey]Row
 	deleted  map[lockKey]bool
+	moved    map[lockKey]string // the keys this transaction changed, as DB.moved
 	locks    []lockKey
 	aborted  bool
 	closed   bool
@@ -778,6 +782,7 @@ type savepoint struct {
 	name     string
 	writes   map[lockKey]Row
 	deleted  map[lockKey]bool
+	moved    map[lockKey]string
 	locks    int
 	deferred int
 }
@@ -906,6 +911,7 @@ func (db *DB) reset() {
 	db.committed = map[string]map[string]Row{}
 	db.locks = map[lockKey]rowLock{}
 	db.touched = map[string]bool{}
+	db.moved = map[lockKey]string{}
 	db.seqs = map[string]int64{}
 	db.uuids = 0
 }
@@ -996,6 +1002,7 @@ func (tx *Tx) savepoint(op, name string) error {
 			sp.writes[k] = v.clone()
 		}
 		maps.Copy(sp.deleted, tx.deleted)
+		sp.moved = maps.Clone(tx.moved)
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1019,6 +1026,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.writes[k] = v.clone()
 	}
 	maps.Copy(tx.deleted, sp.deleted)
+	tx.moved = maps.Clone(sp.moved)
 	tx.deferred = tx.deferred[:sp.deferred]
 	tx.releaseLocks(tx.locks[sp.locks:])
 	tx.locks = tx.locks[:sp.locks]
@@ -1047,6 +1055,25 @@ func (tx *Tx) view(table, key string) (Row, bool) {
 		return nil, false
 	}
 	return r.clone(), true
+}
+
+// latest returns the newest version of the row read under key, following the
+// keys UPDATEs moved it to, as Postgres follows a row's update chain after a
+// wait. A row's identity is its key, so a row since inserted under the old
+// key is taken for it.
+func (tx *Tx) latest(table, key string) (string, Row, bool) {
+	table = tx.db.resolve(table)
+	for range len(tx.db.moved) + 1 {
+		if r, ok := tx.view(table, key); ok {
+			return key, r, true
+		}
+		next, ok := tx.db.moved[lockKey{table, key}]
+		if !ok {
+			break
+		}
+		key = next
+	}
+	return "", nil, false
 }
 
 func (tx *Tx) check() error {
@@ -1135,6 +1162,10 @@ func (tx *Tx) commit() {
 		tx.closed = true // a commit while the processes of an ended run unwind
 		return
 	}
+	for lk := range tx.writes {
+		delete(tx.db.moved, lk) // the key holds a row of its own now
+	}
+	maps.Copy(tx.db.moved, tx.moved)
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {

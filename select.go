@@ -509,22 +509,32 @@ rows:
 		if limit >= 0 && len(locked) >= limit {
 			break
 		}
+		latest := map[string]Row{}
 		for _, a := range targets {
 			table := from.tables[a]
-			lk := lockKey{table, r.by[a].Key()}
-			if x.tx.heldByOther(lk, mode) {
-				if sel.Lock.SkipLocked {
-					continue rows
+			_, cur, ok, err := x.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
+				if x.tx.heldByOther(lk, mode) {
+					if sel.Lock.SkipLocked {
+						return errSkipLocked
+					}
+					if sel.Lock.NoWait {
+						return x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
+					}
 				}
-				if sel.Lock.NoWait {
-					return nil, nil, x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
-				}
+				return x.tx.lockMode(lk, mode)
+			})
+			if errors.Is(err, errSkipLocked) {
+				continue rows
 			}
-			if err := x.tx.lockMode(lk, mode); err != nil {
+			if err != nil {
 				return nil, nil, err
 			}
+			if !ok {
+				continue rows // deleted while waited for
+			}
+			latest[a] = cur
 		}
-		r, ok, err := x.recheck(sel, r, targets, from, outer)
+		r, ok, err := x.recheck(sel, r, latest, from, outer)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -574,21 +584,15 @@ func (x *sqlExec) lockTargets(l *sqlir.LockClause, from fromItems) ([]string, er
 	return out, nil
 }
 
-// recheck re-reads the locked rows of r at their newest version and
-// evaluates the predicate again, as Read Committed does after a wait: a row
-// deleted meanwhile, or no longer matching, is not returned.
-func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, targets []string, from fromItems, outer *env) (jrow, bool, error) {
-	if len(targets) == 0 {
+// recheck evaluates the predicate again with the locked rows of r at their
+// newest version, latest, as Read Committed does after a wait: a row no
+// longer matching is not returned.
+func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, latest map[string]Row, from fromItems, outer *env) (jrow, bool, error) {
+	if len(latest) == 0 {
 		return r, true, nil
 	}
 	by := maps.Clone(r.by)
-	for _, a := range targets {
-		cur, ok := x.tx.view(from.tables[a], r.by[a].Key())
-		if !ok {
-			return jrow{}, false, nil
-		}
-		by[a] = cur
-	}
+	maps.Copy(by, latest)
 	// Join again in FROM order, as scan does, with the rows each item was
 	// joined to: Postgres does not look for new join partners either.
 	n := newJrow(from.aliases[0], by[from.aliases[0]])
@@ -620,6 +624,9 @@ func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, targets []string, from 
 	}
 	return n, true, nil
 }
+
+// errSkipLocked stops lockLatest at a row SKIP LOCKED passes over.
+var errSkipLocked = errors.New("row skipped by SKIP LOCKED")
 
 // lockModeOf is the row lock a locking clause takes.
 func lockModeOf(l *sqlir.LockClause) lockMode {

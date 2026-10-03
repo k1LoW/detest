@@ -212,6 +212,10 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	delete(x.tx.writes, lk)
 	x.tx.deleted[lk] = true
 	delete(x.tx.deleted, nlk)
+	if x.tx.moved == nil {
+		x.tx.moved = map[lockKey]string{}
+	}
+	x.tx.moved[lk] = nlk.key
 	return nlk, nil
 }
 

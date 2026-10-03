@@ -1014,6 +1014,22 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 	return kept, nil
 }
 
+// lockLatest locks the row read under key and returns its newest version,
+// following it to the key an UPDATE moved it to and locking it there too.
+// ok is false when the row is gone.
+func (x *sqlExec) lockLatest(table, key string, lock func(lockKey) error) (string, Row, bool, error) {
+	for {
+		if err := lock(lockKey{table, key}); err != nil {
+			return "", nil, false, err
+		}
+		next, cur, ok := x.tx.latest(table, key)
+		if !ok || next == key {
+			return key, cur, ok, nil
+		}
+		key = next
+	}
+}
+
 func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(up.Table)
 	if x.tx.db.ignored[table] {
@@ -1050,16 +1066,17 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if done[key] {
 			continue
 		}
-		lk := lockKey{table, key}
-		if err := x.tx.lockMode(lk, x.tx.db.updateLock(table, assignedColumns(up.Set))); err != nil {
+		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
+		key, cur, ok, err := x.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+		if err != nil {
 			return nil, err
 		}
-		// Re-evaluate the predicate on the version visible after the lock, as
-		// Postgres Read Committed does.
-		cur, ok := x.tx.view(table, key)
-		if !ok {
+		if !ok || done[key] {
 			continue
 		}
+		lk := lockKey{table, key}
+		// Re-evaluate the predicate on the version visible after the lock, as
+		// Postgres Read Committed does.
 		c2 := c.rebind(alias, cur)
 		if up.Where != nil {
 			ok, err := x.evalBool(up.Where, c2.env(nil))
@@ -1096,7 +1113,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if err := x.onParentUpdate(table, cur, updated); err != nil {
 			return nil, err
 		}
-		lk, err := x.rekey(table, lk, updated)
+		lk, err = x.rekey(table, lk, updated)
 		if err != nil {
 			return nil, err
 		}
@@ -1128,14 +1145,14 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		if done[key] {
 			continue
 		}
-		lk := lockKey{table, key}
-		if err := x.tx.lock(lk); err != nil {
+		key, cur, ok, err := x.lockLatest(table, key, x.tx.lock)
+		if err != nil {
 			return nil, err
 		}
-		cur, ok := x.tx.view(table, key)
-		if !ok {
+		if !ok || done[key] {
 			continue
 		}
+		lk := lockKey{table, key}
 		if del.Where != nil {
 			c2 := c.rebind(alias, cur)
 			ok, err := x.evalBool(del.Where, c2.env(nil))
