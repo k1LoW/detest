@@ -341,3 +341,36 @@ func TestUpdateLockCountsGeneratedKeys(t *testing.T) {
 		t.Errorf("note: got %v, want FOR NO KEY UPDATE", got)
 	}
 }
+
+// ON CONFLICT DO UPDATE that waited on the conflicting row follows it to the
+// key it moved to and updates it there.
+func TestUpsertFollowsMovedRow(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE, n int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO u VALUES (1, 'a', 0)`) })
+		s.Manual("mover", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE u SET id = 2 WHERE id = 1`); err != nil {
+				return err
+			}
+			p.Step("holds the row")
+			return tx.Commit()
+		})
+		s.Manual("upsert", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO u VALUES (3, 'a', 1) ON CONFLICT (email) DO UPDATE SET n = u.n + 1`)
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			row, ok := st.Row(store, "u", "2")
+			if !ok || row.Int64("n") != 1 {
+				return fmt.Errorf("row 2 = %v, want n = 1", row)
+			}
+			return nil
+		})
+	})
+}

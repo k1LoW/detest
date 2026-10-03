@@ -928,11 +928,27 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			continue
 		}
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
-		var existing Row
-		if ins.OnConflict != nil {
+		var existing, cur Row
+		var lk lockKey
+		for ins.OnConflict != nil {
 			var err error
 			if existing, err = x.findConflict(table, ins.OnConflict.Columns, row); err != nil {
 				return nil, err
+			}
+			if existing == nil || ins.OnConflict.DoNothing {
+				break
+			}
+			// DO UPDATE locks the existing row and re-reads it, following
+			// it if it moved. If it went meanwhile, the insert is tried
+			// again, as Postgres does.
+			mode := x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))
+			key, c, ok, err := x.tx.lockLatest(table, existing.Key(), func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				cur, lk = c, lockKey{table, key}
+				break
 			}
 		}
 		if existing != nil {
@@ -942,13 +958,8 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				}
 				continue
 			}
-			// DO UPDATE: lock the existing row, re-read it, apply SET with
-			// EXCLUDED bound to the proposed row.
-			lk := lockKey{table, existing.Key()}
-			if err := x.tx.lockMode(lk, x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))); err != nil {
-				return nil, err
-			}
-			cur, _ := x.tx.view(table, existing.Key())
+			// DO UPDATE: apply SET to the locked row with EXCLUDED bound to
+			// the proposed row.
 			e := &env{tables: map[string]Row{alias: cur}, merged: cur, excluded: row}
 			if ins.OnConflict.Where != nil {
 				ok, err := x.evalBool(ins.OnConflict.Where, e)
@@ -978,7 +989,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if err := x.checkRow(table, updated); err != nil {
 				return nil, err
 			}
-			if err := x.checkUniques(table, updated, existing.Key(), cur); err != nil {
+			if err := x.checkUniques(table, updated, lk.key, cur); err != nil {
 				return nil, err
 			}
 			if err := x.checkParents(table, updated, cur); err != nil {
@@ -999,7 +1010,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			x.appendReturning(out, ins.Returning, updated)
 			continue
 		}
-		lk := lockKey{table, row.Key()}
+		lk = lockKey{table, row.Key()}
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
