@@ -468,3 +468,21 @@ func TestUpsertRechecksConflictAfterWait(t *testing.T) {
 		})
 	})
 }
+
+// A locking read that waited on a row deleted meanwhile keeps no lock on its
+// key, so an insert of that key does not wait for the reader to finish.
+func TestNoLockKeptOnDeletedRow(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE j (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO j VALUES (1)`)
+	reader := &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	table := store.resolve("j")
+	mustExec(t, db, `DELETE FROM j WHERE id = 1`)
+	if _, _, ok, err := reader.lockLatest(table, "1", reader.lock); err != nil || ok {
+		t.Fatalf("lockLatest: %v %v", ok, err)
+	}
+	if len(reader.locks) != 0 || len(store.locks[lockKey{table, "1"}]) != 0 {
+		t.Errorf("lock kept on the deleted row: %v", reader.locks)
+	}
+}

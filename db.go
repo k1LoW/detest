@@ -1120,13 +1120,22 @@ func (tx *Tx) givesGenerated(table string, row Row, call string) error {
 // following it to the key an UPDATE moved it to and locking it there too.
 // ok is false when the row is gone.
 func (tx *Tx) lockLatest(table, key string, lock func(lockKey) error) (string, Row, bool, error) {
+	held := len(tx.locks)
 	for {
 		if err := lock(lockKey{table, key}); err != nil {
 			return "", nil, false, err
 		}
 		next, cur, ok := tx.latest(table, key)
-		if !ok || next == key {
-			return key, cur, ok, nil
+		if !ok {
+			// Postgres keeps no lock on a row that is gone, and detest's
+			// would block an insert of the same key: let go of those taken
+			// here, keeping the ones the transaction held before.
+			tx.releaseLocks(tx.locks[held:])
+			tx.locks = tx.locks[:held]
+			return "", nil, false, nil
+		}
+		if next == key {
+			return key, cur, true, nil
 		}
 		key = next
 	}
