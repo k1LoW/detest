@@ -374,3 +374,41 @@ func TestUpsertFollowsMovedRow(t *testing.T) {
 		})
 	})
 }
+
+// A referential action that waited on a child whose key moved follows it, so
+// the child does not keep referencing a deleted parent.
+func TestCascadeFollowsMovedChild(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY)`)
+		mustExec(t, db, `CREATE TABLE c (id int PRIMARY KEY, pid int REFERENCES p ON DELETE CASCADE)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO p VALUES (1)`)
+			mustExec(t, db, `INSERT INTO c VALUES (1, 1)`)
+		})
+		s.Manual("mover", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE c SET id = 2 WHERE id = 1`); err != nil {
+				return err
+			}
+			p.Step("holds the child")
+			return tx.Commit()
+		})
+		s.Manual("deleter", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `DELETE FROM p WHERE id = 1`)
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			for _, key := range []string{"1", "2"} {
+				if row, ok := st.Row(store, "c", key); ok {
+					return fmt.Errorf("child %v outlived its parent", row)
+				}
+			}
+			return nil
+		})
+	})
+}
