@@ -220,6 +220,9 @@ type ColumnDef struct {
 	// DropNotNull removes it.
 	NotNull     bool
 	DropNotNull bool
+	// Generated is the expression of a generated column, GENERATED ALWAYS
+	// AS (expr), whose value is computed from the row on every write.
+	Generated Expr
 }
 
 // CheckDef is a CHECK constraint. Name is empty when the statement gives

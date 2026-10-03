@@ -15,7 +15,8 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT CURRENT_DATE`,
 		`SELECT CURRENT_USER`,
 		`SELECT * FROM t WHERE created_by = SESSION_USER`,
-		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a * 2) STORED)`,
+		`ALTER TABLE t ALTER COLUMN b DROP EXPRESSION`,
+		`ALTER TABLE t ALTER COLUMN b SET EXPRESSION AS (a * 3)`,
 		`SELECT * FROM a NATURAL JOIN b`,
 		`SELECT * FROM a NATURAL LEFT JOIN b`,
 		`UPDATE t SET tags[1] = 'x'`,
@@ -58,6 +59,7 @@ func TestStillSupported(t *testing.T) {
 		`SELECT * FROM a JOIN b ON a.id = b.a_id`,
 		`UPDATE t SET name = 'x'`,
 		`SELECT count(DISTINCT a) FROM t`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a * 2) STORED)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[$1, -1, 'x'::text])`,
 	} {
 		if _, err := (parser{}).Parse(q); err != nil {

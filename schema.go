@@ -263,10 +263,17 @@ func sameColumns(u sqlir.UniqueDef, cols []string) bool {
 // checkRow makes the checks Postgres makes on a row about to be written, in
 // its order: the column types, NOT NULL, then CHECK constraints.
 func (x *sqlExec) checkRow(table string, row Row) error {
+	def := x.tx.db.defs[table]
+	if def != nil {
+		// Every write checks its row here, so this is where the generated
+		// columns get their values, before the checks that may read them.
+		if err := x.generate(table, def, row); err != nil {
+			return err
+		}
+	}
 	if err := x.checkTypes(table, row); err != nil {
 		return err
 	}
-	def := x.tx.db.defs[table]
 	if def == nil {
 		return nil
 	}
@@ -276,14 +283,7 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 		}
 	}
 	for _, c := range def.checks {
-		r := row
-		if len(c.alias) > 0 {
-			r = row.clone()
-			for written, now := range c.alias {
-				r[written] = row[now]
-			}
-		}
-		v, err := x.eval(c.Expr, &env{tables: map[string]Row{relname(table): r}, merged: r})
+		v, err := x.eval(c.Expr, c.env(table, row))
 		if err != nil {
 			if errors.As(err, new(errUnknownExpr)) {
 				continue // a check detest cannot evaluate passes, as an unknown default does
@@ -348,4 +348,45 @@ func validUUID(s string) bool {
 		}
 	}
 	return n == 32 && !strings.HasSuffix(s, "-")
+}
+
+// generate sets the generated columns of row from the other columns.
+func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
+	for _, col := range def.columns {
+		g := def.generated[col]
+		if g == nil {
+			continue
+		}
+		v, err := x.eval(g.Expr, g.env(table, row))
+		if err != nil {
+			if !errors.As(err, new(errUnknownExpr)) {
+				return err
+			}
+			v = sqlir.Unknown
+		}
+		row[col] = v
+	}
+	return nil
+}
+
+// writesGenerated refuses a statement that gives a generated column a value
+// other than DEFAULT, which Postgres rejects. exprs are the values written to
+// cols, nil when they come from a query.
+func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr) error {
+	def := x.tx.db.defs[table]
+	if def == nil || len(def.generated) == 0 {
+		return nil
+	}
+	for i, col := range cols {
+		if def.generated[col] == nil {
+			continue
+		}
+		if exprs != nil {
+			if _, isDefault := exprs[i].(*sqlir.Default); isDefault {
+				continue
+			}
+		}
+		return x.unsupported(fmt.Sprintf("a value other than DEFAULT for generated column %q", col))
+	}
+	return nil
 }

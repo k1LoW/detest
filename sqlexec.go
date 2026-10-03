@@ -171,6 +171,17 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.DeleteStmt:
 		return x.execDelete(st)
 	case *sqlir.SchemaStmt:
+		for _, ch := range st.Changes {
+			table := tx.db.resolve(ch.Table)
+			if ch.Create || len(tx.db.committed[table]) == 0 {
+				continue
+			}
+			// Postgres computes the new column for the rows already there,
+			// which detest does not do.
+			if slices.ContainsFunc(ch.Columns, func(c sqlir.ColumnDef) bool { return c.Generated != nil }) {
+				return nil, x.unsupported("adding a generated column to a table with rows")
+			}
+		}
 		if err := tx.db.applySchema(st, tx); err != nil {
 			return nil, err
 		}
@@ -769,6 +780,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := x.writesGenerated(table, cols[:min(len(cols), len(scols))], nil); err != nil {
+			return nil, err
+		}
 		for _, sr := range srows {
 			row := Row{}
 			for i, c := range cols {
@@ -786,6 +800,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 					msg = "INSERT has more target columns than expressions"
 				}
 				return nil, x.tx.db.kind.Error(sqlir.SyntaxError, msg, relname(ins.Table), "", "")
+			}
+			if err := x.writesGenerated(table, cols, exprs); err != nil {
+				return nil, err
 			}
 			row := Row{}
 			for i, e := range exprs {
@@ -859,6 +876,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 					}
 					continue
 				}
+			}
+			if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
+				return nil, err
 			}
 			updated := cur.clone()
 			for _, a := range ins.OnConflict.Set {
@@ -1058,6 +1078,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	}
 	// Validate the predicate and preview SET for the trace.
 	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
+		return nil, err
+	}
+	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set)); err != nil {
 		return nil, err
 	}
 	preview := lazyString(func() string {
@@ -1862,6 +1885,14 @@ func assignedColumns(set []sqlir.Assignment) []string {
 		cols[i] = a.Column
 	}
 	return cols
+}
+
+func assignedValues(set []sqlir.Assignment) []sqlir.Expr {
+	vals := make([]sqlir.Expr, len(set))
+	for i, a := range set {
+		vals[i] = a.Value
+	}
+	return vals
 }
 
 // kindError is a database error raised where the server is not at hand, such

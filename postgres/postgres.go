@@ -406,7 +406,7 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_IDENTITY:
 			col.Default = sequenceDefault(table, d.Colname)
 		case pg.ConstrType_CONSTR_GENERATED:
-			return col, nil, nil, c.unsupported("generated column")
+			col.Generated = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
@@ -634,6 +634,8 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.DropConstraints = append(ch.DropConstraints, cmd.Name)
 		case pg.AlterTableType_AT_DropColumn:
 			ch.DropColumns = append(ch.DropColumns, cmd.Name)
+		case pg.AlterTableType_AT_SetExpression, pg.AlterTableType_AT_DropExpression:
+			return nil, c.unsupported("changing the expression of a generated column")
 		}
 	}
 	return ch, nil

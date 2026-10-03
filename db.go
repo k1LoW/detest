@@ -146,6 +146,35 @@ type tableCheck struct {
 
 // columns returns the columns the check's expression refers to, by their
 // current names.
+// renameColumn records that a column the expression refers to is renamed.
+func (c *tableCheck) renameColumn(old, nw string) {
+	renamed := false
+	for k, v := range c.alias {
+		if v == old {
+			c.alias[k], renamed = nw, true
+		}
+	}
+	if !renamed && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+		if c.alias == nil {
+			c.alias = map[string]string{}
+		}
+		c.alias[old] = nw
+	}
+}
+
+// env is the row as the expression sees it, under the column names it was
+// written with.
+func (c tableCheck) env(table string, row Row) *env {
+	r := row
+	if len(c.alias) > 0 {
+		r = row.clone()
+		for written, now := range c.alias {
+			r[written] = row[now]
+		}
+	}
+	return &env{tables: map[string]Row{relname(table): r}, merged: r}
+}
+
 func (c tableCheck) columns() []string {
 	var out []string
 	for _, r := range sqlir.ColumnRefs(c.Expr) {
@@ -169,6 +198,9 @@ type tableDef struct {
 	notNull  map[string]bool   // NOT NULL columns besides the primary key's
 	checks   []tableCheck
 	defaults map[string]sqlir.Expr
+	// generated are the expressions of generated columns, kept as written
+	// with the renames since in alias, as a CHECK's are.
+	generated map[string]*tableCheck
 }
 
 // Name returns the database name.
@@ -413,6 +445,7 @@ func (def *tableDef) renameConstraint(old, nw string) bool {
 func (def *tableDef) dropColumn(col string) {
 	def.columns = slices.DeleteFunc(def.columns, func(c string) bool { return c == col })
 	delete(def.defaults, col)
+	delete(def.generated, col)
 	delete(def.types, col)
 	delete(def.notNull, col)
 	def.checks = slices.DeleteFunc(def.checks, func(c tableCheck) bool { return slices.Contains(c.columns(), col) })
@@ -430,6 +463,13 @@ func (def *tableDef) renameColumn(old, nw string) {
 		delete(def.defaults, old)
 		def.defaults[nw] = d
 	}
+	if g, ok := def.generated[old]; ok {
+		delete(def.generated, old)
+		def.generated[nw] = g
+	}
+	for _, g := range def.generated {
+		g.renameColumn(old, nw)
+	}
 	if t, ok := def.types[old]; ok {
 		delete(def.types, old)
 		def.types[nw] = t
@@ -439,19 +479,7 @@ func (def *tableDef) renameColumn(old, nw string) {
 		def.notNull[nw] = true
 	}
 	for i := range def.checks {
-		c := &def.checks[i]
-		renamed := false
-		for k, v := range c.alias {
-			if v == old {
-				c.alias[k], renamed = nw, true
-			}
-		}
-		if !renamed && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
-			if c.alias == nil {
-				c.alias = map[string]string{}
-			}
-			c.alias[old] = nw
-		}
+		def.checks[i].renameColumn(old, nw)
 	}
 	for i, c := range def.pk {
 		if c == old {
@@ -655,6 +683,12 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		if col.TypeOnly {
 			continue
+		}
+		if col.Generated != nil {
+			if def.generated == nil {
+				def.generated = map[string]*tableCheck{}
+			}
+			def.generated[col.Name] = &tableCheck{CheckDef: sqlir.CheckDef{Name: col.Name, Expr: col.Generated}}
 		}
 		if col.Default != nil {
 			def.defaults[col.Name] = col.Default

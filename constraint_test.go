@@ -158,3 +158,48 @@ func TestCheckInDumpFormIsEnforced(t *testing.T) {
 		t.Errorf("got %#v", err)
 	}
 }
+
+// A generated column is computed from the row on every write, and the
+// constraints on it see the computed value.
+func TestGeneratedColumns(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (a * 2) STORED, CONSTRAINT b_small CHECK (b < 100))`)
+	b := func(id int) int64 {
+		t.Helper()
+		var v int64
+		if err := db.QueryRow(`SELECT b FROM t WHERE id = $1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	mustExec(t, db, `INSERT INTO t (id, a) VALUES (1, 1)`)
+	mustExec(t, db, `INSERT INTO t VALUES (2, 2, DEFAULT)`)
+	if b(1) != 2 || b(2) != 4 {
+		t.Errorf("insert: b = %d, %d", b(1), b(2))
+	}
+	mustExec(t, db, `UPDATE t SET a = 5 WHERE id = 1`)
+	mustExec(t, db, `INSERT INTO t (id, a) VALUES (2, 7) ON CONFLICT (id) DO UPDATE SET a = excluded.a`)
+	if b(1) != 10 || b(2) != 14 {
+		t.Errorf("update: b = %d, %d", b(1), b(2))
+	}
+	if _, err := db.Exec(`UPDATE t SET a = 60 WHERE id = 1`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("CHECK on the generated column: %v", err)
+	}
+	mustExec(t, db, `ALTER TABLE t RENAME COLUMN a TO c`)
+	mustExec(t, db, `UPDATE t SET c = 8 WHERE id = 1`)
+	if b(1) != 16 {
+		t.Errorf("after RENAME COLUMN: b = %d", b(1))
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id, c, b) VALUES (3, 1, 2)`,
+		`INSERT INTO t VALUES (3, 1, 2)`,
+		`UPDATE t SET b = 1`,
+		`INSERT INTO t (id, c) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET b = 1`,
+		`ALTER TABLE t ADD COLUMN d int GENERATED ALWAYS AS (c + 1) STORED`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+}
