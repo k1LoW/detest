@@ -1404,7 +1404,16 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		var casts []string // outermost first
 		for arr.GetTypeCast() != nil {
 			names := arr.GetTypeCast().TypeName.GetNames()
-			casts = append(casts, strings.ToLower(names[len(names)-1].GetString_().GetSval()))
+			typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
+			// pg_dump casts the array only to text[]. A cast to another type
+			// coerces each element in Postgres, as '01' to 1 for int[], which
+			// detest's casts do not do for every value.
+			switch typ {
+			case "text", "varchar", "bpchar":
+			default:
+				return nil, c.unsupported("ANY or ALL over an array cast to " + typ + "[]")
+			}
+			casts = append(casts, typ)
 			arr = arr.GetTypeCast().Arg
 		}
 		if arr.GetAArrayExpr() == nil {

@@ -32,6 +32,7 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a <> ALL (ARRAY[]::int[])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[1, 1/0])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[b, c])`,
+		`SELECT * FROM t WHERE a = ANY ((ARRAY['01', '02'])::int[])`,
 	} {
 		_, err := parser{}.Parse(q)
 		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
@@ -83,7 +84,7 @@ func TestCheckInDumpForm(t *testing.T) {
 
 // A cast of the array casts each element, so it stays on the elements.
 func TestAnyKeepsArrayCast(t *testing.T) {
-	st, err := parser{}.Parse(`SELECT 1 WHERE n = ANY ((ARRAY['01', '02'])::int[])`)
+	st, err := parser{}.Parse(`SELECT 1 WHERE n = ANY ((ARRAY[1, 2])::text[])`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +93,8 @@ func TestAnyKeepsArrayCast(t *testing.T) {
 		t.Fatalf("got %#v", st.(*sqlir.SelectStmt).Where)
 	}
 	for _, e := range in.List {
-		if c, ok := e.(*sqlir.Cast); !ok || c.Type != "int4" {
-			t.Errorf("element %#v, want a cast to int4", e)
+		if c, ok := e.(*sqlir.Cast); !ok || c.Type != "text" {
+			t.Errorf("element %#v, want a cast to text", e)
 		}
 	}
 }
