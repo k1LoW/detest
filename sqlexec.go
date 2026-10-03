@@ -1802,6 +1802,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if ts.IsZero() {
 			ts = time.Now()
 		}
+		ts = ts.Truncate(time.Microsecond) // a Postgres timestamp has six fractional digits
 		if len(args) == 0 {
 			return ts, nil
 		}

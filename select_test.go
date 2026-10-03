@@ -285,6 +285,9 @@ func TestTransactionTimestamp(t *testing.T) {
 		return ts
 	}
 	first, clock := at(`SELECT now()`), at(`SELECT clock_timestamp()`)
+	if first.Nanosecond()%1000 != 0 || clock.Nanosecond()%1000 != 0 {
+		t.Errorf("more than microsecond precision: %v, %v", first, clock)
+	}
 	time.Sleep(2 * time.Millisecond)
 	for _, q := range []string{`SELECT now()`, `SELECT CURRENT_TIMESTAMP`, `SELECT transaction_timestamp()`} {
 		if got := at(q); !got.Equal(first) {
