@@ -288,3 +288,30 @@ func TestWaitFollowsPrimaryKeyChange(t *testing.T) {
 		})
 	}
 }
+
+// A key a row was moved to and then deleted from ends the chain there, so a
+// waiter does not follow an older move out of that key to another row.
+func TestMoveChainEndsAtDeletedKey(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1), (2)`)
+	mustExec(t, db, `UPDATE t SET id = 3 WHERE id = 2`) // 2 -> 3
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE t SET id = 2 WHERE id = 1`); err != nil { // 1 -> 2
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM t WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	waiter := &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	if key, _, ok := waiter.latest("t", "1"); ok {
+		t.Errorf("row 1 was deleted, but its chain leads to %s", key)
+	}
+}

@@ -1199,6 +1199,9 @@ func (tx *Tx) commit() {
 	for lk := range tx.writes {
 		delete(tx.db.moved, lk) // the key holds a row of its own now
 	}
+	for lk := range tx.deleted {
+		delete(tx.db.moved, lk) // a row moved here before is not this one
+	}
 	maps.Copy(tx.db.moved, tx.moved)
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
