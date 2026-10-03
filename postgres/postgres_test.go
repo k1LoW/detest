@@ -30,6 +30,8 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a = ANY ($1)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[]::int[])`,
 		`SELECT * FROM t WHERE a <> ALL (ARRAY[]::int[])`,
+		`SELECT * FROM t WHERE a = ANY (ARRAY[1, 1/0])`,
+		`SELECT * FROM t WHERE a = ANY (ARRAY[b, c])`,
 	} {
 		_, err := parser{}.Parse(q)
 		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
@@ -46,6 +48,7 @@ func TestStillSupported(t *testing.T) {
 		`SELECT * FROM a JOIN b ON a.id = b.a_id`,
 		`UPDATE t SET name = 'x'`,
 		`SELECT count(DISTINCT a) FROM t`,
+		`SELECT * FROM t WHERE a = ANY (ARRAY[$1, -1, 'x'::text])`,
 	} {
 		if _, err := (parser{}).Parse(q); err != nil {
 			t.Errorf("%s: %v", q, err)

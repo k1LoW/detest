@@ -1332,6 +1332,15 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 	return nil, c.unsupported(fmt.Sprintf("expression %T", n.Node))
 }
 
+// isConstElement reports whether an array element is a constant or a
+// parameter, possibly cast, whose evaluation cannot fail before comparing.
+func isConstElement(n *pg.Node) bool {
+	for n.GetTypeCast() != nil {
+		n = n.GetTypeCast().Arg
+	}
+	return n.GetAConst() != nil || n.GetParamRef() != nil
+}
+
 func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 	op := ""
 	if len(e.Name) > 0 {
@@ -1405,6 +1414,14 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		// <> ALL over an empty array are false and true whatever the operand.
 		if len(arr.GetAArrayExpr().Elements) == 0 {
 			return nil, c.unsupported("ANY or ALL over an empty array")
+		}
+		// Postgres builds the whole array before comparing, while IN stops
+		// at the first match, so an element that can fail (1/0) would raise
+		// in one and not the other.
+		for _, el := range arr.GetAArrayExpr().Elements {
+			if !isConstElement(el) {
+				return nil, c.unsupported("ANY or ALL over an array with an element other than a constant or parameter")
+			}
 		}
 		l, err := c.expr(e.Lexpr)
 		if err != nil {
