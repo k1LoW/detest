@@ -684,11 +684,22 @@ func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) 
 			return 0, x.unsupported("a negative " + what)
 		}
 		return int(n), nil
+	case string:
+		// An untyped literal such as '2' reads as a bigint.
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return 0, x.unsupported("an " + what + " that is not a bigint")
+		}
+		if i < 0 {
+			return 0, x.unsupported("a negative " + what)
+		}
+		return int(i), nil
 	}
 	f, ok := toFloat(derefValue(v))
 	switch {
-	case !ok:
-		return -1, nil
+	case !ok || f != math.Trunc(f):
+		// detest does not know how Postgres would coerce it to a bigint.
+		return 0, x.unsupported("an " + what + " that is not a bigint")
 	case f < 0:
 		return 0, x.unsupported("a negative " + what)
 	case math.IsNaN(f) || f >= math.MaxInt64:
