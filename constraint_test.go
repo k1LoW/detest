@@ -235,9 +235,12 @@ func TestGeneratedColumns(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id, b) SELECT nextval('s'), 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("INSERT ... SELECT: got %v", err)
 	}
+	if _, err := db.Exec(`UPDATE t SET b = 1 WHERE nextval('s') > 0`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("UPDATE: got %v", err)
+	}
 	var n int64
 	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("nextval after a refused INSERT: %d, %v", n, err)
+		t.Errorf("nextval after a refused INSERT and UPDATE: %d, %v", n, err)
 	}
 
 	// The same statement may not add a generated column and drop what it reads.

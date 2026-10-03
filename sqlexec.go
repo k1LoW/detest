@@ -1119,10 +1119,10 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		alias = relname(up.Table)
 	}
 	// Validate the predicate and preview SET for the trace.
-	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
-		return nil, err
-	}
 	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set)); err != nil {
+		return nil, err // before WHERE is evaluated, which may have effects
+	}
+	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
 		return nil, err
 	}
 	preview := lazyString(func() string {
