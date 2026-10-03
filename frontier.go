@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,11 @@ type frontier struct {
 	prior      int   // runs of the explorations a checkpoint resumes
 	fatal      error // a misuse that ends the exploration, such as a stale checkpoint
 	progress   []workerProgress
+	// sometimes holds the Sometimes conditions in the order declared, and
+	// whether a run of any worker, or of an exploration a checkpoint resumes,
+	// met each.
+	sometimes []string
+	reached   map[string]bool
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -140,6 +146,38 @@ func (f *frontier) finish(children [][]choice) {
 	f.settled(pushed)
 }
 
+// declareSometimes records the conditions a worker declared. Every worker
+// declares the same ones; the first to come records them.
+func (f *frontier) declareSometimes(names []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sometimes == nil {
+		f.sometimes = names
+	}
+}
+
+func (f *frontier) reach(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reached == nil {
+		f.reached = map[string]bool{}
+	}
+	f.reached[name] = true
+}
+
+// unreached returns the declared conditions no run met.
+func (f *frontier) unreached() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, n := range f.sometimes {
+		if !f.reached[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // fail ends the exploration for every worker on a misuse.
 func (f *frontier) fail(err error) {
 	f.mu.Lock()
@@ -216,6 +254,11 @@ func (s *Sim) children(c []choice, prefix int) [][]choice {
 // checkShared is check for one of several workers sharing f.
 func (s *Sim) checkShared(f *frontier, worker int) *result {
 	start := time.Now()
+	names := make([]string, len(s.sometimes))
+	for i, c := range s.sometimes {
+		names[i] = c.name
+	}
+	f.declareSometimes(names)
 	runs, maxDepth := 0, 0
 	for {
 		prefix, ok := f.take(worker)
@@ -255,7 +298,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 // merge combines the workers' results: the best violation if one was found,
 // else the run counts with whether the exploration finished.
 func (f *frontier) merge(results []*result, workers int) *result {
-	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal}
+	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached()}
 	for _, r := range results {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
@@ -287,6 +330,7 @@ type checkpoint struct {
 	Version  int             `json:"version"`
 	Runs     int             `json:"runs"` // explored before, in all the explorations so far
 	Subtrees [][]savedChoice `json:"subtrees"`
+	Reached  []string        `json:"reached,omitempty"` // Sometimes conditions met so far
 }
 
 type savedChoice struct {
@@ -321,12 +365,19 @@ func (f *frontier) load(path string) error {
 		f.stack = append(f.stack, p)
 	}
 	f.prior = ck.Runs
+	for _, n := range ck.Reached {
+		f.reach(n)
+	}
 	return nil
 }
 
 // save writes the subtrees left to path.
 func (f *frontier) save(path string) error {
 	ck := checkpoint{Version: 1, Runs: f.prior + f.runs}
+	for n := range f.reached {
+		ck.Reached = append(ck.Reached, n)
+	}
+	sort.Strings(ck.Reached)
 	for _, p := range f.stack {
 		st := make([]savedChoice, len(p))
 		for i, c := range p {

@@ -68,6 +68,8 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	switch {
 	case expect == nil && res.Violated:
 		t.Error(res.report())
+	case expect == nil && len(res.Unreached) > 0 && res.Complete && res.Shard == "":
+		t.Errorf("detest: Sometimes %s held in no run\n%s", quoteList(res.Unreached), res.report())
 	case expect == nil:
 		t.Log(res.report())
 	case !res.Violated && res.Checkpoint != "":
@@ -96,6 +98,14 @@ func workerCount(opts []Option) int {
 		return 1 // a replay is one run
 	}
 	return n
+}
+
+func quoteList(names []string) string {
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = strconv.Quote(n)
+	}
+	return strings.Join(q, ", ")
 }
 
 // exploreWorkers runs n workers as subtests, each in its own bubble:

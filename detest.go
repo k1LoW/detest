@@ -126,6 +126,7 @@ type Sim struct {
 	types     []*procType
 	seeds     []func()
 	always    []func(st *State) error
+	sometimes []sometimes
 	atQuiesce []func(st *State) error
 	sqlDBs    []*sql.DB
 	expect    *string // ExpectViolation
@@ -161,6 +162,26 @@ func newSim(t *testing.T, opts ...Option) *Sim {
 // Seed registers a function that populates simulated resources at the start
 // of every run.
 func (s *Sim) Seed(fn func()) { s.declare("Seed"); s.seeds = append(s.seeds, fn) }
+
+// Sometimes declares a condition that must hold in at least one run: fn is
+// checked after every step, as an Always invariant is, and Explore fails the
+// test when it held in none. An exploration that never gets where a bug
+// would be passes for nothing; Sometimes is how a test says where it expects
+// to get, such as both processes holding a reservation at once.
+//
+// An exploration that stopped early (MaxRuns, a violation) or explored one
+// shard of a split may not have reached the condition yet, so it only logs
+// the conditions it has not seen hold.
+func (s *Sim) Sometimes(name string, fn func(st *State) bool) {
+	s.declare("Sometimes")
+	s.sometimes = append(s.sometimes, sometimes{name: name, fn: fn})
+}
+
+type sometimes struct {
+	name    string
+	fn      func(st *State) bool
+	reached bool // by this worker; the frontier knows about all of them
+}
 
 // Always registers an invariant checked after every commit and every process
 // completion. s.Prev() is the state at the previous check.
@@ -208,10 +229,12 @@ type result struct {
 	Checkpoint string
 	// Fatal is a misuse that stopped the exploration, which fails the test
 	// rather than being reported as a violation.
-	Fatal    error
-	Schedule string
-	Trace    string
-	Elapsed  time.Duration
+	Fatal error
+	// Unreached are the Sometimes conditions no run explored so far met.
+	Unreached []string
+	Schedule  string
+	Trace     string
+	Elapsed   time.Duration
 }
 
 // report formats the outcome for humans.
@@ -231,6 +254,9 @@ func (r *result) report() string {
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		if r.Checkpoint != "" {
 			msg += fmt.Sprintf("; the rest is saved: run again with DETEST_CHECKPOINT=%s to continue", r.Checkpoint)
+		}
+		if len(r.Unreached) > 0 {
+			msg += "; Sometimes not held yet: " + strings.Join(r.Unreached, ", ")
 		}
 		return msg
 	}

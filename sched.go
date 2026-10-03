@@ -347,7 +347,30 @@ func (r *run) execute() (v *violation) {
 	return nil
 }
 
+// checkSometimes records the Sometimes conditions that hold now. A condition
+// is not checked again once this worker saw it hold, so that a test with
+// conditions met early pays for no snapshots after.
+func (r *run) checkSometimes() {
+	var st *State
+	for i := range r.s.sometimes {
+		c := &r.s.sometimes[i]
+		if c.reached {
+			continue
+		}
+		if st == nil {
+			st = r.snapshot()
+		}
+		if c.fn(st) {
+			c.reached = true
+			if r.s.frontier != nil {
+				r.s.frontier.reach(c.name)
+			}
+		}
+	}
+}
+
 func (r *run) checkAlways() *violation {
+	r.checkSometimes()
 	if len(r.s.always) == 0 {
 		return nil
 	}
