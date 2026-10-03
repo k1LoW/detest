@@ -1409,8 +1409,13 @@ func plainTextCast(tc *pg.TypeCast, array bool, types ...string) (string, bool) 
 	if len(tc.TypeName.GetTypmods()) > 0 || (len(tc.TypeName.GetArrayBounds()) > 0) != array {
 		return "", false
 	}
+	// Only the built-in type: unqualified or in pg_catalog, and as the
+	// parser gives it, not a quoted "TEXT" or a type of another schema.
 	names := tc.TypeName.GetNames()
-	typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
+	if len(names) == 2 && names[0].GetString_().GetSval() != "pg_catalog" || len(names) > 2 {
+		return "", false
+	}
+	typ := names[len(names)-1].GetString_().GetSval()
 	return typ, slices.Contains(types, typ)
 }
 

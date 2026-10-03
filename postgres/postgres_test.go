@@ -46,6 +46,8 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a = ANY (ARRAY['1'::int])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['a']::text)`,
 		`SELECT * FROM t WHERE a = ANY ((ARRAY[1.20])::text[])`,
+		`SELECT * FROM t WHERE a = ANY ((ARRAY['a'])::app.text[])`,
+		`SELECT * FROM t WHERE a = ANY ((ARRAY['a'])::"TEXT"[])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[1.20::text])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['{a}'::text[]])`,
 		`SELECT 1 UNION SELECT 2 FOR UPDATE`,
