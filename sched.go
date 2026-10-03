@@ -142,6 +142,7 @@ type run struct {
 	clock    int64
 	trace    []step
 	failures int
+	crashes  int
 	runs     map[*procType]int
 	abort    chan struct{}
 	ctx      context.Context // Proc.Context; canceled when the run ends
@@ -269,6 +270,7 @@ const (
 	optResume optionKind = iota
 	optDeliver
 	optStart
+	optCrash
 )
 
 // apply does o. preempt reports whether it takes the CPU from the current
@@ -285,6 +287,8 @@ func (r *run) apply(o option, preempt bool) {
 	case optStart:
 		r.runs[o.pt]++
 		r.resume(r.spawn(o.pt, nil))
+	case optCrash:
+		r.crash(o.p)
 	}
 }
 
@@ -324,7 +328,7 @@ func (r *run) execute() (v *violation) {
 		}
 		o := opts[i]
 		cur := r.current
-		r.apply(o, cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
+		r.apply(o, o.kind != optCrash && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
 		if r.pending != nil {
 			return r.pending
 		}
@@ -414,6 +418,13 @@ func (r *run) enabled() []option {
 			continue
 		}
 		opts = append(opts, option{kind: optResume, p: p})
+	}
+	if r.crashes < r.s.maxCrashes {
+		for _, p := range r.procs {
+			if p.state == stateReady || p.state == stateBlockedLock {
+				opts = append(opts, option{kind: optCrash, p: p})
+			}
+		}
 	}
 	if bounded {
 		return opts
@@ -614,6 +625,54 @@ func (r *run) waitOutside() bool {
 	return true
 }
 
+// crash kills p where it stands, at a yield point or waiting for a lock. Its
+// goroutine is not resumed again: it stays parked until the run ends and then
+// unwinds with the others, its deferred calls finding the run over.
+func (r *run) crash(p *Proc) {
+	r.crashes++
+	r.note(p, "crashes: its transactions roll back, the mutexes it held are freed")
+	p.state = stateDone
+	p.waitRow, p.waitLock = nil, nil
+	if p.tx != nil && !p.tx.closed {
+		p.tx.rollback()
+	}
+	for _, tx := range p.txs {
+		if !tx.closed {
+			tx.rollback()
+		}
+	}
+	p.txs = nil
+	freed := false
+	for _, l := range r.s.locks {
+		if l.crash(p) {
+			freed = true
+		}
+	}
+	if freed {
+		for _, w := range r.procs {
+			if w.state == stateBlockedLock && w.waitLock != nil {
+				w.state, w.waitLock = stateReady, nil // each re-checks its lock
+			}
+		}
+	}
+	if p.msg != nil {
+		r.redeliver(p)
+	}
+	r.version++
+}
+
+// redeliver puts back the message p failed to handle, unless it was
+// redelivered MaxRedeliveries times already.
+func (r *run) redeliver(p *Proc) {
+	p.msg.redelivered++
+	if p.msg.redelivered <= r.s.maxRedeliveries {
+		p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
+		r.queuesTouched = true
+	} else {
+		r.note(p, "drop %s after %d redeliveries", p.msg, p.msg.redelivered-1)
+	}
+}
+
 // reap waits for the goroutines of the run's processes to return. A process
 // asleep on a timer when a violation cut the run short would otherwise wake
 // in the next run and act on its simulated resources, attributed to whichever
@@ -672,17 +731,9 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		case ev.err == nil:
 			r.note(p, "done")
 		}
-		if p.msg != nil {
-			if ev.err != nil {
-				r.note(p, "nack %s", p.msg)
-				p.msg.redelivered++
-				if p.msg.redelivered <= r.s.maxRedeliveries {
-					p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
-					r.queuesTouched = true
-				} else {
-					r.note(p, "drop %s after %d redeliveries", p.msg, p.msg.redelivered-1)
-				}
-			}
+		if p.msg != nil && ev.err != nil {
+			r.note(p, "nack %s", p.msg)
+			r.redeliver(p)
 		}
 		if ev.err != nil && strings.HasPrefix(ev.err.Error(), "panic in ") {
 			panic(ev.err)

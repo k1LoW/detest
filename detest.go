@@ -67,6 +67,16 @@ func MaxFailures(n int) Option { return func(s *Sim) { s.maxFailures = n } }
 // handler returned an error.
 func MaxRedeliveries(n int) Option { return func(s *Sim) { s.maxRedeliveries = n } }
 
+// MaxCrashes bounds the process crashes per run, 0 (the default) for none.
+// A crash is a choice at every step: any process that could be resumed or is
+// waiting for a lock may die there instead. Its open transactions roll back
+// as the connection drops, the mutexes it holds are freed with its memory,
+// and the message it was handling is redelivered, not having been acked. It
+// checks what durable execution promises: that work a process claimed is
+// recovered when the process dies halfway. A crash kills one process, as
+// detest does not know which processes share a pod.
+func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
+
 // MaxPreemptions bounds the context switches away from a runnable process per
 // run (CHESS-style). 0 means unbounded.
 func MaxPreemptions(n int) Option {
@@ -123,6 +133,7 @@ type Sim struct {
 	pods             int
 	maxFailures      int
 	maxRedeliveries  int
+	maxCrashes       int
 	maxPreemptions   int
 	boundPreemptions bool
 	maxRuns          int

@@ -210,7 +210,6 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 	return nil
 }
 
-
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	table = db.resolve(table)

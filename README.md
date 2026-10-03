@@ -111,7 +111,7 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 ### Options and environment variables
 
-The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries` and `detest.MaxRuns` bound it, and `detest.Workers` explores it in parallel.
+The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries` and `detest.MaxRuns` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
 | Variable | Effect |
 | --- | --- |

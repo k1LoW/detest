@@ -10,6 +10,8 @@ type waitable interface {
 	// holders returns the processes waiter is waiting for.
 	holders(waiter *Proc) []*Proc
 	reset()
+	// crash drops what p holds or waits for, reporting whether p held it.
+	crash(p *Proc) bool
 }
 
 // Mutex is a sync.Locker for injecting into production code in place of a
@@ -59,6 +61,14 @@ func (mu *Mutex) Unlock() {
 }
 
 func (mu *Mutex) reset() { mu.held, mu.holder = false, nil }
+
+func (mu *Mutex) crash(p *Proc) bool {
+	if !mu.held || mu.holder != p {
+		return false
+	}
+	mu.held, mu.holder = false, nil
+	return true
+}
 
 func (mu *Mutex) holders(*Proc) []*Proc {
 	if mu.holder == nil {
@@ -203,6 +213,17 @@ func (rw *RWMutex) holders(waiter *Proc) []*Proc {
 		}
 	}
 	return out
+}
+
+func (rw *RWMutex) crash(p *Proc) bool {
+	delete(rw.pendingWriters, p)
+	held := rw.readers[p] > 0
+	delete(rw.readers, p)
+	if rw.writing && rw.writer == p {
+		rw.writing, rw.writer = false, nil
+		held = true
+	}
+	return held
 }
 
 func (rw *RWMutex) readLocked() bool { return rw.outsideReaders > 0 || len(rw.readers) > 0 }
