@@ -658,6 +658,7 @@ func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit i
 		if offset, err = x.evalBound(sel.Offset, "OFFSET", outer); err != nil {
 			return 0, 0, err
 		}
+		offset = max(offset, 0) // OFFSET NULL is OFFSET 0
 	}
 	if sel.Limit != nil {
 		if limit, err = x.evalBound(sel.Limit, "LIMIT", outer); err != nil {

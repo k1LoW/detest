@@ -367,6 +367,8 @@ func TestOffsetBeforeLimit(t *testing.T) {
 	if c != 0 {
 		t.Errorf("LIMIT from a WITH query: %d rows, want 0", c)
 	}
+	// OFFSET NULL is OFFSET 0.
+	mustExec(t, db, `SELECT id FROM t OFFSET NULL`)
 	// The largest bigint is a valid OFFSET.
 	mustExec(t, db, `SELECT id FROM t OFFSET 9223372036854775807`)
 	// OFFSET and LIMIT out of the bigint range are refused, not wrapped.
