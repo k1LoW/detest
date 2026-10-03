@@ -467,6 +467,16 @@ func (c *pgConv) immutable(e sqlir.Expr) error {
 			if v.Sub != nil {
 				return c.unsupported("generated column with a subquery")
 			}
+		case *sqlir.Cast:
+			// Whether a cast is immutable depends on the type it casts
+			// from, as timestamptz::text depends on the time zone, which
+			// detest does not know here. A cast to a number is immutable
+			// from any type.
+			switch v.Type {
+			case "int2", "int4", "int8", "numeric", "float4", "float8":
+			default:
+				return c.unsupported("generated column with a cast to " + v.Type)
+			}
 		}
 	}
 	return nil
