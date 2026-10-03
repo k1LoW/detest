@@ -73,23 +73,8 @@ func (s *Sim) Queue(name string, opts ...QueueOption) *Queue {
 	return q
 }
 
-func (q *Queue) reset() {
-	q.msgs = nil
-	q.nextID = 0
-	q.dupBudget = q.dups
-}
-
 // Name returns the queue name.
 func (q *Queue) Name() string { return q.name }
-
-func (q *Queue) push(msg Msg) {
-	if q.s.run != nil {
-		q.s.run.version++
-		q.s.run.queuesTouched = true
-	}
-	q.nextID++
-	q.msgs = append(q.msgs, &qmsg{id: q.nextID, msg: msg})
-}
 
 // SeedMsg enqueues a message during Seed.
 func (q *Queue) SeedMsg(msg Msg) { q.push(msg) }
@@ -98,4 +83,19 @@ func (q *Queue) SeedMsg(msg Msg) { q.push(msg) }
 func (q *Queue) Enqueue(p *Proc, msg Msg) {
 	p.yieldf("%s: enqueue %s", q.name, msg)
 	q.push(msg)
+}
+
+func (q *Queue) reset() {
+	q.msgs = nil
+	q.nextID = 0
+	q.dupBudget = q.dups
+}
+
+func (q *Queue) push(msg Msg) {
+	if q.s.run != nil {
+		q.s.run.version++
+		q.s.run.queuesTouched = true
+	}
+	q.nextID++
+	q.msgs = append(q.msgs, &qmsg{id: q.nextID, msg: msg})
 }

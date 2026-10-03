@@ -3,6 +3,7 @@ package detest
 import (
 	"database/sql"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -13,14 +14,6 @@ import (
 // Row is a database row. The key column is "id".
 type Row map[string]any
 
-func (r Row) clone() Row {
-	c := make(Row, len(r))
-	for k, v := range r {
-		c[k] = v
-	}
-	return c
-}
-
 // Key returns the row's identity: the id column, or the hidden _key assigned
 // at insert for tables without an id.
 func (r Row) Key() string {
@@ -28,25 +21,6 @@ func (r Row) Key() string {
 		return fmt.Sprint(k)
 	}
 	return fmt.Sprint(r["id"])
-}
-
-func (r Row) ensureKey() {
-	if _, ok := r["id"]; ok {
-		return
-	}
-	if _, ok := r["_key"]; ok {
-		return
-	}
-	keys := make([]string, 0, len(r))
-	for k := range r {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%v", k, derefValue(r[k])))
-	}
-	r["_key"] = strings.Join(parts, "|")
 }
 
 // Str returns a column as a string ("" when absent).
@@ -98,6 +72,31 @@ func (r Row) String() string {
 	return "{" + strings.Join(parts, " ") + "}"
 }
 
+func (r Row) clone() Row {
+	c := make(Row, len(r))
+	maps.Copy(c, r)
+	return c
+}
+
+func (r Row) ensureKey() {
+	if _, ok := r["id"]; ok {
+		return
+	}
+	if _, ok := r["_key"]; ok {
+		return
+	}
+	keys := make([]string, 0, len(r))
+	for k := range r {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, derefValue(r[k])))
+	}
+	r["_key"] = strings.Join(parts, "|")
+}
+
 type lockKey struct{ table, key string }
 
 // DB is a simulated database with row-level locks and Read Committed visibility.
@@ -129,50 +128,25 @@ type tableDef struct {
 	defaults map[string]sqlir.Expr
 }
 
-// resolve returns the schema-qualified name of a table as written. An
-// unqualified name is looked up along the search path, as Postgres does: the
-// first schema with a declared or populated table of that name, else the
-// first schema of the path. A qualified name resolves to itself.
-func (db *DB) resolve(name string) string {
-	if strings.Contains(name, ".") {
-		return name
-	}
-	path := db.kind.SearchPath()
-	if len(path) == 0 {
-		path = defaultSearchPath
-	}
-	for _, schema := range path {
-		q := schema + "." + name
-		if db.defs[q] != nil || db.views[q] != nil {
-			return q
-		}
-		if _, ok := db.committed[q]; ok {
-			return q
-		}
-	}
-	return path[0] + "." + name
-}
+// Name returns the database name.
+func (db *DB) Name() string { return db.name }
 
 var defaultSearchPath = []string{"public"}
 
-// assignKey sets the row's identity: its primary key values when the table
-// declares one, else the id column or, without one, all its columns.
-func (db *DB) assignKey(table string, row Row) error {
-	def := db.defs[table]
-	if def == nil || len(def.pk) == 0 {
-		row.ensureKey()
-		return nil
+// SeedRow inserts a committed row during Seed.
+func (db *DB) SeedRow(table string, row Row) {
+	table = db.resolve(table)
+	row = row.clone()
+	if err := db.assignKey(table, row); err != nil {
+		panic(err)
 	}
-	vals := make([]any, len(def.pk))
-	for i, c := range def.pk {
-		v := derefValue(row[c])
-		if v == nil {
-			return db.kind.Error(sqlir.NotNullViolation, fmt.Sprintf("null value in column %q of relation %q violates not-null constraint", c, relname(table)), relname(table), c, "")
-		}
-		vals[i] = v
+	t := db.committed[table]
+	if t == nil {
+		t = map[string]Row{}
+		db.committed[table] = t
 	}
-	row["_key"] = encodeKey(vals)
-	return nil
+	t[row.Key()] = row.clone()
+	db.touched[table] = true
 }
 
 // encodeKey is the identity of a row with these primary key values. One value
@@ -188,18 +162,43 @@ func encodeKey(vals []any) string {
 	return strings.Join(parts, "\x1f")
 }
 
-func (db *DB) nextval(seq string) int64 {
-	seq = sequenceName(seq)
-	db.seqs[seq]++
-	return db.seqs[seq]
+// Tx runs fn in a transaction: commit on nil, rollback on error.
+func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
+	if p.tx != nil {
+		panic("detest: nested transaction on " + p.name)
+	}
+	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	p.tx = tx
+	p.yieldf("%s: begin", db.name)
+	err := fn(tx)
+	if tx.closed {
+		p.tx = nil
+		return err
+	}
+	if err != nil || tx.aborted {
+		p.yieldf("%s: rollback", db.name)
+		tx.rollback()
+		p.tx = nil
+		if err == nil {
+			err = tx.abortedError()
+		}
+		return err
+	}
+	p.yieldf("%s: commit", db.name)
+	tx.commit()
+	p.tx = nil
+	return nil
 }
 
-// setval sets a sequence so that nextval returns v+1, or v when not called.
-func (db *DB) setval(seq string, v int64, called bool) {
-	if !called {
-		v--
+// Get reads one committed row outside a transaction (autocommit statement).
+func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
+	table = db.resolve(table)
+	p.yieldf("%s: select %s id=%s", db.name, table, key)
+	r, ok := db.committed[table][key]
+	if !ok {
+		return nil, false
 	}
-	db.seqs[sequenceName(seq)] = v
+	return r.clone(), true
 }
 
 // sequenceName normalizes how a sequence is written in nextval and setval
@@ -216,147 +215,54 @@ func sequenceName(s string) string {
 	return strings.Join(parts, ".")
 }
 
-// newUUID returns the run's next generated UUID. It counts instead of drawing
-// random bits, so a schedule replays with the same ids.
-func (db *DB) newUUID() string {
-	db.uuids++
-	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
+// Select reads committed rows outside a transaction (autocommit statement).
+func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
+	table = db.resolve(table)
+	p.yieldf("%s: select %s where ...", db.name, table)
+	return db.selectCommitted(table, pred)
 }
 
-// applySchema records what a schema statement declares. DDL is transactional
-// in Postgres and sees the transaction's own writes, so renames and drops
-// carry tx's pending rows along.
-func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
-	if db.defs == nil {
-		db.defs = map[string]*tableDef{}
-		db.matviews = map[string]*sqlir.CreateTableAsStmt{}
-		db.views = map[string]*sqlir.SchemaChange{}
-	}
-	for _, ch := range st.Changes {
-		if err := db.applyChange(ch, tx); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// Peek returns the committed rows of a table without yielding. It is for fakes
+// that need to observe another database's state (for example a fake runtime that
+// completes an execution only after its tracking row exists), never for model
+// code, which must read through transactions.
+func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 
-// pending applies f to the rows tx has written to table and not committed.
-func (tx *Tx) pending(table string, f func(lk lockKey, r Row)) {
-	if tx == nil {
-		return
-	}
-	for lk, r := range tx.writes {
-		if lk.table == table {
-			f(lk, r)
-		}
-	}
-}
-
-func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
-	table := db.resolve(ch.Table)
-	switch {
-	case ch.Object == "index":
-		return db.indexChange(table, ch)
-	case ch.Object == "view" && !ch.Drop:
-		if _, exists := db.views[table]; exists && !ch.Replace {
-			return fmt.Errorf("detest: view %q already exists", table)
-		}
-		v := ch
-		db.views[table] = &v
+// Select returns rows matching pred (all rows when pred is nil), sorted by key.
+func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
+	table = tx.db.resolve(table)
+	if tx.check() != nil {
 		return nil
-	case ch.Drop:
-		_, isView := db.views[table]
-		if db.defs[table] == nil && !isView && !ch.IfExists {
-			return fmt.Errorf("detest: %q does not exist", table)
-		}
-		delete(db.defs, table)
-		delete(db.committed, table)
-		delete(db.matviews, table)
-		delete(db.views, table)
-		tx.pending(table, func(lk lockKey, _ Row) { delete(tx.writes, lk) })
-		return nil
-	case ch.RenameTo != "":
-		return db.renameTable(table, ch, tx)
 	}
-	def := db.defs[table]
-	switch {
-	case ch.Create:
-		if def != nil {
-			if ch.IfNotExists {
-				return nil
-			}
-			return fmt.Errorf("detest: table %q already exists", table)
-		}
-		def = &tableDef{defaults: map[string]sqlir.Expr{}}
-		db.defs[table] = def
-	case def == nil:
-		if ch.IfExists {
-			return nil
-		}
-		return fmt.Errorf("detest: table %q is not declared (ALTER TABLE or CREATE INDEX before CREATE TABLE)", table)
+	tx.yieldf("%s: select %s where ...", tx.db.name, table)
+	seen := map[string]bool{}
+	var keys []string
+	for k := range tx.db.committed[table] {
+		keys = append(keys, k)
+		seen[k] = true
 	}
-	for _, col := range ch.Columns {
-		if !slices.Contains(def.columns, col.Name) {
-			def.columns = append(def.columns, col.Name)
-		}
-		if col.Type != "" {
-			if def.types == nil {
-				def.types = map[string]string{}
-			}
-			def.types[col.Name] = col.Type
-		}
-		if col.TypeOnly {
-			continue
-		}
-		if col.Default != nil {
-			def.defaults[col.Name] = col.Default
-		} else {
-			delete(def.defaults, col.Name)
+	for lk := range tx.writes {
+		if lk.table == table && !seen[lk.key] {
+			keys = append(keys, lk.key)
 		}
 	}
-	for _, u := range ch.Constraints {
-		if err := def.addConstraint(table, u); err != nil {
-			return err
+	sort.Strings(keys)
+	var out []Row
+	for _, k := range keys {
+		r, ok := tx.view(table, k)
+		if ok && (pred == nil || pred(r)) {
+			out = append(out, r)
 		}
 	}
-	for _, fk := range ch.ForeignKeys {
-		if fk.Name == "" {
-			fk.Name = relname(table) + "_" + strings.Join(fk.Columns, "_") + "_fkey"
-		}
-		fk.RefTable = db.resolve(fk.RefTable)
-		def.fks = append(def.fks, fk)
-	}
-	for _, name := range ch.DropConstraints {
-		def.dropConstraint(name)
-	}
-	for _, col := range ch.DropColumns {
-		def.dropColumn(col)
-	}
-	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
-		def.renameColumn(old, nw)
-		db.renameColumnInRows(table, old, nw)
-		for _, other := range db.defs { // foreign keys elsewhere that reference the column
-			for i := range other.fks {
-				if other.fks[i].RefTable == table {
-					for j, c := range other.fks[i].RefColumns {
-						if c == old {
-							other.fks[i].RefColumns[j] = nw
-						}
-					}
-				}
-			}
-		}
-		tx.pending(table, func(lk lockKey, r Row) {
-			if v, ok := r[old]; ok {
-				delete(r, old)
-				r[nw] = v
-			}
-		})
-	}
-	if old, nw := ch.RenameConstraint[0], ch.RenameConstraint[1]; old != "" {
-		def.renameConstraint(old, nw)
-	}
-	return nil
+	return out
+}
+
+// Open returns another database/sql handle on the database, a pool of its own,
+// for a second service that shares the database.
+func (db *DB) Open() *sql.DB {
+	sqlDB := sql.OpenDB(&sqlConnector{db: db})
+	db.s.sqlDBs = append(db.s.sqlDBs, sqlDB)
+	return sqlDB
 }
 
 func (def *tableDef) addConstraint(table string, u sqlir.UniqueDef) error {
@@ -480,6 +386,220 @@ func refersTo(u sqlir.UniqueDef, col string) bool {
 	return false
 }
 
+// SeedRowNow inserts a committed row from a fake during a run, without a
+// transaction or a yield: the fake's own step is the yield point.
+func (db *DB) SeedRowNow(table string, row Row) { db.SeedRow(table, row) }
+
+// resolve returns the schema-qualified name of a table as written. An
+// unqualified name is looked up along the search path, as Postgres does: the
+// first schema with a declared or populated table of that name, else the
+// first schema of the path. A qualified name resolves to itself.
+func (db *DB) resolve(name string) string {
+	if strings.Contains(name, ".") {
+		return name
+	}
+	path := db.kind.SearchPath()
+	if len(path) == 0 {
+		path = defaultSearchPath
+	}
+	for _, schema := range path {
+		q := schema + "." + name
+		if db.defs[q] != nil || db.views[q] != nil {
+			return q
+		}
+		if _, ok := db.committed[q]; ok {
+			return q
+		}
+	}
+	return path[0] + "." + name
+}
+
+// assignKey sets the row's identity: its primary key values when the table
+// declares one, else the id column or, without one, all its columns.
+func (db *DB) assignKey(table string, row Row) error {
+	def := db.defs[table]
+	if def == nil || len(def.pk) == 0 {
+		row.ensureKey()
+		return nil
+	}
+	vals := make([]any, len(def.pk))
+	for i, c := range def.pk {
+		v := derefValue(row[c])
+		if v == nil {
+			return db.kind.Error(sqlir.NotNullViolation, fmt.Sprintf("null value in column %q of relation %q violates not-null constraint", c, relname(table)), relname(table), c, "")
+		}
+		vals[i] = v
+	}
+	row["_key"] = encodeKey(vals)
+	return nil
+}
+
+// DB declares a database on a server of kind s, such as postgres.New(), and
+// returns a database/sql handle on it with the database itself. Production storage code (GORM, sqlx, sqlc,
+// database/sql) runs unchanged on the handle: every statement is a yield
+// point, and transactions map to detest transactions of the process issuing
+// them. A hand-written model uses the database's Tx API instead and can ignore
+// the handle. Explore closes the handle after the exploration; closing it in
+// the declaration function would close it before any run.
+func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
+	s.declare("DB")
+	if srv.Parser() == nil {
+		s.t.Fatal("detest: DB needs a server, such as postgres.New()")
+	}
+	if err := srv.Check(srv.Isolation()); err != nil {
+		s.t.Fatal(err)
+	}
+	db := &DB{name: name, kind: srv, s: s}
+	db.reset()
+	s.dbs = append(s.dbs, db)
+	return db.Open(), db
+}
+
+func (db *DB) nextval(seq string) int64 {
+	seq = sequenceName(seq)
+	db.seqs[seq]++
+	return db.seqs[seq]
+}
+
+// setval sets a sequence so that nextval returns v+1, or v when not called.
+func (db *DB) setval(seq string, v int64, called bool) {
+	if !called {
+		v--
+	}
+	db.seqs[sequenceName(seq)] = v
+}
+
+// newUUID returns the run's next generated UUID. It counts instead of drawing
+// random bits, so a schedule replays with the same ids.
+func (db *DB) newUUID() string {
+	db.uuids++
+	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
+}
+
+// applySchema records what a schema statement declares. DDL is transactional
+// in Postgres and sees the transaction's own writes, so renames and drops
+// carry tx's pending rows along.
+func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
+	if db.defs == nil {
+		db.defs = map[string]*tableDef{}
+		db.matviews = map[string]*sqlir.CreateTableAsStmt{}
+		db.views = map[string]*sqlir.SchemaChange{}
+	}
+	for _, ch := range st.Changes {
+		if err := db.applyChange(ch, tx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
+	table := db.resolve(ch.Table)
+	switch {
+	case ch.Object == "index":
+		return db.indexChange(table, ch)
+	case ch.Object == "view" && !ch.Drop:
+		if _, exists := db.views[table]; exists && !ch.Replace {
+			return fmt.Errorf("detest: view %q already exists", table)
+		}
+		v := ch
+		db.views[table] = &v
+		return nil
+	case ch.Drop:
+		_, isView := db.views[table]
+		if db.defs[table] == nil && !isView && !ch.IfExists {
+			return fmt.Errorf("detest: %q does not exist", table)
+		}
+		delete(db.defs, table)
+		delete(db.committed, table)
+		delete(db.matviews, table)
+		delete(db.views, table)
+		tx.pending(table, func(lk lockKey, _ Row) { delete(tx.writes, lk) })
+		return nil
+	case ch.RenameTo != "":
+		return db.renameTable(table, ch, tx)
+	}
+	def := db.defs[table]
+	switch {
+	case ch.Create:
+		if def != nil {
+			if ch.IfNotExists {
+				return nil
+			}
+			return fmt.Errorf("detest: table %q already exists", table)
+		}
+		def = &tableDef{defaults: map[string]sqlir.Expr{}}
+		db.defs[table] = def
+	case def == nil:
+		if ch.IfExists {
+			return nil
+		}
+		return fmt.Errorf("detest: table %q is not declared (ALTER TABLE or CREATE INDEX before CREATE TABLE)", table)
+	}
+	for _, col := range ch.Columns {
+		if !slices.Contains(def.columns, col.Name) {
+			def.columns = append(def.columns, col.Name)
+		}
+		if col.Type != "" {
+			if def.types == nil {
+				def.types = map[string]string{}
+			}
+			def.types[col.Name] = col.Type
+		}
+		if col.TypeOnly {
+			continue
+		}
+		if col.Default != nil {
+			def.defaults[col.Name] = col.Default
+		} else {
+			delete(def.defaults, col.Name)
+		}
+	}
+	for _, u := range ch.Constraints {
+		if err := def.addConstraint(table, u); err != nil {
+			return err
+		}
+	}
+	for _, fk := range ch.ForeignKeys {
+		if fk.Name == "" {
+			fk.Name = relname(table) + "_" + strings.Join(fk.Columns, "_") + "_fkey"
+		}
+		fk.RefTable = db.resolve(fk.RefTable)
+		def.fks = append(def.fks, fk)
+	}
+	for _, name := range ch.DropConstraints {
+		def.dropConstraint(name)
+	}
+	for _, col := range ch.DropColumns {
+		def.dropColumn(col)
+	}
+	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
+		def.renameColumn(old, nw)
+		db.renameColumnInRows(table, old, nw)
+		for _, other := range db.defs { // foreign keys elsewhere that reference the column
+			for i := range other.fks {
+				if other.fks[i].RefTable == table {
+					for j, c := range other.fks[i].RefColumns {
+						if c == old {
+							other.fks[i].RefColumns[j] = nw
+						}
+					}
+				}
+			}
+		}
+		tx.pending(table, func(lk lockKey, r Row) {
+			if v, ok := r[old]; ok {
+				delete(r, old)
+				r[nw] = v
+			}
+		})
+	}
+	if old, nw := ch.RenameConstraint[0], ch.RenameConstraint[1]; old != "" {
+		def.renameConstraint(old, nw)
+	}
+	return nil
+}
+
 // renameColumnInRows renames the column in the committed rows, which a commit
 // replaces rather than changes, so each renamed row is a new one.
 func (db *DB) renameColumnInRows(table, old, nw string) {
@@ -513,163 +633,6 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 	return nil // a plain index, which detest does not keep
 }
 
-// renameTable moves a table, view or materialized view to a new name in its
-// schema.
-func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
-	to := table[:strings.LastIndex(table, ".")+1] + ch.RenameTo
-	moved := false
-	tx.pending(table, func(lk lockKey, r Row) {
-		delete(tx.writes, lk)
-		tx.writes[lockKey{to, lk.key}] = r
-		if holders, ok := tx.db.locks[lk]; ok {
-			delete(tx.db.locks, lk)
-			tx.db.locks[lockKey{to, lk.key}] = holders
-		}
-	})
-	if def, ok := db.defs[table]; ok {
-		delete(db.defs, table)
-		db.defs[to] = def
-		moved = true
-		for _, other := range db.defs { // foreign keys that reference the table
-			for i := range other.fks {
-				if other.fks[i].RefTable == table {
-					other.fks[i].RefTable = to
-				}
-			}
-		}
-	}
-	if rows, ok := db.committed[table]; ok {
-		delete(db.committed, table)
-		db.committed[to] = rows
-		db.touched[table], db.touched[to] = true, true
-	}
-	if mv, ok := db.matviews[table]; ok {
-		delete(db.matviews, table)
-		db.matviews[to] = mv
-		moved = true
-	}
-	if v, ok := db.views[table]; ok {
-		delete(db.views, table)
-		db.views[to] = v
-		moved = true
-	}
-	if !moved && !ch.IfExists {
-		return fmt.Errorf("detest: %q does not exist", table)
-	}
-	return nil
-}
-
-// DB declares a database on a server of kind s, such as postgres.New(), and
-// returns a database/sql handle on it with the database itself. Production storage code (GORM, sqlx, sqlc,
-// database/sql) runs unchanged on the handle: every statement is a yield
-// point, and transactions map to detest transactions of the process issuing
-// them. A hand-written model uses the database's Tx API instead and can ignore
-// the handle. Explore closes the handle after the exploration; closing it in
-// the declaration function would close it before any run.
-func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
-	s.declare("DB")
-	if srv.Parser() == nil {
-		s.t.Fatal("detest: DB needs a server, such as postgres.New()")
-	}
-	if err := srv.Check(srv.Isolation()); err != nil {
-		s.t.Fatal(err)
-	}
-	db := &DB{name: name, kind: srv, s: s}
-	db.reset()
-	s.dbs = append(s.dbs, db)
-	return db.Open(), db
-}
-
-// Name returns the database name.
-func (db *DB) Name() string { return db.name }
-
-func (db *DB) reset() {
-	db.committed = map[string]map[string]Row{}
-	db.locks = map[lockKey]rowLock{}
-	db.touched = map[string]bool{}
-	db.seqs = map[string]int64{}
-	db.uuids = 0
-}
-
-// SeedRow inserts a committed row during Seed.
-func (db *DB) SeedRow(table string, row Row) {
-	table = db.resolve(table)
-	row = row.clone()
-	if err := db.assignKey(table, row); err != nil {
-		panic(err)
-	}
-	t := db.committed[table]
-	if t == nil {
-		t = map[string]Row{}
-		db.committed[table] = t
-	}
-	t[row.Key()] = row.clone()
-	db.touched[table] = true
-}
-
-// Tx runs fn in a transaction: commit on nil, rollback on error.
-func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
-	if p.tx != nil {
-		panic("detest: nested transaction on " + p.name)
-	}
-	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
-	p.tx = tx
-	p.yieldf("%s: begin", db.name)
-	err := fn(tx)
-	if tx.closed {
-		p.tx = nil
-		return err
-	}
-	if err != nil || tx.aborted {
-		p.yieldf("%s: rollback", db.name)
-		tx.rollback()
-		p.tx = nil
-		if err == nil {
-			err = tx.abortedError()
-		}
-		return err
-	}
-	p.yieldf("%s: commit", db.name)
-	tx.commit()
-	p.tx = nil
-	return nil
-}
-
-// Get reads one committed row outside a transaction (autocommit statement).
-func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
-	table = db.resolve(table)
-	p.yieldf("%s: select %s id=%s", db.name, table, key)
-	r, ok := db.committed[table][key]
-	if !ok {
-		return nil, false
-	}
-	return r.clone(), true
-}
-
-// Select reads committed rows outside a transaction (autocommit statement).
-func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
-	table = db.resolve(table)
-	p.yieldf("%s: select %s where ...", db.name, table)
-	return db.selectCommitted(table, pred)
-}
-
-func (db *DB) selectCommitted(table string, pred func(Row) bool) []Row {
-	table = db.resolve(table)
-	t := db.committed[table]
-	keys := make([]string, 0, len(t))
-	for k := range t {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var out []Row
-	for _, k := range keys {
-		if pred == nil || pred(t[k]) {
-			out = append(out, t[k].clone())
-		}
-	}
-	return out
-}
-
 // Tx is an open transaction. Reads see committed data plus the transaction's
 // own writes (Read Committed, statement-level). Writes take a row lock that is
 // held until commit or rollback; a waiting writer re-reads the row after the
@@ -699,167 +662,6 @@ type savepoint struct {
 	deleted  map[lockKey]bool
 	locks    int
 	deferred int
-}
-
-// savepoint runs SAVEPOINT, RELEASE SAVEPOINT and ROLLBACK TO SAVEPOINT.
-// ROLLBACK TO undoes the writes since the savepoint, releases the locks taken
-// since, and lets an aborted transaction continue, as PostgreSQL does.
-func (tx *Tx) savepoint(op, name string) error {
-	if !tx.block {
-		return fmt.Errorf("detest: %s can only be used in transaction blocks", strings.ToUpper(strings.ReplaceAll(op, "_", " ")))
-	}
-	if op == "savepoint" {
-		if err := tx.check(); err != nil {
-			return err
-		}
-		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), deferred: len(tx.deferred)}
-		for k, v := range tx.writes {
-			sp.writes[k] = v.clone()
-		}
-		for k, v := range tx.deleted {
-			sp.deleted[k] = v
-		}
-		tx.saves = append(tx.saves, sp)
-		return nil
-	}
-	i := len(tx.saves) - 1
-	for ; i >= 0 && tx.saves[i].name != name; i-- {
-	}
-	if i < 0 {
-		return fmt.Errorf("detest: savepoint %q does not exist", name)
-	}
-	if op == "release" {
-		if err := tx.check(); err != nil {
-			return err
-		}
-		tx.saves = tx.saves[:i]
-		return nil
-	}
-	sp := tx.saves[i]
-	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
-	tx.writes, tx.deleted = map[lockKey]Row{}, map[lockKey]bool{}
-	for k, v := range sp.writes {
-		tx.writes[k] = v.clone()
-	}
-	for k, v := range sp.deleted {
-		tx.deleted[k] = v
-	}
-	tx.deferred = tx.deferred[:sp.deferred]
-	tx.releaseLocks(tx.locks[sp.locks:])
-	tx.locks = tx.locks[:sp.locks]
-	tx.aborted = false
-	return nil
-}
-
-func (tx *Tx) yieldf(format string, args ...any) {
-	if tx.atomic || tx.p == nil {
-		return
-	}
-	tx.p.yieldf(format, args...)
-}
-
-func (tx *Tx) view(table, key string) (Row, bool) {
-	table = tx.db.resolve(table)
-	lk := lockKey{table, key}
-	if tx.deleted[lk] {
-		return nil, false
-	}
-	if w, ok := tx.writes[lk]; ok {
-		return w.clone(), true
-	}
-	r, ok := tx.db.committed[table][key]
-	if !ok {
-		return nil, false
-	}
-	return r.clone(), true
-}
-
-func (tx *Tx) check() error {
-	if tx.closed || tx.aborted {
-		return tx.abortedError()
-	}
-	return nil
-}
-
-func (tx *Tx) abortedError() error {
-	return tx.db.kind.Error(sqlir.InFailedTransaction, "current transaction is aborted, commands ignored until end of transaction block", "", "", "")
-}
-
-// duplicateKey is the error of a write that collides with a row holding the
-// same value in the unique index named constraint.
-func (db *DB) duplicateKey(table, constraint string) error {
-	return db.kind.Error(sqlir.UniqueViolation, fmt.Sprintf("duplicate key value violates unique constraint %q", constraint), relname(table), "", constraint)
-}
-
-// checkTable reports a table that does not exist. A database with a declared
-// schema takes it as complete; one without lets any table spring up empty.
-func (db *DB) checkTable(table string) error {
-	if len(db.defs) == 0 || db.defs[table] != nil || db.views[table] != nil {
-		return nil
-	}
-	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
-}
-
-// updateLock is the row lock an UPDATE of these columns takes: FOR NO KEY
-// UPDATE unless it changes a key column, one in the primary key or in a
-// unique index a foreign key could reference. A table without a declared
-// schema is keyed by id.
-func (db *DB) updateLock(table string, cols []string) lockMode {
-	def := db.defs[table]
-	for _, c := range cols {
-		if def == nil {
-			if c == "id" {
-				return lockUpdate
-			}
-			continue
-		}
-		if slices.Contains(def.pk, c) {
-			return lockUpdate
-		}
-		for _, u := range def.uniques {
-			if u.Where == nil && refersTo(u, c) {
-				return lockUpdate
-			}
-		}
-	}
-	return lockNoKeyUpdate
-}
-
-// pkConstraint is the name of table's primary key constraint.
-func (db *DB) pkConstraint(table string) string {
-	if def := db.defs[table]; def != nil && def.pkName != "" {
-		return def.pkName
-	}
-	return relname(table) + "_pkey"
-}
-
-// Select returns rows matching pred (all rows when pred is nil), sorted by key.
-func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
-	table = tx.db.resolve(table)
-	if tx.check() != nil {
-		return nil
-	}
-	tx.yieldf("%s: select %s where ...", tx.db.name, table)
-	seen := map[string]bool{}
-	var keys []string
-	for k := range tx.db.committed[table] {
-		keys = append(keys, k)
-		seen[k] = true
-	}
-	for lk := range tx.writes {
-		if lk.table == table && !seen[lk.key] {
-			keys = append(keys, lk.key)
-		}
-	}
-	sort.Strings(keys)
-	var out []Row
-	for _, k := range keys {
-		r, ok := tx.view(table, k)
-		if ok && (pred == nil || pred(r)) {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 // Get reads one row.
@@ -936,11 +738,208 @@ func (tx *Tx) CAS(table, key, field string, from, to any) (bool, error) {
 	return n == 1, err
 }
 
+// renameTable moves a table, view or materialized view to a new name in its
+// schema.
+func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
+	to := table[:strings.LastIndex(table, ".")+1] + ch.RenameTo
+	moved := false
+	tx.pending(table, func(lk lockKey, r Row) {
+		delete(tx.writes, lk)
+		tx.writes[lockKey{to, lk.key}] = r
+		if holders, ok := tx.db.locks[lk]; ok {
+			delete(tx.db.locks, lk)
+			tx.db.locks[lockKey{to, lk.key}] = holders
+		}
+	})
+	if def, ok := db.defs[table]; ok {
+		delete(db.defs, table)
+		db.defs[to] = def
+		moved = true
+		for _, other := range db.defs { // foreign keys that reference the table
+			for i := range other.fks {
+				if other.fks[i].RefTable == table {
+					other.fks[i].RefTable = to
+				}
+			}
+		}
+	}
+	if rows, ok := db.committed[table]; ok {
+		delete(db.committed, table)
+		db.committed[to] = rows
+		db.touched[table], db.touched[to] = true, true
+	}
+	if mv, ok := db.matviews[table]; ok {
+		delete(db.matviews, table)
+		db.matviews[to] = mv
+		moved = true
+	}
+	if v, ok := db.views[table]; ok {
+		delete(db.views, table)
+		db.views[to] = v
+		moved = true
+	}
+	if !moved && !ch.IfExists {
+		return fmt.Errorf("detest: %q does not exist", table)
+	}
+	return nil
+}
+
+func (db *DB) reset() {
+	db.committed = map[string]map[string]Row{}
+	db.locks = map[lockKey]rowLock{}
+	db.touched = map[string]bool{}
+	db.seqs = map[string]int64{}
+	db.uuids = 0
+}
+
+func (db *DB) selectCommitted(table string, pred func(Row) bool) []Row {
+	table = db.resolve(table)
+	t := db.committed[table]
+	keys := make([]string, 0, len(t))
+	for k := range t {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []Row
+	for _, k := range keys {
+		if pred == nil || pred(t[k]) {
+			out = append(out, t[k].clone())
+		}
+	}
+	return out
+}
+
+// duplicateKey is the error of a write that collides with a row holding the
+// same value in the unique index named constraint.
+func (db *DB) duplicateKey(table, constraint string) error {
+	return db.kind.Error(sqlir.UniqueViolation, fmt.Sprintf("duplicate key value violates unique constraint %q", constraint), relname(table), "", constraint)
+}
+
 // UpdateWhere updates every row matching pred and returns the count. Each
 // matching row is locked, then pred is re-evaluated on the version visible after
 // the lock is granted.
 func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (int, error) {
 	return tx.updateWhere(table, pred, fields, desc)
+}
+
+// Delete removes one row. Returns whether it existed.
+func (tx *Tx) Delete(table, key string) (bool, error) {
+	table = tx.db.resolve(table)
+	if err := tx.check(); err != nil {
+		return false, err
+	}
+	lk := lockKey{table, key}
+	tx.yieldf("%s: delete %s id=%s", tx.db.name, table, key)
+	if err := tx.lock(lk); err != nil {
+		return false, err
+	}
+	cur, ok := tx.view(table, key)
+	if !ok {
+		return false, nil
+	}
+	delete(tx.writes, lk)
+	tx.deleted[lk] = true
+	if err := tx.evaluator().onParentDelete(table, cur); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Enqueue publishes a message when the transaction commits (outbox pattern).
+func (tx *Tx) Enqueue(q *Queue, msg Msg) {
+	tx.deferred = append(tx.deferred, func() { q.push(msg) })
+}
+
+// pending applies f to the rows tx has written to table and not committed.
+func (tx *Tx) pending(table string, f func(lk lockKey, r Row)) {
+	if tx == nil {
+		return
+	}
+	for lk, r := range tx.writes {
+		if lk.table == table {
+			f(lk, r)
+		}
+	}
+}
+
+// savepoint runs SAVEPOINT, RELEASE SAVEPOINT and ROLLBACK TO SAVEPOINT.
+// ROLLBACK TO undoes the writes since the savepoint, releases the locks taken
+// since, and lets an aborted transaction continue, as PostgreSQL does.
+func (tx *Tx) savepoint(op, name string) error {
+	if !tx.block {
+		return fmt.Errorf("detest: %s can only be used in transaction blocks", strings.ToUpper(strings.ReplaceAll(op, "_", " ")))
+	}
+	if op == "savepoint" {
+		if err := tx.check(); err != nil {
+			return err
+		}
+		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), deferred: len(tx.deferred)}
+		for k, v := range tx.writes {
+			sp.writes[k] = v.clone()
+		}
+		maps.Copy(sp.deleted, tx.deleted)
+		tx.saves = append(tx.saves, sp)
+		return nil
+	}
+	i := len(tx.saves) - 1
+	for ; i >= 0 && tx.saves[i].name != name; i-- {
+	}
+	if i < 0 {
+		return fmt.Errorf("detest: savepoint %q does not exist", name)
+	}
+	if op == "release" {
+		if err := tx.check(); err != nil {
+			return err
+		}
+		tx.saves = tx.saves[:i]
+		return nil
+	}
+	sp := tx.saves[i]
+	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
+	tx.writes, tx.deleted = map[lockKey]Row{}, map[lockKey]bool{}
+	for k, v := range sp.writes {
+		tx.writes[k] = v.clone()
+	}
+	maps.Copy(tx.deleted, sp.deleted)
+	tx.deferred = tx.deferred[:sp.deferred]
+	tx.releaseLocks(tx.locks[sp.locks:])
+	tx.locks = tx.locks[:sp.locks]
+	tx.aborted = false
+	return nil
+}
+
+func (tx *Tx) yieldf(format string, args ...any) {
+	if tx.atomic || tx.p == nil {
+		return
+	}
+	tx.p.yieldf(format, args...)
+}
+
+func (tx *Tx) view(table, key string) (Row, bool) {
+	table = tx.db.resolve(table)
+	lk := lockKey{table, key}
+	if tx.deleted[lk] {
+		return nil, false
+	}
+	if w, ok := tx.writes[lk]; ok {
+		return w.clone(), true
+	}
+	r, ok := tx.db.committed[table][key]
+	if !ok {
+		return nil, false
+	}
+	return r.clone(), true
+}
+
+func (tx *Tx) check() error {
+	if tx.closed || tx.aborted {
+		return tx.abortedError()
+	}
+	return nil
+}
+
+func (tx *Tx) abortedError() error {
+	return tx.db.kind.Error(sqlir.InFailedTransaction, "current transaction is aborted, commands ignored until end of transaction block", "", "", "")
 }
 
 func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc any) (int, error) {
@@ -964,9 +963,7 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 			continue
 		}
 		old := cur.clone()
-		for k, v := range fields {
-			cur[k] = v
-		}
+		maps.Copy(cur, fields)
 		x := tx.evaluator()
 
 		if err := x.checkTypes(table, cur); err != nil {
@@ -1015,34 +1012,6 @@ func (tx *Tx) selectNoYield(table string, pred func(Row) bool) []Row {
 	return out
 }
 
-// Delete removes one row. Returns whether it existed.
-func (tx *Tx) Delete(table, key string) (bool, error) {
-	table = tx.db.resolve(table)
-	if err := tx.check(); err != nil {
-		return false, err
-	}
-	lk := lockKey{table, key}
-	tx.yieldf("%s: delete %s id=%s", tx.db.name, table, key)
-	if err := tx.lock(lk); err != nil {
-		return false, err
-	}
-	cur, ok := tx.view(table, key)
-	if !ok {
-		return false, nil
-	}
-	delete(tx.writes, lk)
-	tx.deleted[lk] = true
-	if err := tx.evaluator().onParentDelete(table, cur); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// Enqueue publishes a message when the transaction commits (outbox pattern).
-func (tx *Tx) Enqueue(q *Queue, msg Msg) {
-	tx.deferred = append(tx.deferred, func() { q.push(msg) })
-}
-
 func (tx *Tx) commit() {
 	if tx.p != nil && tx.p.r.over() {
 		tx.closed = true // a commit while the processes of an ended run unwind
@@ -1082,20 +1051,44 @@ func (tx *Tx) release() {
 	tx.releaseLocks(tx.locks)
 }
 
-// Peek returns the committed rows of a table without yielding. It is for fakes
-// that need to observe another database's state (for example a fake runtime that
-// completes an execution only after its tracking row exists), never for model
-// code, which must read through transactions.
-func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
-
-// Open returns another database/sql handle on the database, a pool of its own,
-// for a second service that shares the database.
-func (db *DB) Open() *sql.DB {
-	sqlDB := sql.OpenDB(&sqlConnector{db: db})
-	db.s.sqlDBs = append(db.s.sqlDBs, sqlDB)
-	return sqlDB
+// checkTable reports a table that does not exist. A database with a declared
+// schema takes it as complete; one without lets any table spring up empty.
+func (db *DB) checkTable(table string) error {
+	if len(db.defs) == 0 || db.defs[table] != nil || db.views[table] != nil {
+		return nil
+	}
+	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 }
 
-// SeedRowNow inserts a committed row from a fake during a run, without a
-// transaction or a yield: the fake's own step is the yield point.
-func (db *DB) SeedRowNow(table string, row Row) { db.SeedRow(table, row) }
+// updateLock is the row lock an UPDATE of these columns takes: FOR NO KEY
+// UPDATE unless it changes a key column, one in the primary key or in a
+// unique index a foreign key could reference. A table without a declared
+// schema is keyed by id.
+func (db *DB) updateLock(table string, cols []string) lockMode {
+	def := db.defs[table]
+	for _, c := range cols {
+		if def == nil {
+			if c == "id" {
+				return lockUpdate
+			}
+			continue
+		}
+		if slices.Contains(def.pk, c) {
+			return lockUpdate
+		}
+		for _, u := range def.uniques {
+			if u.Where == nil && refersTo(u, c) {
+				return lockUpdate
+			}
+		}
+	}
+	return lockNoKeyUpdate
+}
+
+// pkConstraint is the name of table's primary key constraint.
+func (db *DB) pkConstraint(table string) string {
+	if def := db.defs[table]; def != nil && def.pkName != "" {
+		return def.pkName
+	}
+	return relname(table) + "_pkey"
+}

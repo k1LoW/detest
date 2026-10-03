@@ -218,7 +218,7 @@ func nonDurableStacks() string {
 		buf = make([]byte, len(buf)*2)
 	}
 	var b strings.Builder
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
 		header, _, _ := strings.Cut(g, "\n")
 		if !strings.Contains(header, "synctest bubble") || strings.Contains(header, "durable") {
 			continue

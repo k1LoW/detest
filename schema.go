@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -44,7 +45,7 @@ func (x *sqlExec) applyDefaults(table string, row Row) error {
 		}
 		v, err := x.eval(d, &env{})
 		if err != nil {
-			if _, unknown := err.(errUnknownExpr); unknown {
+			if errors.As(err, new(errUnknownExpr)) {
 				continue // a default detest cannot evaluate leaves the column NULL
 			}
 			return err
@@ -173,15 +174,17 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 // defaultConstraintName is the name Postgres gives an unnamed unique
 // constraint: table_column_key.
 func defaultConstraintName(table string, u sqlir.UniqueDef) string {
-	name := relname(table)
+	var name strings.Builder
+	name.WriteString(relname(table))
 	for _, e := range u.Elems {
 		if c, ok := e.(*sqlir.ColumnRef); ok {
-			name += "_" + c.Column
+			name.WriteString("_" + c.Column)
 		} else {
-			name += "_expr"
+			name.WriteString("_expr")
 		}
 	}
-	return name + "_key"
+	name.WriteString("_key")
+	return name.String()
 }
 
 // rekey moves a row whose primary key an UPDATE changes: a row's identity is

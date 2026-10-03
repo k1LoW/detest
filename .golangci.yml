@@ -1,12 +1,15 @@
 version: "2"
 run:
-  timeout: 2m
+  timeout: 10m
 linters:
   enable:
+    - errorlint
     - godot
     - gosec
     - misspell
     - revive
+    - funcorder
+    - modernize
   settings:
     errcheck:
       check-type-assertions: true
@@ -19,20 +22,8 @@ linters:
         - name: exported
           disabled: false
   exclusions:
-    generated: lax
     presets:
       - comments
       - common-false-positives
       - legacy
       - std-error-handling
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
-formatters:
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$

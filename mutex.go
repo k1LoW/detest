@@ -32,15 +32,6 @@ func (s *Sim) Mutex(name string) *Mutex {
 	return mu
 }
 
-func (mu *Mutex) reset() { mu.held, mu.holder = false, nil }
-
-func (mu *Mutex) holders(*Proc) []*Proc {
-	if mu.holder == nil {
-		return nil
-	}
-	return []*Proc{mu.holder}
-}
-
 // Lock acquires the mutex, waiting while another process holds it.
 func (mu *Mutex) Lock() {
 	p := mu.s.Current()
@@ -67,6 +58,15 @@ func (mu *Mutex) Unlock() {
 	mu.s.released(mu, "unlock "+mu.name)
 }
 
+func (mu *Mutex) reset() { mu.held, mu.holder = false, nil }
+
+func (mu *Mutex) holders(*Proc) []*Proc {
+	if mu.holder == nil {
+		return nil
+	}
+	return []*Proc{mu.holder}
+}
+
 // RWMutex is the sync.RWMutex counterpart of Mutex. As with sync.RWMutex, a
 // process waiting in Lock keeps new readers out, so a reader that takes the
 // read lock again while a writer waits deadlocks; detest reports that cycle.
@@ -89,37 +89,6 @@ func (s *Sim) RWMutex(name string) *RWMutex {
 	s.locks = append(s.locks, rw)
 	return rw
 }
-
-func (rw *RWMutex) reset() {
-	rw.writing, rw.writer = false, nil
-	rw.readers = map[*Proc]int{}
-	rw.outsideReaders = 0
-	rw.pendingWriters = map[*Proc]bool{}
-}
-
-func (rw *RWMutex) holders(waiter *Proc) []*Proc {
-	var out []*Proc
-	if rw.writer != nil {
-		out = append(out, rw.writer)
-	}
-	if rw.pendingWriters[waiter] {
-		for _, p := range rw.s.run.procs {
-			// Including waiter itself catches an upgrade from a read lock.
-			if rw.readers[p] > 0 {
-				out = append(out, p)
-			}
-		}
-		return out
-	}
-	for _, p := range rw.s.run.procs {
-		if rw.pendingWriters[p] && p != waiter {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func (rw *RWMutex) readLocked() bool { return rw.outsideReaders > 0 || len(rw.readers) > 0 }
 
 // Lock acquires the write lock, waiting while any reader or writer holds it.
 func (rw *RWMutex) Lock() {
@@ -206,6 +175,37 @@ func (rw *RWMutex) RUnlock() {
 
 // RLocker returns a sync.Locker that calls RLock and RUnlock.
 func (rw *RWMutex) RLocker() sync.Locker { return rlocker{rw} }
+
+func (rw *RWMutex) reset() {
+	rw.writing, rw.writer = false, nil
+	rw.readers = map[*Proc]int{}
+	rw.outsideReaders = 0
+	rw.pendingWriters = map[*Proc]bool{}
+}
+
+func (rw *RWMutex) holders(waiter *Proc) []*Proc {
+	var out []*Proc
+	if rw.writer != nil {
+		out = append(out, rw.writer)
+	}
+	if rw.pendingWriters[waiter] {
+		for _, p := range rw.s.run.procs {
+			// Including waiter itself catches an upgrade from a read lock.
+			if rw.readers[p] > 0 {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	for _, p := range rw.s.run.procs {
+		if rw.pendingWriters[p] && p != waiter {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (rw *RWMutex) readLocked() bool { return rw.outsideReaders > 0 || len(rw.readers) > 0 }
 
 type rlocker struct{ rw *RWMutex }
 

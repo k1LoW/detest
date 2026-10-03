@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -247,7 +248,7 @@ func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []stri
 		for j, k := range keys {
 			v, err := x.outputValue(it, k.Expr, cols)
 			if err != nil {
-				if _, unknown := err.(errUnknownExpr); unknown {
+				if errors.As(err, new(errUnknownExpr)) {
 					continue // order by an expression detest cannot evaluate: keep the order
 				}
 				return err

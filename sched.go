@@ -2,7 +2,9 @@ package detest
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"runtime"
@@ -181,23 +183,31 @@ type Proc struct {
 // Name returns the instance name, such as "sweeper#2".
 func (p *Proc) Name() string { return p.name }
 
-func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
-	r.ctx, r.cancel = context.WithCancel(context.Background())
-	s.run = r
-	for _, db := range s.dbs {
-		db.reset()
+// Current returns the process whose goroutine is calling. Production code
+// called from a process does not carry the *Proc, so fakes injected at its
+// boundaries (clients, drivers) use this instead. A goroutine the process
+// itself spawned is not registered and falls back to the process the
+// scheduler resumed last.
+func (s *Sim) Current() *Proc {
+	if s.run == nil {
+		return nil
 	}
-	for _, q := range s.queues {
-		q.reset()
+	r := s.run
+	// While no process is blocked outside detest, every process but the
+	// resumed one is parked inside detest and cannot be calling, so the lookup
+	// below would return r.current anyway. It is skipped because goroutineID
+	// takes a runtime-wide lock, which parallel workers contend on.
+	if r.outside.Load() == 0 {
+		return r.current
 	}
-	for _, l := range s.locks {
-		l.reset()
+	gid := goroutineID()
+	r.gidMu.Lock()
+	p, ok := r.byGid[gid]
+	r.gidMu.Unlock()
+	if ok {
+		return p
 	}
-	for _, fn := range s.seeds {
-		fn()
-	}
-	return r
+	return r.current
 }
 
 func (r *run) choose(label string, n int) int {
@@ -423,28 +433,10 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	return p
 }
 
-func (p *Proc) main() {
-	defer func() {
-		if rec := recover(); rec != nil {
-			if _, ok := rec.(abortSentinel); ok {
-				return
-			}
-			p.ev <- procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())}
-			return
-		}
-		p.ev <- procEvent{kind: evDone, err: p.err}
-	}()
-	p.gid = goroutineID()
-	p.r.gidMu.Lock()
-	p.r.byGid[p.gid] = p
-	p.r.gidMu.Unlock()
-	<-p.resume
-	switch p.pt.kind {
-	case trigMessage:
-		p.err = p.pt.msgFn(p, p.msg.msg)
-	default:
-		p.err = p.pt.loopFn(p)
-	}
+// Step records a step with no effect on a simulated resource, such as a decision made
+// by an external environment. It is a yield point.
+func (p *Proc) Step(format string, args ...any) {
+	p.yieldf(format, args...)
 }
 
 // goroutineID returns the current goroutine's id from its stack header.
@@ -560,7 +552,7 @@ func (r *run) waitOutside() bool {
 	p := waiting[chosen]
 	r.outside.Add(-1)
 	r.note(p, "resumes from the primitive it blocked on")
-	ev, _ := v.Interface().(procEvent) // p.ev carries only procEvent
+	ev, _ := reflect.TypeAssert[procEvent](v) // p.ev carries only procEvent
 	r.handleEvent(p, ev)
 	return true
 }
@@ -588,14 +580,14 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		}
 		p.txs = nil
 		switch {
-		case ev.err == Idle:
+		case errors.Is(ev.err, Idle):
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
 				r.runs[p.pt]--
 				r.idleAt[p.pt] = r.version
 			}
 			ev.err = nil
-		case ev.err != nil && ev.err != errNack:
+		case ev.err != nil && !errors.Is(ev.err, errNack):
 			r.note(p, "done with error: %v", ev.err)
 		case ev.err == nil:
 			r.note(p, "done")
@@ -656,39 +648,6 @@ func (r *run) over() bool {
 	}
 }
 
-// yieldf hands control to the scheduler after recording the operation.
-func (p *Proc) yieldf(format string, args ...any) {
-	if p.r.over() {
-		return // cleanup after the run runs through without scheduling
-	}
-	p.r.noteAt(p, format, args...)
-	p.ev <- procEvent{kind: evYield}
-	p.wait()
-}
-
-func (p *Proc) wait() {
-	select {
-	case <-p.resume:
-	case <-p.r.abort:
-		panic(abortSentinel{})
-	}
-}
-
-// blockOnRow blocks until a row lock we need may be free.
-func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
-	p.state = stateBlockedLock
-	p.waitRow = &w
-	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
-	p.ev <- procEvent{kind: evBlocked}
-	p.wait()
-}
-
-// Step records a step with no effect on a simulated resource, such as a decision made
-// by an external environment. It is a yield point.
-func (p *Proc) Step(format string, args ...any) {
-	p.yieldf(format, args...)
-}
-
 // Now returns the simulated clock.
 func (p *Proc) Now() int64 { return p.r.clock }
 
@@ -716,6 +675,53 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
+}
+
+// Context returns a context for production code called from this process. It
+// is canceled when the run ends, which lets database/sql roll back a
+// transaction the process left open when the run was cut short.
+func (p *Proc) Context() context.Context { return p.r.ctx }
+
+func (p *Proc) main() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if _, ok := rec.(abortSentinel); ok {
+				return
+			}
+			p.ev <- procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())}
+			return
+		}
+		p.ev <- procEvent{kind: evDone, err: p.err}
+	}()
+	p.gid = goroutineID()
+	p.r.gidMu.Lock()
+	p.r.byGid[p.gid] = p
+	p.r.gidMu.Unlock()
+	<-p.resume
+	switch p.pt.kind {
+	case trigMessage:
+		p.err = p.pt.msgFn(p, p.msg.msg)
+	default:
+		p.err = p.pt.loopFn(p)
+	}
+}
+
+// yieldf hands control to the scheduler after recording the operation.
+func (p *Proc) yieldf(format string, args ...any) {
+	if p.r.over() {
+		return // cleanup after the run runs through without scheduling
+	}
+	p.r.noteAt(p, format, args...)
+	p.ev <- procEvent{kind: evYield}
+	p.wait()
+}
+
+func (p *Proc) wait() {
+	select {
+	case <-p.resume:
+	case <-p.r.abort:
+		panic(abortSentinel{})
+	}
 }
 
 // note records an operation in the trace. The trace is kept only by a run that
@@ -893,9 +899,7 @@ func (r *run) snapshot() *State {
 				continue
 			}
 			rows := make(map[string]Row, len(t))
-			for k, row := range t {
-				rows[k] = row
-			}
+			maps.Copy(rows, t)
 			ts[tn] = rows
 		}
 		clear(db.touched)
@@ -919,34 +923,30 @@ func (r *run) dbsTouched() bool {
 	return false
 }
 
-// Current returns the process whose goroutine is calling. Production code
-// called from a process does not carry the *Proc, so fakes injected at its
-// boundaries (clients, drivers) use this instead. A goroutine the process
-// itself spawned is not registered and falls back to the process the
-// scheduler resumed last.
-func (s *Sim) Current() *Proc {
-	if s.run == nil {
-		return nil
+func (s *Sim) newRun(prefix []choice) *run {
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
+	s.run = r
+	for _, db := range s.dbs {
+		db.reset()
 	}
-	r := s.run
-	// While no process is blocked outside detest, every process but the
-	// resumed one is parked inside detest and cannot be calling, so the lookup
-	// below would return r.current anyway. It is skipped because goroutineID
-	// takes a runtime-wide lock, which parallel workers contend on.
-	if r.outside.Load() == 0 {
-		return r.current
+	for _, q := range s.queues {
+		q.reset()
 	}
-	gid := goroutineID()
-	r.gidMu.Lock()
-	p, ok := r.byGid[gid]
-	r.gidMu.Unlock()
-	if ok {
-		return p
+	for _, l := range s.locks {
+		l.reset()
 	}
-	return r.current
+	for _, fn := range s.seeds {
+		fn()
+	}
+	return r
 }
 
-// Context returns a context for production code called from this process. It
-// is canceled when the run ends, which lets database/sql roll back a
-// transaction the process left open when the run was cut short.
-func (p *Proc) Context() context.Context { return p.r.ctx }
+// blockOnRow blocks until a row lock we need may be free.
+func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
+	p.state = stateBlockedLock
+	p.waitRow = &w
+	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
+	p.ev <- procEvent{kind: evBlocked}
+	p.wait()
+}

@@ -2,8 +2,11 @@ package detest
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,20 +76,14 @@ type jrow struct {
 
 func newJrow(alias string, r Row) jrow {
 	j := jrow{by: map[string]Row{alias: r}, merged: Row{}, base: r}
-	for k, v := range r {
-		j.merged[k] = v
-	}
+	maps.Copy(j.merged, r)
 	return j
 }
 
 func (j jrow) with(alias string, r Row) jrow {
 	n := jrow{by: make(map[string]Row, len(j.by)+1), merged: make(Row, len(j.merged)+len(r)), base: j.base}
-	for k, v := range j.by {
-		n.by[k] = v
-	}
-	for k, v := range j.merged {
-		n.merged[k] = v
-	}
+	maps.Copy(n.by, j.by)
+	maps.Copy(n.merged, j.merged)
 	if r != nil {
 		n.by[alias] = r
 		for k, v := range r {
@@ -496,7 +493,7 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 		for j, k := range keys {
 			v, err := x.eval(k.Expr, r.env(outer))
 			if err != nil {
-				if _, unknown := err.(errUnknownExpr); unknown {
+				if errors.As(err, new(errUnknownExpr)) {
 					continue // order by an expression detest cannot evaluate: keep key order
 				}
 				return err
@@ -617,10 +614,8 @@ func hasAggregate(e sqlir.Expr) bool {
 		case "count", "sum", "min", "max", "avg":
 			return true
 		}
-		for _, a := range v.Args {
-			if hasAggregate(a) {
-				return true
-			}
+		if slices.ContainsFunc(v.Args, hasAggregate) {
+			return true
 		}
 	case *sqlir.BinaryExpr:
 		return hasAggregate(v.L) || hasAggregate(v.R)
@@ -742,7 +737,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for i, e := range exprs {
 				v, err := x.eval(e, &env{})
 				if err != nil {
-					if _, ok := err.(errUnknownExpr); ok {
+					if errors.As(err, new(errUnknownExpr)) {
 						v = sqlir.Unknown
 					} else {
 						return nil, err
@@ -810,7 +805,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for _, a := range ins.OnConflict.Set {
 				v, err := x.eval(a.Value, e)
 				if err != nil {
-					if _, ok := err.(errUnknownExpr); ok {
+					if errors.As(err, new(errUnknownExpr)) {
 						v = sqlir.Unknown
 					} else {
 						return nil, err
@@ -1035,7 +1030,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		for _, a := range up.Set {
 			v, err := x.eval(a.Value, c2.env(nil))
 			if err != nil {
-				if _, ok := err.(errUnknownExpr); ok {
+				if errors.As(err, new(errUnknownExpr)) {
 					v = sqlir.Unknown
 				} else {
 					return nil, err
@@ -1357,7 +1352,7 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		return m, nil
 	case "+", "-", "*", "/", "%":
 		v, err := arith(op, l, r)
-		if ke, ok := err.(kindError); ok {
+		if ke := (kindError{}); errors.As(err, &ke) {
 			return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
 		}
 		return v, err

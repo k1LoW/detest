@@ -159,14 +159,6 @@ func newSim(t *testing.T, opts ...Option) *Sim {
 	return s
 }
 
-// declare panics when a declaration method is called after the declaration
-// function returned: the exploration has started and would ignore it.
-func (s *Sim) declare(what string) {
-	if s.frozen {
-		panic(fmt.Sprintf("detest: Sim.%s called after the declaration function returned", what))
-	}
-}
-
 // Seed registers a function that populates simulated resources at the start
 // of every run.
 func (s *Sim) Seed(fn func()) { s.declare("Seed"); s.seeds = append(s.seeds, fn) }
@@ -192,6 +184,14 @@ func (s *Sim) ExpectViolation(substr string) { s.declare("ExpectViolation"); s.e
 
 // Now returns the simulated clock of the current run.
 func (s *Sim) Now() int64 { return s.run.clock }
+
+// declare panics when a declaration method is called after the declaration
+// function returned: the exploration has started and would ignore it.
+func (s *Sim) declare(what string) {
+	if s.frozen {
+		panic(fmt.Sprintf("detest: Sim.%s called after the declaration function returned", what))
+	}
+}
 
 // result is the outcome of an exploration.
 type result struct {
@@ -245,7 +245,7 @@ func (s *Sim) check() *result {
 	start := time.Now()
 	if env := os.Getenv("DETEST_SCHEDULE"); env != "" {
 		var prefix []choice
-		for _, f := range strings.Split(env, ",") {
+		for f := range strings.SplitSeq(env, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil {
 				s.t.Fatalf("detest: bad DETEST_SCHEDULE: %v", err)

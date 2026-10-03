@@ -55,11 +55,6 @@ func (c *sqlConn) Ping(context.Context) error {
 	return nil
 }
 
-// current returns the process issuing statements on this connection. Outside
-// a run (seeding) or outside any process, statements run directly on the
-// committed state without yielding.
-func (c *sqlConn) current() *Proc { return c.db.s.Current() }
-
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
@@ -79,6 +74,17 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx
 	c.tx = tx
 	p.yieldf("%s: begin", c.db.name)
 	return &sqlTx{c: c}, nil
+}
+
+// ExecContext and QueryContext return database errors as the server's Errors
+// option converts them, the type the production code's driver returns.
+func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	rows, affected, err := c.run(query, args)
+	if err != nil {
+		return nil, c.db.kind.Convert(err)
+	}
+	_ = rows
+	return driver.RowsAffected(affected), nil
 }
 
 type sqlTx struct{ c *sqlConn }
@@ -125,6 +131,19 @@ func (p *Proc) forgetTx(tx *Tx) {
 	}
 }
 
+func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	rows, _, err := c.run(query, args)
+	if err != nil {
+		return nil, c.db.kind.Convert(err)
+	}
+	return rows, nil
+}
+
+// current returns the process issuing statements on this connection. Outside
+// a run (seeding) or outside any process, statements run directly on the
+// committed state without yielding.
+func (c *sqlConn) current() *Proc { return c.db.s.Current() }
+
 // statementTx returns the transaction a statement runs in: the open one, or an
 // autocommit transaction committed right after the statement.
 func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
@@ -134,25 +153,6 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 	p := c.current()
 	tx = &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: p == nil}
 	return tx, true
-}
-
-// ExecContext and QueryContext return database errors as the server's Errors
-// option converts them, the type the production code's driver returns.
-func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	rows, affected, err := c.run(query, args)
-	if err != nil {
-		return nil, c.db.kind.Convert(err)
-	}
-	_ = rows
-	return driver.RowsAffected(affected), nil
-}
-
-func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	rows, _, err := c.run(query, args)
-	if err != nil {
-		return nil, c.db.kind.Convert(err)
-	}
-	return rows, nil
 }
 
 func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64, error) {

@@ -267,8 +267,11 @@ func (f *frontier) load(path string) error {
 		return err
 	}
 	var ck checkpoint
-	if err := json.Unmarshal(b, &ck); err != nil || ck.Version != 1 {
-		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %v", path, err)
+	if err := json.Unmarshal(b, &ck); err != nil {
+		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %w", path, err)
+	}
+	if ck.Version != 1 {
+		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
 	}
 	f.stack = f.stack[:0]
 	for _, st := range ck.Subtrees {
