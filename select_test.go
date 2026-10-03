@@ -260,3 +260,37 @@ func TestTimestampPrecision(t *testing.T) {
 		}
 	}
 }
+
+// now() and CURRENT_TIMESTAMP are the time the transaction began, the same
+// throughout it, while clock_timestamp() moves on.
+func TestTransactionTimestamp(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	at := func(q string) time.Time {
+		t.Helper()
+		var ts time.Time
+		if err := tx.QueryRow(q).Scan(&ts); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return ts
+	}
+	first, clock := at(`SELECT now()`), at(`SELECT clock_timestamp()`)
+	time.Sleep(2 * time.Millisecond)
+	for _, q := range []string{`SELECT now()`, `SELECT CURRENT_TIMESTAMP`, `SELECT transaction_timestamp()`} {
+		if got := at(q); !got.Equal(first) {
+			t.Errorf("%s: %v, want the transaction's start %v", q, got, first)
+		}
+	}
+	if !at(`SELECT clock_timestamp()`).After(clock) {
+		t.Error("clock_timestamp() did not move on")
+	}
+	var same bool
+	if err := tx.QueryRow(`SELECT CURRENT_TIMESTAMP(6) = CURRENT_TIMESTAMP(6)`).Scan(&same); err != nil || !same {
+		t.Errorf("CURRENT_TIMESTAMP(6) twice: %v %v", same, err)
+	}
+}

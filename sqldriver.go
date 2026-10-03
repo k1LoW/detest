@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -26,7 +27,7 @@ func CheckSQL(d Server, query string) error {
 	}
 	pdb := &DB{name: "probe", kind: kind}
 	pdb.reset()
-	probe := &Tx{db: pdb, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: true, block: true}
+	probe := &Tx{db: pdb, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: true, block: true}
 	args := make([]driver.Value, 65536) // more than any statement binds
 	_, err = s.exec(probe, args)
 	return err
@@ -84,10 +85,10 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	}
 	p := c.current()
 	if p == nil {
-		c.tx = &Tx{db: c.db, p: nil, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: true, block: true}
+		c.tx = &Tx{db: c.db, p: nil, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: true, block: true}
 		return &sqlTx{c: c}, nil
 	}
-	tx := &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, block: true}
+	tx := &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), block: true}
 	p.txs = append(p.txs, tx)
 	c.tx = tx
 	p.yieldf("%s: begin", c.db.name)
@@ -218,7 +219,7 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 		return c.tx, false
 	}
 	p := c.current()
-	tx = &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: p == nil}
+	tx = &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: p == nil}
 	return tx, true
 }
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -261,7 +262,7 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
-	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now()}
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
 	err := fn(tx)
@@ -792,11 +793,14 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 // held until commit or rollback; a waiting writer re-reads the row after the
 // lock is granted, as Postgres does.
 type Tx struct {
-	db       *DB
-	p        *Proc
-	writes   map[lockKey]Row
-	deleted  map[lockKey]bool
-	moved    map[lockKey]string // the keys this transaction changed, as DB.moved
+	db      *DB
+	p       *Proc
+	writes  map[lockKey]Row
+	deleted map[lockKey]bool
+	moved   map[lockKey]string // the keys this transaction changed, as DB.moved
+	// start is when the transaction began, which now() and
+	// CURRENT_TIMESTAMP return throughout it.
+	start    time.Time
 	locks    []lockKey
 	aborted  bool
 	closed   bool

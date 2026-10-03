@@ -33,6 +33,7 @@ type sqlExec struct {
 	query string
 	args  []driver.Value
 	ctes  map[string][]Row
+	start time.Time // when the statement began, for statement_timestamp()
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -130,7 +131,7 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if err := tx.check(); err != nil {
 		return nil, err
 	}
-	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}}
+	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}, start: time.Now()}
 	return x.execStatement(s.stmt)
 }
 
@@ -1734,8 +1735,20 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "gen_random_uuid", "uuid_generate_v4":
 		return x.tx.db.newUUID(), nil
 	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
+		// Postgres fixes now() at the start of the transaction, which a
+		// transaction that starts early and commits late depends on.
+		ts := x.tx.start
+		switch name {
+		case "clock_timestamp":
+			ts = time.Now()
+		case "statement_timestamp":
+			ts = x.start
+		}
+		if ts.IsZero() {
+			ts = time.Now()
+		}
 		if len(args) == 0 {
-			return time.Now(), nil
+			return ts, nil
 		}
 		// Only CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) take an argument,
 		// which the converter passes as current_timestamp's.
@@ -1744,7 +1757,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return nil, x.unsupported(name + " with these arguments")
 		}
 		// Postgres reduces a precision above 6 to 6, with a warning.
-		return time.Now().Round(time.Duration(math.Pow10(9 - int(min(p, 6))))), nil
+		return ts.Round(time.Duration(math.Pow10(9 - int(min(p, 6))))), nil
 	case "random":
 		return 0.5, nil
 	case "abs":
