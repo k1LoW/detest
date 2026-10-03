@@ -227,6 +227,7 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 		`SELECT count(*) IN (1, 2) FROM t`,
 		`SELECT string_agg(id::text, ',') FROM t`,
 		`SELECT json_agg_strict(id) FROM t`,
+		`SELECT 1 FROM t ORDER BY string_agg(id::text, ',')`,
 		`SELECT id FROM t LIMIT -1`,
 		`SELECT id FROM t OFFSET -1`,
 		`SELECT id FROM t LIMIT -1 FOR UPDATE`,
@@ -238,6 +239,19 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 	var n int64
 	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("count(*) + 1: %d, %v", n, err)
+	}
+	// An aggregate only in ORDER BY makes the query one group, as in Postgres.
+	rows, err := db.Query(`SELECT 1 FROM t ORDER BY count(*)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := 0
+	for rows.Next() {
+		got++
+	}
+	_ = rows.Close()
+	if got != 1 {
+		t.Errorf("ORDER BY count(*): %d rows, want 1", got)
 	}
 }
 

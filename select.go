@@ -124,7 +124,7 @@ func isAggregate(sel *sqlir.SelectStmt) bool {
 			return true
 		}
 	}
-	return false
+	return slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
 }
 
 // groups folds the rows into groups by GROUP BY and keeps those HAVING
@@ -560,8 +560,7 @@ type lockPlan struct {
 // planLocking checks a locking read and works out the FROM items it locks,
 // from the statement alone.
 func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
-	aggregate := isAggregate(sel) || slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
-	if aggregate || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
 		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 	}
 	// Postgres allows neither in WHERE or ON at all.
