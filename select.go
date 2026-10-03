@@ -3,6 +3,8 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -477,7 +479,7 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 // before locking, in scan order, so LIMIT counts the rows actually locked
 // (FOR UPDATE SKIP LOCKED skips rows held by others).
 func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
-	rows, baseTable, err := x.scan(sel, outer)
+	rows, from, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -487,6 +489,10 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Ro
 	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
 		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 	}
+	targets, err := x.lockTargets(sel.Lock, from)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := x.order(sel.OrderBy, rows, outer); err != nil {
 		return nil, nil, err
 	}
@@ -495,34 +501,104 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Ro
 		return nil, nil, err
 	}
 	mode := lockModeOf(sel.Lock)
-	if baseTable != "" {
-		var locked []jrow
-		for _, r := range rows {
-			if limit >= 0 && len(locked) >= limit {
-				break
-			}
-			lk := lockKey{baseTable, r.base.Key()}
+	var locked []jrow
+rows:
+	for _, r := range rows {
+		if limit >= 0 && len(locked) >= limit {
+			break
+		}
+		for _, a := range targets {
+			table := from.tables[a]
+			lk := lockKey{table, r.by[a].Key()}
 			if x.tx.heldByOther(lk, mode) {
 				if sel.Lock.SkipLocked {
-					continue
+					continue rows
 				}
 				if sel.Lock.NoWait {
-					return nil, nil, x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(baseTable)), relname(baseTable), "", "")
+					return nil, nil, x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
 				}
 			}
 			if err := x.tx.lockMode(lk, mode); err != nil {
 				return nil, nil, err
 			}
-			if cur, ok := x.tx.view(baseTable, r.base.Key()); ok {
-				r = newJrow(x.aliasOf(sel), cur)
-			}
+		}
+		r, ok, err := x.recheck(sel, r, targets, from, outer)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ok {
 			locked = append(locked, r)
 		}
-		rows = locked
-	} else if limit >= 0 && limit < len(rows) {
-		rows = rows[:limit]
 	}
-	return x.project(sel, rows, outer)
+	return x.project(sel, locked, outer)
+}
+
+// lockTargets is the FROM items whose rows a locking clause locks: those it
+// names, or every table in FROM.
+func (x *sqlExec) lockTargets(l *sqlir.LockClause, from fromItems) ([]string, error) {
+	names := l.Of
+	if len(names) == 0 {
+		names = from.aliases
+	}
+	var out []string
+	for _, a := range names {
+		if !slices.Contains(from.aliases, a) {
+			return nil, x.tx.db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q in FOR UPDATE clause not found in FROM clause", a), a, "", "")
+		}
+		if from.tables[a] == "" {
+			continue // a subquery, CTE or view: detest locks no rows behind it
+		}
+		if from.nullable[a] {
+			return nil, x.unsupported("FOR UPDATE on the nullable side of an outer join")
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// recheck re-reads the locked rows of r at their newest version and
+// evaluates the predicate again, as Read Committed does after a wait: a row
+// deleted meanwhile, or no longer matching, is not returned.
+func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, targets []string, from fromItems, outer *env) (jrow, bool, error) {
+	if len(targets) == 0 {
+		return r, true, nil
+	}
+	by := maps.Clone(r.by)
+	for _, a := range targets {
+		cur, ok := x.tx.view(from.tables[a], r.by[a].Key())
+		if !ok {
+			return jrow{}, false, nil
+		}
+		by[a] = cur
+	}
+	n := newJrow(from.aliases[0], by[from.aliases[0]])
+	if from.tables[from.aliases[0]] == "" {
+		n.base = nil
+	}
+	for _, a := range from.aliases[1:] {
+		n = n.with(a, by[a])
+	}
+	// Outer joins are not re-evaluated: their ON decides whether a row is
+	// null-extended, not whether it is returned.
+	for _, join := range sel.Joins {
+		if join.On == nil || join.Kind == sqlir.LeftJoin {
+			continue
+		}
+		ok, err := x.evalBool(join.On, n.env(outer))
+		if err != nil {
+			return jrow{}, false, err
+		}
+		if !ok {
+			return jrow{}, false, nil
+		}
+	}
+	if sel.Where != nil {
+		ok, err := x.evalBool(sel.Where, n.env(outer))
+		if err != nil || !ok {
+			return jrow{}, false, err
+		}
+	}
+	return n, true, nil
 }
 
 // lockModeOf is the row lock a locking clause takes.

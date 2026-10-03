@@ -415,19 +415,27 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	return alias, x.tx.selectNoYield(t.Name, nil), true, nil
 }
 
+// fromItems describes the FROM items of a query, for locking reads.
+type fromItems struct {
+	aliases  []string          // in FROM order, the first being the base item
+	tables   map[string]string // alias -> table, for the items that are tables
+	nullable map[string]bool   // the right side of a LEFT JOIN
+}
+
 // scan produces the FROM rows of a query: the base table joined with each
 // JOIN item by nested loops.
-func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error) {
+func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, fromItems, error) {
+	from := fromItems{tables: map[string]string{}, nullable: map[string]bool{}}
 	if sel.From == nil {
-		return []jrow{{by: map[string]Row{}, merged: Row{}}}, "", nil
+		return []jrow{{by: map[string]Row{}, merged: Row{}}}, from, nil
 	}
 	alias, rows, isBase, err := x.tableRows(*sel.From, outer)
 	if err != nil {
-		return nil, "", err
+		return nil, from, err
 	}
-	baseTable := ""
-	if isBase && len(sel.Joins) == 0 {
-		baseTable = x.tx.db.resolve(sel.From.Name)
+	from.aliases = append(from.aliases, alias)
+	if isBase {
+		from.tables[alias] = x.tx.db.resolve(sel.From.Name)
 	}
 	var out []jrow
 	for _, r := range rows {
@@ -438,9 +446,16 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 		out = append(out, j)
 	}
 	for _, join := range sel.Joins {
-		jalias, jrows, _, err := x.tableRows(join.Table, outer)
+		jalias, jrows, jIsBase, err := x.tableRows(join.Table, outer)
 		if err != nil {
-			return nil, "", err
+			return nil, from, err
+		}
+		from.aliases = append(from.aliases, jalias)
+		if jIsBase {
+			from.tables[jalias] = x.tx.db.resolve(join.Table.Name)
+		}
+		if join.Kind == sqlir.LeftJoin {
+			from.nullable[jalias] = true
 		}
 		var next []jrow
 		switch join.Kind {
@@ -449,7 +464,7 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 				if join.Table.Lateral {
 					// A lateral item sees the row it joins to.
 					if _, jrows, _, err = x.tableRows(join.Table, l.env(outer)); err != nil {
-						return nil, "", err
+						return nil, from, err
 					}
 				}
 				matched := false
@@ -458,7 +473,7 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 					ok := true
 					if join.On != nil {
 						if ok, err = x.evalBool(join.On, cand.env(outer)); err != nil {
-							return nil, "", err
+							return nil, from, err
 						}
 					}
 					if ok {
@@ -471,18 +486,11 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 				}
 			}
 		default:
-			return nil, "", x.unsupported("right or full join")
+			return nil, from, x.unsupported("right or full join")
 		}
 		out = next
 	}
-	return out, baseTable, nil
-}
-
-func (x *sqlExec) aliasOf(sel *sqlir.SelectStmt) string {
-	if sel.From.Alias != "" {
-		return sel.From.Alias
-	}
-	return relname(sel.From.Name)
+	return out, from, nil
 }
 
 func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {

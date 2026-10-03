@@ -126,6 +126,9 @@ type LockClause struct {
 	Strength   string // "update", "no key update", "share" or "key share"
 	SkipLocked bool
 	NoWait     bool
+	// Of names the FROM items (by alias, or table name when unaliased) whose
+	// rows are locked. Empty locks the rows of every table in FROM.
+	Of []string
 }
 
 // InsertStmt is INSERT ... VALUES or INSERT ... SELECT.

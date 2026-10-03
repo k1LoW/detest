@@ -766,11 +766,17 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if err := c.tail(s, out); err != nil {
 		return nil, err
 	}
+	if len(s.LockingClause) > 1 {
+		return nil, c.unsupported("more than one locking clause")
+	}
 	for _, lc := range s.LockingClause {
 		if l := lc.GetLockingClause(); l != nil {
 			out.Lock = &sqlir.LockClause{SkipLocked: l.WaitPolicy == pg.LockWaitPolicy_LockWaitSkip, NoWait: l.WaitPolicy == pg.LockWaitPolicy_LockWaitError,
 				Strength: map[pg.LockClauseStrength]string{pg.LockClauseStrength_LCS_FORUPDATE: "update", pg.LockClauseStrength_LCS_FORNOKEYUPDATE: "no key update",
 					pg.LockClauseStrength_LCS_FORSHARE: "share", pg.LockClauseStrength_LCS_FORKEYSHARE: "key share"}[l.Strength]}
+			for _, r := range l.LockedRels {
+				out.Lock.Of = append(out.Lock.Of, r.GetRangeVar().GetRelname())
+			}
 		}
 	}
 	return out, nil
