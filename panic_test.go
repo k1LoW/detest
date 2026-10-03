@@ -89,3 +89,27 @@ func TestPanicSameIgnoresStack(t *testing.T) {
 		})
 	}
 }
+
+// A process that panics after resuming from a primitive detest does not model
+// is reported too, even when nothing else is left to run.
+func TestPanicAfterBlockingOutside(t *testing.T) {
+	var ch chan struct{}
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.Seed(func() { ch = make(chan struct{}) })
+		s.Manual("a", 1, func(p *Proc) error {
+			select {
+			case <-ch:
+				return nil
+			default:
+			}
+			<-ch
+			panic("boom")
+		})
+		s.Manual("b", 1, func(p *Proc) error {
+			p.Step("close")
+			close(ch)
+			return nil
+		})
+		s.ExpectViolation("boom")
+	})
+}

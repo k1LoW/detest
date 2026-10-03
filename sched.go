@@ -314,6 +314,9 @@ func (r *run) execute() (v *violation) {
 			r.s.progress.steps.Add(1)
 		}
 		r.settleOutside()
+		if r.pending != nil {
+			return r.pending
+		}
 		opts := r.enabled()
 		if len(opts) == 0 {
 			if r.advanceClock() {
