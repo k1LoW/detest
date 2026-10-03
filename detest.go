@@ -307,8 +307,12 @@ func (r *result) report() string {
 	if r.Kind == "panic" {
 		what = r.Err.Error()
 	}
+	choices := 0
+	if r.Schedule != "" {
+		choices = len(strings.Split(r.Schedule, ","))
+	}
 	return fmt.Sprintf("detest: %s\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
-		what, r.Runs, len(strings.Split(r.Schedule, ",")), r.Schedule, r.Trace)
+		what, r.Runs, choices, r.Schedule, r.Trace)
 }
 
 // check runs the exhaustive exploration. DETEST_REPLAY or Replay replays
