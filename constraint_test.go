@@ -272,6 +272,13 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("unconvertible generated column: got %v", err)
 	}
 
+	// CREATE TABLE of a table that exists is a no-op or a duplicate, whatever
+	// its generated columns.
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS t (x int)`)
+	if _, err := db.Exec(`CREATE TABLE t (x int)`); !errors.Is(err, ErrDuplicateTable) {
+		t.Errorf("CREATE TABLE of an existing table: got %v", err)
+	}
+
 	// A row the transaction inserted counts as a row there already.
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
 	tx, err := db.Begin()
