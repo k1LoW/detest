@@ -197,9 +197,34 @@ func TestGeneratedColumns(t *testing.T) {
 		`UPDATE t SET b = 1`,
 		`INSERT INTO t (id, c) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET b = 1`,
 		`ALTER TABLE t ADD COLUMN d int GENERATED ALWAYS AS (c + 1) STORED`,
+		`INSERT INTO t (id, c) VALUES (99, 1) ON CONFLICT (id) DO UPDATE SET b = 1`, // no conflict
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
 		}
+	}
+
+	// Refused before the source query runs.
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	if _, err := db.Exec(`INSERT INTO t (id, b) SELECT nextval('s'), 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("INSERT ... SELECT: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after a refused INSERT: %d, %v", n, err)
+	}
+
+	// A row the transaction inserted counts as a row there already.
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO u VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE u ADD COLUMN d int GENERATED ALWAYS AS (id + 1) STORED`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ADD COLUMN after an insert in the transaction: got %v", err)
 	}
 }

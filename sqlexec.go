@@ -172,8 +172,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		return x.execDelete(st)
 	case *sqlir.SchemaStmt:
 		for _, ch := range st.Changes {
-			table := tx.db.resolve(ch.Table)
-			if ch.Create || len(tx.db.committed[table]) == 0 {
+			if ch.Create || len(tx.selectNoYield(ch.Table, nil)) == 0 {
 				continue
 			}
 			// Postgres computes the new column for the rows already there,
@@ -773,14 +772,14 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if def := x.tx.db.defs[table]; len(cols) == 0 && def != nil {
 		cols = def.columns // INSERT INTO t VALUES (...): the columns in table order
 	}
+	if err := x.insertsGenerated(table, ins, cols); err != nil {
+		return nil, err
+	}
 	var rows []Row
 	switch {
 	case ins.Select != nil:
 		scols, srows, err := x.evalSelect(ins.Select, nil)
 		if err != nil {
-			return nil, err
-		}
-		if err := x.writesGenerated(table, cols[:min(len(cols), len(scols))], nil); err != nil {
 			return nil, err
 		}
 		for _, sr := range srows {
@@ -800,9 +799,6 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 					msg = "INSERT has more target columns than expressions"
 				}
 				return nil, x.tx.db.kind.Error(sqlir.SyntaxError, msg, relname(ins.Table), "", "")
-			}
-			if err := x.writesGenerated(table, cols, exprs); err != nil {
-				return nil, err
 			}
 			row := Row{}
 			for i, e := range exprs {
@@ -876,9 +872,6 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 					}
 					continue
 				}
-			}
-			if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
-				return nil, err
 			}
 			updated := cur.clone()
 			for _, a := range ins.OnConflict.Set {

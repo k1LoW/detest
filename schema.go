@@ -390,3 +390,53 @@ func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Exp
 	}
 	return nil
 }
+
+// insertsGenerated refuses an INSERT that writes a generated column, before
+// it evaluates anything, as Postgres does when it plans the statement.
+func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []string) error {
+	def := x.tx.db.defs[table]
+	if def == nil || len(def.generated) == 0 {
+		return nil
+	}
+	if ins.OnConflict != nil {
+		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
+			return err
+		}
+	}
+	for _, exprs := range ins.Rows {
+		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs); err != nil {
+			return err
+		}
+	}
+	if ins.Select == nil {
+		return nil
+	}
+	width := len(cols)
+	if len(ins.Columns) == 0 {
+		var ok bool
+		if width, ok = selectWidth(ins.Select); !ok {
+			return x.unsupported("INSERT ... SELECT without a column list into a table with generated columns")
+		}
+	}
+	return x.writesGenerated(table, cols[:min(len(cols), width)], nil)
+}
+
+// selectWidth is the number of columns a query returns, when it is known
+// without running it.
+func selectWidth(sel *sqlir.SelectStmt) (int, bool) {
+	switch {
+	case sel.SetOp != "":
+		return selectWidth(sel.Larg)
+	case sel.Values != nil:
+		if len(sel.Values) == 0 {
+			return 0, false
+		}
+		return len(sel.Values[0]), true
+	}
+	for _, t := range sel.Targets {
+		if t.Star {
+			return 0, false
+		}
+	}
+	return len(sel.Targets), true
+}
