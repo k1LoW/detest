@@ -359,13 +359,14 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 			continue
 		}
 		v, err := x.eval(g.Expr, g.env(table, row))
-		if err != nil {
-			if errors.As(err, new(errUnknownExpr)) {
-				// The schema loads with it, but a value detest cannot compute
-				// must not be stored as if it were the column's.
-				return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
-			}
+		if err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
+		}
+		// The schema loads with an expression detest cannot convert or
+		// evaluate, but a value it cannot compute must not be stored as if
+		// it were the column's. One it could not convert evaluates to Unknown.
+		if err != nil || v == sqlir.Unknown {
+			return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
 		}
 		row[col] = v
 	}

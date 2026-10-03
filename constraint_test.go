@@ -257,6 +257,10 @@ func TestGeneratedColumns(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO w (id, a) VALUES (1, 'ab')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("unevaluable generated column: got %v", err)
 	}
+	mustExec(t, db, `CREATE TABLE w2 (id int PRIMARY KEY, a text[], b text GENERATED ALWAYS AS (a[1]) STORED)`)
+	if _, err := db.Exec(`INSERT INTO w2 (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("unconvertible generated column: got %v", err)
+	}
 
 	// A row the transaction inserted counts as a row there already.
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
