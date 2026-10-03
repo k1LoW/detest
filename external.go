@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"time"
 )
 
 // Outcome of an external call chosen by the explorer.
@@ -83,7 +84,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
 	}
-	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: true}
+	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: true}
 	err := effect(tx)
 	if err != nil {
 		tx.rollback()

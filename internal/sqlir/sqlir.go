@@ -126,6 +126,9 @@ type LockClause struct {
 	Strength   string // "update", "no key update", "share" or "key share"
 	SkipLocked bool
 	NoWait     bool
+	// Of names the FROM items (by alias, or table name when unaliased) whose
+	// rows are locked. Empty locks the rows of every table in FROM.
+	Of []string
 }
 
 // InsertStmt is INSERT ... VALUES or INSERT ... SELECT.
@@ -217,6 +220,9 @@ type ColumnDef struct {
 	// DropNotNull removes it.
 	NotNull     bool
 	DropNotNull bool
+	// Generated is the expression of a generated column, GENERATED ALWAYS
+	// AS (expr), whose value is computed from the row on every write.
+	Generated Expr
 }
 
 // CheckDef is a CHECK constraint. Name is empty when the statement gives
@@ -618,4 +624,22 @@ func (s *Impl) Check(level IsolationLevel) error {
 		return fmt.Errorf("detest: %s at %s is not implemented", s.name, level)
 	}
 	return nil
+}
+
+// OtherAggregates are the built-in Postgres aggregates detest does not
+// implement. They are known as aggregates so that a query using one is
+// grouped, or refused before it runs, rather than evaluated per row.
+var OtherAggregates = map[string]bool{
+	"any_value": true, "array_agg": true, "bit_and": true, "bit_or": true, "bit_xor": true,
+	"bool_and": true, "bool_or": true, "every": true, "json_agg": true, "jsonb_agg": true,
+	"json_object_agg": true, "jsonb_object_agg": true, "json_arrayagg": true, "json_objectagg": true,
+	"range_agg": true, "range_intersect_agg": true, "string_agg": true, "xmlagg": true,
+	"corr": true, "covar_pop": true, "covar_samp": true, "regr_avgx": true, "regr_avgy": true,
+	"regr_count": true, "regr_intercept": true, "regr_r2": true, "regr_slope": true,
+	"regr_sxx": true, "regr_sxy": true, "regr_syy": true, "stddev": true, "stddev_pop": true,
+	"stddev_samp": true, "variance": true, "var_pop": true, "var_samp": true,
+	"json_agg_strict": true, "jsonb_agg_strict": true, "json_object_agg_strict": true,
+	"json_object_agg_unique": true, "json_object_agg_unique_strict": true,
+	"jsonb_object_agg_strict": true, "jsonb_object_agg_unique": true, "jsonb_object_agg_unique_strict": true,
+	"mode": true, "percentile_cont": true, "percentile_disc": true,
 }

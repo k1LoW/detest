@@ -39,7 +39,7 @@ func TestFromPostgres(t *testing.T) {
 		`CREATE UNIQUE INDEX users_lower_email ON public.users (lower(email))`,
 		`CREATE TABLE public.orders (tenant_id text, id uuid DEFAULT gen_random_uuid(), ref text, deleted_at timestamptz, PRIMARY KEY (tenant_id, id))`,
 		`CREATE UNIQUE INDEX orders_ref_live ON public.orders (tenant_id, ref) WHERE deleted_at IS NULL`,
-		`CREATE TABLE billing.invoices (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, total int)`,
+		`CREATE TABLE billing.invoices (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, total int, doubled int GENERATED ALWAYS AS (total * 2) STORED)`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -89,8 +89,9 @@ func TestFromPostgres(t *testing.T) {
 		if err := exec(`INSERT INTO orders (tenant_id, ref) VALUES ('t2', 'r1')`); err != nil {
 			t.Errorf("another tenant: %v", err)
 		}
-		if err := db.QueryRow(`INSERT INTO billing.invoices (total) VALUES (10) RETURNING id`).Scan(&id); err != nil || id != 1 {
-			t.Errorf("identity: %d %v", id, err)
+		var doubled int64
+		if err := db.QueryRow(`INSERT INTO billing.invoices (total) VALUES (10) RETURNING id, doubled`).Scan(&id, &doubled); err != nil || id != 1 || doubled != 20 {
+			t.Errorf("identity and generated column: %d %d %v", id, doubled, err)
 		}
 	})
 }

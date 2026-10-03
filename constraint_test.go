@@ -1,8 +1,10 @@
 package detest
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/k1LoW/detest/postgres"
@@ -138,6 +140,226 @@ INSERT INTO items VALUES ('a', 100), ('b', NULL);
 		_ = rows.Close()
 		if g := fmt.Sprint(got); g != "["+tc.want+"]" {
 			t.Errorf("WHERE %s: %s, want [%s]", tc.where, g, tc.want)
+		}
+	}
+}
+
+// pg_dump writes CHECK (status IN (...)) as = ANY over an array.
+func TestCheckInDumpFormIsEnforced(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE orders (
+    id integer NOT NULL,
+    status character varying NOT NULL,
+    CONSTRAINT orders_status_check CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'closed'::character varying])::text[])))
+)`)
+	mustExec(t, db, `INSERT INTO orders (id, status) VALUES (1, 'open')`)
+	_, err := db.Exec(`INSERT INTO orders (id, status) VALUES (2, 'lost')`)
+	var se *DBError
+	if !errors.As(err, &se) || !errors.Is(err, ErrCheckViolation) || se.Constraint != "orders_status_check" {
+		t.Errorf("got %#v", err)
+	}
+}
+
+// A generated column is computed from the row on every write, and the
+// constraints on it see the computed value.
+func TestGeneratedColumns(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (a * 2) STORED, CONSTRAINT b_small CHECK (b < 100))`)
+	b := func(id int) int64 {
+		t.Helper()
+		var v int64
+		if err := db.QueryRow(`SELECT b FROM t WHERE id = $1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	mustExec(t, db, `INSERT INTO t (id, a) VALUES (1, 1)`)
+	mustExec(t, db, `INSERT INTO t VALUES (2, 2, DEFAULT)`)
+	if b(1) != 2 || b(2) != 4 {
+		t.Errorf("insert: b = %d, %d", b(1), b(2))
+	}
+	mustExec(t, db, `UPDATE t SET a = 5 WHERE id = 1`)
+	mustExec(t, db, `INSERT INTO t (id, a) VALUES (2, 7) ON CONFLICT (id) DO UPDATE SET a = excluded.a`)
+	if b(1) != 10 || b(2) != 14 {
+		t.Errorf("update: b = %d, %d", b(1), b(2))
+	}
+	if _, err := db.Exec(`UPDATE t SET a = 60 WHERE id = 1`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("CHECK on the generated column: %v", err)
+	}
+	mustExec(t, db, `ALTER TABLE t RENAME COLUMN a TO c`)
+	mustExec(t, db, `UPDATE t SET c = 8 WHERE id = 1`)
+	if b(1) != 16 {
+		t.Errorf("after RENAME COLUMN: b = %d", b(1))
+	}
+	// A new column that takes the old name does not become the source.
+	mustExec(t, db, `ALTER TABLE t ADD COLUMN a int`)
+	mustExec(t, db, `ALTER TABLE t RENAME COLUMN a TO e`)
+	mustExec(t, db, `UPDATE t SET c = 9, e = 1 WHERE id = 1`)
+	if b(1) != 18 {
+		t.Errorf("after reusing the old name: b = %d", b(1))
+	}
+	// Without a column list, N values fill the first N columns.
+	mustExec(t, db, `INSERT INTO t VALUES (4, 3)`)
+	if b(4) != 6 {
+		t.Errorf("VALUES for the first columns: b = %d", b(4))
+	}
+	// RETURNING * returns every column, the computed one included.
+	for _, q := range []string{`INSERT INTO t VALUES (5, 1) RETURNING *`, `INSERT INTO t (id, c) VALUES (6, 1) RETURNING *`} {
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		cols, _ := rows.Columns()
+		_ = rows.Close()
+		if !slices.Contains(cols, "b") {
+			t.Errorf("%s: columns %v", q, cols)
+		}
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id, c, b) VALUES (3, 1, 2)`,
+		`INSERT INTO t VALUES (3, 1, 2)`,
+		`UPDATE t SET b = 1`,
+		`INSERT INTO t (id, c) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET b = 1`,
+		`ALTER TABLE t ADD COLUMN d int GENERATED ALWAYS AS (c + 1) STORED`,
+		`INSERT INTO t (id, c) VALUES (99, 1) ON CONFLICT (id) DO UPDATE SET b = 1`, // no conflict
+		`ALTER TABLE t ALTER COLUMN b SET DEFAULT 1`,
+		`CREATE TABLE z (a int, b int GENERATED ALWAYS AS (coalesce(missing, 0)) STORED)`,
+		`ALTER TABLE t ADD COLUMN z int GENERATED ALWAYS AS (missing + 1) STORED`,
+		`ALTER TABLE t ALTER COLUMN b DROP DEFAULT`,
+		`ALTER TABLE t DROP COLUMN c`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+
+	// Refused before the source query runs.
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	if _, err := db.Exec(`INSERT INTO t (id, b) SELECT nextval('s'), 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("INSERT ... SELECT: got %v", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET b = 1 WHERE nextval('s') > 0`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("UPDATE: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after a refused INSERT and UPDATE: %d, %v", n, err)
+	}
+
+	// The same statement may not add a generated column and drop what it reads.
+	mustExec(t, db, `CREATE TABLE v (id int PRIMARY KEY, a int)`)
+	if _, err := db.Exec(`ALTER TABLE v ADD COLUMN b int GENERATED ALWAYS AS (a * 2) STORED, DROP COLUMN a`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ADD and DROP in one ALTER: got %v", err)
+	}
+
+	// A generation expression detest cannot evaluate loads, but writing a
+	// row that needs it is refused rather than storing a made-up value.
+	mustExec(t, db, `CREATE TABLE w (id int PRIMARY KEY, a text, b text GENERATED ALWAYS AS (reverse(a)) STORED)`)
+	if _, err := db.Exec(`INSERT INTO w (id, a) VALUES (1, 'ab')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("unevaluable generated column: got %v", err)
+	}
+	// A value that happens to be the placeholder's text is still a value.
+	mustExec(t, db, `CREATE TABLE w3 (id int PRIMARY KEY, a text, b text GENERATED ALWAYS AS (a) STORED)`)
+	mustExec(t, db, `INSERT INTO w3 (id, a) VALUES (1, $1)`, Unknown)
+	// A generated column may not refer to another, as in Postgres.
+	if _, err := db.Exec(`CREATE TABLE w4 (a int, b int GENERATED ALWAYS AS (a + 1) STORED, c int GENERATED ALWAYS AS (b + 1) STORED)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("generated column on a generated column: got %v", err)
+	}
+	mustExec(t, db, `CREATE TABLE w2 (id int PRIMARY KEY, a text[], b text GENERATED ALWAYS AS (a[1]) STORED)`)
+	if _, err := db.Exec(`INSERT INTO w2 (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("unconvertible generated column: got %v", err)
+	}
+
+	// The values given are checked before the generated column is computed.
+	mustExec(t, db, `CREATE TABLE r (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (100 / (a - 3000000000)) STORED)`)
+	if _, err := db.Exec(`INSERT INTO r (id, a) VALUES (1, 3000000000)`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("out-of-range base value: got %v", err)
+	}
+
+	// A qualified reference still reads the table after it is renamed.
+	mustExec(t, db, `CREATE TABLE q (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (q.a + 1) STORED, CONSTRAINT a_small CHECK (q.a < 10))`)
+	mustExec(t, db, `ALTER TABLE q RENAME TO q2`)
+	mustExec(t, db, `INSERT INTO q2 (id, a) VALUES (1, 1)`)
+	var qb int64
+	if err := db.QueryRow(`SELECT b FROM q2 WHERE id = 1`).Scan(&qb); err != nil || qb != 2 {
+		t.Errorf("generated after RENAME TO: %d, %v", qb, err)
+	}
+	if _, err := db.Exec(`INSERT INTO q2 (id, a) VALUES (2, 20)`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("CHECK after RENAME TO: %v", err)
+	}
+
+	// CREATE TABLE of a table that exists is a no-op or a duplicate, whatever
+	// its generated columns.
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS t (x int)`)
+	if _, err := db.Exec(`CREATE TABLE t (x int)`); !errors.Is(err, ErrDuplicateTable) {
+		t.Errorf("CREATE TABLE of an existing table: got %v", err)
+	}
+
+	// A change to a table that does not exist is an undefined table.
+	if _, err := db.Exec(`ALTER TABLE missing ADD COLUMN b int GENERATED ALWAYS AS (a + 1) STORED`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("ALTER of a missing table: got %v", err)
+	}
+
+	// A row the transaction inserted counts as a row there already.
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO u VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE u ADD COLUMN d int GENERATED ALWAYS AS (id + 1) STORED`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ADD COLUMN after an insert in the transaction: got %v", err)
+	}
+}
+
+// A strict function of NULL is NULL, so NULLs do not collide in a unique
+// generated column, as in Postgres.
+func TestStrictFunctionsOfNull(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE users (id int PRIMARY KEY, email text, email_l text GENERATED ALWAYS AS (lower(email)) STORED UNIQUE)`)
+	mustExec(t, db, `INSERT INTO users (id) VALUES (1), (2)`)
+	for _, q := range []string{`SELECT lower(NULL)`, `SELECT length(NULL)`, `SELECT 'a' || NULL`, `SELECT abs(NULL)`} {
+		var v sql.NullString
+		if err := db.QueryRow(q).Scan(&v); err != nil || v.Valid {
+			t.Errorf("%s: %v %v, want NULL", q, v, err)
+		}
+	}
+	// A call no signature takes is refused, NULL or not.
+	for _, q := range []string{`SELECT power(NULL)`, `SELECT abs(NULL, NULL)`, `SELECT round(1.2, 1.5)`, `SELECT round(1.2, 2147483648)`, `SELECT round(1.25::float8, 1)`, `SELECT round(random(), 2)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// Refused before its arguments are evaluated.
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	for _, q := range []string{`SELECT abs(nextval('s'), 0)`, `SELECT now(nextval('s'))`, `SELECT random(nextval('s'))`, `SELECT gen_random_uuid(nextval('s'))`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// nextval and the advisory locks are strict: given NULL, they do nothing.
+	for _, q := range []string{`SELECT nextval(NULL)`, `SELECT setval('s', 5, NULL)`, `SELECT pg_try_advisory_xact_lock(NULL)`} {
+		var v sql.NullString
+		if err := db.QueryRow(q).Scan(&v); err != nil || v.Valid {
+			t.Errorf("%s: %v %v, want NULL", q, v, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after a refused call: %d, %v", n, err)
+	}
+	for q, want := range map[string]float64{`SELECT round(2.345, 2)`: 2.35, `SELECT round(1.5)`: 2, `SELECT round(-2.345, 1)`: -2.3,
+		`SELECT round(-81.865, 2)`: -81.87, `SELECT round(1.005, 2)`: 1.01, `SELECT round(1250, -2)`: 1300,
+		`SELECT round(1.5, 1000000000)`: 1.5, `SELECT round(1.5, -1000000000)`: 0} {
+		var v float64
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != want {
+			t.Errorf("%s: %v %v, want %v", q, v, err, want)
 		}
 	}
 }

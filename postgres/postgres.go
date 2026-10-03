@@ -4,7 +4,9 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -344,7 +346,11 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
 				continue
 			}
-			if chk, ok := c.check(e.Constraint); ok {
+			chk, ok, err := c.check(e.Constraint, ch.Table)
+			if err != nil {
+				return ch, err
+			}
+			if ok {
 				ch.Checks = append(ch.Checks, chk)
 				continue
 			}
@@ -362,15 +368,39 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 
 // check converts a CHECK constraint. One detest cannot evaluate is dropped,
 // as a default it cannot evaluate becomes unknown: the schema still loads.
-func (c *pgConv) check(k *pg.Constraint) (sqlir.CheckDef, bool) {
+func (c *pgConv) check(k *pg.Constraint, table string) (sqlir.CheckDef, bool, error) {
 	if k == nil || k.Contype != pg.ConstrType_CONSTR_CHECK {
-		return sqlir.CheckDef{}, false
+		return sqlir.CheckDef{}, false, nil
 	}
 	e, err := c.expr(k.RawExpr)
 	if err != nil {
-		return sqlir.CheckDef{}, false
+		return sqlir.CheckDef{}, false, nil
 	}
-	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true
+	if err := c.ownColumns(e, table); err != nil {
+		return sqlir.CheckDef{}, false, err
+	}
+	unqualify(e)
+	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true, nil
+}
+
+// ownColumns refuses a column reference qualified by a name other than
+// table's, which a CHECK or generation expression cannot refer to.
+func (c *pgConv) ownColumns(e sqlir.Expr, table string) error {
+	for _, r := range sqlir.ColumnRefs(e) {
+		if r.Table != "" && r.Table != relnameOf(table) && r.Table != table {
+			return c.unsupported("a constraint or generated column referring to " + r.Table + "." + r.Column)
+		}
+	}
+	return nil
+}
+
+// unqualify drops the table name from the column references of a CHECK or
+// generation expression, which can only refer to its own table: kept, t.a
+// would read nothing once the table is renamed.
+func unqualify(e sqlir.Expr) {
+	for _, r := range sqlir.ColumnRefs(e) {
+		r.Table = ""
+	}
 }
 
 // columnDef converts a column with the constraints written on it.
@@ -394,7 +424,11 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_NOTNULL:
 			col.NotNull = true
 		case pg.ConstrType_CONSTR_CHECK:
-			if chk, ok := c.check(k); ok {
+			chk, ok, err := c.check(k, table)
+			if err != nil {
+				return col, nil, nil, err
+			}
+			if ok {
 				if chk.Name == "" {
 					chk.Name = relnameOf(table) + "_" + d.Colname + "_check"
 				}
@@ -404,6 +438,23 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			col.Default = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_IDENTITY:
 			col.Default = sequenceDefault(table, d.Colname)
+		case pg.ConstrType_CONSTR_GENERATED:
+			g, err := c.expr(k.RawExpr)
+			// Every refusal of an aggregate (string_agg, FILTER, ORDER BY,
+			// WITHIN GROUP) reads "aggregate ...", and of a SQL value
+			// function such as CURRENT_DATE "SQL value function ...":
+			// Postgres refuses both here, not only detest.
+			if u := (*sqlir.ErrUnsupportedSQL)(nil); errors.As(err, &u) && (strings.HasPrefix(u.What, "aggregate ") || strings.HasPrefix(u.What, "SQL value function ")) {
+				return col, nil, nil, err
+			}
+			if err != nil {
+				g = &sqlir.Const{Value: sqlir.Unknown} // as defaultExpr: the schema still loads
+			}
+			col.Generated = g
+			if err := c.immutable(col.Generated, relnameOf(table)); err != nil {
+				return col, nil, nil, err
+			}
+			unqualify(col.Generated)
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
@@ -412,7 +463,60 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			cons = append(cons, u)
 		}
 	}
+	if col.Generated != nil && col.Default != nil {
+		return col, nil, nil, c.unsupported("a default or identity on a generated column")
+	}
 	return col, cons, checks, nil
+}
+
+// mutableFuncs are the functions detest evaluates that Postgres does not
+// mark immutable, which a generation expression may not call. A function
+// detest does not know is let through: the schema loads, and a write that
+// needs it fails then.
+var mutableFuncs = map[string]bool{
+	"nextval": true, "setval": true, "currval": true, "gen_random_uuid": true, "uuid_generate_v4": true,
+	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true,
+	"statement_timestamp": true, "random": true, "concat": true,
+	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
+	"count": true, "sum": true, "min": true, "max": true, "avg": true,
+	// Immutable in Postgres, but detest returns its input rather than the
+	// int4 hash, which a stored value must not differ from.
+	"hashtext": true,
+}
+
+// immutable refuses what Postgres does not allow in a generation expression:
+// a function that is not immutable, such as nextval or now, an aggregate, a
+// subquery or a parameter. detest would otherwise run it on every write.
+func (c *pgConv) immutable(e sqlir.Expr, table string) error {
+	for _, x := range sqlir.Exprs(e) {
+		switch v := x.(type) {
+		case *sqlir.ColumnRef:
+			if err := c.ownColumns(v, table); err != nil {
+				return err
+			}
+		case *sqlir.FuncCall:
+			if mutableFuncs[v.Name] || sqlir.OtherAggregates[v.Name] {
+				return c.unsupported("generated column calling " + v.Name)
+			}
+		case *sqlir.SubQuery, *sqlir.Exists, *sqlir.Param, *sqlir.WindowFunc:
+			return c.unsupported("generated column with a subquery, parameter or window function")
+		case *sqlir.InExpr:
+			if v.Sub != nil {
+				return c.unsupported("generated column with a subquery")
+			}
+		case *sqlir.Cast:
+			// Whether a cast is immutable depends on the type it casts
+			// from, as timestamptz::text depends on the time zone, which
+			// detest does not know here. A cast to a number is immutable
+			// from any type.
+			switch v.Type {
+			case "int2", "int4", "int8", "numeric", "float4", "float8":
+			default:
+				return c.unsupported("generated column with a cast to " + v.Type)
+			}
+		}
+	}
+	return nil
 }
 
 // relnameOf is a table name without its schema, as constraint names use it.
@@ -591,7 +695,11 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
 				continue
 			}
-			if chk, ok := c.check(cmd.Def.GetConstraint()); ok {
+			chk, ok, err := c.check(cmd.Def.GetConstraint(), ch.Table)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				ch.Checks = append(ch.Checks, chk)
 				continue
 			}
@@ -631,6 +739,8 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.DropConstraints = append(ch.DropConstraints, cmd.Name)
 		case pg.AlterTableType_AT_DropColumn:
 			ch.DropColumns = append(ch.DropColumns, cmd.Name)
+		case pg.AlterTableType_AT_SetExpression, pg.AlterTableType_AT_DropExpression:
+			return nil, c.unsupported("changing the expression of a generated column")
 		}
 	}
 	return ch, nil
@@ -664,6 +774,9 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if out.With, err = c.with(s.WithClause); err != nil {
 		return nil, err
 	}
+	if len(s.LockingClause) > 0 && (s.Op != pg.SetOperation_SETOP_NONE || len(s.ValuesLists) > 0) {
+		return nil, c.unsupported("FOR UPDATE on a set operation or VALUES")
+	}
 	if s.Op == pg.SetOperation_SETOP_UNION || s.Op == pg.SetOperation_SETOP_INTERSECT || s.Op == pg.SetOperation_SETOP_EXCEPT {
 		out.SetOp = map[pg.SetOperation]string{pg.SetOperation_SETOP_UNION: "union", pg.SetOperation_SETOP_INTERSECT: "intersect", pg.SetOperation_SETOP_EXCEPT: "except"}[s.Op]
 		out.SetAll = s.All
@@ -672,6 +785,9 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		}
 		if out.Rarg, err = c.selectStmt(s.Rarg); err != nil {
 			return nil, err
+		}
+		if out.Larg.Lock != nil || out.Rarg.Lock != nil {
+			return nil, c.unsupported("FOR UPDATE in a set operation")
 		}
 		return out, c.tail(s, out)
 	}
@@ -764,11 +880,17 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if err := c.tail(s, out); err != nil {
 		return nil, err
 	}
+	if len(s.LockingClause) > 1 {
+		return nil, c.unsupported("more than one locking clause")
+	}
 	for _, lc := range s.LockingClause {
 		if l := lc.GetLockingClause(); l != nil {
 			out.Lock = &sqlir.LockClause{SkipLocked: l.WaitPolicy == pg.LockWaitPolicy_LockWaitSkip, NoWait: l.WaitPolicy == pg.LockWaitPolicy_LockWaitError,
 				Strength: map[pg.LockClauseStrength]string{pg.LockClauseStrength_LCS_FORUPDATE: "update", pg.LockClauseStrength_LCS_FORNOKEYUPDATE: "no key update",
 					pg.LockClauseStrength_LCS_FORSHARE: "share", pg.LockClauseStrength_LCS_FORKEYSHARE: "key share"}[l.Strength]}
+			for _, r := range l.LockedRels {
+				out.Lock.Of = append(out.Lock.Of, r.GetRangeVar().GetRelname())
+			}
 		}
 	}
 	return out, nil
@@ -921,6 +1043,9 @@ func (c *pgConv) fromItem(n *pg.Node) (*sqlir.TableRef, []sqlir.Join, error) {
 		if len(rightJoins) > 0 {
 			return nil, nil, c.unsupported("nested join on the right")
 		}
+		if j.IsNatural {
+			return nil, nil, c.unsupported("NATURAL JOIN")
+		}
 		kind := sqlir.InnerJoin
 		switch j.Jointype {
 		case pg.JoinType_JOIN_LEFT:
@@ -973,7 +1098,11 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		out.Alias = s.Relation.Alias.Aliasname
 	}
 	for _, col := range s.Cols {
-		out.Columns = append(out.Columns, col.GetResTarget().GetName())
+		name, err := c.targetColumn(col.GetResTarget())
+		if err != nil {
+			return nil, err
+		}
+		out.Columns = append(out.Columns, name)
 	}
 	sel := s.SelectStmt.GetSelectStmt()
 	if sel == nil {
@@ -1011,11 +1140,15 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		case pg.OnConflictAction_ONCONFLICT_UPDATE:
 			for _, t := range oc.TargetList {
 				rt := t.GetResTarget()
+				name, err := c.targetColumn(rt)
+				if err != nil {
+					return nil, err
+				}
 				e, err := c.expr(rt.Val)
 				if err != nil {
 					return nil, err
 				}
-				conf.Set = append(conf.Set, sqlir.Assignment{Column: rt.Name, Value: e})
+				conf.Set = append(conf.Set, sqlir.Assignment{Column: name, Value: e})
 			}
 			if oc.WhereClause != nil {
 				w, err := c.expr(oc.WhereClause)
@@ -1036,6 +1169,16 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 	return out, nil
 }
 
+// targetColumn is the column an INSERT or SET target writes. A subscript or
+// field (tags[1], addr.city) writes part of the column, which detest would
+// otherwise apply to the whole of it.
+func (c *pgConv) targetColumn(rt *pg.ResTarget) (string, error) {
+	if len(rt.Indirection) > 0 {
+		return "", c.unsupported("subscript or field in a target column")
+	}
+	return rt.Name, nil
+}
+
 func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 	if s.WithClause != nil {
 		return nil, c.unsupported("CTE on UPDATE")
@@ -1046,11 +1189,15 @@ func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 	}
 	for _, t := range s.TargetList {
 		rt := t.GetResTarget()
+		name, err := c.targetColumn(rt)
+		if err != nil {
+			return nil, err
+		}
 		e, err := c.expr(rt.Val)
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: rt.Name, Value: e})
+		out.Set = append(out.Set, sqlir.Assignment{Column: name, Value: e})
 	}
 	for _, f := range s.FromClause {
 		t, joins, err := c.fromItem(f)
@@ -1213,11 +1360,44 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		return nil, c.unsupported("subquery kind")
 	case *pg.Node_FuncCall:
 		fc := e.FuncCall
+		switch {
+		case fc.AggFilter != nil:
+			return nil, c.unsupported("aggregate FILTER")
+		case len(fc.AggOrder) > 0:
+			return nil, c.unsupported("aggregate ORDER BY")
+		case fc.AggWithinGroup:
+			return nil, c.unsupported("aggregate WITHIN GROUP")
+		}
 		args, err := c.exprs(fc.Args)
 		if err != nil {
 			return nil, err
 		}
+		if len(fc.Funcname) > 2 || len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
+			// A function of another schema is the user's, which detest
+			// would otherwise take for the built-in of the same name.
+			return nil, c.unsupported("function " + fc.Funcname[0].GetString_().GetSval() + "." + fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
+		}
 		call := &sqlir.FuncCall{Name: strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval()), Args: args, Star: fc.AggStar, Distinct: fc.AggDistinct}
+		if sqlir.OtherAggregates[call.Name] {
+			// Refused here, before a WITH query or anything else runs.
+			return nil, c.unsupported("aggregate " + call.Name)
+		}
+		switch call.Name {
+		case "count":
+			// count(*) or count(x): no other signature.
+			if call.Star != (len(call.Args) == 0) || len(call.Args) > 1 {
+				return nil, c.unsupported("aggregate count with these arguments")
+			}
+		case "sum", "min", "max", "avg":
+			if call.Star || len(call.Args) != 1 {
+				return nil, c.unsupported("aggregate " + call.Name + " with these arguments")
+			}
+		default:
+			if call.Distinct {
+				// Postgres takes DISTINCT only in an aggregate's arguments.
+				return nil, c.unsupported("DISTINCT in a call to " + call.Name)
+			}
+		}
 		if fc.Over != nil {
 			return c.window(call, fc.Over)
 		}
@@ -1241,7 +1421,15 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		return &sqlir.FuncCall{Name: name, Args: args}, nil
 	case *pg.Node_SqlvalueFunction:
-		return &sqlir.FuncCall{Name: "now"}, nil
+		switch e.SqlvalueFunction.Op {
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP:
+			return &sqlir.FuncCall{Name: "now"}, nil
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
+			// current_timestamp with an argument cannot be written as a call,
+			// so it is free to carry the precision to round to.
+			return &sqlir.FuncCall{Name: "current_timestamp", Args: []sqlir.Expr{&sqlir.Const{Value: int64(e.SqlvalueFunction.Typmod)}}}, nil
+		}
+		return nil, c.unsupported("SQL value function " + e.SqlvalueFunction.Op.String())
 	case *pg.Node_CaseExpr:
 		out := &sqlir.CaseExpr{}
 		var err error
@@ -1284,6 +1472,42 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		return &sqlir.RowExpr{Items: items}, nil
 	}
 	return nil, c.unsupported(fmt.Sprintf("expression %T", n.Node))
+}
+
+// isConstElement reports whether an array element is a constant or a
+// parameter, possibly cast to text or varchar as pg_dump writes it, whose
+// evaluation cannot fail and keeps its value. A number that becomes text,
+// through its own cast or the array's (textCast), is not one: Postgres keeps
+// its digits as written (1.20), which detest's number does not.
+func isConstElement(n *pg.Node, textCast bool) bool {
+	for n.GetTypeCast() != nil {
+		if _, ok := plainTextCast(n.GetTypeCast(), false, "text", "varchar"); !ok {
+			return false
+		}
+		textCast = true
+		n = n.GetTypeCast().Arg
+	}
+	if k := n.GetAConst(); k != nil {
+		return !textCast || k.Isnull || k.GetSval() != nil
+	}
+	return n.GetParamRef() != nil
+}
+
+// plainTextCast returns the type of a cast to one of types, or to an array
+// of one, without a type modifier, such as varchar(1), which would change the
+// value.
+func plainTextCast(tc *pg.TypeCast, array bool, types ...string) (string, bool) {
+	if len(tc.TypeName.GetTypmods()) > 0 || (len(tc.TypeName.GetArrayBounds()) > 0) != array {
+		return "", false
+	}
+	// Only the built-in type: unqualified or in pg_catalog, and as the
+	// parser gives it, not a quoted "TEXT" or a type of another schema.
+	names := tc.TypeName.GetNames()
+	if len(names) == 2 && names[0].GetString_().GetSval() != "pg_catalog" || len(names) > 2 {
+		return "", false
+	}
+	typ := names[len(names)-1].GetString_().GetSval()
+	return typ, slices.Contains(types, typ)
 }
 
 func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
@@ -1337,6 +1561,59 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			list = []sqlir.Expr{r}
 		}
 		return &sqlir.InExpr{X: l, List: list, Not: op == "<>"}, nil
+	case pg.A_Expr_Kind_AEXPR_OP_ANY, pg.A_Expr_Kind_AEXPR_OP_ALL:
+		// Postgres stores IN (...) as = ANY (ARRAY[...]), so pg_dump writes a
+		// CHECK (status IN ('a', 'b')) back in this form. Only the two forms
+		// that mean IN and NOT IN over a literal array are converted.
+		isAny := e.Kind == pg.A_Expr_Kind_AEXPR_OP_ANY
+		if (!isAny || op != "=") && (isAny || op != "<>") {
+			return nil, c.unsupported("operator " + op + " with ANY or ALL")
+		}
+		arr := e.Rexpr
+		var casts []string // outermost first
+		for arr.GetTypeCast() != nil {
+			// pg_dump casts the array only to text[]. A cast to another type
+			// coerces each element in Postgres, as '01' to 1 for int[] or
+			// 'a ' to 'a' for bpchar[], which detest's casts do not do.
+			typ, ok := plainTextCast(arr.GetTypeCast(), true, "text")
+			if !ok {
+				return nil, c.unsupported("ANY or ALL over an array cast to a type other than text[]")
+			}
+			casts = append(casts, typ)
+			arr = arr.GetTypeCast().Arg
+		}
+		if arr.GetAArrayExpr() == nil {
+			return nil, c.unsupported("ANY or ALL over an array other than ARRAY[...]")
+		}
+		// IN () has no NULL-free answer for a NULL operand, while = ANY and
+		// <> ALL over an empty array are false and true whatever the operand.
+		if len(arr.GetAArrayExpr().Elements) == 0 {
+			return nil, c.unsupported("ANY or ALL over an empty array")
+		}
+		// Postgres builds the whole array before comparing, while IN stops
+		// at the first match, so an element that can fail (1/0) would raise
+		// in one and not the other.
+		for _, el := range arr.GetAArrayExpr().Elements {
+			if !isConstElement(el, len(casts) > 0) {
+				return nil, c.unsupported("ANY or ALL over an array with an element other than a constant or parameter")
+			}
+		}
+		l, err := c.expr(e.Lexpr)
+		if err != nil {
+			return nil, err
+		}
+		list, err := c.exprs(arr.GetAArrayExpr().Elements)
+		if err != nil {
+			return nil, err
+		}
+		// A cast of the array casts each element, so it is kept on them:
+		// x = ANY ((ARRAY['1'])::text[]) compares x with the text '1'.
+		for i := range list {
+			for _, typ := range slices.Backward(casts) {
+				list[i] = &sqlir.Cast{X: list[i], Type: typ}
+			}
+		}
+		return &sqlir.InExpr{X: l, List: list, Not: !isAny}, nil
 	case pg.A_Expr_Kind_AEXPR_LIKE, pg.A_Expr_Kind_AEXPR_ILIKE:
 		l, err := c.expr(e.Lexpr)
 		if err != nil {

@@ -199,11 +199,10 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 		switch ck.fk.OnDelete {
 		case "cascade":
 			for _, k := range kids {
-				lk := lockKey{ck.table, k.Key()}
-				if err := x.tx.lock(lk); err != nil {
+				lk, cur, ok, err := x.lockChild(ck, k, row, lockUpdate)
+				if err != nil {
 					return err
 				}
-				cur, ok := x.tx.view(ck.table, k.Key())
 				if !ok {
 					continue
 				}
@@ -270,14 +269,28 @@ func (x *sqlExec) onParentUpdate(table string, old, row Row) error {
 // parent's new key (cascade), to NULL (set null) or to the columns' defaults
 // (set default). Each child goes through the checks an UPDATE of it would,
 // and its own children follow.
+// lockChild locks a child row of a referential action and returns its newest
+// version, following it if a concurrent change moved its key. ok is false
+// when the child is gone or no longer references parent's key.
+func (x *sqlExec) lockChild(ck childKey, k, parent Row, mode lockMode) (lockKey, Row, bool, error) {
+	key, cur, ok, err := x.tx.lockLatest(ck.table, k.Key(), func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+	if err != nil || !ok {
+		return lockKey{}, nil, false, err
+	}
+	vals, ok := values(cur, ck.fk.Columns)
+	if !ok || !rowMatches(parent, x.tx.db.refColumns(ck.fk), vals) {
+		return lockKey{}, nil, false, nil
+	}
+	return lockKey{ck.table, key}, cur, true, nil
+}
+
 func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action string) error {
 	def := x.tx.db.defs[ck.table]
 	for _, k := range kids {
-		lk := lockKey{ck.table, k.Key()}
-		if err := x.tx.lockMode(lk, x.tx.db.updateLock(ck.table, ck.fk.Columns)); err != nil {
+		lk, cur, ok, err := x.lockChild(ck, k, old, x.tx.db.updateLock(ck.table, ck.fk.Columns))
+		if err != nil {
 			return err
 		}
-		cur, ok := x.tx.view(ck.table, k.Key())
 		if !ok {
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -122,6 +123,9 @@ type DB struct {
 	committed map[string]map[string]Row
 	locks     map[lockKey]rowLock
 	touched   map[string]bool // tables committed to since the run's last snapshot
+	// moved maps the key of a row an UPDATE gave a new primary key to that
+	// key, so a transaction that waited on the row can follow it.
+	moved map[lockKey]string
 
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
@@ -143,6 +147,38 @@ type tableCheck struct {
 
 // columns returns the columns the check's expression refers to, by their
 // current names.
+// renameColumn records that a column the expression refers to is renamed.
+func (c *tableCheck) renameColumn(old, nw string) {
+	renamed := false
+	for k, v := range c.alias {
+		if v == old {
+			c.alias[k], renamed = nw, true
+		}
+	}
+	// A name the expression wrote that already maps elsewhere refers to the
+	// renamed column, not to one that took the name since.
+	_, aliased := c.alias[old]
+	if !renamed && !aliased && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+		if c.alias == nil {
+			c.alias = map[string]string{}
+		}
+		c.alias[old] = nw
+	}
+}
+
+// env is the row as the expression sees it, under the column names it was
+// written with.
+func (c tableCheck) env(table string, row Row) *env {
+	r := row
+	if len(c.alias) > 0 {
+		r = row.clone()
+		for written, now := range c.alias {
+			r[written] = row[now]
+		}
+	}
+	return &env{tables: map[string]Row{relname(table): r}, merged: r}
+}
+
 func (c tableCheck) columns() []string {
 	var out []string
 	for _, r := range sqlir.ColumnRefs(c.Expr) {
@@ -166,6 +202,9 @@ type tableDef struct {
 	notNull  map[string]bool   // NOT NULL columns besides the primary key's
 	checks   []tableCheck
 	defaults map[string]sqlir.Expr
+	// generated are the expressions of generated columns, kept as written
+	// with the renames since in alias, as a CHECK's are.
+	generated map[string]*tableCheck
 }
 
 // Name returns the database name.
@@ -223,7 +262,7 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
-	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now()}
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
 	err := fn(tx)
@@ -410,6 +449,7 @@ func (def *tableDef) renameConstraint(old, nw string) bool {
 func (def *tableDef) dropColumn(col string) {
 	def.columns = slices.DeleteFunc(def.columns, func(c string) bool { return c == col })
 	delete(def.defaults, col)
+	delete(def.generated, col)
 	delete(def.types, col)
 	delete(def.notNull, col)
 	def.checks = slices.DeleteFunc(def.checks, func(c tableCheck) bool { return slices.Contains(c.columns(), col) })
@@ -427,6 +467,13 @@ func (def *tableDef) renameColumn(old, nw string) {
 		delete(def.defaults, old)
 		def.defaults[nw] = d
 	}
+	if g, ok := def.generated[old]; ok {
+		delete(def.generated, old)
+		def.generated[nw] = g
+	}
+	for _, g := range def.generated {
+		g.renameColumn(old, nw)
+	}
 	if t, ok := def.types[old]; ok {
 		delete(def.types, old)
 		def.types[nw] = t
@@ -436,19 +483,7 @@ func (def *tableDef) renameColumn(old, nw string) {
 		def.notNull[nw] = true
 	}
 	for i := range def.checks {
-		c := &def.checks[i]
-		renamed := false
-		for k, v := range c.alias {
-			if v == old {
-				c.alias[k], renamed = nw, true
-			}
-		}
-		if !renamed && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
-			if c.alias == nil {
-				c.alias = map[string]string{}
-			}
-			c.alias[old] = nw
-		}
+		def.checks[i].renameColumn(old, nw)
 	}
 	for i, c := range def.pk {
 		if c == old {
@@ -653,6 +688,12 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if col.TypeOnly {
 			continue
 		}
+		if col.Generated != nil {
+			if def.generated == nil {
+				def.generated = map[string]*tableCheck{}
+			}
+			def.generated[col.Name] = &tableCheck{CheckDef: sqlir.CheckDef{Name: col.Name, Expr: col.Generated}}
+		}
 		if col.Default != nil {
 			def.defaults[col.Name] = col.Default
 		} else {
@@ -752,10 +793,14 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 // held until commit or rollback; a waiting writer re-reads the row after the
 // lock is granted, as Postgres does.
 type Tx struct {
-	db       *DB
-	p        *Proc
-	writes   map[lockKey]Row
-	deleted  map[lockKey]bool
+	db      *DB
+	p       *Proc
+	writes  map[lockKey]Row
+	deleted map[lockKey]bool
+	moved   map[lockKey]string // the keys this transaction changed, as DB.moved
+	// start is when the transaction began, which now() and
+	// CURRENT_TIMESTAMP return throughout it.
+	start    time.Time
 	locks    []lockKey
 	aborted  bool
 	closed   bool
@@ -778,6 +823,7 @@ type savepoint struct {
 	name     string
 	writes   map[lockKey]Row
 	deleted  map[lockKey]bool
+	moved    map[lockKey]string
 	locks    int
 	deferred int
 }
@@ -810,6 +856,9 @@ func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
 func (tx *Tx) Insert(table string, row Row) error {
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
+		return err
+	}
+	if err := tx.givesGenerated(table, row, "Tx.Insert"); err != nil {
 		return err
 	}
 	row = row.clone()
@@ -906,6 +955,7 @@ func (db *DB) reset() {
 	db.committed = map[string]map[string]Row{}
 	db.locks = map[lockKey]rowLock{}
 	db.touched = map[string]bool{}
+	db.moved = map[lockKey]string{}
 	db.seqs = map[string]int64{}
 	db.uuids = 0
 }
@@ -996,6 +1046,7 @@ func (tx *Tx) savepoint(op, name string) error {
 			sp.writes[k] = v.clone()
 		}
 		maps.Copy(sp.deleted, tx.deleted)
+		sp.moved = maps.Clone(tx.moved)
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1019,6 +1070,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.writes[k] = v.clone()
 	}
 	maps.Copy(tx.deleted, sp.deleted)
+	tx.moved = maps.Clone(sp.moved)
 	tx.deferred = tx.deferred[:sp.deferred]
 	tx.releaseLocks(tx.locks[sp.locks:])
 	tx.locks = tx.locks[:sp.locks]
@@ -1049,6 +1101,72 @@ func (tx *Tx) view(table, key string) (Row, bool) {
 	return r.clone(), true
 }
 
+// givesGenerated refuses a value for a generated column, which Postgres
+// rejects and the write would overwrite.
+func (tx *Tx) givesGenerated(table string, row Row, call string) error {
+	def := tx.db.defs[table]
+	if def == nil {
+		return nil
+	}
+	for _, col := range def.columns { // in declaration order, for a stable error
+		if _, given := row[col]; given && def.generated[col] != nil {
+			return unsupported(fmt.Sprintf("a value for generated column %q", col), call)
+		}
+	}
+	return nil
+}
+
+// lockLatest locks the row read under key and returns its newest version,
+// following it to the key an UPDATE moved it to and locking it there too.
+// ok is false when the row is gone.
+func (tx *Tx) lockLatest(table, key string, lock func(lockKey) error) (string, Row, bool, error) {
+	held := len(tx.locks)
+	for {
+		before := len(tx.locks)
+		if err := lock(lockKey{table, key}); err != nil {
+			return "", nil, false, err
+		}
+		next, cur, ok := tx.latest(table, key)
+		if ok && next != key {
+			// The row moved: a lock taken here on the key it left would keep
+			// an insert of that key waiting, which the moved row does not.
+			tx.releaseLocks(tx.locks[before:])
+			tx.locks = tx.locks[:before]
+		}
+		if !ok {
+			// Postgres keeps no lock on a row that is gone, and detest's
+			// would block an insert of the same key: let go of those taken
+			// here, keeping the ones the transaction held before.
+			tx.releaseLocks(tx.locks[held:])
+			tx.locks = tx.locks[:held]
+			return "", nil, false, nil
+		}
+		if next == key {
+			return key, cur, true, nil
+		}
+		key = next
+	}
+}
+
+// latest returns the newest version of the row read under key, following the
+// keys UPDATEs moved it to, as Postgres follows a row's update chain after a
+// wait. A row's identity is its key, so a row since inserted under the old
+// key is taken for it.
+func (tx *Tx) latest(table, key string) (string, Row, bool) {
+	table = tx.db.resolve(table)
+	for range len(tx.db.moved) + 1 {
+		if r, ok := tx.view(table, key); ok {
+			return key, r, true
+		}
+		next, ok := tx.db.moved[lockKey{table, key}]
+		if !ok {
+			break
+		}
+		key = next
+	}
+	return "", nil, false
+}
+
 func (tx *Tx) check() error {
 	if tx.closed || tx.aborted {
 		return tx.abortedError()
@@ -1065,29 +1183,35 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 	if err := tx.check(); err != nil {
 		return 0, err
 	}
+	if err := tx.givesGenerated(table, fields, "Tx.Update"); err != nil {
+		return 0, err
+	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
 	n := 0
+	cols := make([]string, 0, len(fields))
+	for c := range fields {
+		cols = append(cols, c)
+	}
+	mode := tx.db.updateLock(table, cols)
+	done := map[string]bool{}
+	x := tx.evaluator() // one for the operation, so statement_timestamp() is one time
 	for _, r := range tx.selectNoYield(table, pred) {
-		lk := lockKey{table, r.Key()}
-		cols := make([]string, 0, len(fields))
-		for c := range fields {
-			cols = append(cols, c)
-		}
-		if err := tx.lockMode(lk, tx.db.updateLock(table, cols)); err != nil {
+		key, cur, ok, err := tx.lockLatest(table, r.Key(), func(lk lockKey) error { return tx.lockMode(lk, mode) })
+		if err != nil {
 			return n, err
 		}
-		cur, ok := tx.view(table, r.Key())
-		if !ok || !pred(cur) {
+		if !ok || done[key] || !pred(cur) {
 			continue
 		}
+		done[key] = true
+		lk := lockKey{table, key}
 		old := cur.clone()
 		maps.Copy(cur, fields)
-		x := tx.evaluator()
 
 		if err := x.checkRow(table, cur); err != nil {
 			return n, err
 		}
-		if err := x.checkUniques(table, cur, r.Key(), old); err != nil {
+		if err := x.checkUniques(table, cur, key, old); err != nil {
 			return n, err
 		}
 		if err := x.checkParents(table, cur, old); err != nil {
@@ -1096,7 +1220,6 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if err := x.onParentUpdate(table, old, cur); err != nil {
 			return n, err
 		}
-		var err error
 		if lk, err = x.rekey(table, lk, cur); err != nil {
 			return n, err
 		}
@@ -1135,6 +1258,13 @@ func (tx *Tx) commit() {
 		tx.closed = true // a commit while the processes of an ended run unwind
 		return
 	}
+	for lk := range tx.writes {
+		delete(tx.db.moved, lk) // the key holds a row of its own now
+	}
+	for lk := range tx.deleted {
+		delete(tx.db.moved, lk) // a row moved here before is not this one
+	}
+	maps.Copy(tx.db.moved, tx.moved)
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {
@@ -1186,6 +1316,15 @@ func (db *DB) isIgnored(table string) bool { return db.ignored[db.resolve(table)
 // schema is keyed by id.
 func (db *DB) updateLock(table string, cols []string) lockMode {
 	def := db.defs[table]
+	if def != nil {
+		// A generated column changes with the columns it is computed from,
+		// so it counts as written when one of them is.
+		for _, col := range def.columns {
+			if g := def.generated[col]; g != nil && slices.ContainsFunc(g.columns(), func(dep string) bool { return slices.Contains(cols, dep) }) {
+				cols = append(slices.Clip(cols), col)
+			}
+		}
+	}
 	for _, c := range cols {
 		if def == nil {
 			if c == "id" {

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k1LoW/detest/postgres"
 )
@@ -210,4 +211,179 @@ func TestLockTimeout(t *testing.T) {
 		})
 		s.ExpectViolation("a lock wait timed out")
 	})
+}
+
+// An aggregate under an expression the grouped evaluation does not take
+// apart is refused rather than evaluated as a function of one row.
+func TestAggregateUnderUnsupportedExpression(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1)`)
+	for _, q := range []string{
+		`SELECT count(*) IS NULL FROM t`,
+		`SELECT NOT count(*) > 0 FROM t`,
+		`SELECT CASE WHEN count(*) > 0 THEN 1 END FROM t`,
+		`SELECT count(*) IN (1, 2) FROM t`,
+		`SELECT string_agg(id::text, ',') FROM t`,
+		`SELECT json_agg_strict(id) FROM t`,
+		`SELECT 1 FROM t ORDER BY string_agg(id::text, ',')`,
+		`SELECT id FROM t LIMIT -1`,
+		`SELECT id FROM t OFFSET -1`,
+		`SELECT id FROM t LIMIT -1 FOR UPDATE`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("count(*) + 1: %d, %v", n, err)
+	}
+	// An aggregate only in ORDER BY is refused: Postgres makes the query one
+	// group and checks the select list against it, which detest does not.
+	for _, q := range []string{`SELECT 1 FROM t ORDER BY count(*)`, `SELECT id FROM t ORDER BY count(*)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// ORDER BY an aggregate the select list has too is fine.
+	if err := db.QueryRow(`SELECT count(*) FROM t ORDER BY count(*)`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("count(*) ORDER BY count(*): %d, %v", n, err)
+	}
+}
+
+// CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) round to p fractional digits.
+func TestTimestampPrecision(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for q, unit := range map[string]int{
+		`SELECT CURRENT_TIMESTAMP(0)`: 1e9,
+		`SELECT LOCALTIMESTAMP(3)`:    1e6,
+		`SELECT CURRENT_TIMESTAMP(7)`: 1e3, // reduced to 6, as Postgres does
+	} {
+		var ts time.Time
+		if err := db.QueryRow(q).Scan(&ts); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if ts.Nanosecond()%unit != 0 {
+			t.Errorf("%s: %v has more digits", q, ts)
+		}
+	}
+	// The other time functions take no argument.
+	for _, q := range []string{`SELECT now(3)`, `SELECT clock_timestamp(3)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+}
+
+// now() and CURRENT_TIMESTAMP are the time the transaction began, the same
+// throughout it, while clock_timestamp() moves on.
+func TestTransactionTimestamp(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	at := func(q string) time.Time {
+		t.Helper()
+		var ts time.Time
+		if err := tx.QueryRow(q).Scan(&ts); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return ts
+	}
+	first, clock := at(`SELECT now()`), at(`SELECT clock_timestamp()`)
+	if first.Nanosecond()%1000 != 0 || clock.Nanosecond()%1000 != 0 {
+		t.Errorf("more than microsecond precision: %v, %v", first, clock)
+	}
+	time.Sleep(2 * time.Millisecond)
+	for _, q := range []string{`SELECT now()`, `SELECT CURRENT_TIMESTAMP`, `SELECT transaction_timestamp()`} {
+		if got := at(q); !got.Equal(first) {
+			t.Errorf("%s: %v, want the transaction's start %v", q, got, first)
+		}
+	}
+	if !at(`SELECT clock_timestamp()`).After(clock) {
+		t.Error("clock_timestamp() did not move on")
+	}
+	var same bool
+	if err := tx.QueryRow(`SELECT CURRENT_TIMESTAMP(6) = CURRENT_TIMESTAMP(6)`).Scan(&same); err != nil || !same {
+		t.Errorf("CURRENT_TIMESTAMP(6) twice: %v %v", same, err)
+	}
+	// A statement outside a transaction begins its own at the same instant.
+	if err := db.QueryRow(`SELECT now() = statement_timestamp()`).Scan(&same); err != nil || !same {
+		t.Errorf("now() = statement_timestamp() in autocommit: %v %v", same, err)
+	}
+}
+
+// OFFSET is evaluated before LIMIT, as Postgres does.
+func TestOffsetBeforeLimit(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1), (2), (3), (4), (5)`)
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	rows, err := db.Query(`SELECT id FROM t ORDER BY id LIMIT nextval('s') + 1 OFFSET nextval('s')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	// OFFSET takes 1 and LIMIT 2 + 1.
+	if !reflect.DeepEqual(got, []int64{2, 3, 4}) {
+		t.Errorf("got %v", got)
+	}
+	// VALUES lists of different lengths are refused before any is evaluated.
+	mustExec(t, db, `CREATE TABLE v (a int, b int)`)
+	for _, q := range []string{`INSERT INTO v VALUES (nextval('s')), (1, 2)`, `INSERT INTO v (a) SELECT * FROM (VALUES (nextval('s')), (2, 3)) w`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// An aggregate detest does not implement is refused before WITH runs.
+	if _, err := db.Exec(`WITH c AS (SELECT nextval('s') AS id) SELECT string_agg(id::text, ',') FROM c`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("string_agg: got %v", err)
+	}
+	// A bound may read a WITH query.
+	var c int
+	rows2, err := db.Query(`WITH c AS (VALUES (0)) SELECT 1 LIMIT (SELECT column1 FROM c)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows2.Next() {
+		c++
+	}
+	_ = rows2.Close()
+	if c != 0 {
+		t.Errorf("LIMIT from a WITH query: %d rows, want 0", c)
+	}
+	// OFFSET NULL is OFFSET 0.
+	mustExec(t, db, `SELECT id FROM t OFFSET NULL`)
+	// The largest bigint is a valid OFFSET.
+	mustExec(t, db, `SELECT id FROM t OFFSET 9223372036854775807`)
+	// OFFSET and LIMIT out of the bigint range are refused, not wrapped.
+	mustExec(t, db, `SELECT id FROM t LIMIT '2'`)
+	for _, q := range []string{`SELECT id FROM t OFFSET 1e100`, `SELECT id FROM t LIMIT 1e100`, `SELECT id FROM t LIMIT 'bad'`, `SELECT id FROM t LIMIT 1.5`, `SELECT id FROM t LIMIT true`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// A negative LIMIT is refused before the select list runs.
+	if _, err := db.Exec(`SELECT nextval('s') FROM t LIMIT -1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("negative LIMIT: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 3 {
+		t.Errorf("nextval after a refused LIMIT: %d, %v", n, err)
+	}
 }

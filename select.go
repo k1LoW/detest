@@ -3,6 +3,9 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -24,18 +27,50 @@ type selItem struct {
 // and LIMIT. A query with FOR UPDATE takes the locking path instead, which
 // PostgreSQL allows only without grouping, DISTINCT and windows.
 func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	var locking lockPlan
+	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return nil, nil, x.unsupported("an aggregate only in ORDER BY")
+	}
+	if sel.Lock != nil && (sel.SetOp != "" || sel.Values != nil) {
+		return nil, nil, x.unsupported("FOR UPDATE on a set operation or VALUES")
+	}
+	if sel.Lock != nil {
+		// Checked before the WITH queries run, which may have effects.
+		var err error
+		if locking, err = x.planLocking(sel); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, vs := range sel.Values {
+		// Postgres refuses lists of different lengths when it analyzes the
+		// statement, before evaluating anything.
+		if len(vs) != len(sel.Values[0]) {
+			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
+		}
+	}
 	if err := x.withCTEs(sel.With, outer); err != nil {
 		return nil, nil, err
 	}
+	// OFFSET and LIMIT are taken, and a negative one refused, before the
+	// query produces a row, as Postgres does before fetching rows. They may
+	// read the WITH queries, so those come first.
+	offset, limit, err := x.evalBounds(sel, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if x.bounds == nil {
+		x.bounds = map[*sqlir.SelectStmt][2]int{}
+	}
+	x.bounds[sel] = [2]int{offset, limit}
 	switch {
 	case sel.SetOp != "":
 		return x.evalSetOp(sel, outer)
 	case sel.Values != nil:
 		return x.evalValues(sel, outer)
 	case sel.Lock != nil:
-		return x.evalLocking(sel, outer)
+		return x.evalLocking(sel, locking, outer)
 	}
-	rows, _, err := x.scan(sel, outer)
+	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -101,7 +136,15 @@ func isAggregate(sel *sqlir.SelectStmt) bool {
 			return true
 		}
 	}
-	return false
+	return orderOnlyAggregate(sel)
+}
+
+// orderOnlyAggregate reports an aggregate in ORDER BY of a query that has
+// none elsewhere. Postgres makes such a query one group and refuses any
+// column the select list reads outside an aggregate, a check detest does
+// not make, so evalSelect refuses the query instead.
+func orderOnlyAggregate(sel *sqlir.SelectStmt) bool {
+	return slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
 }
 
 // groups folds the rows into groups by GROUP BY and keeps those HAVING
@@ -328,27 +371,13 @@ func (x *sqlExec) distinct(sel *sqlir.SelectStmt, items []*selItem, cols []strin
 
 // slice applies OFFSET and LIMIT.
 func (x *sqlExec) slice(sel *sqlir.SelectStmt, rows []Row, outer *env) ([]Row, error) {
-	if sel.Offset != nil {
-		v, err := x.eval(sel.Offset, &env{outer: outer})
-		if err != nil {
-			return nil, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if int(f) < len(rows) {
-				rows = rows[int(f):]
-			} else {
-				rows = nil
-			}
-		}
+	offset, limit, err := x.offsetLimit(sel, outer)
+	if err != nil {
+		return nil, err
 	}
-	if sel.Limit != nil {
-		v, err := x.eval(sel.Limit, &env{outer: outer})
-		if err != nil {
-			return nil, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok && int(f) < len(rows) {
-			rows = rows[:int(f)]
-		}
+	rows = rows[min(offset, len(rows)):]
+	if limit >= 0 && limit < len(rows) {
+		rows = rows[:limit]
 	}
 	return rows, nil
 }
@@ -473,57 +502,186 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 	return x.finish(sel, lcols, out, outer)
 }
 
-// evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY and LIMIT
-// before locking, in scan order, so LIMIT counts the rows actually locked
-// (FOR UPDATE SKIP LOCKED skips rows held by others).
-func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
-	rows, baseTable, err := x.scan(sel, outer)
+// evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY before
+// locking, and OFFSET and LIMIT after, so they count the rows actually locked
+// (FOR UPDATE SKIP LOCKED skips rows held by others) and the rows OFFSET
+// skips are locked as well.
+func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) ([]string, []Row, error) {
+	from, targets := plan.from, plan.targets
+	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
 	if rows, err = x.where(sel, rows, outer); err != nil {
 		return nil, nil, err
 	}
-	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
-		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
-	}
 	if err := x.order(sel.OrderBy, rows, outer); err != nil {
 		return nil, nil, err
 	}
-	rows, limit, err := x.offsetLimit(sel, rows, outer)
+	offset, limit, err := x.offsetLimit(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
 	mode := lockModeOf(sel.Lock)
-	if baseTable != "" {
-		var locked []jrow
-		for _, r := range rows {
-			if limit >= 0 && len(locked) >= limit {
-				break
-			}
-			lk := lockKey{baseTable, r.base.Key()}
-			if x.tx.heldByOther(lk, mode) {
-				if sel.Lock.SkipLocked {
-					continue
+	var locked []jrow
+	skipped := 0 // rows locked for OFFSET, which Postgres locks too
+rows:
+	for _, r := range rows {
+		if limit >= 0 && len(locked) >= limit {
+			break
+		}
+		latest := map[string]Row{}
+		changed := false
+		for _, a := range targets {
+			table := from.tables[a]
+			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
+				if x.tx.heldByOther(lk, mode) {
+					if sel.Lock.SkipLocked {
+						return errSkipLocked
+					}
+					if sel.Lock.NoWait {
+						return x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
+					}
 				}
-				if sel.Lock.NoWait {
-					return nil, nil, x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(baseTable)), relname(baseTable), "", "")
-				}
+				return x.tx.lockMode(lk, mode)
+			})
+			if errors.Is(err, errSkipLocked) {
+				continue rows
 			}
-			if err := x.tx.lockMode(lk, mode); err != nil {
+			if err != nil {
 				return nil, nil, err
 			}
-			if cur, ok := x.tx.view(baseTable, r.base.Key()); ok {
-				r = newJrow(x.aliasOf(sel), cur)
+			if !ok {
+				continue rows // deleted while waited for
 			}
-			locked = append(locked, r)
+			latest[a] = cur
+			changed = changed || !reflect.DeepEqual(cur, r.by[a])
 		}
-		rows = locked
-	} else if limit >= 0 && limit < len(rows) {
-		rows = rows[:limit]
+		// Postgres re-evaluates the predicate only for a row another
+		// transaction changed, which matters for a volatile one.
+		if changed {
+			var ok bool
+			var err error
+			if r, ok, err = x.recheck(sel, r, latest, from, outer); err != nil {
+				return nil, nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		locked = append(locked, r)
 	}
-	return x.project(sel, rows, outer)
+	return x.project(sel, locked, outer)
 }
+
+// lockPlan is what a locking read locks, worked out before it runs.
+type lockPlan struct {
+	from    fromItems
+	targets []string
+}
+
+// planLocking checks a locking read and works out the FROM items it locks,
+// from the statement alone.
+func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+	}
+	// Postgres allows neither in WHERE or ON at all.
+	preds := []sqlir.Expr{sel.Where}
+	for _, j := range sel.Joins {
+		preds = append(preds, j.On)
+	}
+	for _, p := range preds {
+		if hasAggregate(p) || len(windowsIn(p)) > 0 {
+			return lockPlan{}, x.unsupported("an aggregate or window function in WHERE or ON")
+		}
+	}
+	from := x.fromItemsOf(sel)
+	targets, err := x.lockTargets(sel.Lock, from)
+	return lockPlan{from: from, targets: targets}, err
+}
+
+// lockTargets is the FROM items whose rows a locking clause locks: those it
+// names, or every table in FROM.
+func (x *sqlExec) lockTargets(l *sqlir.LockClause, from fromItems) ([]string, error) {
+	names := l.Of
+	if len(names) == 0 {
+		names = from.aliases
+	}
+	if from.lateral {
+		// A lateral item's rows come from the rows before it, which the
+		// re-check after a wait would have to feed again.
+		return nil, x.unsupported("FOR UPDATE with LATERAL or a function in FROM")
+	}
+	var out []string
+	for _, a := range names {
+		if !slices.Contains(from.aliases, a) {
+			return nil, x.tx.db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q in FOR UPDATE clause not found in FROM clause", a), a, "", "")
+		}
+		if kind := from.kinds[a]; kind != "" {
+			// Postgres locks the tables behind a view or subquery, which
+			// detest does not. A WITH query or a function it leaves alone
+			// unless named, and then refuses.
+			if (kind == "cte" || kind == "function") && len(l.Of) == 0 {
+				continue
+			}
+			return nil, x.unsupported("FOR UPDATE on a " + kind)
+		}
+		if from.nullable[a] {
+			return nil, x.unsupported("FOR UPDATE on the nullable side of an outer join")
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// recheck evaluates the predicate again with the locked rows of r at their
+// newest version, latest, as Read Committed does after a wait: a row no
+// longer matching is not returned.
+func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, latest map[string]Row, from fromItems, outer *env) (jrow, bool, error) {
+	if len(latest) == 0 {
+		return r, true, nil
+	}
+	by := maps.Clone(r.by)
+	maps.Copy(by, latest)
+	// Join again in FROM order, as scan does, with the rows each item was
+	// joined to: Postgres does not look for new join partners either.
+	n := newJrow(from.aliases[0], by[from.aliases[0]])
+	if from.tables[from.aliases[0]] == "" {
+		n.base = nil
+	}
+	for i, join := range sel.Joins {
+		a := from.aliases[i+1]
+		cand := n.with(a, by[a])
+		if join.On != nil && by[a] != nil {
+			ok, err := x.evalBool(join.On, cand.env(outer))
+			if err != nil {
+				return jrow{}, false, err
+			}
+			if !ok {
+				if join.Kind != sqlir.LeftJoin {
+					return jrow{}, false, nil
+				}
+				cand = n.with(a, nil)
+			}
+		}
+		n = cand
+	}
+	if sel.Where != nil {
+		ok, err := x.evalBool(sel.Where, n.env(outer))
+		if err != nil || !ok {
+			return jrow{}, false, err
+		}
+	}
+	return n, true, nil
+}
+
+// errSkipLocked stops lockLatest at a row SKIP LOCKED passes over.
+var errSkipLocked = errors.New("row skipped by SKIP LOCKED")
 
 // lockModeOf is the row lock a locking clause takes.
 func lockModeOf(l *sqlir.LockClause) lockMode {
@@ -542,6 +700,21 @@ func lockModeOf(l *sqlir.LockClause) lockMode {
 // DISTINCT ON.
 func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 	var out []*sqlir.WindowFunc
+	for _, t := range sel.Targets {
+		out = append(out, windowsIn(t.Expr)...)
+	}
+	for _, k := range sel.OrderBy {
+		out = append(out, windowsIn(k.Expr)...)
+	}
+	for _, e := range sel.DistinctOn {
+		out = append(out, windowsIn(e)...)
+	}
+	return out
+}
+
+// windowsIn returns the window functions in e, not those of its subqueries.
+func windowsIn(e sqlir.Expr) []*sqlir.WindowFunc {
+	var out []*sqlir.WindowFunc
 	var walk func(e sqlir.Expr)
 	walk = func(e sqlir.Expr) {
 		switch v := e.(type) {
@@ -558,6 +731,17 @@ func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 			walk(v.X)
 		case *sqlir.Cast:
 			walk(v.X)
+		case *sqlir.IsNull:
+			walk(v.X)
+		case *sqlir.InExpr:
+			walk(v.X)
+			for _, e := range v.List {
+				walk(e)
+			}
+		case *sqlir.RowExpr:
+			for _, e := range v.Items {
+				walk(e)
+			}
 		case *sqlir.CaseExpr:
 			walk(v.Arg)
 			for _, w := range v.Whens {
@@ -567,15 +751,7 @@ func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 			walk(v.Else)
 		}
 	}
-	for _, t := range sel.Targets {
-		walk(t.Expr)
-	}
-	for _, k := range sel.OrderBy {
-		walk(k.Expr)
-	}
-	for _, e := range sel.DistinctOn {
-		walk(e)
-	}
+	walk(e)
 	return out
 }
 

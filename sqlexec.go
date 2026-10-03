@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"sort"
 	"strconv"
@@ -33,6 +34,10 @@ type sqlExec struct {
 	query string
 	args  []driver.Value
 	ctes  map[string][]Row
+	start time.Time // when the statement began, for statement_timestamp()
+	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
+	// before each query runs anything.
+	bounds map[*sqlir.SelectStmt][2]int
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -130,7 +135,10 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if err := tx.check(); err != nil {
 		return nil, err
 	}
-	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}}
+	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}, start: time.Now()}
+	if !tx.block && !tx.start.IsZero() {
+		x.start = tx.start // the statement is its own transaction, begun at the same instant
+	}
 	return x.execStatement(s.stmt)
 }
 
@@ -171,6 +179,78 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.DeleteStmt:
 		return x.execDelete(st)
 	case *sqlir.SchemaStmt:
+		for _, ch := range st.Changes {
+			// Postgres refuses to drop a column a generated column depends
+			// on, or drops both with CASCADE. The generated columns are the
+			// table's and those the same statement adds.
+			if exists := tx.db.defs[tx.db.resolve(ch.Table)] != nil; ch.Create == exists {
+				// A CREATE of a table that exists is a no-op or a duplicate,
+				// and a change to one that does not is an undefined table,
+				// which applySchema reports.
+				continue
+			}
+			gens := map[string]tableCheck{}
+			var order []string
+			if def := tx.db.defs[tx.db.resolve(ch.Table)]; def != nil {
+				for _, col := range def.columns {
+					if g := def.generated[col]; g != nil {
+						gens[col] = *g
+						order = append(order, col)
+					}
+				}
+			}
+			for _, c := range ch.Columns {
+				if c.Generated != nil {
+					gens[c.Name] = tableCheck{CheckDef: sqlir.CheckDef{Name: c.Name, Expr: c.Generated}}
+					order = append(order, c.Name)
+				}
+				// SET or DROP DEFAULT and ADD IDENTITY name a column without
+				// a type; Postgres refuses them on a generated column.
+				if _, generated := gens[c.Name]; generated && !ch.Create && c.Generated == nil && c.Type == "" && !c.TypeOnly {
+					return nil, x.unsupported(fmt.Sprintf("a default or identity on generated column %q", c.Name))
+				}
+			}
+			// The columns the table has once the statement is applied.
+			cols := map[string]bool{}
+			if def := tx.db.defs[tx.db.resolve(ch.Table)]; def != nil && !ch.Create {
+				for _, c := range def.columns {
+					cols[c] = true
+				}
+			}
+			for _, c := range ch.Columns {
+				cols[c.Name] = true
+			}
+			for _, c := range ch.DropColumns {
+				delete(cols, c)
+			}
+			for _, col := range order { // in declaration order, for a stable error
+				if slices.Contains(ch.DropColumns, col) {
+					continue
+				}
+				for _, dep := range gens[col].columns() {
+					if !cols[dep] && !slices.Contains(ch.DropColumns, dep) {
+						// Postgres refuses it; detest would read it as NULL.
+						return nil, x.unsupported(fmt.Sprintf("generated column %q, which refers to column %q the table does not have", col, dep))
+					}
+					if _, generated := gens[dep]; generated {
+						// Postgres refuses it; detest would compute it in
+						// declaration order.
+						return nil, x.unsupported(fmt.Sprintf("generated column %q, which refers to generated column %q", col, dep))
+					}
+					if slices.Contains(ch.DropColumns, dep) {
+						return nil, x.unsupported(fmt.Sprintf("dropping column %q, which generated column %q depends on", dep, col))
+					}
+				}
+			}
+			if ch.Create || len(tx.selectNoYield(ch.Table, nil)) == 0 {
+				continue
+			}
+			// Postgres computes the new column for the rows already there,
+			// which detest does not do.
+			if slices.ContainsFunc(ch.Columns, func(c sqlir.ColumnDef) bool { return c.Generated != nil }) {
+				return nil, x.unsupported("adding a generated column to a table with rows")
+			}
+		}
 		if err := tx.db.applySchema(st, tx); err != nil {
 			return nil, err
 		}
@@ -415,19 +495,73 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	return alias, x.tx.selectNoYield(t.Name, nil), true, nil
 }
 
+// fromItems describes the FROM items of a query, for locking reads.
+type fromItems struct {
+	aliases  []string          // in FROM order, the first being the base item
+	tables   map[string]string // alias -> table, for the items that are tables
+	kinds    map[string]string // alias -> "subquery", "view", "function" or "cte" for the others
+	nullable map[string]bool   // the right side of a LEFT JOIN
+	lateral  bool              // some item depends on the rows before it
+}
+
+// fromItemsOf describes the FROM items of sel without evaluating them or its
+// WITH queries, so a locking clause is checked before the query has any
+// effect, such as advancing a sequence.
+func (x *sqlExec) fromItemsOf(sel *sqlir.SelectStmt) fromItems {
+	from := fromItems{tables: map[string]string{}, kinds: map[string]string{}, nullable: map[string]bool{}}
+	if sel.From == nil {
+		return from
+	}
+	items := []sqlir.TableRef{*sel.From}
+	for _, j := range sel.Joins {
+		items = append(items, j.Table)
+	}
+	for i, t := range items {
+		alias := t.Alias
+		switch {
+		case alias != "":
+		case t.Func != nil:
+			alias = t.Func.Name
+		default:
+			alias = relname(t.Name)
+		}
+		from.aliases = append(from.aliases, alias)
+		_, isCTE := x.ctes[t.Name]
+		isCTE = isCTE || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
+		switch {
+		case t.Sub != nil:
+			from.kinds[alias] = "subquery"
+		case t.Func != nil:
+			from.kinds[alias] = "function"
+		case isCTE:
+			from.kinds[alias] = "cte"
+		case x.tx.db.views[x.tx.db.resolve(t.Name)] != nil:
+			from.kinds[alias] = "view"
+		default:
+			from.tables[alias] = x.tx.db.resolve(t.Name)
+		}
+		if i == 0 {
+			continue
+		}
+		if t.Lateral || t.Func != nil {
+			from.lateral = true
+		}
+		if sel.Joins[i-1].Kind == sqlir.LeftJoin {
+			from.nullable[alias] = true
+		}
+	}
+	return from
+}
+
 // scan produces the FROM rows of a query: the base table joined with each
 // JOIN item by nested loops.
-func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error) {
+func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, error) {
 	if sel.From == nil {
-		return []jrow{{by: map[string]Row{}, merged: Row{}}}, "", nil
+		return []jrow{{by: map[string]Row{}, merged: Row{}}}, nil
 	}
 	alias, rows, isBase, err := x.tableRows(*sel.From, outer)
 	if err != nil {
-		return nil, "", err
-	}
-	baseTable := ""
-	if isBase && len(sel.Joins) == 0 {
-		baseTable = x.tx.db.resolve(sel.From.Name)
+		return nil, err
 	}
 	var out []jrow
 	for _, r := range rows {
@@ -440,7 +574,7 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 	for _, join := range sel.Joins {
 		jalias, jrows, _, err := x.tableRows(join.Table, outer)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		var next []jrow
 		switch join.Kind {
@@ -449,7 +583,7 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 				if join.Table.Lateral {
 					// A lateral item sees the row it joins to.
 					if _, jrows, _, err = x.tableRows(join.Table, l.env(outer)); err != nil {
-						return nil, "", err
+						return nil, err
 					}
 				}
 				matched := false
@@ -458,7 +592,7 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 					ok := true
 					if join.On != nil {
 						if ok, err = x.evalBool(join.On, cand.env(outer)); err != nil {
-							return nil, "", err
+							return nil, err
 						}
 					}
 					if ok {
@@ -471,18 +605,11 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, string, error
 				}
 			}
 		default:
-			return nil, "", x.unsupported("right or full join")
+			return nil, x.unsupported("right or full join")
 		}
 		out = next
 	}
-	return out, baseTable, nil
-}
-
-func (x *sqlExec) aliasOf(sel *sqlir.SelectStmt) string {
-	if sel.From.Alias != "" {
-		return sel.From.Alias
-	}
-	return relname(sel.From.Name)
+	return out, nil
 }
 
 func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
@@ -516,31 +643,74 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 	return nil
 }
 
-func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]jrow, int, error) {
-	limit := -1
-	if sel.Limit != nil {
-		v, err := x.eval(sel.Limit, &env{outer: outer})
-		if err != nil {
-			return nil, 0, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			limit = int(f)
-		}
+// offsetLimit returns the OFFSET and LIMIT evalSelect took for sel before
+// running it, evaluating them if it has not.
+func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
+	if b, ok := x.bounds[sel]; ok {
+		return b[0], b[1], nil
 	}
+	return x.evalBounds(sel, outer)
+}
+
+// evalBounds evaluates OFFSET and LIMIT. limit is -1 without a LIMIT.
+// Postgres refuses a negative one of either.
+func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
+	limit = -1
+	// OFFSET first, as Postgres evaluates them.
 	if sel.Offset != nil {
-		v, err := x.eval(sel.Offset, &env{outer: outer})
-		if err != nil {
-			return nil, 0, err
+		if offset, err = x.evalBound(sel.Offset, "OFFSET", outer); err != nil {
+			return 0, 0, err
 		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if int(f) < len(rows) {
-				rows = rows[int(f):]
-			} else {
-				rows = nil
-			}
+		offset = max(offset, 0) // OFFSET NULL is OFFSET 0
+	}
+	if sel.Limit != nil {
+		if limit, err = x.evalBound(sel.Limit, "LIMIT", outer); err != nil {
+			return 0, 0, err
 		}
 	}
-	return rows, limit, nil
+	return offset, limit, nil
+}
+
+// evalBound evaluates an OFFSET or LIMIT, a bigint that may not be negative.
+// -1 is NULL, which is no LIMIT. An integer stays one: a float cannot hold
+// the largest bigint.
+func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) {
+	v, err := x.eval(e, &env{outer: outer})
+	if err != nil {
+		return 0, err
+	}
+	switch n := derefValue(v).(type) {
+	case nil:
+		return -1, nil
+	case int64:
+		if n < 0 {
+			return 0, x.unsupported("a negative " + what)
+		}
+		return int(min(n, math.MaxInt)), nil // no slice is longer than MaxInt
+	case string:
+		// An untyped literal such as '2' reads as a bigint.
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return 0, x.unsupported("an " + what + " that is not a bigint")
+		}
+		if i < 0 {
+			return 0, x.unsupported("a negative " + what)
+		}
+		return int(min(i, math.MaxInt)), nil
+	}
+	f, ok := toFloat(derefValue(v))
+	switch {
+	case !ok || f != math.Trunc(f):
+		// detest does not know how Postgres would coerce it to a bigint.
+		return 0, x.unsupported("an " + what + " that is not a bigint")
+	case f < 0:
+		return 0, x.unsupported("a negative " + what)
+	case math.IsNaN(f) || f >= math.MaxInt64:
+		return 0, x.unsupported("an " + what + " out of the bigint range")
+	case f >= math.MaxInt:
+		return math.MaxInt, nil
+	}
+	return int(f), nil
 }
 
 func (x *sqlExec) project(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {
@@ -616,6 +786,9 @@ func hasAggregate(e sqlir.Expr) bool {
 		case "count", "sum", "min", "max", "avg":
 			return true
 		}
+		if sqlir.OtherAggregates[v.Name] {
+			return true
+		}
 		if slices.ContainsFunc(v.Args, hasAggregate) {
 			return true
 		}
@@ -625,7 +798,16 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.Cast:
 		return hasAggregate(v.X)
+	case *sqlir.IsNull:
+		return hasAggregate(v.X)
+	case *sqlir.InExpr:
+		return hasAggregate(v.X) || slices.ContainsFunc(v.List, hasAggregate)
+	case *sqlir.RowExpr:
+		return slices.ContainsFunc(v.Items, hasAggregate)
 	case *sqlir.CaseExpr:
+		if hasAggregate(v.Arg) {
+			return true
+		}
 		for _, w := range v.Whens {
 			if hasAggregate(w.When) || hasAggregate(w.Then) {
 				return true
@@ -678,6 +860,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 			}
 			return foldAggregate(v.Name, false, vals, len(g.rows)), nil
 		}
+		if sqlir.OtherAggregates[v.Name] {
+			return nil, x.unsupported("aggregate " + v.Name)
+		}
+		if err := x.checkArity(v); err != nil {
+			return nil, err
+		}
 		args := make([]any, len(v.Args))
 		for i, a := range v.Args {
 			val, err := x.evalAgg(a, g)
@@ -704,6 +892,10 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		return castValue(val, v.Type), nil
 	}
+	if hasAggregate(e) {
+		// eval would take the aggregate for a function of one row.
+		return nil, x.unsupported("an aggregate inside NOT, CASE, IS NULL, IN or a row")
+	}
 	return x.eval(e, g.env)
 }
 
@@ -715,8 +907,21 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		return nil, err
 	}
 	cols := ins.Columns
+	for _, exprs := range ins.Rows {
+		// Postgres refuses VALUES lists of different lengths before any of
+		// them is evaluated.
+		if len(exprs) != len(ins.Rows[0]) {
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", relname(ins.Table), "", "")
+		}
+	}
 	if def := x.tx.db.defs[table]; len(cols) == 0 && def != nil {
 		cols = def.columns // INSERT INTO t VALUES (...): the columns in table order
+		if len(ins.Rows) > 0 && len(ins.Rows[0]) < len(cols) {
+			cols = cols[:len(ins.Rows[0])] // or the first N, for N values
+		}
+	}
+	if err := x.insertsGenerated(table, ins, cols); err != nil {
+		return nil, err
 	}
 	var rows []Row
 	switch {
@@ -765,7 +970,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if alias == "" {
 		alias = relname(ins.Table)
 	}
-	out := &sqlResult{cols: x.returningCols(ins.Returning, cols)}
+	all := cols // RETURNING * is every column of the table, not only those written
+	if def := x.tx.db.defs[table]; def != nil {
+		all = def.columns
+	}
+	out := &sqlResult{cols: x.returningCols(ins.Returning, all)}
 	for _, row := range rows {
 		if err := x.applyDefaults(table, row); err != nil {
 			return nil, err
@@ -782,11 +991,36 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			continue
 		}
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
-		var existing Row
-		if ins.OnConflict != nil {
+		var existing, cur Row
+		var lk lockKey
+		for ins.OnConflict != nil {
 			var err error
 			if existing, err = x.findConflict(table, ins.OnConflict.Columns, row); err != nil {
 				return nil, err
+			}
+			if existing == nil || ins.OnConflict.DoNothing {
+				break
+			}
+			// DO UPDATE locks the existing row and re-reads it, following
+			// it if it moved. If it went meanwhile, the insert is tried
+			// again, as Postgres does.
+			mode := x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))
+			key, c, ok, err := x.tx.lockLatest(table, existing.Key(), func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			// The row may no longer conflict after the wait, when its
+			// arbiter value changed: then the insert is tried again too.
+			again, err := x.findConflict(table, ins.OnConflict.Columns, row)
+			if err != nil {
+				return nil, err
+			}
+			if again != nil && again.Key() == key {
+				cur, lk = c, lockKey{table, key}
+				break
 			}
 		}
 		if existing != nil {
@@ -796,13 +1030,8 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				}
 				continue
 			}
-			// DO UPDATE: lock the existing row, re-read it, apply SET with
-			// EXCLUDED bound to the proposed row.
-			lk := lockKey{table, existing.Key()}
-			if err := x.tx.lockMode(lk, x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))); err != nil {
-				return nil, err
-			}
-			cur, _ := x.tx.view(table, existing.Key())
+			// DO UPDATE: apply SET to the locked row with EXCLUDED bound to
+			// the proposed row.
 			e := &env{tables: map[string]Row{alias: cur}, merged: cur, excluded: row}
 			if ins.OnConflict.Where != nil {
 				ok, err := x.evalBool(ins.OnConflict.Where, e)
@@ -832,7 +1061,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if err := x.checkRow(table, updated); err != nil {
 				return nil, err
 			}
-			if err := x.checkUniques(table, updated, existing.Key(), cur); err != nil {
+			if err := x.checkUniques(table, updated, lk.key, cur); err != nil {
 				return nil, err
 			}
 			if err := x.checkParents(table, updated, cur); err != nil {
@@ -853,7 +1082,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			x.appendReturning(out, ins.Returning, updated)
 			continue
 		}
-		lk := lockKey{table, row.Key()}
+		lk = lockKey{table, row.Key()}
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
@@ -997,6 +1226,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		alias = relname(up.Table)
 	}
 	// Validate the predicate and preview SET for the trace.
+	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set)); err != nil {
+		return nil, err // before WHERE is evaluated, which may have effects
+	}
 	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
 		return nil, err
 	}
@@ -1023,16 +1255,17 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if done[key] {
 			continue
 		}
-		lk := lockKey{table, key}
-		if err := x.tx.lockMode(lk, x.tx.db.updateLock(table, assignedColumns(up.Set))); err != nil {
+		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
+		key, cur, ok, err := x.tx.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+		if err != nil {
 			return nil, err
 		}
-		// Re-evaluate the predicate on the version visible after the lock, as
-		// Postgres Read Committed does.
-		cur, ok := x.tx.view(table, key)
-		if !ok {
+		if !ok || done[key] {
 			continue
 		}
+		lk := lockKey{table, key}
+		// Re-evaluate the predicate on the version visible after the lock, as
+		// Postgres Read Committed does.
 		c2 := c.rebind(alias, cur)
 		if up.Where != nil {
 			ok, err := x.evalBool(up.Where, c2.env(nil))
@@ -1069,7 +1302,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if err := x.onParentUpdate(table, cur, updated); err != nil {
 			return nil, err
 		}
-		lk, err := x.rekey(table, lk, updated)
+		lk, err = x.rekey(table, lk, updated)
 		if err != nil {
 			return nil, err
 		}
@@ -1101,14 +1334,14 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		if done[key] {
 			continue
 		}
-		lk := lockKey{table, key}
-		if err := x.tx.lock(lk); err != nil {
+		key, cur, ok, err := x.tx.lockLatest(table, key, x.tx.lock)
+		if err != nil {
 			return nil, err
 		}
-		cur, ok := x.tx.view(table, key)
-		if !ok {
+		if !ok || done[key] {
 			continue
 		}
+		lk := lockKey{table, key}
 		if del.Where != nil {
 			c2 := c.rebind(alias, cur)
 			ok, err := x.evalBool(del.Where, c2.env(nil))
@@ -1351,6 +1584,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
+		if err := x.checkArity(v); err != nil {
+			return nil, err
+		}
 		args := make([]any, len(v.Args))
 		for i, a := range v.Args {
 			val, err := x.eval(a, en)
@@ -1404,6 +1640,9 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		}
 		return v, err
 	case "||":
+		if derefValue(l) == nil || derefValue(r) == nil {
+			return nil, nil // NULL || x is NULL
+		}
 		return fmt.Sprint(derefValue(l)) + fmt.Sprint(derefValue(r)), nil
 	}
 	return nil, errUnknownExpr{"operator " + op}
@@ -1524,12 +1763,98 @@ func castValue(v any, typ string) any {
 // callFunc evaluates the scalar functions that appear on control paths.
 // pg_try_advisory_xact_lock is a non-blocking lock held until the end of the
 // transaction, modeled in the DB's lock table.
+// strictFuncs are the functions detest evaluates that Postgres declares
+// strict, given NULL, they return NULL without being called, with the
+// numbers of arguments their signatures take.
+var strictFuncs = map[string][]int{
+	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
+	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
+	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
+}
+
+// roundDecimal is round(x, n) on the decimal x was written as, half away from
+// zero as Postgres's numeric rounds: on the float, f*10^n is off by a
+// little, so round(-81.865, 2) would come out -81.86.
+func roundDecimal(f float64, n int) float64 {
+	// Past these, a float64 keeps its value or becomes 0, which also bounds
+	// the power of ten below for a scale taken from SQL.
+	switch {
+	case n > 30:
+		return f
+	case n < -330:
+		return 0
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
+	if !ok {
+		return f
+	}
+	scale := new(big.Rat).SetFrac(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(max(n, -n))), nil), big.NewInt(1))
+	if n >= 0 {
+		r.Mul(r, scale)
+	} else {
+		r.Quo(r, scale)
+	}
+	// Half away from zero: add or subtract 1/2, then truncate.
+	half := big.NewRat(1, 2)
+	if r.Sign() < 0 {
+		r.Sub(r, half)
+	} else {
+		r.Add(r, half)
+	}
+	q := new(big.Int).Quo(r.Num(), r.Denom())
+	r.SetInt(q)
+	if n >= 0 {
+		r.Quo(r, scale)
+	} else {
+		r.Mul(r, scale)
+	}
+	out, _ := r.Float64()
+	return out
+}
+
+// checkArity refuses a call to a function detest knows that no signature of
+// it takes, before its arguments are evaluated, as Postgres resolves the
+// signature when it plans the statement.
+// otherArity are the numbers of arguments of functions detest evaluates
+// that are not strict. current_timestamp takes the one precision the
+// converter passes for CURRENT_TIMESTAMP(p), which SQL cannot call itself.
+var otherArity = map[string][]int{
+	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
+	"current_timestamp": {1}, "random": {0}, "nullif": {2},
+	"gen_random_uuid": {0}, "uuid_generate_v4": {0},
+}
+
+func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
+	arity, known := strictFuncs[f.Name]
+	if !known {
+		arity, known = otherArity[f.Name]
+	}
+	if known && !slices.Contains(arity, len(f.Args)) {
+		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
+	}
+	// round with a scale exists only for numeric; detest keeps no type for
+	// its argument but can see a cast to a float or a call of random.
+	// Refusing every argument not proven numeric would refuse round(price,
+	// 2) on a numeric column too.
+	if f.Name == "round" && len(f.Args) == 2 {
+		c, cast := f.Args[0].(*sqlir.Cast)
+		r, call := f.Args[0].(*sqlir.FuncCall)
+		if cast && (c.Type == "float4" || c.Type == "float8") || call && r.Name == "random" {
+			return x.unsupported("round of a float with a scale")
+		}
+	}
+	return nil
+}
+
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	d := func(i int) any {
 		if i < len(args) {
 			return derefValue(args[i])
 		}
 		return nil
+	}
+	if _, strict := strictFuncs[name]; strict && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
+		return nil, nil // a strict function of NULL is NULL
 	}
 	switch name {
 	case "coalesce":
@@ -1603,7 +1928,30 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "gen_random_uuid", "uuid_generate_v4":
 		return x.tx.db.newUUID(), nil
 	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
-		return time.Now(), nil
+		// Postgres fixes now() at the start of the transaction, which a
+		// transaction that starts early and commits late depends on.
+		ts := x.tx.start
+		switch name {
+		case "clock_timestamp":
+			ts = time.Now()
+		case "statement_timestamp":
+			ts = x.start
+		}
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		ts = ts.Truncate(time.Microsecond) // a Postgres timestamp has six fractional digits
+		if len(args) == 0 {
+			return ts, nil
+		}
+		// Only CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) take an argument,
+		// which the converter passes as current_timestamp's.
+		p, ok := toFloat(d(0))
+		if name != "current_timestamp" || len(args) > 1 || !ok || p < 0 {
+			return nil, x.unsupported(name + " with these arguments")
+		}
+		// Postgres reduces a precision above 6 to 6, with a warning.
+		return ts.Round(time.Duration(math.Pow10(9 - int(min(p, 6))))), nil
 	case "random":
 		return 0.5, nil
 	case "abs":
@@ -1619,9 +1967,23 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return numeric(math.Ceil(f)), nil
 		}
 	case "round":
-		if f, ok := toFloat(d(0)); ok {
+		f, ok := toFloat(d(0))
+		if !ok {
+			break
+		}
+		if len(args) == 1 {
 			return numeric(math.Round(f)), nil
 		}
+		places, ok := toFloat(d(1))
+		if !ok {
+			break
+		}
+		if places != math.Trunc(places) || places < math.MinInt32 || places > math.MaxInt32 {
+			// round(numeric, integer) is the only signature with two, and
+			// its scale is an int4.
+			return nil, x.unsupported("round with a scale that is not an integer")
+		}
+		return roundDecimal(f, int(places)), nil
 	case "power", "pow":
 		a, oka := toFloat(d(0))
 		b, okb := toFloat(d(1))
@@ -1801,6 +2163,14 @@ func assignedColumns(set []sqlir.Assignment) []string {
 		cols[i] = a.Column
 	}
 	return cols
+}
+
+func assignedValues(set []sqlir.Assignment) []sqlir.Expr {
+	vals := make([]sqlir.Expr, len(set))
+	for i, a := range set {
+		vals[i] = a.Value
+	}
+	return vals
 }
 
 // kindError is a database error raised where the server is not at hand, such

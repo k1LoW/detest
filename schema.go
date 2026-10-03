@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -25,7 +26,7 @@ func rowEnv(table string, row Row) *env {
 // evaluator evaluates schema expressions (defaults, expression indexes,
 // partial index predicates) for a write made through the Tx API.
 func (tx *Tx) evaluator() *sqlExec {
-	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string][]Row{}}
+	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string][]Row{}, start: time.Now()}
 }
 
 // applyDefaults fills the columns a new row leaves out with their declared
@@ -212,6 +213,10 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	delete(x.tx.writes, lk)
 	x.tx.deleted[lk] = true
 	delete(x.tx.deleted, nlk)
+	if x.tx.moved == nil {
+		x.tx.moved = map[lockKey]string{}
+	}
+	x.tx.moved[lk] = nlk.key
 	return nlk, nil
 }
 
@@ -259,10 +264,22 @@ func sameColumns(u sqlir.UniqueDef, cols []string) bool {
 // checkRow makes the checks Postgres makes on a row about to be written, in
 // its order: the column types, NOT NULL, then CHECK constraints.
 func (x *sqlExec) checkRow(table string, row Row) error {
+	def := x.tx.db.defs[table]
+	if def != nil && len(def.generated) > 0 {
+		// Every write checks its row here, so this is where the generated
+		// columns get their values: after the values given are checked, as
+		// Postgres coerces them first, and before the checks that may read
+		// the computed ones.
+		if err := x.checkTypes(table, row); err != nil {
+			return err
+		}
+		if err := x.generate(table, def, row); err != nil {
+			return err
+		}
+	}
 	if err := x.checkTypes(table, row); err != nil {
 		return err
 	}
-	def := x.tx.db.defs[table]
 	if def == nil {
 		return nil
 	}
@@ -272,14 +289,7 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 		}
 	}
 	for _, c := range def.checks {
-		r := row
-		if len(c.alias) > 0 {
-			r = row.clone()
-			for written, now := range c.alias {
-				r[written] = row[now]
-			}
-		}
-		v, err := x.eval(c.Expr, &env{tables: map[string]Row{relname(table): r}, merged: r})
+		v, err := x.eval(c.Expr, c.env(table, row))
 		if err != nil {
 			if errors.As(err, new(errUnknownExpr)) {
 				continue // a check detest cannot evaluate passes, as an unknown default does
@@ -344,4 +354,102 @@ func validUUID(s string) bool {
 		}
 	}
 	return n == 32 && !strings.HasSuffix(s, "-")
+}
+
+// generate sets the generated columns of row from the other columns.
+func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
+	for _, col := range def.columns {
+		g := def.generated[col]
+		if g == nil {
+			continue
+		}
+		// The schema loads with an expression detest cannot convert or
+		// evaluate, but a value it cannot compute must not be stored as if
+		// it were the column's. One it could not convert is the Unknown
+		// constant, told apart by the expression and not by the value, which
+		// a real expression can equal.
+		k, unconverted := g.Expr.(*sqlir.Const)
+		unconverted = unconverted && k.Value == sqlir.Unknown
+		v, err := x.eval(g.Expr, g.env(table, row))
+		if err != nil && !errors.As(err, new(errUnknownExpr)) {
+			return err
+		}
+		if err != nil || unconverted {
+			return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
+		}
+		row[col] = v
+	}
+	return nil
+}
+
+// writesGenerated refuses a statement that gives a generated column a value
+// other than DEFAULT, which Postgres rejects. exprs are the values written to
+// cols, nil when they come from a query.
+func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr) error {
+	def := x.tx.db.defs[table]
+	if def == nil || len(def.generated) == 0 {
+		return nil
+	}
+	for i, col := range cols {
+		if def.generated[col] == nil {
+			continue
+		}
+		if exprs != nil {
+			if _, isDefault := exprs[i].(*sqlir.Default); isDefault {
+				continue
+			}
+		}
+		return x.unsupported(fmt.Sprintf("a value other than DEFAULT for generated column %q", col))
+	}
+	return nil
+}
+
+// insertsGenerated refuses an INSERT that writes a generated column, before
+// it evaluates anything, as Postgres does when it plans the statement.
+func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []string) error {
+	def := x.tx.db.defs[table]
+	if def == nil || len(def.generated) == 0 {
+		return nil
+	}
+	if ins.OnConflict != nil {
+		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
+			return err
+		}
+	}
+	for _, exprs := range ins.Rows {
+		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs); err != nil {
+			return err
+		}
+	}
+	if ins.Select == nil {
+		return nil
+	}
+	width := len(cols)
+	if len(ins.Columns) == 0 {
+		var ok bool
+		if width, ok = selectWidth(ins.Select); !ok {
+			return x.unsupported("INSERT ... SELECT without a column list into a table with generated columns")
+		}
+	}
+	return x.writesGenerated(table, cols[:min(len(cols), width)], nil)
+}
+
+// selectWidth is the number of columns a query returns, when it is known
+// without running it.
+func selectWidth(sel *sqlir.SelectStmt) (int, bool) {
+	switch {
+	case sel.SetOp != "":
+		return selectWidth(sel.Larg)
+	case sel.Values != nil:
+		if len(sel.Values) == 0 {
+			return 0, false
+		}
+		return len(sel.Values[0]), true
+	}
+	for _, t := range sel.Targets {
+		if t.Star {
+			return 0, false
+		}
+	}
+	return len(sel.Targets), true
 }

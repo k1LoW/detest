@@ -134,6 +134,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 
 - `CREATE`, `ALTER` and `DROP` of tables, columns, constraints, indexes, views and materialized views, `CREATE TABLE AS`, `REFRESH MATERIALIZED VIEW`, renames
 - Defaults, serial and identity columns, sequences, with values that repeat from run to run
+- Stored generated columns, computed on every write. A Postgres 18 virtual column loads through `ddl.From`, which writes it as stored, but not from a Postgres 18 dump, whose `GENERATED ALWAYS AS (...)` without `STORED` the grammar detest parses with rejects
 - Schemas and `search_path` (`postgres.SearchPath`)
 - Migrations and `pg_dump --schema-only` output run as they are. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
 - `ddl.From` reads the tables of a live database and writes DDL that detest accepts
@@ -150,7 +151,7 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 **Not supported**
 
-Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING`, window frames other than the two above, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. MySQL support is in progress, and its parser is not available yet.
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), locking reads over a view, a subquery or a `LATERAL` item, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. MySQL support is in progress, and its parser is not available yet.
 
 ### Queue
 
