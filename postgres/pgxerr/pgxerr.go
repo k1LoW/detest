@@ -2,7 +2,7 @@
 // under test that branches on *pgconn.PgError, directly or through GORM's
 // TranslateError:
 //
-//	db, store := sim.DB("app", postgres.New(postgres.Errors(pgxerr.Convert)))
+//	db, store := s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert)))
 package pgxerr
 
 import (

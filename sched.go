@@ -68,7 +68,7 @@ type procType struct {
 	queue     *Queue
 	loopFn    func(p *Proc) error
 	msgFn     func(p *Proc, msg Msg) error
-	after     func(s *State) bool
+	after     func(st *State) bool
 	when      func() bool
 }
 
@@ -79,7 +79,7 @@ type ProcOption func(*procType)
 func Instances(n int) ProcOption { return func(pt *procType) { pt.instances = n } }
 
 // After restricts a manual process to start only once the predicate holds.
-func After(pred func(s *State) bool) ProcOption { return func(pt *procType) { pt.after = pred } }
+func After(pred func(st *State) bool) ProcOption { return func(pt *procType) { pt.after = pred } }
 
 // When lets a loop or manual process start only while pred holds. Use it to
 // express that a periodic sweep has work to do: a tick that would find nothing
@@ -90,40 +90,40 @@ func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = p
 
 // OnMessage registers a process type started by delivering a message of q.
 // A returned error redelivers the message, bounded by MaxRedeliveries.
-func (sim *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
-	sim.declare("OnMessage")
-	pt := &procType{name: name, kind: trigMessage, instances: sim.pods, queue: q, msgFn: fn}
+func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
+	s.declare("OnMessage")
+	pt := &procType{name: name, kind: trigMessage, instances: s.pods, queue: q, msgFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
 	q.consumers = append(q.consumers, pt)
-	sim.types = append(sim.types, pt)
+	s.types = append(s.types, pt)
 }
 
 // Loop registers a periodic process type that the scheduler may start at any
 // point, at most maxRuns times per run.
-func (sim *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
-	sim.declare("Loop")
-	pt := &procType{name: name, kind: trigLoop, instances: sim.pods, maxRuns: maxRuns, loopFn: fn}
+func (s *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	s.declare("Loop")
+	pt := &procType{name: name, kind: trigLoop, instances: s.pods, maxRuns: maxRuns, loopFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
-	sim.types = append(sim.types, pt)
+	s.types = append(s.types, pt)
 }
 
 // Manual registers a process type started at an arbitrary point, such as a
 // user-issued cancel, at most maxRuns times per run.
-func (sim *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
-	sim.declare("Manual")
+func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	s.declare("Manual")
 	pt := &procType{name: name, kind: trigManual, instances: 1, maxRuns: maxRuns, loopFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
-	sim.types = append(sim.types, pt)
+	s.types = append(s.types, pt)
 }
 
 type run struct {
-	sim      *Sim
+	s        *Sim
 	prefix   []choice
 	choices  []choice
 	pos      int
@@ -181,20 +181,20 @@ type Proc struct {
 // Name returns the instance name, such as "sweeper#2".
 func (p *Proc) Name() string { return p.name }
 
-func (sim *Sim) newRun(prefix []choice) *run {
-	r := &run{sim: sim, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
+func (s *Sim) newRun(prefix []choice) *run {
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	sim.run = r
-	for _, db := range sim.dbs {
+	s.run = r
+	for _, db := range s.dbs {
 		db.reset()
 	}
-	for _, q := range sim.queues {
+	for _, q := range s.queues {
 		q.reset()
 	}
-	for _, l := range sim.locks {
+	for _, l := range s.locks {
 		l.reset()
 	}
-	for _, fn := range sim.seeds {
+	for _, fn := range s.seeds {
 		fn()
 	}
 	return r
@@ -249,8 +249,8 @@ func (r *run) execute() (v *violation) {
 		}
 	}()
 	for {
-		if r.sim.progress != nil {
-			r.sim.progress.Add(1)
+		if r.s.progress != nil {
+			r.s.progress.Add(1)
 		}
 		r.settleOutside()
 		opts := r.enabled()
@@ -283,9 +283,9 @@ func (r *run) execute() (v *violation) {
 			return &violation{kind: "progress", err: fmt.Errorf("process %s is blocked on a channel or WaitGroup that nothing left running can release", p.name)}
 		}
 	}
-	s := r.snapshot()
-	for _, fn := range r.sim.atQuiesce {
-		if err := fn(s); err != nil {
+	st := r.snapshot()
+	for _, fn := range r.s.atQuiesce {
+		if err := fn(st); err != nil {
 			return &violation{kind: "quiescence invariant", err: err}
 		}
 	}
@@ -293,18 +293,18 @@ func (r *run) execute() (v *violation) {
 }
 
 func (r *run) checkAlways() *violation {
-	if len(r.sim.always) == 0 {
+	if len(r.s.always) == 0 {
 		return nil
 	}
-	s := r.snapshot()
-	s.prev = r.prev
-	for _, fn := range r.sim.always {
-		if err := fn(s); err != nil {
+	st := r.snapshot()
+	st.prev = r.prev
+	for _, fn := range r.s.always {
+		if err := fn(st); err != nil {
 			return &violation{kind: "always invariant", err: err}
 		}
 	}
-	s.prev = nil
-	r.prev = s
+	st.prev = nil
+	r.prev = st
 	return nil
 }
 
@@ -324,7 +324,7 @@ func (r *run) enabled() []option {
 	// the current process keeps running while it is runnable.
 	cur := r.current
 	curRunnable := cur != nil && cur.state == stateReady
-	bounded := r.sim.boundPreemptions && r.preempts >= r.sim.maxPreemptions && curRunnable
+	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable
 	for _, p := range r.procs {
 		if p.state != stateReady {
 			continue
@@ -344,7 +344,7 @@ func (r *run) enabled() []option {
 		return opts
 	}
 	// Deliver a message to a consumer.
-	for _, q := range r.sim.queues {
+	for _, q := range r.s.queues {
 		for _, pt := range q.consumers {
 			if r.active(pt) >= pt.instances {
 				continue
@@ -361,7 +361,7 @@ func (r *run) enabled() []option {
 		}
 	}
 	// Start a loop tick or a manual action.
-	for _, pt := range r.sim.types {
+	for _, pt := range r.s.types {
 		if pt.kind != trigLoop && pt.kind != trigManual {
 			continue
 		}
@@ -604,7 +604,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			if ev.err != nil {
 				r.note(p, "nack %s", p.msg)
 				p.msg.redelivered++
-				if p.msg.redelivered <= r.sim.maxRedeliveries {
+				if p.msg.redelivered <= r.s.maxRedeliveries {
 					p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
 					r.queuesTouched = true
 				} else {
@@ -810,11 +810,11 @@ type State struct {
 }
 
 // Prev returns the snapshot taken at the previous Always check, or nil.
-func (s *State) Prev() *State { return s.prev }
+func (st *State) Prev() *State { return st.prev }
 
 // Rows returns the committed rows of a table sorted by key.
-func (s *State) Rows(db *DB, table string) []RowView {
-	t := s.dbs[db.name][db.resolve(table)]
+func (st *State) Rows(db *DB, table string) []RowView {
+	t := st.dbs[db.name][db.resolve(table)]
 	keys := make([]string, 0, len(t))
 	for k := range t {
 		keys = append(keys, k)
@@ -829,8 +829,8 @@ func (s *State) Rows(db *DB, table string) []RowView {
 
 // Row returns one committed row by its primary key: the values of the
 // declared primary key columns in order, or the id column's value.
-func (s *State) Row(db *DB, table string, key ...any) (RowView, bool) {
-	r, ok := s.dbs[db.name][db.resolve(table)][encodeKey(key)]
+func (st *State) Row(db *DB, table string, key ...any) (RowView, bool) {
+	r, ok := st.dbs[db.name][db.resolve(table)][encodeKey(key)]
 	return RowView{r}, ok
 }
 
@@ -869,7 +869,7 @@ func (v RowView) String() string { return v.r.String() }
 func (v RowView) Clone() Row { return v.r.clone() }
 
 // Queue returns the messages currently in a queue.
-func (s *State) Queue(q *Queue) []Msg { return s.queues[q.name] }
+func (st *State) Queue(q *Queue) []Msg { return st.queues[q.name] }
 
 // snapshot shares the committed rows instead of copying them: a commit
 // replaces a row rather than changing it, and State clones a row only when an
@@ -880,8 +880,8 @@ func (r *run) snapshot() *State {
 		return r.snap
 	}
 	r.queuesTouched = false
-	s := &State{dbs: make(map[string]map[string]map[string]Row, len(r.sim.dbs)), queues: map[string][]Msg{}}
-	for _, db := range r.sim.dbs {
+	st := &State{dbs: make(map[string]map[string]map[string]Row, len(r.s.dbs)), queues: map[string][]Msg{}}
+	for _, db := range r.s.dbs {
 		var prev map[string]map[string]Row
 		if r.snap != nil {
 			prev = r.snap.dbs[db.name]
@@ -899,19 +899,19 @@ func (r *run) snapshot() *State {
 			ts[tn] = rows
 		}
 		clear(db.touched)
-		s.dbs[db.name] = ts
+		st.dbs[db.name] = ts
 	}
-	r.snap = s
-	for _, q := range r.sim.queues {
+	r.snap = st
+	for _, q := range r.s.queues {
 		for _, m := range q.msgs {
-			s.queues[q.name] = append(s.queues[q.name], m.msg)
+			st.queues[q.name] = append(st.queues[q.name], m.msg)
 		}
 	}
-	return s
+	return st
 }
 
 func (r *run) dbsTouched() bool {
-	for _, db := range r.sim.dbs {
+	for _, db := range r.s.dbs {
 		if len(db.touched) > 0 {
 			return true
 		}
@@ -924,11 +924,11 @@ func (r *run) dbsTouched() bool {
 // boundaries (clients, drivers) use this instead. A goroutine the process
 // itself spawned is not registered and falls back to the process the
 // scheduler resumed last.
-func (sim *Sim) Current() *Proc {
-	if sim.run == nil {
+func (s *Sim) Current() *Proc {
+	if s.run == nil {
 		return nil
 	}
-	r := sim.run
+	r := s.run
 	// While no process is blocked outside detest, every process but the
 	// resumed one is parked inside detest and cannot be calling, so the lookup
 	// below would return r.current anyway. It is skipped because goroutineID

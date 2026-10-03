@@ -15,7 +15,7 @@ import (
 
 // Explore declares a simulation with fn and explores every schedule of it,
 // failing the test on a violation. fn registers simulated resources,
-// processes, seeds and invariants on sim and returns; the exploration starts
+// processes, seeds and invariants on s and returns; the exploration starts
 // after it returns.
 //
 // Both run inside a testing/synctest bubble, so the code under test sleeps on
@@ -26,7 +26,7 @@ import (
 // The exploration is bounded (preemptions, failures, MaxRuns), and the log
 // line Explore writes states how far it got. A violating schedule is run once
 // more to record its trace, so seeds and invariants see that run twice.
-func Explore(t *testing.T, fn func(t *testing.T, sim *Sim), opts ...Option) {
+func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	start := time.Now()
 	var progress atomic.Int64
@@ -103,7 +103,7 @@ func workerCount(opts []Option) int {
 // exploreWorkers runs n workers as subtests, each in its own bubble:
 // synctest.Wait waits for every goroutine of a bubble, so workers sharing one
 // would wait for each other. The workers take subtrees from one frontier.
-func exploreWorkers(t *testing.T, fn func(t *testing.T, sim *Sim), opts []Option, progress *atomic.Int64, f *frontier, n int) (*result, *string) {
+func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, progress *atomic.Int64, f *frontier, n int) (*result, *string) {
 	results := make([]*result, n)
 	expects := make([]*string, n)
 	var wg sync.WaitGroup
@@ -133,27 +133,27 @@ func maxRunsOf(opts []Option) int {
 
 // exploreBubble declares and explores the simulation, alone or as a worker
 // taking subtrees from f.
-func exploreBubble(t *testing.T, fn func(t *testing.T, sim *Sim), opts []Option, progress *atomic.Int64, f *frontier, worker int) (*result, *string) {
+func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, progress *atomic.Int64, f *frontier, worker int) (*result, *string) {
 	var res *result
 	var expect *string
 	synctest.Test(t, func(t *testing.T) {
-		sim := newSim(t, opts...)
-		sim.progress = progress
-		sim.frontier, sim.worker = f, worker
-		defer sim.closeSQL() // the bubble cannot end while the pools' goroutines run
-		fn(t, sim)
-		sim.frozen = true
-		res = sim.check()
-		if sim.shardTotal > 1 {
-			res.Shard = fmt.Sprintf("%d/%d", sim.shardIndex, sim.shardTotal)
+		s := newSim(t, opts...)
+		s.progress = progress
+		s.frontier, s.worker = f, worker
+		defer s.closeSQL() // the bubble cannot end while the pools' goroutines run
+		fn(t, s)
+		s.frozen = true
+		res = s.check()
+		if s.shardTotal > 1 {
+			res.Shard = fmt.Sprintf("%d/%d", s.shardIndex, s.shardTotal)
 		}
-		expect = sim.expect
+		expect = s.expect
 	})
 	return res, expect
 }
 
-func (sim *Sim) closeSQL() {
-	for _, db := range sim.sqlDBs {
+func (s *Sim) closeSQL() {
+	for _, db := range s.sqlDBs {
 		_ = db.Close()
 	}
 }

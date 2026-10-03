@@ -11,9 +11,9 @@ import (
 // counterModel declares two handlers that read-check-write a counter, with the
 // update guarded by CAS or not. Every declaration runs once per worker, so it
 // keeps no state outside m.
-func counterModel(sim *Sim, cas bool) {
-	db, store := sim.DB("app", postgres.New())
-	sim.Seed(func() {
+func counterModel(s *Sim, cas bool) {
+	db, store := s.DB("app", postgres.New())
+	s.Seed(func() {
 		_, _ = db.Exec(`INSERT INTO "counters" ("id","n") VALUES ($1,$2)`, "c", int64(0))
 	})
 	handler := func(p *Proc) error {
@@ -36,10 +36,10 @@ func counterModel(sim *Sim, cas bool) {
 		}
 	}
 	for i := range 3 {
-		sim.Manual(fmt.Sprintf("inc_%d", i), 1, handler)
+		s.Manual(fmt.Sprintf("inc_%d", i), 1, handler)
 	}
-	sim.AtQuiescence(func(s *State) error {
-		row, _ := s.Row(store, "counters", "c")
+	s.AtQuiescence(func(st *State) error {
+		row, _ := st.Row(store, "counters", "c")
 		if row.Int64("n") != 3 {
 			return fmt.Errorf("lost update: n = %d", row.Int64("n"))
 		}
@@ -48,20 +48,20 @@ func counterModel(sim *Sim, cas bool) {
 }
 
 func TestWorkersFindViolation(t *testing.T) {
-	Explore(t, func(t *testing.T, sim *Sim) {
-		counterModel(sim, false)
-		sim.ExpectViolation("lost update")
+	Explore(t, func(t *testing.T, s *Sim) {
+		counterModel(s, false)
+		s.ExpectViolation("lost update")
 	}, Workers(4))
 }
 
 func TestWorkersExploreEverySchedule(t *testing.T) {
-	Explore(t, func(t *testing.T, sim *Sim) { counterModel(sim, true) }, Workers(4), MaxPreemptions(2))
+	Explore(t, func(t *testing.T, s *Sim) { counterModel(s, true) }, Workers(4), MaxPreemptions(2))
 }
 
 // With several violating schedules, parallel workers report the same one as
 // a single worker: the first in depth-first order.
 func TestWorkersReportTheFirstViolation(t *testing.T) {
-	model := func(t *testing.T, sim *Sim) { counterModel(sim, false) }
+	model := func(t *testing.T, s *Sim) { counterModel(s, false) }
 	var progress atomic.Int64
 	one, _ := exploreBubble(t, model, nil, &progress, nil, 0)
 	if !one.Violated {

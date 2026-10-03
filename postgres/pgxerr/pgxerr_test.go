@@ -22,8 +22,8 @@ type user struct {
 // Production code that branches on *pgconn.PgError, or on the errors GORM
 // translates it into, takes the same branch on detest's store.
 func TestConvert(t *testing.T) {
-	detest.Explore(t, func(t *testing.T, sim *detest.Sim) {
-		sqlDB, _ := sim.DB("app", postgres.New(postgres.Errors(pgxerr.Convert)))
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		sqlDB, _ := s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert)))
 		if _, err := sqlDB.Exec(`CREATE TABLE users (id text PRIMARY KEY, email text NOT NULL, CONSTRAINT users_email_key UNIQUE (email))`); err != nil {
 			t.Fatal(err)
 		}

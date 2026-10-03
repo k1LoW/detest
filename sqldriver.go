@@ -58,7 +58,7 @@ func (c *sqlConn) Ping(context.Context) error {
 // current returns the process issuing statements on this connection. Outside
 // a run (seeding) or outside any process, statements run directly on the
 // committed state without yielding.
-func (c *sqlConn) current() *Proc { return c.db.sim.Current() }
+func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	if c.tx != nil {
@@ -162,15 +162,15 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)
 	if err != nil {
-		if c.db.sim.sqlObserver != nil {
-			c.db.sim.sqlObserver(query, err)
+		if c.db.s.sqlObserver != nil {
+			c.db.s.sqlObserver(query, err)
 		}
 		return nil, 0, err
 	}
 	tx, auto := c.statementTx()
 	res, err := stmt.exec(tx, args)
-	if c.db.sim.sqlObserver != nil {
-		c.db.sim.sqlObserver(query, err)
+	if c.db.s.sqlObserver != nil {
+		c.db.s.sqlObserver(query, err)
 	}
 	if auto {
 		if err != nil || tx.aborted {

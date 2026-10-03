@@ -104,7 +104,7 @@ type lockKey struct{ table, key string }
 type DB struct {
 	name      string
 	kind      Server
-	sim       *Sim
+	s         *Sim
 	committed map[string]map[string]Row
 	locks     map[lockKey]rowLock
 	touched   map[string]bool // tables committed to since the run's last snapshot
@@ -566,17 +566,17 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 // them. A hand-written model uses the database's Tx API instead and can ignore
 // the handle. Explore closes the handle after the exploration; closing it in
 // the declaration function would close it before any run.
-func (sim *Sim) DB(name string, s Server) (*sql.DB, *DB) {
-	sim.declare("DB")
-	if s.Parser() == nil {
-		sim.t.Fatal("detest: DB needs a server, such as postgres.New()")
+func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
+	s.declare("DB")
+	if srv.Parser() == nil {
+		s.t.Fatal("detest: DB needs a server, such as postgres.New()")
 	}
-	if err := s.Check(s.Isolation()); err != nil {
-		sim.t.Fatal(err)
+	if err := srv.Check(srv.Isolation()); err != nil {
+		s.t.Fatal(err)
 	}
-	db := &DB{name: name, kind: s, sim: sim}
+	db := &DB{name: name, kind: srv, s: s}
 	db.reset()
-	sim.dbs = append(sim.dbs, db)
+	s.dbs = append(s.dbs, db)
 	return db.Open(), db
 }
 
@@ -1092,7 +1092,7 @@ func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 // for a second service that shares the database.
 func (db *DB) Open() *sql.DB {
 	sqlDB := sql.OpenDB(&sqlConnector{db: db})
-	db.sim.sqlDBs = append(db.sim.sqlDBs, sqlDB)
+	db.s.sqlDBs = append(db.s.sqlDBs, sqlDB)
 	return sqlDB
 }
 

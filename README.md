@@ -34,27 +34,27 @@ func reserve(ctx context.Context, db *sql.DB, sku string) error {
 }
 
 func TestReserve(t *testing.T) {
-	detest.Explore(t, func(t *testing.T, sim *detest.Sim) {
-		db, store := sim.DB("shop", postgres.New())
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		db, store := s.DB("shop", postgres.New())
 		if _, err := db.Exec(`CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`); err != nil {
 			t.Fatal(err)
 		}
-		sim.Seed(func() {
+		s.Seed(func() {
 			_, _ = db.Exec(`INSERT INTO stock (sku, n) VALUES ('apple', 1)`)
 		})
 		reserved := 0
-		sim.Seed(func() { reserved = 0 })
+		s.Seed(func() { reserved = 0 })
 		for _, name := range []string{"alice", "bob"} {
-			sim.Manual(name, 1, func(p *detest.Proc) error {
+			s.Manual(name, 1, func(p *detest.Proc) error {
 				if err := reserve(p.Context(), db, "apple"); err == nil {
 					reserved++
 				}
 				return nil
 			})
 		}
-		sim.AtQuiescence(func(s *detest.State) error {
+		s.AtQuiescence(func(st *detest.State) error {
 			if reserved > 1 {
-				row, _ := s.Row(store, "stock", "apple")
+				row, _ := st.Row(store, "stock", "apple")
 				return fmt.Errorf("%d reservations of 1 item (stock now %d)", reserved, row.Int64("n"))
 			}
 			return nil
@@ -79,21 +79,21 @@ func TestReserve(t *testing.T) {
            10  bob#2    done
 ```
 
-The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `sim.Seed`. Run the test again with the printed `DETEST_SCHEDULE` to replay exactly that run.
+The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `s.Seed`. Run the test again with the printed `DETEST_SCHEDULE` to replay exactly that run.
 
-A test that pins a known violation calls `sim.ExpectViolation(substr)`. It passes while the violation is found and fails once it is gone.
+A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes while the violation is found and fails once it is gone.
 
 ### Declaring a model
 
 | Method | What it declares |
 | --- | --- |
-| `sim.DB(name, server)` | A database. It returns a `*sql.DB` to hand to production code and a `*detest.DB` to read in invariants |
-| `sim.Manual(name, n, fn)` | A process type started up to `n` times |
-| `sim.Loop(name, n, fn)` | A process that runs `fn` repeatedly, such as a poller or a reaper |
-| `sim.Queue(name)`, `sim.OnMessage(name, q, fn)` | A message queue and its consumer, with redelivery |
-| `sim.External(name)` | A call to another service, which may fail before its effect or lose the response after it. `Transport(h)` gives an `http.RoundTripper` serving an `http.Handler` |
-| `sim.Mutex(name)`, `sim.RWMutex(name)` | Locks the scheduler can see, to inject in place of `sync.Mutex` |
-| `sim.Always(fn)`, `sim.AtQuiescence(fn)` | Invariants checked after every step, or once every process is done |
+| `s.DB(name, server)` | A database. It returns a `*sql.DB` to hand to production code and a `*detest.DB` to read in invariants |
+| `s.Manual(name, n, fn)` | A process type started up to `n` times |
+| `s.Loop(name, n, fn)` | A process that runs `fn` repeatedly, such as a poller or a reaper |
+| `s.Queue(name)`, `s.OnMessage(name, q, fn)` | A message queue and its consumer, with redelivery |
+| `s.External(name)` | A call to another service, which may fail before its effect or lose the response after it. `Transport(h)` gives an `http.RoundTripper` serving an `http.Handler` |
+| `s.Mutex(name)`, `s.RWMutex(name)` | Locks the scheduler can see, to inject in place of `sync.Mutex` |
+| `s.Always(fn)`, `s.AtQuiescence(fn)` | Invariants checked after every step, or once every process is done |
 
 ### Databases
 
@@ -102,8 +102,8 @@ A test that pins a known violation calls `sim.ExpectViolation(substr)`. It passe
 Errors are `*detest.SQLError` with the SQLSTATE of the real server. Code that branches on driver error types gets them by converting.
 
 ``` go
-sim.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError
-sim.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
+s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError
+s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 ```
 
 `ddl.From` reads the tables of a live database and writes DDL that detest accepts.

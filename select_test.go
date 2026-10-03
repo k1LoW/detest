@@ -44,8 +44,8 @@ func rowsOf(t *testing.T, db *sql.DB, q string, args ...any) []string {
 }
 
 func TestSelectPipeline(t *testing.T) {
-	sim := newSim(t)
-	db, _ := sim.DB("app", postgres.New())
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE releases (id text PRIMARY KEY, name text, version int, created int)`)
 	for _, r := range []struct {
 		id, name string
@@ -102,8 +102,8 @@ func TestSelectPipeline(t *testing.T) {
 }
 
 func TestSavepoint(t *testing.T) {
-	sim := newSim(t)
-	db, store := sim.DB("app", postgres.New())
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE items (id text PRIMARY KEY, n int)`)
 	tx, err := db.Begin()
 	if err != nil {
@@ -154,8 +154,8 @@ func TestSavepoint(t *testing.T) {
 }
 
 func TestSequences(t *testing.T) {
-	sim := newSim(t)
-	db, _ := sim.DB("app", postgres.New())
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE orders (id serial PRIMARY KEY, note text)`)
 	if got := rowsOf(t, db, `SELECT setval('"public"."orders_id_seq"', 41)`); got[0] != "41" {
 		t.Fatalf("setval: %v", got)
@@ -173,10 +173,10 @@ func TestSequences(t *testing.T) {
 // and the explorer tries both.
 func TestLockTimeout(t *testing.T) {
 	var outcomes []string
-	Explore(t, func(t *testing.T, sim *Sim) {
-		db, _ := sim.DB("app", postgres.New())
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
 		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int)`)
-		sim.Seed(func() {
+		s.Seed(func() {
 			outcomes = outcomes[:0]
 			mustExec(t, db, `INSERT INTO counters (id, n) VALUES ('c', 0)`)
 		})
@@ -200,14 +200,14 @@ func TestLockTimeout(t *testing.T) {
 			outcomes = append(outcomes, "ok")
 			return tx.Commit()
 		}
-		sim.Manual("a", 1, bump)
-		sim.Manual("b", 1, bump)
-		sim.AtQuiescence(func(s *State) error {
+		s.Manual("a", 1, bump)
+		s.Manual("b", 1, bump)
+		s.AtQuiescence(func(st *State) error {
 			if strings.Contains(strings.Join(outcomes, ","), "timeout") {
 				return fmt.Errorf("a lock wait timed out: %v", outcomes)
 			}
 			return nil
 		})
-		sim.ExpectViolation("a lock wait timed out")
+		s.ExpectViolation("a lock wait timed out")
 	})
 }

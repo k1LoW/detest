@@ -33,15 +33,15 @@ func cancelOrderHandler(db *sql.DB) http.HandlerFunc {
 // leaves the order canceled although the caller saw an error.
 func TestTransportOutcomes(t *testing.T) {
 	var runs, callerSawError, canceled int // accumulated across runs
-	Explore(t, func(t *testing.T, sim *Sim) {
-		orderDB, db := sim.DB("shared", postgres.New())
-		svc := sim.External("OrderService")
+	Explore(t, func(t *testing.T, s *Sim) {
+		orderDB, db := s.DB("shared", postgres.New())
+		svc := s.External("OrderService")
 		client := &http.Client{Transport: svc.Transport(cancelOrderHandler(db.Open()))}
-		sim.Seed(func() {
+		s.Seed(func() {
 			runs++
 			_, _ = orderDB.Exec(`INSERT INTO "orders" ("id","status") VALUES ($1,$2)`, "o1", "PENDING")
 		})
-		sim.Manual("caller", 1, func(p *Proc) error {
+		s.Manual("caller", 1, func(p *Proc) error {
 			req, _ := http.NewRequestWithContext(p.Context(), http.MethodPost, "http://orders.internal/orders/o1", nil)
 			resp, err := client.Do(req)
 			if err != nil {
@@ -58,8 +58,8 @@ func TestTransportOutcomes(t *testing.T) {
 			}
 			return nil
 		})
-		sim.AtQuiescence(func(s *State) error {
-			if row, _ := s.Row(db, "orders", "o1"); row.Str("status") == "CANCELED" {
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(db, "orders", "o1"); row.Str("status") == "CANCELED" {
 				canceled++
 			}
 			return nil
@@ -76,9 +76,9 @@ func TestTransportOutcomes(t *testing.T) {
 func TestTransportConnect(t *testing.T) {
 	const procedure = "/inventory.v1.InventoryService/Reserve"
 	var codes []string
-	Explore(t, func(t *testing.T, sim *Sim) {
-		invDB, db := sim.DB("inventory", postgres.New())
-		svc := sim.External("InventoryService")
+	Explore(t, func(t *testing.T, s *Sim) {
+		invDB, db := s.DB("inventory", postgres.New())
+		svc := s.External("InventoryService")
 		mux := http.NewServeMux()
 		mux.Handle(procedure, connect.NewUnaryHandler(procedure, func(ctx context.Context, req *connect.Request[wrapperspb.StringValue]) (*connect.Response[wrapperspb.Int64Value], error) {
 			res, err := invDB.ExecContext(ctx, `UPDATE "stock" SET "n" = "n" - 1 WHERE "id" = $1 AND "n" > 0`, req.Msg.GetValue())
@@ -91,7 +91,7 @@ func TestTransportConnect(t *testing.T) {
 			return connect.NewResponse(wrapperspb.Int64(1)), nil
 		}))
 		client := connect.NewClient[wrapperspb.StringValue, wrapperspb.Int64Value](&http.Client{Transport: svc.Transport(mux)}, "http://inventory.internal"+procedure)
-		sim.Seed(func() {
+		s.Seed(func() {
 			_, _ = invDB.Exec(`INSERT INTO "stock" ("id","n") VALUES ($1,$2)`, "sku1", int64(1))
 		})
 		reserve := func(p *Proc) error {
@@ -103,10 +103,10 @@ func TestTransportConnect(t *testing.T) {
 			}
 			return nil
 		}
-		sim.Manual("reserve_a", 1, reserve)
-		sim.Manual("reserve_b", 1, reserve)
-		sim.AtQuiescence(func(s *State) error {
-			if row, _ := s.Row(db, "stock", "sku1"); row.Int64("n") < 0 {
+		s.Manual("reserve_a", 1, reserve)
+		s.Manual("reserve_b", 1, reserve)
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(db, "stock", "sku1"); row.Int64("n") < 0 {
 				return fmt.Errorf("stock went negative: %d", row.Int64("n"))
 			}
 			return nil
