@@ -314,6 +314,9 @@ func (r *run) execute() (v *violation) {
 			r.s.progress.steps.Add(1)
 		}
 		r.settleOutside()
+		if r.pending != nil {
+			return r.pending
+		}
 		opts := r.enabled()
 		if len(opts) == 0 {
 			if r.advanceClock() {
@@ -738,7 +741,11 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			}
 			ev.err = nil
 		case ev.err != nil && !errors.Is(ev.err, errNack):
-			r.note(p, "done with error: %v", ev.err)
+			if pp, ok := errors.AsType[*procPanic](ev.err); ok {
+				r.note(p, "panicked: %v", pp.value) // the stack is in the report, once
+			} else {
+				r.note(p, "done with error: %v", ev.err)
+			}
 		case ev.err == nil:
 			r.note(p, "done")
 		}
@@ -746,13 +753,45 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			r.note(p, "nack %s", p.msg)
 			r.redeliver(p)
 		}
-		if ev.err != nil && strings.HasPrefix(ev.err.Error(), "panic in ") {
-			panic(ev.err)
+		if pp, ok := errors.AsType[*procPanic](ev.err); ok && r.pending == nil {
+			// A panic under one interleaving is what exploring them is for,
+			// so it is reported as a violation, with the schedule that
+			// replays it, rather than taking the test binary down.
+			r.pending = &violation{kind: "panic", err: pp}
 		}
 	}
 }
 
 var errNack = fmt.Errorf("detest: nack")
+
+// procPanic is a panic of a process, from the code under test or from
+// detest's simulated resources, with the stack it was raised on.
+type procPanic struct {
+	proc  string
+	value any
+	stack string
+}
+
+func (e *procPanic) Error() string {
+	return fmt.Sprintf("panic in %s: %v\n%s", e.proc, e.value, e.stack)
+}
+
+// same reports whether two violations break the run the same way. A panic is
+// the same by its process and value, as its stack holds addresses that differ
+// between runs. The value is compared by its type and text, as the report
+// shows it. A value holding a channel or a func prints an address that differs
+// between runs, so such a panic is not shrunk; canonicalizing values to shrink
+// it is not worth the code, as the unshrunk schedule still replays it.
+func (v *violation) same(o *violation) bool {
+	if v.kind != o.kind {
+		return false
+	}
+	if a, ok := errors.AsType[*procPanic](v.err); ok {
+		b, ok := errors.AsType[*procPanic](o.err)
+		return ok && a.proc == b.proc && fmt.Sprintf("%T %v", a.value, a.value) == fmt.Sprintf("%T %v", b.value, b.value)
+	}
+	return v.err.Error() == o.err.Error()
+}
 
 // ErrIdle is returned by a loop process that found nothing to do. The tick
 // does not consume the loop's run budget, which encodes the fairness
@@ -840,7 +879,7 @@ func (p *Proc) main() {
 			if _, ok := rec.(abortSentinel); ok {
 				return
 			}
-			p.send(procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())})
+			p.send(procEvent{kind: evDone, err: &procPanic{proc: p.name, value: rec, stack: debugStack()}})
 			return
 		}
 		p.send(procEvent{kind: evDone, err: p.err})
