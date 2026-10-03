@@ -412,3 +412,23 @@ func TestCascadeFollowsMovedChild(t *testing.T) {
 		})
 	})
 }
+
+// The Tx API refuses a value for a generated column, as Postgres would.
+func TestTxAPIRefusesGeneratedValues(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE g (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (a * 2) STORED)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO g (id, a) VALUES (1, 1)`) })
+		s.Manual("api", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if err := tx.Insert("g", Row{"id": 2, "a": 1, "b": 9}); !errors.As(err, new(*ErrUnsupportedSQL)) {
+					t.Errorf("Insert: got %v", err)
+				}
+				if _, err := tx.Update("g", "1", Row{"b": 9}); !errors.As(err, new(*ErrUnsupportedSQL)) {
+					t.Errorf("Update: got %v", err)
+				}
+				return nil
+			})
+		})
+	})
+}

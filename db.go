@@ -858,6 +858,9 @@ func (tx *Tx) Insert(table string, row Row) error {
 	if err := tx.check(); err != nil {
 		return err
 	}
+	if err := tx.givesGenerated(table, row, "Tx.Insert"); err != nil {
+		return err
+	}
 	row = row.clone()
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
@@ -1098,6 +1101,21 @@ func (tx *Tx) view(table, key string) (Row, bool) {
 	return r.clone(), true
 }
 
+// givesGenerated refuses a value for a generated column, which Postgres
+// rejects and the write would overwrite.
+func (tx *Tx) givesGenerated(table string, row Row, call string) error {
+	def := tx.db.defs[table]
+	if def == nil {
+		return nil
+	}
+	for _, col := range def.columns { // in declaration order, for a stable error
+		if _, given := row[col]; given && def.generated[col] != nil {
+			return unsupported(fmt.Sprintf("a value for generated column %q", col), call)
+		}
+	}
+	return nil
+}
+
 // lockLatest locks the row read under key and returns its newest version,
 // following it to the key an UPDATE moved it to and locking it there too.
 // ok is false when the row is gone.
@@ -1147,6 +1165,9 @@ func (tx *Tx) abortedError() error {
 func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc any) (int, error) {
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
+		return 0, err
+	}
+	if err := tx.givesGenerated(table, fields, "Tx.Update"); err != nil {
 		return 0, err
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
