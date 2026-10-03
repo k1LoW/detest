@@ -27,6 +27,9 @@ type selItem struct {
 // PostgreSQL allows only without grouping, DISTINCT and windows.
 func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
 	var locking lockPlan
+	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return nil, nil, x.unsupported("an aggregate only in ORDER BY")
+	}
 	if sel.Lock != nil && (sel.SetOp != "" || sel.Values != nil) {
 		return nil, nil, x.unsupported("FOR UPDATE on a set operation or VALUES")
 	}
@@ -124,6 +127,14 @@ func isAggregate(sel *sqlir.SelectStmt) bool {
 			return true
 		}
 	}
+	return orderOnlyAggregate(sel)
+}
+
+// orderOnlyAggregate reports an aggregate in ORDER BY of a query that has
+// none elsewhere. Postgres makes such a query one group and refuses any
+// column the select list reads outside an aggregate, a check detest does
+// not make, so evalSelect refuses the query instead.
+func orderOnlyAggregate(sel *sqlir.SelectStmt) bool {
 	return slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
 }
 

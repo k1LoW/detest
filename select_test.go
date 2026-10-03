@@ -240,18 +240,16 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("count(*) + 1: %d, %v", n, err)
 	}
-	// An aggregate only in ORDER BY makes the query one group, as in Postgres.
-	rows, err := db.Query(`SELECT 1 FROM t ORDER BY count(*)`)
-	if err != nil {
-		t.Fatal(err)
+	// An aggregate only in ORDER BY is refused: Postgres makes the query one
+	// group and checks the select list against it, which detest does not.
+	for _, q := range []string{`SELECT 1 FROM t ORDER BY count(*)`, `SELECT id FROM t ORDER BY count(*)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
 	}
-	got := 0
-	for rows.Next() {
-		got++
-	}
-	_ = rows.Close()
-	if got != 1 {
-		t.Errorf("ORDER BY count(*): %d rows, want 1", got)
+	// ORDER BY an aggregate the select list has too is fine.
+	if err := db.QueryRow(`SELECT count(*) FROM t ORDER BY count(*)`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("count(*) ORDER BY count(*): %d, %v", n, err)
 	}
 }
 
