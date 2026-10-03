@@ -360,10 +360,12 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 		}
 		v, err := x.eval(g.Expr, g.env(table, row))
 		if err != nil {
-			if !errors.As(err, new(errUnknownExpr)) {
-				return err
+			if errors.As(err, new(errUnknownExpr)) {
+				// The schema loads with it, but a value detest cannot compute
+				// must not be stored as if it were the column's.
+				return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
 			}
-			v = sqlir.Unknown
+			return err
 		}
 		row[col] = v
 	}

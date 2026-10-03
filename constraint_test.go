@@ -251,6 +251,13 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("ADD and DROP in one ALTER: got %v", err)
 	}
 
+	// A generation expression detest cannot evaluate loads, but writing a
+	// row that needs it is refused rather than storing a made-up value.
+	mustExec(t, db, `CREATE TABLE w (id int PRIMARY KEY, a text, b text GENERATED ALWAYS AS (reverse(a)) STORED)`)
+	if _, err := db.Exec(`INSERT INTO w (id, a) VALUES (1, 'ab')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("unevaluable generated column: got %v", err)
+	}
+
 	// A row the transaction inserted counts as a row there already.
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
 	tx, err := db.Begin()
