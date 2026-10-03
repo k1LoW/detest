@@ -25,7 +25,7 @@ type choice struct {
 	// fp is the run's fingerprint when it made the choice: a hash of the
 	// operations and the options before it. A run replaying the choice must
 	// arrive at it with the same fingerprint; 0 when unknown, as for
-	// DETEST_SCHEDULE.
+	// DETEST_REPLAY.
 	fp uint64
 }
 

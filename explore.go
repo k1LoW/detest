@@ -33,6 +33,9 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	stop := watchStall(f)
 	defer stop()
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
+	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
+		ckpt = "" // a replay neither resumes nor ends an exploration
+	}
 	if ckpt != "" {
 		if err := f.load(ckpt); err != nil {
 			t.Fatal(err)
@@ -94,10 +97,19 @@ func workerCount(opts []Option) int {
 			n = v
 		}
 	}
-	if os.Getenv("DETEST_SCHEDULE") != "" || n < 1 {
+	if sched, _ := replaySchedule(probe.schedule); sched != "" || n < 1 {
 		return 1 // a replay is one run
 	}
 	return n
+}
+
+// replaySchedule returns the schedule to replay instead of exploring:
+// DETEST_REPLAY, or else the one an option pinned.
+func replaySchedule(pinned string) (sched string, fromEnv bool) {
+	if env := os.Getenv("DETEST_REPLAY"); env != "" {
+		return env, true
+	}
+	return pinned, false
 }
 
 func quoteList(names []string) string {
@@ -129,6 +141,14 @@ func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, 
 		}
 	}
 	return f.merge(results, n), expects[0]
+}
+
+func scheduleOf(opts []Option) string {
+	probe := &Sim{}
+	for _, o := range opts {
+		o(probe)
+	}
+	return probe.schedule
 }
 
 func maxRunsOf(opts []Option) int {

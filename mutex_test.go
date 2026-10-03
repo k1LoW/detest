@@ -99,7 +99,7 @@ func TestInjectedMutexAndRowLockInOppositeOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.schedule != "" {
-				t.Setenv("DETEST_SCHEDULE", tc.schedule)
+				t.Setenv("DETEST_REPLAY", tc.schedule)
 			}
 			Explore(t, func(t *testing.T, s *Sim) {
 				db, _ := s.DB("app", postgres.New())

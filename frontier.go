@@ -303,6 +303,9 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
+		if r.Replay {
+			merged.Replay, merged.Schedule = true, r.Schedule
+		}
 	}
 	best := f.bestResult
 	for _, r := range results {

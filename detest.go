@@ -90,6 +90,14 @@ func Shard(index, total, depth int) Option {
 // needs synchronization. DETEST_WORKERS overrides n.
 func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 
+// Replay makes Explore run the one schedule a violation was reported with
+// (the value printed after DETEST_REPLAY=) instead of exploring. A
+// regression test pins the counterexample of a bug with it: with
+// ExpectViolation it fails once the bug is fixed, without it it fails while
+// the bug is there. A schedule recorded before the code under test changed
+// shape fails the test as stale. DETEST_REPLAY overrides it.
+func Replay(schedule string) Option { return func(s *Sim) { s.schedule = schedule } }
+
 // Verbose prints every run's trace.
 func Verbose() Option { return func(s *Sim) { s.verbose = true } }
 
@@ -125,6 +133,7 @@ type Sim struct {
 	locks     []waitable
 	types     []*procType
 	seeds     []func()
+	schedule  string // the schedule Replay pinned, replayed instead of exploring
 	always    []func(st *State) error
 	sometimes []sometimes
 	atQuiesce []func(st *State) error
@@ -223,6 +232,7 @@ type result struct {
 	Complete bool
 	Shard    string // "index/total" when DETEST_SHARD or Shard splits the exploration across machines
 	Workers  int
+	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
 	// Checkpoint is the file the rest of the exploration was saved to.
 	PriorRuns  int
@@ -239,6 +249,9 @@ type result struct {
 
 // report formats the outcome for humans.
 func (r *result) report() string {
+	if !r.Violated && r.Replay {
+		return fmt.Sprintf("detest: replayed schedule %s without violation", r.Schedule)
+	}
 	if !r.Violated {
 		scope, workers := "", ""
 		if r.Shard != "" {
@@ -260,31 +273,36 @@ func (r *result) report() string {
 		}
 		return msg
 	}
-	return fmt.Sprintf("detest: %s violated: %v\nrun %d, schedule (%d choices): DETEST_SCHEDULE=%s\n%s",
+	return fmt.Sprintf("detest: %s violated: %v\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		r.Kind, r.Err, r.Runs, len(strings.Split(r.Schedule, ",")), r.Schedule, r.Trace)
 }
 
-// check runs the exhaustive exploration. DETEST_SCHEDULE replays one schedule
-// instead.
+// check runs the exhaustive exploration. DETEST_REPLAY or Replay replays
+// one schedule instead.
 func (s *Sim) check() *result {
 	start := time.Now()
-	if env := os.Getenv("DETEST_SCHEDULE"); env != "" {
+	if sched, fromEnv := replaySchedule(s.schedule); sched != "" {
 		var prefix []choice
-		for f := range strings.SplitSeq(env, ",") {
+		for f := range strings.SplitSeq(sched, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil {
-				s.t.Fatalf("detest: bad DETEST_SCHEDULE: %v", err)
+				s.t.Fatalf("detest: bad schedule %q: %v", sched, err)
 			}
 			prefix = append(prefix, choice{picked: v, replay: true})
 		}
 		r := s.newRun(prefix)
 		r.tracing = true
 		v := r.execute()
-		fmt.Fprintf(os.Stderr, "--- replay\n%s\n", r.traceString())
+		if fromEnv || s.verbose {
+			// A schedule pinned in a test reports its trace only on a violation.
+			fmt.Fprintf(os.Stderr, "--- replay\n%s\n", r.traceString())
+		}
 		if v != nil && v.kind == "fatal" {
 			return &result{Runs: 1, Fatal: v.err}
 		}
-		return s.makeResult(r, v, 1, len(r.choices), true, start)
+		res := s.makeResult(r, v, 1, len(r.choices), true, start)
+		res.Replay = true
+		return res
 	}
 	f := s.frontier
 	if f == nil {

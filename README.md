@@ -66,7 +66,7 @@ func TestReserve(t *testing.T) {
 ```
 --- FAIL: TestReserve (0.67s)
     stock_test.go:34: detest: quiescence invariant violated: 2 reservations of 1 item (stock now 0)
-        run 4, schedule (8 choices): DETEST_SCHEDULE=0,0,0,0,1,1,1,0
+        run 4, schedule (8 choices): DETEST_REPLAY=0,0,0,0,1,1,1,0
             1  alice#1  shop: begin   (stock_test.go:15)
             2  alice#1  shop: select stock where sku = apple   (stock_test.go:21)
             3  alice#1  shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
@@ -79,7 +79,7 @@ func TestReserve(t *testing.T) {
            10  bob#2    done
 ```
 
-The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `s.Seed`. Run the test again with the printed `DETEST_SCHEDULE` to replay exactly that run.
+The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `s.Seed`. Run the test again with the printed `DETEST_REPLAY` to replay exactly that run, or pass it to `detest.Replay` to pin the counterexample in a regression test.
 
 A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes while the violation is found and fails once it is gone.
 
@@ -115,7 +115,7 @@ The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `
 
 | Variable | Effect |
 | --- | --- |
-| `DETEST_SCHEDULE` | Replay one run, given the choices printed with a violation |
+| `DETEST_REPLAY` | Replay one run, given the choices printed with a violation |
 | `DETEST_WORKERS` | Number of workers, overriding `detest.Workers` |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
 | `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` is reached, and to resume from on the next run |

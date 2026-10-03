@@ -74,7 +74,7 @@ func TestStaleCheckpointFailsTheTest(t *testing.T) {
 	}
 	for _, env := range [][]string{
 		{"DETEST_CHECKPOINT=" + stale},
-		{"DETEST_SCHEDULE=7"},
+		{"DETEST_REPLAY=7"},
 	} {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestStaleCheckpointFailsTheTest$") //nolint:gosec // the test binary itself
 		cmd.Env = append(append(os.Environ(), "DETEST_STALE_CHILD=1"), env...)
