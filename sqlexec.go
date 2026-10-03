@@ -612,6 +612,7 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 }
 
 // offsetLimit evaluates OFFSET and LIMIT. limit is -1 without a LIMIT.
+// Postgres refuses a negative one of either.
 func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
 	limit = -1
 	if sel.Limit != nil {
@@ -620,6 +621,9 @@ func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit 
 			return 0, 0, err
 		}
 		if f, ok := toFloat(derefValue(v)); ok {
+			if f < 0 {
+				return 0, 0, x.unsupported("a negative LIMIT")
+			}
 			limit = int(f)
 		}
 	}
@@ -629,6 +633,9 @@ func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit 
 			return 0, 0, err
 		}
 		if f, ok := toFloat(derefValue(v)); ok {
+			if f < 0 {
+				return 0, 0, x.unsupported("a negative OFFSET")
+			}
 			offset = int(f)
 		}
 	}

@@ -341,27 +341,13 @@ func (x *sqlExec) distinct(sel *sqlir.SelectStmt, items []*selItem, cols []strin
 
 // slice applies OFFSET and LIMIT.
 func (x *sqlExec) slice(sel *sqlir.SelectStmt, rows []Row, outer *env) ([]Row, error) {
-	if sel.Offset != nil {
-		v, err := x.eval(sel.Offset, &env{outer: outer})
-		if err != nil {
-			return nil, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if int(f) < len(rows) {
-				rows = rows[int(f):]
-			} else {
-				rows = nil
-			}
-		}
+	offset, limit, err := x.offsetLimit(sel, outer)
+	if err != nil {
+		return nil, err
 	}
-	if sel.Limit != nil {
-		v, err := x.eval(sel.Limit, &env{outer: outer})
-		if err != nil {
-			return nil, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok && int(f) < len(rows) {
-			rows = rows[:int(f)]
-		}
+	rows = rows[min(offset, len(rows)):]
+	if limit >= 0 && limit < len(rows) {
+		rows = rows[:limit]
 	}
 	return rows, nil
 }

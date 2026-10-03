@@ -227,6 +227,9 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 		`SELECT count(*) IN (1, 2) FROM t`,
 		`SELECT string_agg(id::text, ',') FROM t`,
 		`SELECT json_agg_strict(id) FROM t`,
+		`SELECT id FROM t LIMIT -1`,
+		`SELECT id FROM t OFFSET -1`,
+		`SELECT id FROM t LIMIT -1 FOR UPDATE`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
