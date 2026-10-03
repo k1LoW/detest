@@ -141,3 +141,20 @@ INSERT INTO items VALUES ('a', 100), ('b', NULL);
 		}
 	}
 }
+
+// pg_dump writes CHECK (status IN (...)) as = ANY over an array.
+func TestCheckInDumpFormIsEnforced(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE orders (
+    id integer NOT NULL,
+    status character varying NOT NULL,
+    CONSTRAINT orders_status_check CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'closed'::character varying])::text[])))
+)`)
+	mustExec(t, db, `INSERT INTO orders (id, status) VALUES (1, 'open')`)
+	_, err := db.Exec(`INSERT INTO orders (id, status) VALUES (2, 'lost')`)
+	var se *DBError
+	if !errors.As(err, &se) || !errors.Is(err, ErrCheckViolation) || se.Constraint != "orders_status_check" {
+		t.Errorf("got %#v", err)
+	}
+}

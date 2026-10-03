@@ -1337,6 +1337,30 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			list = []sqlir.Expr{r}
 		}
 		return &sqlir.InExpr{X: l, List: list, Not: op == "<>"}, nil
+	case pg.A_Expr_Kind_AEXPR_OP_ANY, pg.A_Expr_Kind_AEXPR_OP_ALL:
+		// Postgres stores IN (...) as = ANY (ARRAY[...]), so pg_dump writes a
+		// CHECK (status IN ('a', 'b')) back in this form. Only the two forms
+		// that mean IN and NOT IN over a literal array are converted.
+		isAny := e.Kind == pg.A_Expr_Kind_AEXPR_OP_ANY
+		if !(isAny && op == "=") && !(!isAny && op == "<>") {
+			return nil, c.unsupported("operator " + op + " with ANY or ALL")
+		}
+		arr := e.Rexpr
+		for arr.GetTypeCast() != nil {
+			arr = arr.GetTypeCast().Arg
+		}
+		if arr.GetAArrayExpr() == nil {
+			return nil, c.unsupported("ANY or ALL over an array other than ARRAY[...]")
+		}
+		l, err := c.expr(e.Lexpr)
+		if err != nil {
+			return nil, err
+		}
+		list, err := c.exprs(arr.GetAArrayExpr().Elements)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlir.InExpr{X: l, List: list, Not: !isAny}, nil
 	case pg.A_Expr_Kind_AEXPR_LIKE, pg.A_Expr_Kind_AEXPR_ILIKE:
 		l, err := c.expr(e.Lexpr)
 		if err != nil {
