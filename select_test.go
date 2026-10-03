@@ -225,6 +225,7 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 		`SELECT NOT count(*) > 0 FROM t`,
 		`SELECT CASE WHEN count(*) > 0 THEN 1 END FROM t`,
 		`SELECT count(*) IN (1, 2) FROM t`,
+		`SELECT string_agg(id::text, ',') FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
