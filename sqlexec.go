@@ -172,6 +172,21 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		return x.execDelete(st)
 	case *sqlir.SchemaStmt:
 		for _, ch := range st.Changes {
+			if def := tx.db.defs[tx.db.resolve(ch.Table)]; def != nil {
+				// Postgres refuses to drop a column a generated column
+				// depends on, or drops both with CASCADE.
+				for _, col := range def.columns { // in declaration order, for a stable error
+					g := def.generated[col]
+					if g == nil || slices.Contains(ch.DropColumns, col) {
+						continue
+					}
+					for _, dep := range g.columns() {
+						if slices.Contains(ch.DropColumns, dep) {
+							return nil, x.unsupported(fmt.Sprintf("dropping column %q, which generated column %q depends on", dep, col))
+						}
+					}
+				}
+			}
 			if ch.Create || len(tx.selectNoYield(ch.Table, nil)) == 0 {
 				continue
 			}

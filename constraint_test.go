@@ -198,6 +198,7 @@ func TestGeneratedColumns(t *testing.T) {
 		`INSERT INTO t (id, c) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET b = 1`,
 		`ALTER TABLE t ADD COLUMN d int GENERATED ALWAYS AS (c + 1) STORED`,
 		`INSERT INTO t (id, c) VALUES (99, 1) ON CONFLICT (id) DO UPDATE SET b = 1`, // no conflict
+		`ALTER TABLE t DROP COLUMN c`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
