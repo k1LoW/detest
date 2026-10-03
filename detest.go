@@ -55,8 +55,10 @@ var (
 // Option configures a Sim.
 type Option func(*Sim)
 
-// Pods sets how many pods the system runs on. It is the default instance count
-// of every process type.
+// Pods sets how many pods the system runs on. It is the default instance
+// count of loop and message process types. A manual process, such as an
+// operation a user issues, runs one instance at a time unless Instances says
+// otherwise.
 func Pods(n int) Option { return func(s *Sim) { s.pods = n } }
 
 // MaxFailures bounds the external-call failures per run. It is the fairness
@@ -342,6 +344,31 @@ func (s *Sim) printRun(n int, r *run) {
 // retrace runs a violating schedule again with the trace kept, which exploring
 // runs skip. The run is deterministic, so it violates again; if it does not,
 // the original violation is reported with the code's nondeterminism noted.
+// shrink looks for a simpler schedule with the same violation, so that the
+// one reported is easier to read. It goes through the choices in order and
+// tries the first option where the run took a later one, keeping the other
+// picks, and adopts the change when the run still breaks the same way. The
+// result departs from the default schedule at fewer choices, and the search
+// costs one run per choice it tries.
+func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
+	for i := 0; i < len(r.choices); i++ {
+		if r.choices[i].picked == 0 {
+			continue
+		}
+		prefix := make([]choice, len(r.choices))
+		for j, c := range r.choices {
+			prefix[j] = choice{picked: c.picked, replay: true}
+		}
+		prefix[i].picked = 0
+		cr := s.newRun(prefix)
+		cv := cr.execute()
+		if cv != nil && cv.kind == v.kind && cv.err.Error() == v.err.Error() {
+			r, v = cr, cv
+		}
+	}
+	return r, v
+}
+
 func (s *Sim) retrace(r *run, v *violation) (*run, *violation) {
 	rr := s.newRun(append([]choice(nil), r.choices...))
 	rr.tracing = true

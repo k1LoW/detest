@@ -279,6 +279,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		}
 		if v != nil {
 			choices := r.choices
+			r, v = s.shrink(r, v)
 			if !r.tracing {
 				r, v = s.retrace(r, v)
 				if v.kind == "fatal" { // the rerun took another path
