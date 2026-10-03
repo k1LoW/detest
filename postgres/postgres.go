@@ -415,6 +415,9 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			cons = append(cons, u)
 		}
 	}
+	if col.Generated != nil && col.Default != nil {
+		return col, nil, nil, c.unsupported("a default or identity on a generated column")
+	}
 	return col, cons, checks, nil
 }
 

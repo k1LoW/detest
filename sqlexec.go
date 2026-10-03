@@ -190,6 +190,11 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 					gens[c.Name] = tableCheck{CheckDef: sqlir.CheckDef{Name: c.Name, Expr: c.Generated}}
 					order = append(order, c.Name)
 				}
+				// SET or DROP DEFAULT and ADD IDENTITY name a column without
+				// a type; Postgres refuses them on a generated column.
+				if _, generated := gens[c.Name]; generated && !ch.Create && c.Generated == nil && c.Type == "" && !c.TypeOnly {
+					return nil, x.unsupported(fmt.Sprintf("a default or identity on generated column %q", c.Name))
+				}
 			}
 			for _, col := range order { // in declaration order, for a stable error
 				if slices.Contains(ch.DropColumns, col) {
