@@ -134,7 +134,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 
 - `CREATE`, `ALTER` and `DROP` of tables, columns, constraints, indexes, views and materialized views, `CREATE TABLE AS`, `REFRESH MATERIALIZED VIEW`, renames
 - Defaults, serial and identity columns, sequences, with values that repeat from run to run
-- Generated columns, computed on every write
+- Stored generated columns, computed on every write. A Postgres 18 virtual column loads through `ddl.From`, which writes it as stored, but not from a Postgres 18 dump, whose `GENERATED ALWAYS AS (...)` without `STORED` the grammar detest parses with rejects
 - Schemas and `search_path` (`postgres.SearchPath`)
 - Migrations and `pg_dump --schema-only` output run as they are. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
 - `ddl.From` reads the tables of a live database and writes DDL that detest accepts
