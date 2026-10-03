@@ -39,6 +39,9 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a = ANY (ARRAY['1'::int])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['a']::text)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['{a}'::text[]])`,
+		`SELECT 1 UNION SELECT 2 FOR UPDATE`,
+		`(SELECT 1 FROM t FOR UPDATE) UNION SELECT 2`,
+		`VALUES (1) FOR UPDATE`,
 	} {
 		_, err := parser{}.Parse(q)
 		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {

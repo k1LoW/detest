@@ -27,7 +27,10 @@ type selItem struct {
 // PostgreSQL allows only without grouping, DISTINCT and windows.
 func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
 	var locking lockPlan
-	if sel.Lock != nil && sel.SetOp == "" && sel.Values == nil {
+	if sel.Lock != nil && (sel.SetOp != "" || sel.Values != nil) {
+		return nil, nil, x.unsupported("FOR UPDATE on a set operation or VALUES")
+	}
+	if sel.Lock != nil {
 		// Checked before the WITH queries run, which may have effects.
 		var err error
 		if locking, err = x.planLocking(sel); err != nil {

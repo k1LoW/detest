@@ -667,6 +667,9 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if out.With, err = c.with(s.WithClause); err != nil {
 		return nil, err
 	}
+	if len(s.LockingClause) > 0 && (s.Op != pg.SetOperation_SETOP_NONE || len(s.ValuesLists) > 0) {
+		return nil, c.unsupported("FOR UPDATE on a set operation or VALUES")
+	}
 	if s.Op == pg.SetOperation_SETOP_UNION || s.Op == pg.SetOperation_SETOP_INTERSECT || s.Op == pg.SetOperation_SETOP_EXCEPT {
 		out.SetOp = map[pg.SetOperation]string{pg.SetOperation_SETOP_UNION: "union", pg.SetOperation_SETOP_INTERSECT: "intersect", pg.SetOperation_SETOP_EXCEPT: "except"}[s.Op]
 		out.SetAll = s.All
@@ -675,6 +678,9 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		}
 		if out.Rarg, err = c.selectStmt(s.Rarg); err != nil {
 			return nil, err
+		}
+		if out.Larg.Lock != nil || out.Rarg.Lock != nil {
+			return nil, c.unsupported("FOR UPDATE in a set operation")
 		}
 		return out, c.tail(s, out)
 	}
