@@ -17,7 +17,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,8 +130,8 @@ type Sim struct {
 	sqlDBs    []*sql.DB
 	expect    *string // ExpectViolation
 
-	frozen   bool          // the declaration function returned
-	progress *atomic.Int64 // bumped on every scheduler step, read by the stall watchdog
+	frozen   bool            // the declaration function returned
+	progress *workerProgress // bumped on every scheduler step, read by the stall watchdog
 
 	run *run // current run
 }

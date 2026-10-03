@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -29,11 +28,10 @@ import (
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	start := time.Now()
-	var progress atomic.Int64
-	stop := watchStall(&progress)
-	defer stop()
 	n := workerCount(opts)
 	f := newFrontier(n, maxRunsOf(opts))
+	stop := watchStall(f)
+	defer stop()
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
 	if ckpt != "" {
 		if err := f.load(ckpt); err != nil {
@@ -44,11 +42,11 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	var expect *string
 	if n == 1 {
 		var r *result
-		if r, expect = exploreBubble(t, fn, opts, &progress, f, 0); r != nil {
+		if r, expect = exploreBubble(t, fn, opts, f, 0); r != nil {
 			res = f.merge([]*result{r}, 1)
 		}
 	} else {
-		res, expect = exploreWorkers(t, fn, opts, &progress, f, n)
+		res, expect = exploreWorkers(t, fn, opts, f, n)
 	}
 	if res == nil {
 		return // fn stopped the test
@@ -103,14 +101,14 @@ func workerCount(opts []Option) int {
 // exploreWorkers runs n workers as subtests, each in its own bubble:
 // synctest.Wait waits for every goroutine of a bubble, so workers sharing one
 // would wait for each other. The workers take subtrees from one frontier.
-func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, progress *atomic.Int64, f *frontier, n int) (*result, *string) {
+func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f *frontier, n int) (*result, *string) {
 	results := make([]*result, n)
 	expects := make([]*string, n)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Go(func() {
 			t.Run(fmt.Sprintf("worker%d", i), func(t *testing.T) {
-				results[i], expects[i] = exploreBubble(t, fn, opts, progress, f, i)
+				results[i], expects[i] = exploreBubble(t, fn, opts, f, i)
 			})
 		})
 	}
@@ -133,12 +131,14 @@ func maxRunsOf(opts []Option) int {
 
 // exploreBubble declares and explores the simulation, alone or as a worker
 // taking subtrees from f.
-func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, progress *atomic.Int64, f *frontier, worker int) (*result, *string) {
+func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f *frontier, worker int) (*result, *string) {
 	var res *result
 	var expect *string
 	synctest.Test(t, func(t *testing.T) {
 		s := newSim(t, opts...)
-		s.progress = progress
+		if f != nil {
+			s.progress = &f.progress[worker]
+		}
 		s.frontier, s.worker = f, worker
 		defer s.closeSQL() // the bubble cannot end while the pools' goroutines run
 		fn(t, s)
@@ -175,7 +175,11 @@ func stallTimeout() time.Duration {
 // yield point. The scheduler then waits in synctest.Wait forever and no
 // timeout inside the bubble can fire, so the watchdog runs outside it, on real
 // time, and crashes the test binary with the blocked goroutines.
-func watchStall(progress *atomic.Int64) (stop func()) {
+//
+// Each worker is watched on its own: one worker stuck while the others keep
+// exploring is a stall all the same. A worker waiting for a subtree, or done,
+// is idle and never stalls.
+func watchStall(f *frontier) (stop func()) {
 	done := make(chan struct{})
 	limit := stallTimeout()
 	if limit <= 0 {
@@ -184,18 +188,29 @@ func watchStall(progress *atomic.Int64) (stop func()) {
 	go func() {
 		tick := time.NewTicker(limit / 10)
 		defer tick.Stop()
-		last, since := progress.Load(), time.Now()
+		last := make([]int64, len(f.progress))
+		since := make([]time.Time, len(f.progress))
+		for i := range f.progress {
+			last[i], since[i] = f.progress[i].steps.Load(), time.Now()
+		}
 		for {
 			select {
 			case <-done:
 				return
 			case <-tick.C:
 			}
-			if n := progress.Load(); n != last {
-				last, since = n, time.Now()
-				continue
+			stalled := false
+			for i := range f.progress {
+				w := &f.progress[i]
+				if n := w.steps.Load(); n != last[i] || w.idle.Load() {
+					last[i], since[i] = n, time.Now()
+					continue
+				}
+				if time.Since(since[i]) >= limit {
+					stalled = true
+				}
 			}
-			if time.Since(since) < limit {
+			if !stalled {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "detest: no scheduling progress for %s. A process is blocked on something detest does not model, such as a sync.Mutex held across a yield point or real I/O; inject a detest.Mutex or detest.RWMutex, or keep the I/O out of the code under test. Goroutines blocked in the bubble:\n\n%s", limit, nonDurableStacks())

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,11 @@ type choice struct {
 	n      int
 	picked int
 	replay bool
+	// fp is the run's fingerprint when it made the choice: a hash of the
+	// operations and the options before it. A run replaying the choice must
+	// arrive at it with the same fingerprint; 0 when unknown, as for
+	// DETEST_SCHEDULE.
+	fp uint64
 }
 
 type violation struct {
@@ -49,6 +55,7 @@ const (
 type procEvent struct {
 	kind eventKind
 	err  error
+	op   uint64 // evYield: hash of the operation the process yields at
 }
 
 type abortSentinel struct{}
@@ -130,6 +137,7 @@ type run struct {
 	choices  []choice
 	pos      int
 	procs    []*Proc
+	opts     []option // reused by enabled, whose result lives for one step
 	nextID   int
 	clock    int64
 	trace    []step
@@ -144,6 +152,7 @@ type run struct {
 	version  int
 	idleAt   map[*procType]int
 	pending  *violation // raised by a simulated resource during a step
+	fp       uint64     // fingerprint of the run so far (see choice.fp)
 	tracing  bool       // keep the trace (see note)
 	snap     *State     // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
@@ -214,6 +223,8 @@ func (r *run) choose(label string, n int) int {
 	if n <= 0 {
 		panic("detest: choose with n <= 0")
 	}
+	fp := r.fp
+	picked := 0
 	if r.pos < len(r.prefix) {
 		c := r.prefix[r.pos]
 		var mismatch error
@@ -222,27 +233,58 @@ func (r *run) choose(label string, n int) int {
 			mismatch = fmt.Errorf("detest: the simulation is nondeterministic, or the checkpoint is of another version of it: choice %d (%s) had %d options, now %d", r.pos, label, c.n, n)
 		case c.picked >= n:
 			mismatch = fmt.Errorf("detest: the schedule picks %d of %d options at choice %d (%s): it is of another version of the simulation", c.picked, n, r.pos, label)
+		case c.fp != 0 && c.fp != fp:
+			mismatch = fmt.Errorf("detest: the simulation is nondeterministic, or the checkpoint is of another version of it: the operations before choice %d (%s) differ from the run that recorded it. Look for what varies between runs of the code under test: map iteration order, the wall clock, randomness, or goroutines detest does not schedule", r.pos, label)
 		}
 		if mismatch != nil {
 			// This may be a process's goroutine, which cannot fail the test.
 			// The scheduler ends the run after the step and Explore fails the
 			// test; the run goes on until then with the first option.
 			r.pending = &violation{kind: "fatal", err: mismatch}
-			c = choice{}
+		} else {
+			picked = c.picked
 		}
-		c.label, c.n = label, n
-		r.choices = append(r.choices, c)
-		r.pos++
-		return c.picked
 	}
-	r.choices = append(r.choices, choice{label: label, n: n})
+	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
 	r.pos++
-	return 0
+	r.mixString(label)
+	r.mixInt(int64(picked))
+	return picked
 }
 
+// option is one thing the scheduler may do next. It is a plain value rather
+// than a closure because enabled builds every option at every step.
 type option struct {
-	desc  string
-	apply func()
+	kind optionKind
+	p    *Proc     // optResume
+	q    *Queue    // optDeliver
+	i    int       // optDeliver: index of the message in q
+	pt   *procType // optDeliver, optStart
+}
+
+type optionKind uint8
+
+const (
+	optResume optionKind = iota
+	optDeliver
+	optStart
+)
+
+// apply does o. preempt reports whether it takes the CPU from the current
+// process while that process could still run.
+func (r *run) apply(o option, preempt bool) {
+	if preempt {
+		r.preempts++
+	}
+	switch o.kind {
+	case optResume:
+		r.resume(o.p)
+	case optDeliver:
+		r.deliver(o.q, o.i, o.pt)
+	case optStart:
+		r.runs[o.pt]++
+		r.resume(r.spawn(o.pt, nil))
+	}
 }
 
 func (r *run) execute() (v *violation) {
@@ -260,7 +302,7 @@ func (r *run) execute() (v *violation) {
 	}()
 	for {
 		if r.s.progress != nil {
-			r.s.progress.Add(1)
+			r.s.progress.steps.Add(1)
 		}
 		r.settleOutside()
 		opts := r.enabled()
@@ -275,9 +317,12 @@ func (r *run) execute() (v *violation) {
 		}
 		i := 0
 		if len(opts) > 1 {
+			r.mixOptions(opts)
 			i = r.choose("step", len(opts))
 		}
-		opts[i].apply()
+		o := opts[i]
+		cur := r.current
+		r.apply(o, cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
 		if r.pending != nil {
 			return r.pending
 		}
@@ -329,7 +374,8 @@ func (r *run) active(pt *procType) int {
 }
 
 func (r *run) enabled() []option {
-	var opts []option
+	opts := r.opts[:0]
+	defer func() { r.opts = opts[:0] }()
 	// Resume a runnable process. Preemption bounding: once the budget is spent,
 	// the current process keeps running while it is runnable.
 	cur := r.current
@@ -342,13 +388,7 @@ func (r *run) enabled() []option {
 		if bounded && p != cur {
 			continue
 		}
-		p := p
-		opts = append(opts, option{desc: "resume " + p.name, apply: func() {
-			if curRunnable && p != cur {
-				r.preempts++
-			}
-			r.resume(p)
-		}})
+		opts = append(opts, option{kind: optResume, p: p})
 	}
 	if bounded {
 		return opts
@@ -360,13 +400,7 @@ func (r *run) enabled() []option {
 				continue
 			}
 			for i := range q.msgs {
-				q, pt, i := q, pt, i
-				opts = append(opts, option{desc: fmt.Sprintf("deliver %s[%d] to %s", q.name, i, pt.name), apply: func() {
-					if curRunnable {
-						r.preempts++
-					}
-					r.deliver(q, i, pt)
-				}})
+				opts = append(opts, option{kind: optDeliver, q: q, i: i, pt: pt})
 			}
 		}
 	}
@@ -388,15 +422,7 @@ func (r *run) enabled() []option {
 		if pt.when != nil && !pt.when() {
 			continue
 		}
-		pt := pt
-		opts = append(opts, option{desc: "start " + pt.name, apply: func() {
-			if curRunnable {
-				r.preempts++
-			}
-			r.runs[pt]++
-			p := r.spawn(pt, nil)
-			r.resume(p)
-		}})
+		opts = append(opts, option{kind: optStart, pt: pt})
 	}
 	return opts
 }
@@ -424,7 +450,7 @@ func (r *run) advanceClock() bool {
 
 func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	r.nextID++
-	p := &Proc{name: fmt.Sprintf("%s#%d", pt.name, r.nextID), pt: pt, r: r,
+	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.nextID), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), msg: msg}
@@ -479,6 +505,12 @@ func (r *run) resume(p *Proc) {
 		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
 		return
 	}
+	// Only the events of the resumed process enter the fingerprint: when
+	// several processes blocked outside wake together, the order their
+	// events arrive in is not the code's.
+	r.mixString(p.name)
+	r.mixInt(int64(ev.kind))
+	r.mixInt(int64(ev.op)) //nolint:gosec // a hash, reinterpreted bit for bit
 	r.handleEvent(p, ev)
 }
 
@@ -712,7 +744,7 @@ func (p *Proc) yieldf(format string, args ...any) {
 		return // cleanup after the run runs through without scheduling
 	}
 	p.r.noteAt(p, format, args...)
-	p.ev <- procEvent{kind: evYield}
+	p.ev <- procEvent{kind: evYield, op: opHash(format)}
 	p.wait()
 }
 
@@ -924,7 +956,7 @@ func (r *run) dbsTouched() bool {
 }
 
 func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {

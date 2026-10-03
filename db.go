@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -18,9 +19,23 @@ type Row map[string]any
 // at insert for tables without an id.
 func (r Row) Key() string {
 	if k, ok := r["_key"]; ok {
-		return fmt.Sprint(k)
+		return keyString(k)
 	}
-	return fmt.Sprint(r["id"])
+	return keyString(r["id"])
+}
+
+// keyString is fmt.Sprint(v), with the key types rows use most spelled out:
+// keys are built on every row access, and fmt allocates for each.
+func keyString(v any) string {
+	switch v := v.(type) {
+	case string:
+		return v
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int:
+		return strconv.Itoa(v)
+	}
+	return fmt.Sprint(v)
 }
 
 // Str returns a column as a string ("" when absent).
@@ -153,11 +168,11 @@ func (db *DB) SeedRow(table string, row Row) {
 // encodes as itself, so a table keyed by id is looked up by the id.
 func encodeKey(vals []any) string {
 	if len(vals) == 1 {
-		return fmt.Sprint(derefValue(vals[0]))
+		return keyString(derefValue(vals[0]))
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
-		parts[i] = fmt.Sprint(derefValue(v))
+		parts[i] = keyString(derefValue(v))
 	}
 	return strings.Join(parts, "\x1f")
 }

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,10 +38,19 @@ type frontier struct {
 	bestResult *result
 	prior      int   // runs of the explorations a checkpoint resumes
 	fatal      error // a misuse that ends the exploration, such as a stale checkpoint
+	progress   []workerProgress
+}
+
+// workerProgress is what the stall watchdog reads of a worker: the steps its
+// scheduler took, and whether it is idle, waiting for a subtree or done, so
+// that its standing still is no stall.
+type workerProgress struct {
+	steps atomic.Int64
+	idle  atomic.Bool
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
-	f := &frontier{stack: [][]choice{nil}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers)}
+	f := &frontier{stack: [][]choice{nil}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers)}
 	for i := range f.wake {
 		f.wake[i] = make(chan struct{}, 1)
 	}
@@ -48,16 +58,34 @@ func newFrontier(workers, maxRuns int) *frontier {
 }
 
 // wakeAll wakes the waiting workers. f.mu is held.
-func (f *frontier) wakeAll() {
+func (f *frontier) wakeAll() { f.wakeN(len(f.waiting)) }
+
+// wakeN wakes up to n waiting workers. f.mu is held.
+func (f *frontier) wakeN(n int) {
 	for i, w := range f.waiting {
+		if n == 0 {
+			return
+		}
 		if w {
 			f.waiting[i] = false
+			n--
 			select {
 			case f.wake[i] <- struct{}{}:
 			default:
 			}
 		}
 	}
+}
+
+// settled wakes the workers a change of the stack concerns: one per subtree
+// pushed, or all of them once nothing is left to take or wait for. f.mu is
+// held.
+func (f *frontier) settled(pushed int) {
+	if f.busy == 0 && len(f.stack) == 0 {
+		f.wakeAll()
+		return
+	}
+	f.wakeN(pushed)
 }
 
 // take returns the next prefix to run, waiting while other workers may still
@@ -73,16 +101,20 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 			break
 		}
 		f.waiting[worker] = true
+		f.progress[worker].idle.Store(true)
 		f.mu.Unlock()
 		<-f.wake[worker]
 		f.mu.Lock()
+		f.progress[worker].idle.Store(false)
 	}
 	if f.stopped || len(f.stack) == 0 {
+		f.progress[worker].idle.Store(true)
 		f.wakeAll() // the exploration is over: let the others see it
 		return nil, false
 	}
 	if f.runs >= f.maxRuns {
 		f.incomplete, f.stopped = true, true
+		f.progress[worker].idle.Store(true)
 		f.wakeAll()
 		return nil, false
 	}
@@ -97,13 +129,15 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 func (f *frontier) finish(children [][]choice) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	pushed := 0
 	for _, c := range children {
 		if !f.after(c) {
 			f.stack = append(f.stack, c)
+			pushed++
 		}
 	}
 	f.busy--
-	f.wakeAll()
+	f.settled(pushed)
 }
 
 // fail ends the exploration for every worker on a misuse.
@@ -130,7 +164,7 @@ func (f *frontier) found(choices []choice, res *result) {
 		f.best, f.bestResult = picks, res
 	}
 	f.busy--
-	f.wakeAll()
+	f.settled(0)
 }
 
 // after reports whether every run under prefix comes after the best
@@ -169,7 +203,7 @@ func (s *Sim) children(c []choice, prefix int) [][]choice {
 		for v := c[j].n - 1; v > c[j].picked; v-- {
 			p := make([]choice, j+1)
 			copy(p, c[:j])
-			p[j] = choice{label: c[j].label, n: c[j].n, picked: v}
+			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp}
 			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
 				continue // another machine's subtree
 			}
@@ -204,6 +238,10 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			choices := r.choices
 			if !r.tracing {
 				r, v = s.retrace(r, v)
+				if v.kind == "fatal" { // the rerun took another path
+					f.fail(v.err)
+					return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
+				}
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
@@ -255,6 +293,7 @@ type savedChoice struct {
 	Label  string `json:"label"`
 	N      int    `json:"n"`
 	Picked int    `json:"picked"`
+	FP     uint64 `json:"fp,omitempty"`
 }
 
 // load resumes from the checkpoint at path, if there is one.
@@ -277,7 +316,7 @@ func (f *frontier) load(path string) error {
 	for _, st := range ck.Subtrees {
 		p := make([]choice, len(st))
 		for i, c := range st {
-			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked}
+			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP}
 		}
 		f.stack = append(f.stack, p)
 	}
@@ -291,7 +330,7 @@ func (f *frontier) save(path string) error {
 	for _, p := range f.stack {
 		st := make([]savedChoice, len(p))
 		for i, c := range p {
-			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked}
+			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp}
 		}
 		ck.Subtrees = append(ck.Subtrees, st)
 	}

@@ -2,7 +2,6 @@ package detest
 
 import (
 	"fmt"
-	"sync/atomic"
 	"testing"
 
 	"github.com/k1LoW/detest/postgres"
@@ -62,13 +61,12 @@ func TestWorkersExploreEverySchedule(t *testing.T) {
 // a single worker: the first in depth-first order.
 func TestWorkersReportTheFirstViolation(t *testing.T) {
 	model := func(t *testing.T, s *Sim) { counterModel(s, false) }
-	var progress atomic.Int64
-	one, _ := exploreBubble(t, model, nil, &progress, nil, 0)
+	one, _ := exploreBubble(t, model, nil, nil, 0)
 	if !one.Violated {
 		t.Fatal("expected a violation")
 	}
 	for i := range 20 {
-		got, _ := exploreWorkers(t, model, nil, &progress, newFrontier(4, 200000), 4)
+		got, _ := exploreWorkers(t, model, nil, newFrontier(4, 200000), 4)
 		if got.Schedule != one.Schedule || got.Err.Error() != one.Err.Error() {
 			t.Fatalf("attempt %d: 4 workers reported %s (%v), 1 worker %s (%v)", i, got.Schedule, got.Err, one.Schedule, one.Err)
 		}

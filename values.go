@@ -9,8 +9,11 @@ import (
 )
 
 func derefValue(v any) any {
-	if v == nil {
+	switch v.(type) {
+	case nil:
 		return nil
+	case string, int64, int, bool, float64, []byte:
+		return v // the common column types, without reflection
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
