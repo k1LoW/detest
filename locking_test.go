@@ -169,3 +169,41 @@ func TestForUpdateRecheckRejoins(t *testing.T) {
 		})
 	})
 }
+
+// The rows OFFSET skips are locked too, as in Postgres.
+func TestForUpdateLocksOffsetRows(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE items (id text PRIMARY KEY)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO items VALUES ('a'), ('b')`) })
+		refused := false
+		s.Seed(func() { refused = false })
+		s.Manual("x", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`SELECT id FROM items ORDER BY id OFFSET 1 LIMIT 1 FOR UPDATE`); err != nil {
+				return err
+			}
+			p.Step("holds the rows")
+			return tx.Commit()
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`SELECT id FROM items WHERE id = 'a' FOR UPDATE NOWAIT`); errors.Is(err, ErrLockNotAvailable) {
+				refused = true
+				return nil
+			} else if err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Sometimes("the row OFFSET skipped is locked", func(*State) bool { return refused })
+	})
+}

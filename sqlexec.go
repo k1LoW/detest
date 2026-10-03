@@ -546,12 +546,13 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 	return nil
 }
 
-func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]jrow, int, error) {
-	limit := -1
+// offsetLimit evaluates OFFSET and LIMIT. limit is -1 without a LIMIT.
+func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
+	limit = -1
 	if sel.Limit != nil {
 		v, err := x.eval(sel.Limit, &env{outer: outer})
 		if err != nil {
-			return nil, 0, err
+			return 0, 0, err
 		}
 		if f, ok := toFloat(derefValue(v)); ok {
 			limit = int(f)
@@ -560,17 +561,13 @@ func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([
 	if sel.Offset != nil {
 		v, err := x.eval(sel.Offset, &env{outer: outer})
 		if err != nil {
-			return nil, 0, err
+			return 0, 0, err
 		}
 		if f, ok := toFloat(derefValue(v)); ok {
-			if int(f) < len(rows) {
-				rows = rows[int(f):]
-			} else {
-				rows = nil
-			}
+			offset = int(f)
 		}
 	}
-	return rows, limit, nil
+	return offset, limit, nil
 }
 
 func (x *sqlExec) project(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {

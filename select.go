@@ -475,9 +475,10 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 	return x.finish(sel, lcols, out, outer)
 }
 
-// evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY and LIMIT
-// before locking, in scan order, so LIMIT counts the rows actually locked
-// (FOR UPDATE SKIP LOCKED skips rows held by others).
+// evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY before
+// locking, and OFFSET and LIMIT after, so they count the rows actually locked
+// (FOR UPDATE SKIP LOCKED skips rows held by others) and the rows OFFSET
+// skips are locked as well.
 func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
 	rows, from, err := x.scan(sel, outer)
 	if err != nil {
@@ -496,12 +497,13 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Ro
 	if err := x.order(sel.OrderBy, rows, outer); err != nil {
 		return nil, nil, err
 	}
-	rows, limit, err := x.offsetLimit(sel, rows, outer)
+	offset, limit, err := x.offsetLimit(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
 	mode := lockModeOf(sel.Lock)
 	var locked []jrow
+	skipped := 0 // rows locked for OFFSET, which Postgres locks too
 rows:
 	for _, r := range rows {
 		if limit >= 0 && len(locked) >= limit {
@@ -526,9 +528,14 @@ rows:
 		if err != nil {
 			return nil, nil, err
 		}
-		if ok {
-			locked = append(locked, r)
+		if !ok {
+			continue
 		}
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		locked = append(locked, r)
 	}
 	return x.project(sel, locked, outer)
 }
