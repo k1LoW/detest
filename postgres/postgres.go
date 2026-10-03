@@ -100,6 +100,8 @@ func codes(k sqlir.ErrorKind) (string, int) {
 		return "25P01", 0
 	case sqlir.InvalidSavepoint:
 		return "3B001", 0
+	case sqlir.CheckViolation:
+		return "23514", 0
 	}
 	return "", 0
 }
@@ -329,16 +331,21 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 	for _, elt := range s.TableElts {
 		switch e := elt.Node.(type) {
 		case *pg.Node_ColumnDef:
-			col, cons, err := c.columnDef(ch.Table, e.ColumnDef)
+			col, cons, checks, err := c.columnDef(ch.Table, e.ColumnDef)
 			if err != nil {
 				return ch, err
 			}
 			ch.Columns = append(ch.Columns, col)
 			ch.Constraints = append(ch.Constraints, cons...)
+			ch.Checks = append(ch.Checks, checks...)
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(e.ColumnDef)...)
 		case *pg.Node_Constraint:
 			if fk, ok := foreignKey(e.Constraint, nil); ok {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
+				continue
+			}
+			if chk, ok := c.check(e.Constraint); ok {
+				ch.Checks = append(ch.Checks, chk)
 				continue
 			}
 			u, ok, err := c.constraintDef(e.Constraint, nil)
@@ -353,8 +360,21 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 	return ch, nil
 }
 
+// check converts a CHECK constraint. One detest cannot evaluate is dropped,
+// as a default it cannot evaluate becomes unknown: the schema still loads.
+func (c *pgConv) check(k *pg.Constraint) (sqlir.CheckDef, bool) {
+	if k == nil || k.Contype != pg.ConstrType_CONSTR_CHECK {
+		return sqlir.CheckDef{}, false
+	}
+	e, err := c.expr(k.RawExpr)
+	if err != nil {
+		return sqlir.CheckDef{}, false
+	}
+	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true
+}
+
 // columnDef converts a column with the constraints written on it.
-func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, error) {
+func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
 	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
@@ -363,12 +383,23 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		col.Default = sequenceDefault(table, d.Colname)
 	}
 	var cons []sqlir.UniqueDef
+	var checks []sqlir.CheckDef
+	col.NotNull = d.IsNotNull
 	for _, n := range d.Constraints {
 		k := n.GetConstraint()
 		if k == nil {
 			continue
 		}
 		switch k.Contype {
+		case pg.ConstrType_CONSTR_NOTNULL:
+			col.NotNull = true
+		case pg.ConstrType_CONSTR_CHECK:
+			if chk, ok := c.check(k); ok {
+				if chk.Name == "" {
+					chk.Name = relnameOf(table) + "_" + d.Colname + "_check"
+				}
+				checks = append(checks, chk)
+			}
 		case pg.ConstrType_CONSTR_DEFAULT:
 			col.Default = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_IDENTITY:
@@ -376,12 +407,20 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
-				return col, nil, err
+				return col, nil, nil, err
 			}
 			cons = append(cons, u)
 		}
 	}
-	return col, cons, nil
+	return col, cons, checks, nil
+}
+
+// relnameOf is a table name without its schema, as constraint names use it.
+func relnameOf(table string) string {
+	if i := strings.LastIndexByte(table, '.'); i >= 0 {
+		return table[i+1:]
+	}
+	return table
 }
 
 // defaultExpr converts a column default. A default detest cannot convert
@@ -552,6 +591,10 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
 				continue
 			}
+			if chk, ok := c.check(cmd.Def.GetConstraint()); ok {
+				ch.Checks = append(ch.Checks, chk)
+				continue
+			}
 			u, ok, err := c.constraintDef(cmd.Def.GetConstraint(), nil)
 			if err != nil {
 				return nil, err
@@ -568,17 +611,22 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 		case pg.AlterTableType_AT_AddIdentity:
 			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Default: sequenceDefault(ch.Table, cmd.Name)})
 		case pg.AlterTableType_AT_AddColumn:
-			col, cons, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
+			col, cons, checks, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
 			if err != nil {
 				return nil, err
 			}
 			ch.Columns = append(ch.Columns, col)
 			ch.Constraints = append(ch.Constraints, cons...)
+			ch.Checks = append(ch.Checks, checks...)
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
 				ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true})
 			}
+		case pg.AlterTableType_AT_SetNotNull:
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, NotNull: true, TypeOnly: true})
+		case pg.AlterTableType_AT_DropNotNull:
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, DropNotNull: true, TypeOnly: true})
 		case pg.AlterTableType_AT_DropConstraint:
 			ch.DropConstraints = append(ch.DropConstraints, cmd.Name)
 		case pg.AlterTableType_AT_DropColumn:

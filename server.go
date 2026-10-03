@@ -53,6 +53,7 @@ const (
 	InvalidTableDefinition    = sqlir.InvalidTableDefinition
 	NoActiveTransaction       = sqlir.NoActiveTransaction
 	InvalidSavepoint          = sqlir.InvalidSavepoint
+	CheckViolation            = sqlir.CheckViolation
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

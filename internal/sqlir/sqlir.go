@@ -187,6 +187,7 @@ type SchemaChange struct {
 	Columns     []ColumnDef
 	Constraints []UniqueDef
 	ForeignKeys []ForeignKey
+	Checks      []CheckDef
 	// Object is what Drop and the renames act on besides a table: "view",
 	// "matview" or "index" (Table then names the index).
 	Object           string
@@ -212,6 +213,17 @@ type ColumnDef struct {
 	Type string
 	// TypeOnly changes the type and leaves the default (ALTER COLUMN TYPE).
 	TypeOnly bool
+	// NotNull adds NOT NULL (in CREATE TABLE, ADD COLUMN or SET NOT NULL);
+	// DropNotNull removes it.
+	NotNull     bool
+	DropNotNull bool
+}
+
+// CheckDef is a CHECK constraint. Name is empty when the statement gives
+// none.
+type CheckDef struct {
+	Name string
+	Expr Expr
 }
 
 // UniqueDef is a primary key, a unique constraint or a unique index. Elems are
@@ -534,6 +546,7 @@ const (
 	InvalidTableDefinition
 	NoActiveTransaction
 	InvalidSavepoint
+	CheckViolation
 )
 
 // The errors an SQLError of each kind matches with errors.Is.
@@ -556,10 +569,12 @@ var (
 	ErrInvalidTableDefinition    = errors.New("detest: invalid table definition")
 	ErrNoActiveTransaction       = errors.New("detest: no active transaction")
 	ErrInvalidSavepoint          = errors.New("detest: invalid savepoint")
+	ErrCheckViolation            = errors.New("detest: check violation")
 	kindErrors                   = map[ErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
-		WrongObjectType: ErrWrongObjectType, InvalidTableDefinition: ErrInvalidTableDefinition, NoActiveTransaction: ErrNoActiveTransaction, InvalidSavepoint: ErrInvalidSavepoint}
+		WrongObjectType: ErrWrongObjectType, InvalidTableDefinition: ErrInvalidTableDefinition, NoActiveTransaction: ErrNoActiveTransaction, InvalidSavepoint: ErrInvalidSavepoint,
+		CheckViolation: ErrCheckViolation}
 )
 
 // SQLError is a database error detest's simulated database raises, with what drivers

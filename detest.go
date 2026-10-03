@@ -44,6 +44,7 @@ var (
 	ErrInvalidTableDefinition    = sqlir.ErrInvalidTableDefinition
 	ErrNoActiveTransaction       = sqlir.ErrNoActiveTransaction
 	ErrInvalidSavepoint          = sqlir.ErrInvalidSavepoint
+	ErrCheckViolation            = sqlir.ErrCheckViolation
 	ErrUnavailable               = errors.New("detest: external call failed (transport)")
 	ErrNotFound                  = errors.New("detest: not found")
 	ErrFailedPrecondition        = errors.New("detest: failed precondition")

@@ -256,6 +256,44 @@ func sameColumns(u sqlir.UniqueDef, cols []string) bool {
 // checkTypes makes the checks Postgres makes when a value is stored in a
 // typed column: a uuid must parse, and an integer must fit its width. Types
 // detest does not check accept any value.
+// checkRow makes the checks Postgres makes on a row about to be written, in
+// its order: the column types, NOT NULL, then CHECK constraints.
+func (x *sqlExec) checkRow(table string, row Row) error {
+	if err := x.checkTypes(table, row); err != nil {
+		return err
+	}
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return nil
+	}
+	for _, col := range def.columns { // in declaration order, for a stable error
+		if def.notNull[col] && derefValue(row[col]) == nil {
+			return x.tx.db.kind.Error(sqlir.NotNullViolation, fmt.Sprintf("null value in column %q of relation %q violates not-null constraint", col, relname(table)), relname(table), col, "")
+		}
+	}
+	for _, c := range def.checks {
+		r := row
+		if len(c.alias) > 0 {
+			r = row.clone()
+			for written, now := range c.alias {
+				r[written] = row[now]
+			}
+		}
+		v, err := x.eval(c.Expr, &env{tables: map[string]Row{relname(table): r}, merged: r})
+		if err != nil {
+			if errors.As(err, new(errUnknownExpr)) {
+				continue // a check detest cannot evaluate passes, as an unknown default does
+			}
+			return err
+		}
+		// NULL passes a CHECK, as in Postgres; only false fails it.
+		if b, ok := derefValue(v).(bool); ok && !b {
+			return x.tx.db.kind.Error(sqlir.CheckViolation, fmt.Sprintf("new row for relation %q violates check constraint %q", relname(table), c.Name), relname(table), "", c.Name)
+		}
+	}
+	return nil
+}
+
 func (x *sqlExec) checkTypes(table string, row Row) error {
 	def := x.tx.db.defs[table]
 	if def == nil || len(def.types) == 0 {

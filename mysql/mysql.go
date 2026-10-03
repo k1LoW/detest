@@ -65,6 +65,8 @@ func codes(k sqlir.ErrorKind) (string, int) {
 		return "42000", 1068 // ER_MULTIPLE_PRI_KEY
 	case sqlir.InvalidSavepoint:
 		return "42000", 1305 // ER_SP_DOES_NOT_EXIST
+	case sqlir.CheckViolation:
+		return "HY000", 3819 // ER_CHECK_CONSTRAINT_VIOLATED
 	}
 	return "", 0
 }

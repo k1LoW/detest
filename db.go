@@ -133,6 +133,28 @@ type DB struct {
 	ignored  map[string]bool                     // tables Ignore took out of the simulation
 }
 
+// tableCheck is a CHECK constraint of a table. alias maps a column name its
+// expression uses to the column's name now, after RENAME COLUMN: the
+// expression is kept as written.
+type tableCheck struct {
+	sqlir.CheckDef
+	alias map[string]string
+}
+
+// columns returns the columns the check's expression refers to, by their
+// current names.
+func (c tableCheck) columns() []string {
+	var out []string
+	for _, r := range sqlir.ColumnRefs(c.Expr) {
+		name := r.Column
+		if n, ok := c.alias[name]; ok {
+			name = n
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
 // tableDef is what the schema declares about a table.
 type tableDef struct {
 	pk       []string // primary key columns; nil without a primary key
@@ -141,6 +163,8 @@ type tableDef struct {
 	fks      []sqlir.ForeignKey
 	columns  []string          // in declaration order, for applying defaults deterministically
 	types    map[string]string // column types, for the checks Postgres makes on write
+	notNull  map[string]bool   // NOT NULL columns besides the primary key's
+	checks   []tableCheck
 	defaults map[string]sqlir.Expr
 }
 
@@ -330,6 +354,12 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 // dropConstraint removes a unique constraint or index, or the primary key.
 // The rows keep the identity the primary key gave them.
 func (def *tableDef) dropConstraint(name string) bool {
+	for i, c := range def.checks {
+		if c.Name == name {
+			def.checks = slices.Delete(def.checks, i, i+1)
+			return true
+		}
+	}
 	for i, fk := range def.fks {
 		if fk.Name == name {
 			def.fks = slices.Delete(def.fks, i, i+1)
@@ -350,6 +380,12 @@ func (def *tableDef) dropConstraint(name string) bool {
 }
 
 func (def *tableDef) renameConstraint(old, nw string) bool {
+	for i := range def.checks {
+		if def.checks[i].Name == old {
+			def.checks[i].Name = nw
+			return true
+		}
+	}
 	for i := range def.fks {
 		if def.fks[i].Name == old {
 			def.fks[i].Name = nw
@@ -375,6 +411,8 @@ func (def *tableDef) dropColumn(col string) {
 	def.columns = slices.DeleteFunc(def.columns, func(c string) bool { return c == col })
 	delete(def.defaults, col)
 	delete(def.types, col)
+	delete(def.notNull, col)
+	def.checks = slices.DeleteFunc(def.checks, func(c tableCheck) bool { return slices.Contains(c.columns(), col) })
 	def.uniques = slices.DeleteFunc(def.uniques, func(u sqlir.UniqueDef) bool { return refersTo(u, col) })
 	def.fks = slices.DeleteFunc(def.fks, func(fk sqlir.ForeignKey) bool { return slices.Contains(fk.Columns, col) })
 }
@@ -392,6 +430,25 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if t, ok := def.types[old]; ok {
 		delete(def.types, old)
 		def.types[nw] = t
+	}
+	if def.notNull[old] {
+		delete(def.notNull, old)
+		def.notNull[nw] = true
+	}
+	for i := range def.checks {
+		c := &def.checks[i]
+		renamed := false
+		for k, v := range c.alias {
+			if v == old {
+				c.alias[k], renamed = nw, true
+			}
+		}
+		if !renamed && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+			if c.alias == nil {
+				c.alias = map[string]string{}
+			}
+			c.alias[old] = nw
+		}
 	}
 	for i, c := range def.pk {
 		if c == old {
@@ -584,6 +641,15 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			}
 			def.types[col.Name] = col.Type
 		}
+		switch {
+		case col.NotNull:
+			if def.notNull == nil {
+				def.notNull = map[string]bool{}
+			}
+			def.notNull[col.Name] = true
+		case col.DropNotNull:
+			delete(def.notNull, col.Name)
+		}
 		if col.TypeOnly {
 			continue
 		}
@@ -597,6 +663,16 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if err := def.addConstraint(db.kind, table, u); err != nil {
 			return err
 		}
+	}
+	for _, c := range ch.Checks {
+		if c.Name == "" {
+			// Postgres names it after the first column it refers to.
+			c.Name = relname(table) + "_check"
+			if refs := sqlir.ColumnRefs(c.Expr); len(refs) > 0 {
+				c.Name = relname(table) + "_" + refs[0].Column + "_check"
+			}
+		}
+		def.checks = append(def.checks, tableCheck{CheckDef: c})
 	}
 	for _, fk := range ch.ForeignKeys {
 		if fk.Name == "" {
@@ -741,7 +817,7 @@ func (tx *Tx) Insert(table string, row Row) error {
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
 	}
-	if err := x.checkTypes(table, row); err != nil {
+	if err := x.checkRow(table, row); err != nil {
 		return err
 	}
 	if err := tx.db.assignKey(table, row); err != nil {
@@ -1008,7 +1084,7 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		maps.Copy(cur, fields)
 		x := tx.evaluator()
 
-		if err := x.checkTypes(table, cur); err != nil {
+		if err := x.checkRow(table, cur); err != nil {
 			return n, err
 		}
 		if err := x.checkUniques(table, cur, r.Key(), old); err != nil {

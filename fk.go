@@ -308,7 +308,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 				return x.tx.childViolation(ck.table, ck.fk)
 			}
 		}
-		if err := x.checkTypes(ck.table, updated); err != nil {
+		if err := x.checkRow(ck.table, updated); err != nil {
 			return err
 		}
 		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {

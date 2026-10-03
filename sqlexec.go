@@ -770,7 +770,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if err := x.applyDefaults(table, row); err != nil {
 			return nil, err
 		}
-		if err := x.checkTypes(table, row); err != nil {
+		if err := x.checkRow(table, row); err != nil {
 			return nil, err
 		}
 		if err := x.tx.db.assignKey(table, row); err != nil {
@@ -829,7 +829,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				updated[a.Column] = v
 			}
 
-			if err := x.checkTypes(table, updated); err != nil {
+			if err := x.checkRow(table, updated); err != nil {
 				return nil, err
 			}
 			if err := x.checkUniques(table, updated, existing.Key(), cur); err != nil {
@@ -1057,7 +1057,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			updated[a.Column] = v
 		}
 
-		if err := x.checkTypes(table, updated); err != nil {
+		if err := x.checkRow(table, updated); err != nil {
 			return nil, err
 		}
 		if err := x.checkUniques(table, updated, key, cur); err != nil {
@@ -1182,7 +1182,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		switch v.Op {
 		case "NOT":
-			b, _ := derefValue(val).(bool)
+			b, ok := derefValue(val).(bool)
+			if !ok {
+				return nil, nil // NOT NULL is NULL
+			}
 			return !b, nil
 		case "-":
 			if f, ok := toFloat(derefValue(val)); ok {
@@ -1192,18 +1195,30 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		return nil, errUnknownExpr{"unary " + v.Op}
 	case *sqlir.BinaryExpr:
 		switch v.Op {
-		case "AND":
-			l, err := x.evalBool(v.L, en)
-			if err != nil || !l {
-				return false, err
+		case "AND", "OR":
+			// Three-valued: false decides AND and true decides OR, whatever
+			// the other side; otherwise a NULL side makes the result NULL.
+			decides := v.Op == "OR"
+			l, err := x.eval(v.L, en)
+			if err != nil {
+				return nil, err
 			}
-			return x.evalBool(v.R, en)
-		case "OR":
-			l, err := x.evalBool(v.L, en)
-			if err != nil || l {
-				return l, err
+			lb, lok := derefValue(l).(bool)
+			if lok && lb == decides {
+				return decides, nil
 			}
-			return x.evalBool(v.R, en)
+			r, err := x.eval(v.R, en)
+			if err != nil {
+				return nil, err
+			}
+			rb, rok := derefValue(r).(bool)
+			switch {
+			case rok && rb == decides:
+				return decides, nil
+			case !lok || !rok:
+				return nil, nil
+			}
+			return !decides, nil
 		}
 		l, err := x.eval(v.L, en)
 		if err != nil {
@@ -1229,7 +1244,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		in := false
+		in, sawNull := false, false
 		if v.Sub != nil {
 			cols, rows, err := x.evalSelect(v.Sub, en)
 			if err != nil {
@@ -1261,11 +1276,19 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
+				if derefValue(val) == nil {
+					sawNull = true
+				}
 				if equalValues(l, val) {
 					in = true
 					break
 				}
 			}
+		}
+		// x IN (...) is NULL for a NULL x, or when it matches nothing and
+		// the list holds a NULL; NOT IN negates only a known answer.
+		if !in && (sawNull || derefValue(l) == nil) {
+			return nil, nil
 		}
 		if v.Not {
 			return !in, nil
@@ -1343,12 +1366,15 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 
 func (x *sqlExec) binary(op string, l, r any) (any, error) {
 	switch op {
+	case "=", "<>", "!=", "<", "<=", ">", ">=", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
+		if derefValue(l) == nil || derefValue(r) == nil {
+			return nil, nil // a comparison with NULL is NULL
+		}
+	}
+	switch op {
 	case "=":
 		return equalValues(l, r), nil
 	case "<>", "!=":
-		if derefValue(l) == nil || derefValue(r) == nil {
-			return false, nil
-		}
 		return !equalValues(l, r), nil
 	case "<", "<=", ">", ">=":
 		c, ok := compareValues(l, r)
