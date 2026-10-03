@@ -83,7 +83,7 @@ The function passed to `detest.Explore` declares the simulation. It runs once pe
 
 A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes while the violation is found and fails once it is gone.
 
-### Declaring a model
+### Declaring a simulation
 
 | Method | What it declares |
 | --- | --- |

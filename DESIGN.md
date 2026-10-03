@@ -93,7 +93,7 @@ The fingerprint leaves argument values out. Real code puts generated ids and wal
 
 The database is an in-memory `database/sql` driver. The code under test, including ORMs such as GORM, sqlx and sqlc, runs on the `*sql.DB` it returns. SQL is parsed with PostgreSQL's real grammar (pg_query) into an internal representation that the executor runs.
 
-The model follows PostgreSQL at Read Committed, because the interleavings that matter come from its locking rather than from its query planner. It covers the following.
+The database follows PostgreSQL at Read Committed, because the interleavings that matter come from its locking rather than from its query planner. It covers the following.
 
 - the four row lock strengths and their conflict table, waits, `NOWAIT`, `SKIP LOCKED`, `lock_timeout`, and deadlock detection for cycles of row lock waits;
 - statement-level snapshots, with the re-check of the predicate after a lock wait that Read Committed does;
