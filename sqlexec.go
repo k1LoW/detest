@@ -828,6 +828,9 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
 		}
+		if err := x.checkArity(v); err != nil {
+			return nil, err
+		}
 		args := make([]any, len(v.Args))
 		for i, a := range v.Args {
 			val, err := x.evalAgg(a, g)
@@ -1546,6 +1549,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
+		if err := x.checkArity(v); err != nil {
+			return nil, err
+		}
 		args := make([]any, len(v.Args))
 		for i, a := range v.Args {
 			val, err := x.eval(a, en)
@@ -1770,6 +1776,16 @@ func roundDecimal(f float64, n int) float64 {
 	return out
 }
 
+// checkArity refuses a call to a function detest knows that no signature of
+// it takes, before its arguments are evaluated, as Postgres resolves the
+// signature when it plans the statement.
+func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
+	if arity, known := strictFuncs[f.Name]; known && !slices.Contains(arity, len(f.Args)) {
+		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
+	}
+	return nil
+}
+
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	d := func(i int) any {
 		if i < len(args) {
@@ -1777,14 +1793,8 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		return nil
 	}
-	if arity, strict := strictFuncs[name]; strict {
-		// Postgres resolves the signature before strictness applies.
-		if !slices.Contains(arity, len(args)) {
-			return nil, x.unsupported(fmt.Sprintf("%s with %d arguments", name, len(args)))
-		}
-		if slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
-			return nil, nil // a strict function of NULL is NULL
-		}
+	if _, strict := strictFuncs[name]; strict && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
+		return nil, nil // a strict function of NULL is NULL
 	}
 	switch name {
 	case "coalesce":

@@ -306,6 +306,15 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 			t.Errorf("%s: got %v", q, err)
 		}
 	}
+	// Refused before its arguments are evaluated.
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	if _, err := db.Exec(`SELECT abs(nextval('s'), 0)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("abs with two arguments: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after a refused call: %d, %v", n, err)
+	}
 	for q, want := range map[string]float64{`SELECT round(2.345, 2)`: 2.35, `SELECT round(1.5)`: 2, `SELECT round(-2.345, 1)`: -2.3,
 		`SELECT round(-81.865, 2)`: -81.87, `SELECT round(1.005, 2)`: 1.01, `SELECT round(1250, -2)`: 1300,
 		`SELECT round(1.5, 1000000000)`: 1.5, `SELECT round(1.5, -1000000000)`: 0} {
