@@ -1338,7 +1338,7 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 // evaluation cannot fail and keeps its value.
 func isConstElement(n *pg.Node) bool {
 	for n.GetTypeCast() != nil {
-		if _, ok := plainTextCast(n.GetTypeCast(), "text", "varchar"); !ok {
+		if _, ok := plainTextCast(n.GetTypeCast(), false, "text", "varchar"); !ok {
 			return false
 		}
 		n = n.GetTypeCast().Arg
@@ -1346,10 +1346,11 @@ func isConstElement(n *pg.Node) bool {
 	return n.GetAConst() != nil || n.GetParamRef() != nil
 }
 
-// plainTextCast returns the type of a cast to one of types without a type
-// modifier, such as varchar(1), which would change the value.
-func plainTextCast(tc *pg.TypeCast, types ...string) (string, bool) {
-	if len(tc.TypeName.GetTypmods()) > 0 {
+// plainTextCast returns the type of a cast to one of types, or to an array
+// of one, without a type modifier, such as varchar(1), which would change the
+// value.
+func plainTextCast(tc *pg.TypeCast, array bool, types ...string) (string, bool) {
+	if len(tc.TypeName.GetTypmods()) > 0 || (len(tc.TypeName.GetArrayBounds()) > 0) != array {
 		return "", false
 	}
 	names := tc.TypeName.GetNames()
@@ -1422,7 +1423,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			// pg_dump casts the array only to text[]. A cast to another type
 			// coerces each element in Postgres, as '01' to 1 for int[] or
 			// 'a ' to 'a' for bpchar[], which detest's casts do not do.
-			typ, ok := plainTextCast(arr.GetTypeCast(), "text")
+			typ, ok := plainTextCast(arr.GetTypeCast(), true, "text")
 			if !ok {
 				return nil, c.unsupported("ANY or ALL over an array cast to a type other than text[]")
 			}
