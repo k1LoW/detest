@@ -517,7 +517,7 @@ rows:
 		latest := map[string]Row{}
 		for _, a := range targets {
 			table := from.tables[a]
-			_, cur, ok, err := x.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
+			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
 				if x.tx.heldByOther(lk, mode) {
 					if sel.Lock.SkipLocked {
 						return errSkipLocked

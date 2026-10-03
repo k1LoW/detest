@@ -1098,6 +1098,22 @@ func (tx *Tx) view(table, key string) (Row, bool) {
 	return r.clone(), true
 }
 
+// lockLatest locks the row read under key and returns its newest version,
+// following it to the key an UPDATE moved it to and locking it there too.
+// ok is false when the row is gone.
+func (tx *Tx) lockLatest(table, key string, lock func(lockKey) error) (string, Row, bool, error) {
+	for {
+		if err := lock(lockKey{table, key}); err != nil {
+			return "", nil, false, err
+		}
+		next, cur, ok := tx.latest(table, key)
+		if !ok || next == key {
+			return key, cur, ok, nil
+		}
+		key = next
+	}
+}
+
 // latest returns the newest version of the row read under key, following the
 // keys UPDATEs moved it to, as Postgres follows a row's update chain after a
 // wait. A row's identity is its key, so a row since inserted under the old
@@ -1135,19 +1151,22 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
 	n := 0
+	cols := make([]string, 0, len(fields))
+	for c := range fields {
+		cols = append(cols, c)
+	}
+	mode := tx.db.updateLock(table, cols)
+	done := map[string]bool{}
 	for _, r := range tx.selectNoYield(table, pred) {
-		lk := lockKey{table, r.Key()}
-		cols := make([]string, 0, len(fields))
-		for c := range fields {
-			cols = append(cols, c)
-		}
-		if err := tx.lockMode(lk, tx.db.updateLock(table, cols)); err != nil {
+		key, cur, ok, err := tx.lockLatest(table, r.Key(), func(lk lockKey) error { return tx.lockMode(lk, mode) })
+		if err != nil {
 			return n, err
 		}
-		cur, ok := tx.view(table, r.Key())
-		if !ok || !pred(cur) {
+		if !ok || done[key] || !pred(cur) {
 			continue
 		}
+		done[key] = true
+		lk := lockKey{table, key}
 		old := cur.clone()
 		maps.Copy(cur, fields)
 		x := tx.evaluator()
@@ -1155,7 +1174,7 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if err := x.checkRow(table, cur); err != nil {
 			return n, err
 		}
-		if err := x.checkUniques(table, cur, r.Key(), old); err != nil {
+		if err := x.checkUniques(table, cur, key, old); err != nil {
 			return n, err
 		}
 		if err := x.checkParents(table, cur, old); err != nil {
@@ -1164,7 +1183,6 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if err := x.onParentUpdate(table, old, cur); err != nil {
 			return n, err
 		}
-		var err error
 		if lk, err = x.rekey(table, lk, cur); err != nil {
 			return n, err
 		}

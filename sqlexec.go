@@ -1099,22 +1099,6 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 	return kept, nil
 }
 
-// lockLatest locks the row read under key and returns its newest version,
-// following it to the key an UPDATE moved it to and locking it there too.
-// ok is false when the row is gone.
-func (x *sqlExec) lockLatest(table, key string, lock func(lockKey) error) (string, Row, bool, error) {
-	for {
-		if err := lock(lockKey{table, key}); err != nil {
-			return "", nil, false, err
-		}
-		next, cur, ok := x.tx.latest(table, key)
-		if !ok || next == key {
-			return key, cur, ok, nil
-		}
-		key = next
-	}
-}
-
 func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(up.Table)
 	if x.tx.db.ignored[table] {
@@ -1155,7 +1139,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			continue
 		}
 		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
-		key, cur, ok, err := x.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+		key, cur, ok, err := x.tx.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
 		if err != nil {
 			return nil, err
 		}
@@ -1233,7 +1217,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		if done[key] {
 			continue
 		}
-		key, cur, ok, err := x.lockLatest(table, key, x.tx.lock)
+		key, cur, ok, err := x.tx.lockLatest(table, key, x.tx.lock)
 		if err != nil {
 			return nil, err
 		}

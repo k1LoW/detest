@@ -231,10 +231,11 @@ func TestWaitFollowsPrimaryKeyChange(t *testing.T) {
 		{"locking read", `SELECT id FROM jobs WHERE status = 'pending' FOR UPDATE`},
 		{"update", `UPDATE jobs SET status = 'done' WHERE status = 'pending'`},
 		{"delete", `DELETE FROM jobs WHERE status = 'pending'`},
+		{"Tx.UpdateWhere", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", postgres.New())
+				db, store := s.DB("app", postgres.New())
 				mustExec(t, db, `CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`)
 				s.Seed(func() { mustExec(t, db, `INSERT INTO jobs VALUES (1, 'pending')`) })
 				var n int64
@@ -252,6 +253,13 @@ func TestWaitFollowsPrimaryKeyChange(t *testing.T) {
 					return tx.Commit()
 				})
 				s.Manual("worker", 1, func(p *Proc) error {
+					if tc.query == "" {
+						return store.Tx(p, func(tx *Tx) error {
+							m, err := tx.UpdateWhere("jobs", func(r Row) bool { return r.Str("status") == "pending" }, Row{"status": "done"}, "status = pending")
+							n = int64(m)
+							return err
+						})
+					}
 					tx, err := db.BeginTx(p.Context(), nil)
 					if err != nil {
 						return err
