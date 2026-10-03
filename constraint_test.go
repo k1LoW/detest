@@ -3,6 +3,7 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/k1LoW/detest/postgres"
@@ -202,6 +203,18 @@ func TestGeneratedColumns(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (4, 3)`)
 	if b(4) != 6 {
 		t.Errorf("VALUES for the first columns: b = %d", b(4))
+	}
+	// RETURNING * returns every column, the computed one included.
+	for _, q := range []string{`INSERT INTO t VALUES (5, 1) RETURNING *`, `INSERT INTO t (id, c) VALUES (6, 1) RETURNING *`} {
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		cols, _ := rows.Columns()
+		_ = rows.Close()
+		if !slices.Contains(cols, "b") {
+			t.Errorf("%s: columns %v", q, cols)
+		}
 	}
 	for _, q := range []string{
 		`INSERT INTO t (id, c, b) VALUES (3, 1, 2)`,

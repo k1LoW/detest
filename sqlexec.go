@@ -867,7 +867,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if alias == "" {
 		alias = relname(ins.Table)
 	}
-	out := &sqlResult{cols: x.returningCols(ins.Returning, cols)}
+	all := cols // RETURNING * is every column of the table, not only those written
+	if def := x.tx.db.defs[table]; def != nil {
+		all = def.columns
+	}
+	out := &sqlResult{cols: x.returningCols(ins.Returning, all)}
 	for _, row := range rows {
 		if err := x.applyDefaults(table, row); err != nil {
 			return nil, err
