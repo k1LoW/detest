@@ -105,3 +105,67 @@ func TestForUpdateOverDerivedItems(t *testing.T) {
 	// A WITH query is not locked unless named, as in Postgres.
 	mustExec(t, db, `WITH c AS (SELECT id FROM a) SELECT * FROM a JOIN c ON c.id = a.id FOR UPDATE`)
 }
+
+// After a wait, a row whose join partner no longer matches is left out, and
+// a LEFT JOIN partner that no longer matches becomes NULL.
+func TestForUpdateRecheckRejoins(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE b (id text PRIMARY KEY)`)
+		mustExec(t, db, `CREATE TABLE a (id text PRIMARY KEY, bid text)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO b VALUES ('b1'), ('b2')`)
+			mustExec(t, db, `INSERT INTO a VALUES ('a1', 'b1')`)
+		})
+		var pairs []string
+		s.Seed(func() { pairs = nil })
+		s.Manual("mover", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE a SET bid = 'b2' WHERE id = 'a1'`); err != nil {
+				return err
+			}
+			p.Step("holds a1")
+			return tx.Commit()
+		})
+		for _, r := range []struct{ name, query string }{
+			{"inner", `SELECT a.bid, b.id FROM a JOIN b ON b.id = a.bid AND b.id = 'b1' FOR UPDATE OF a`},
+			{"left", `SELECT a.bid, b.id FROM a LEFT JOIN b ON b.id = a.bid AND b.id = 'b1' FOR UPDATE OF a`},
+		} {
+			s.Manual(r.name, 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				rows, err := tx.Query(r.query)
+				if err != nil {
+					return err
+				}
+				for rows.Next() {
+					var abid string
+					var bid sql.NullString
+					if err := rows.Scan(&abid, &bid); err != nil {
+						return err
+					}
+					pairs = append(pairs, abid+"/"+bid.String)
+				}
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				return tx.Commit()
+			})
+		}
+		s.AtQuiescence(func(*State) error {
+			for _, pr := range pairs {
+				if pr == "b2/b1" {
+					return fmt.Errorf("a row moved to b2 returned joined to b1")
+				}
+			}
+			return nil
+		})
+	})
+}

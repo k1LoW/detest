@@ -582,26 +582,28 @@ func (x *sqlExec) recheck(sel *sqlir.SelectStmt, r jrow, targets []string, from 
 		}
 		by[a] = cur
 	}
+	// Join again in FROM order, as scan does, with the rows each item was
+	// joined to: Postgres does not look for new join partners either.
 	n := newJrow(from.aliases[0], by[from.aliases[0]])
 	if from.tables[from.aliases[0]] == "" {
 		n.base = nil
 	}
-	for _, a := range from.aliases[1:] {
-		n = n.with(a, by[a])
-	}
-	// Outer joins are not re-evaluated: their ON decides whether a row is
-	// null-extended, not whether it is returned.
-	for _, join := range sel.Joins {
-		if join.On == nil || join.Kind == sqlir.LeftJoin {
-			continue
+	for i, join := range sel.Joins {
+		a := from.aliases[i+1]
+		cand := n.with(a, by[a])
+		if join.On != nil && by[a] != nil {
+			ok, err := x.evalBool(join.On, cand.env(outer))
+			if err != nil {
+				return jrow{}, false, err
+			}
+			if !ok {
+				if join.Kind != sqlir.LeftJoin {
+					return jrow{}, false, nil
+				}
+				cand = n.with(a, nil)
+			}
 		}
-		ok, err := x.evalBool(join.On, n.env(outer))
-		if err != nil {
-			return jrow{}, false, err
-		}
-		if !ok {
-			return jrow{}, false, nil
-		}
+		n = cand
 	}
 	if sel.Where != nil {
 		ok, err := x.evalBool(sel.Where, n.env(outer))
