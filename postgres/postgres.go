@@ -1386,7 +1386,10 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			return nil, c.unsupported("operator " + op + " with ANY or ALL")
 		}
 		arr := e.Rexpr
+		var casts []string // outermost first
 		for arr.GetTypeCast() != nil {
+			names := arr.GetTypeCast().TypeName.GetNames()
+			casts = append(casts, strings.ToLower(names[len(names)-1].GetString_().GetSval()))
 			arr = arr.GetTypeCast().Arg
 		}
 		if arr.GetAArrayExpr() == nil {
@@ -1399,6 +1402,13 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		list, err := c.exprs(arr.GetAArrayExpr().Elements)
 		if err != nil {
 			return nil, err
+		}
+		// A cast of the array casts each element, so it is kept on them:
+		// 1 = ANY (ARRAY['01']::int[]) compares 1 with 1, not with '01'.
+		for i := range list {
+			for j := len(casts) - 1; j >= 0; j-- {
+				list[i] = &sqlir.Cast{X: list[i], Type: casts[j]}
+			}
 		}
 		return &sqlir.InExpr{X: l, List: list, Not: !isAny}, nil
 	case pg.A_Expr_Kind_AEXPR_LIKE, pg.A_Expr_Kind_AEXPR_ILIKE:

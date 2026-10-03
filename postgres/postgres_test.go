@@ -75,3 +75,20 @@ func TestCheckInDumpForm(t *testing.T) {
 		}
 	}
 }
+
+// A cast of the array casts each element, so it stays on the elements.
+func TestAnyKeepsArrayCast(t *testing.T) {
+	st, err := parser{}.Parse(`SELECT 1 WHERE n = ANY ((ARRAY['01', '02'])::int[])`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, ok := st.(*sqlir.SelectStmt).Where.(*sqlir.InExpr)
+	if !ok || len(in.List) != 2 {
+		t.Fatalf("got %#v", st.(*sqlir.SelectStmt).Where)
+	}
+	for _, e := range in.List {
+		if c, ok := e.(*sqlir.Cast); !ok || c.Type != "int4" {
+			t.Errorf("element %#v, want a cast to int4", e)
+		}
+	}
+}
