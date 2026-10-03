@@ -24,6 +24,7 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`CREATE TABLE t (a int, b date GENERATED ALWAYS AS (CURRENT_DATE) STORED)`,
 		`CREATE TABLE t (a text, b int GENERATED ALWAYS AS (hashtext(a)) STORED)`,
 		`CREATE TABLE t (a timestamptz, b text GENERATED ALWAYS AS (a::text) STORED)`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (other.a) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (count(*) FILTER (WHERE a > 0)) STORED)`,
 		`CREATE TABLE t (a int, b int DEFAULT 1 GENERATED ALWAYS AS (a * 2) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS IDENTITY GENERATED ALWAYS AS (a * 2) STORED)`,
@@ -82,6 +83,7 @@ func TestStillSupported(t *testing.T) {
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a * 2) STORED)`,
 		`CREATE TABLE t (a text, b text GENERATED ALWAYS AS (lower(coalesce(a, ''))) STORED)`,
 		`CREATE TABLE t (a int, b numeric GENERATED ALWAYS AS (a::numeric * 2) STORED)`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (t.a + 1) STORED)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[$1, -1, 'x'::text])`,
 	} {
 		if _, err := (parser{}).Parse(q); err != nil {

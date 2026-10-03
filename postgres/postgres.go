@@ -419,7 +419,7 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 				g = &sqlir.Const{Value: sqlir.Unknown} // as defaultExpr: the schema still loads
 			}
 			col.Generated = g
-			if err := c.immutable(col.Generated); err != nil {
+			if err := c.immutable(col.Generated, relnameOf(table)); err != nil {
 				return col, nil, nil, err
 			}
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
@@ -454,9 +454,14 @@ var mutableFuncs = map[string]bool{
 // immutable refuses what Postgres does not allow in a generation expression:
 // a function that is not immutable, such as nextval or now, an aggregate, a
 // subquery or a parameter. detest would otherwise run it on every write.
-func (c *pgConv) immutable(e sqlir.Expr) error {
+func (c *pgConv) immutable(e sqlir.Expr, table string) error {
 	for _, x := range sqlir.Exprs(e) {
 		switch v := x.(type) {
+		case *sqlir.ColumnRef:
+			// Only the table's own columns are in scope.
+			if v.Table != "" && v.Table != table {
+				return c.unsupported("generated column referring to " + v.Table + "." + v.Column)
+			}
 		case *sqlir.FuncCall:
 			if mutableFuncs[v.Name] || sqlir.OtherAggregates[v.Name] {
 				return c.unsupported("generated column calling " + v.Name)
