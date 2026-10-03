@@ -185,6 +185,7 @@ type Proc struct {
 	tx       *Tx   // transaction opened by a hand-written model through DB.Tx
 	txs      []*Tx // transactions opened through the database/sql driver
 	msg      *qmsg
+	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
 }
@@ -294,6 +295,7 @@ func (r *run) execute() (v *violation) {
 		// transactions they left open, before the next run resets the simulated resources.
 		r.cancel()
 		synctest.Wait()
+		r.reap()
 		if rec := recover(); rec != nil {
 			if _, ok := rec.(abortSentinel); !ok {
 				panic(rec)
@@ -476,7 +478,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.nextID), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
-		resume: make(chan struct{}), ev: make(chan procEvent, 1), msg: msg}
+		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg}
 	r.procs = append(r.procs, p)
 	go p.main()
 	return p
@@ -612,6 +614,29 @@ func (r *run) waitOutside() bool {
 	return true
 }
 
+// reap waits for the goroutines of the run's processes to return. A process
+// asleep on a timer when a violation cut the run short would otherwise wake
+// in the next run and act on its simulated resources, attributed to whichever
+// process that run resumed last. Waiting on the bubble's clock lets the
+// timers fire at once; the process then finds its run over and unwinds at its
+// next call into detest. A process blocked on something that never comes,
+// such as a channel nobody sends on, is left behind after reapLimit.
+func (r *run) reap() {
+	limit := time.NewTimer(reapLimit)
+	defer limit.Stop()
+	for _, p := range r.procs {
+		select {
+		case <-p.exited:
+		case <-limit.C:
+			return
+		}
+	}
+}
+
+// reapLimit is on the bubble's clock, which advances only while every
+// goroutine is blocked, so it costs no real time.
+const reapLimit = time.Hour
+
 // outsideWaitLimit bounds how long the scheduler waits for a process parked
 // outside detest when nothing else can run. The bubble's clock is fake, so it
 // only fires when no earlier timer exists.
@@ -715,7 +740,7 @@ func (p *Proc) WaitUntil(t int64) {
 	p.state = stateBlockedTime
 	p.waitAt = t
 	p.r.noteAt(p, "waits until clock %d", t)
-	p.ev <- procEvent{kind: evBlocked}
+	p.send(procEvent{kind: evBlocked})
 	p.wait()
 }
 
@@ -738,15 +763,16 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 func (p *Proc) Context() context.Context { return p.r.ctx }
 
 func (p *Proc) main() {
+	defer close(p.exited)
 	defer func() {
 		if rec := recover(); rec != nil {
 			if _, ok := rec.(abortSentinel); ok {
 				return
 			}
-			p.ev <- procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())}
+			p.send(procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())})
 			return
 		}
-		p.ev <- procEvent{kind: evDone, err: p.err}
+		p.send(procEvent{kind: evDone, err: p.err})
 	}()
 	p.gid = goroutineID()
 	p.r.gidMu.Lock()
@@ -767,8 +793,17 @@ func (p *Proc) yieldf(format string, args ...any) {
 		return // cleanup after the run runs through without scheduling
 	}
 	p.r.noteAt(p, format, args...)
-	p.ev <- procEvent{kind: evYield, op: opHash(format)}
+	p.send(procEvent{kind: evYield, op: opHash(format)})
 	p.wait()
+}
+
+// send reports ev to the scheduler. Once the run is over nobody reads, and a
+// process unwinding then must not block on its full channel.
+func (p *Proc) send(ev procEvent) {
+	select {
+	case p.ev <- ev:
+	case <-p.r.abort:
+	}
 }
 
 func (p *Proc) wait() {
@@ -1002,6 +1037,6 @@ func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
 	p.state = stateBlockedLock
 	p.waitRow = &w
 	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
-	p.ev <- procEvent{kind: evBlocked}
+	p.send(procEvent{kind: evBlocked})
 	p.wait()
 }

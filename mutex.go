@@ -250,7 +250,7 @@ func (p *Proc) blockOnLock(l waitable, what string) {
 	p.state = stateBlockedLock
 	p.waitLock = l
 	p.r.note(p, "waits for %s", what)
-	p.ev <- procEvent{kind: evBlocked}
+	p.send(procEvent{kind: evBlocked})
 	p.wait()
 }
 
