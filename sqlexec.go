@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"sort"
 	"strconv"
@@ -1722,6 +1723,38 @@ var strictFuncs = map[string][]int{
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 }
 
+// roundDecimal is round(x, n) on the decimal x was written as, half away from
+// zero as Postgres's numeric rounds: on the float, f*10^n is off by a
+// little, so round(-81.865, 2) would come out -81.86.
+func roundDecimal(f float64, n int) float64 {
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
+	if !ok {
+		return f
+	}
+	scale := new(big.Rat).SetFrac(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(max(n, -n))), nil), big.NewInt(1))
+	if n >= 0 {
+		r.Mul(r, scale)
+	} else {
+		r.Quo(r, scale)
+	}
+	// Half away from zero: add or subtract 1/2, then truncate.
+	half := big.NewRat(1, 2)
+	if r.Sign() < 0 {
+		r.Sub(r, half)
+	} else {
+		r.Add(r, half)
+	}
+	q := new(big.Int).Quo(r.Num(), r.Denom())
+	r.SetInt(q)
+	if n >= 0 {
+		r.Quo(r, scale)
+	} else {
+		r.Mul(r, scale)
+	}
+	out, _ := r.Float64()
+	return out
+}
+
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	d := func(i int) any {
 		if i < len(args) {
@@ -1860,8 +1893,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !ok {
 			break
 		}
-		scale := math.Pow10(int(places)) // round(x, n), half away from zero as Postgres's numeric
-		return math.Round(f*scale) / scale, nil
+		return roundDecimal(f, int(places)), nil
 	case "power", "pow":
 		a, oka := toFloat(d(0))
 		b, okb := toFloat(d(1))

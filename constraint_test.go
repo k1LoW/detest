@@ -306,7 +306,8 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 			t.Errorf("%s: got %v", q, err)
 		}
 	}
-	for q, want := range map[string]float64{`SELECT round(2.345, 2)`: 2.35, `SELECT round(1.5)`: 2, `SELECT round(-2.345, 1)`: -2.3} {
+	for q, want := range map[string]float64{`SELECT round(2.345, 2)`: 2.35, `SELECT round(1.5)`: 2, `SELECT round(-2.345, 1)`: -2.3,
+		`SELECT round(-81.865, 2)`: -81.87, `SELECT round(1.005, 2)`: 1.01, `SELECT round(1250, -2)`: 1300} {
 		var v float64
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != want {
 			t.Errorf("%s: %v %v, want %v", q, v, err, want)
