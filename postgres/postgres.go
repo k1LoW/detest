@@ -408,8 +408,11 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			col.Default = sequenceDefault(table, d.Colname)
 		case pg.ConstrType_CONSTR_GENERATED:
 			g, err := c.expr(k.RawExpr)
+			// Every refusal of an aggregate (string_agg, FILTER, ORDER BY,
+			// WITHIN GROUP) reads "aggregate ...": Postgres refuses an
+			// aggregate here, not only detest.
 			if u := (*sqlir.ErrUnsupportedSQL)(nil); errors.As(err, &u) && strings.HasPrefix(u.What, "aggregate ") {
-				return col, nil, nil, err // Postgres refuses an aggregate here, not only detest
+				return col, nil, nil, err
 			}
 			if err != nil {
 				g = &sqlir.Const{Value: sqlir.Unknown} // as defaultExpr: the schema still loads
@@ -1306,9 +1309,9 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		case fc.AggFilter != nil:
 			return nil, c.unsupported("aggregate FILTER")
 		case len(fc.AggOrder) > 0:
-			return nil, c.unsupported("ORDER BY in an aggregate")
+			return nil, c.unsupported("aggregate ORDER BY")
 		case fc.AggWithinGroup:
-			return nil, c.unsupported("WITHIN GROUP")
+			return nil, c.unsupported("aggregate WITHIN GROUP")
 		}
 		args, err := c.exprs(fc.Args)
 		if err != nil {
