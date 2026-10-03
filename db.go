@@ -1194,6 +1194,7 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 	}
 	mode := tx.db.updateLock(table, cols)
 	done := map[string]bool{}
+	x := tx.evaluator() // one for the operation, so statement_timestamp() is one time
 	for _, r := range tx.selectNoYield(table, pred) {
 		key, cur, ok, err := tx.lockLatest(table, r.Key(), func(lk lockKey) error { return tx.lockMode(lk, mode) })
 		if err != nil {
@@ -1206,7 +1207,6 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		lk := lockKey{table, key}
 		old := cur.clone()
 		maps.Copy(cur, fields)
-		x := tx.evaluator()
 
 		if err := x.checkRow(table, cur); err != nil {
 			return n, err
