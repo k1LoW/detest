@@ -211,3 +211,26 @@ func TestLockTimeout(t *testing.T) {
 		s.ExpectViolation("a lock wait timed out")
 	})
 }
+
+// An aggregate under an expression the grouped evaluation does not take
+// apart is refused rather than evaluated as a function of one row.
+func TestAggregateUnderUnsupportedExpression(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1)`)
+	for _, q := range []string{
+		`SELECT count(*) IS NULL FROM t`,
+		`SELECT NOT count(*) > 0 FROM t`,
+		`SELECT CASE WHEN count(*) > 0 THEN 1 END FROM t`,
+		`SELECT count(*) IN (1, 2) FROM t`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("count(*) + 1: %d, %v", n, err)
+	}
+}

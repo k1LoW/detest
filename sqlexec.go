@@ -708,7 +708,16 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.Cast:
 		return hasAggregate(v.X)
+	case *sqlir.IsNull:
+		return hasAggregate(v.X)
+	case *sqlir.InExpr:
+		return hasAggregate(v.X) || slices.ContainsFunc(v.List, hasAggregate)
+	case *sqlir.RowExpr:
+		return slices.ContainsFunc(v.Items, hasAggregate)
 	case *sqlir.CaseExpr:
+		if hasAggregate(v.Arg) {
+			return true
+		}
 		for _, w := range v.Whens {
 			if hasAggregate(w.When) || hasAggregate(w.Then) {
 				return true
@@ -786,6 +795,10 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 			return nil, err
 		}
 		return castValue(val, v.Type), nil
+	}
+	if hasAggregate(e) {
+		// eval would take the aggregate for a function of one row.
+		return nil, x.unsupported("an aggregate inside NOT, CASE, IS NULL, IN or a row")
 	}
 	return x.eval(e, g.env)
 }

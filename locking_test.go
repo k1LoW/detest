@@ -99,6 +99,8 @@ func TestForUpdateOverDerivedItems(t *testing.T) {
 		`SELECT * FROM a, LATERAL (SELECT a.id AS x) l FOR UPDATE OF a`,
 		`WITH c AS (SELECT id FROM a) SELECT * FROM c FOR UPDATE OF c`,
 		`SELECT 1 FROM a ORDER BY count(*) FOR UPDATE`,
+		`SELECT row_number() OVER () IS NULL FROM a FOR UPDATE`,
+		`SELECT count(*) IS NULL FROM a FOR UPDATE`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)

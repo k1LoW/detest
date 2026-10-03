@@ -684,6 +684,17 @@ func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 			walk(v.X)
 		case *sqlir.Cast:
 			walk(v.X)
+		case *sqlir.IsNull:
+			walk(v.X)
+		case *sqlir.InExpr:
+			walk(v.X)
+			for _, e := range v.List {
+				walk(e)
+			}
+		case *sqlir.RowExpr:
+			for _, e := range v.Items {
+				walk(e)
+			}
 		case *sqlir.CaseExpr:
 			walk(v.Arg)
 			for _, w := range v.Whens {
