@@ -663,6 +663,9 @@ func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit i
 			if f < 0 {
 				return 0, 0, x.unsupported("a negative OFFSET")
 			}
+			if math.IsNaN(f) || f >= math.MaxInt64 {
+				return 0, 0, x.unsupported("an OFFSET out of the bigint range")
+			}
 			offset = int(f)
 		}
 	}
@@ -674,6 +677,9 @@ func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit i
 		if f, ok := toFloat(derefValue(v)); ok {
 			if f < 0 {
 				return 0, 0, x.unsupported("a negative LIMIT")
+			}
+			if math.IsNaN(f) || f >= math.MaxInt64 {
+				return 0, 0, x.unsupported("a LIMIT out of the bigint range")
 			}
 			limit = int(f)
 		}
