@@ -1806,6 +1806,13 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 	if known && !slices.Contains(arity, len(f.Args)) {
 		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
 	}
+	// round with a scale exists only for numeric; detest keeps no type for
+	// its argument but can see one cast to a float.
+	if f.Name == "round" && len(f.Args) == 2 {
+		if c, ok := f.Args[0].(*sqlir.Cast); ok && (c.Type == "float4" || c.Type == "float8") {
+			return x.unsupported("round of a float with a scale")
+		}
+	}
 	return nil
 }
 
