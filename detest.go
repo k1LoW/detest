@@ -1,9 +1,10 @@
 // Package detest explores every interleaving of Go backend code under a
-// deterministic scheduler. The code under test, real storage layers and
-// handlers or a hand-written model, talks to stores (databases through
-// database/sql, queues, external services, mutexes) whose semantics detest
-// implements, and detest enumerates the schedules, the failure outcomes and the
-// duplicate deliveries, checking user-supplied invariants on each run.
+// deterministic scheduler. Processes running the code under test, real storage
+// layers and handlers or a hand-written model, interact only through simulated
+// resources: databases (through database/sql), queues, mutexes and external
+// services, whose semantics detest implements. Every operation on them is a
+// scheduling point, and detest enumerates the schedules, the failure outcomes
+// and the duplicate deliveries, checking user-supplied invariants on each run.
 //
 // Explore is the only entry point. It runs the declaration function and the
 // exploration inside a testing/synctest bubble.
@@ -23,7 +24,7 @@ import (
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
-// Errors a store operation or an external call can return. Models branch on
+// Errors an operation on a simulated resource can return. Models branch on
 // these the way production code branches on database and RPC errors.
 // The database errors are *SQLError values, which match these with errors.Is.
 var (
@@ -43,30 +44,30 @@ var (
 	ErrSelfWait                  = errors.New("detest: waiting for a lock held by the same process (would hang)")
 )
 
-// Option configures a Model.
-type Option func(*Model)
+// Option configures a Sim.
+type Option func(*Sim)
 
 // Pods sets how many pods the system runs on. It is the default instance count
 // of every process type.
-func Pods(n int) Option { return func(m *Model) { m.pods = n } }
+func Pods(n int) Option { return func(sim *Sim) { sim.pods = n } }
 
 // MaxFailures bounds the external-call failures per run. It is the fairness
 // assumption: the environment eventually cooperates, so a run cannot fail every
 // call forever.
-func MaxFailures(n int) Option { return func(m *Model) { m.maxFailures = n } }
+func MaxFailures(n int) Option { return func(sim *Sim) { sim.maxFailures = n } }
 
 // MaxRedeliveries bounds how many times a queue redelivers a message whose
 // handler returned an error.
-func MaxRedeliveries(n int) Option { return func(m *Model) { m.maxRedeliveries = n } }
+func MaxRedeliveries(n int) Option { return func(sim *Sim) { sim.maxRedeliveries = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per
 // run (CHESS-style). 0 means unbounded.
 func MaxPreemptions(n int) Option {
-	return func(m *Model) { m.maxPreemptions = n; m.boundPreemptions = true }
+	return func(sim *Sim) { sim.maxPreemptions = n; sim.boundPreemptions = true }
 }
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
-func MaxRuns(n int) Option { return func(m *Model) { m.maxRuns = n } }
+func MaxRuns(n int) Option { return func(sim *Sim) { sim.maxRuns = n } }
 
 // defaultShardDepth is how many leading choices pick a schedule's shard.
 const defaultShardDepth = 12
@@ -79,7 +80,7 @@ const defaultShardDepth = 12
 // the shard owning its subtree. DETEST_SHARD=index/total[/depth] sets it from
 // the environment.
 func Shard(index, total, depth int) Option {
-	return func(m *Model) { m.shardIndex, m.shardTotal, m.shardDepth = index, total, depth }
+	return func(sim *Sim) { sim.shardIndex, sim.shardTotal, sim.shardDepth = index, total, depth }
 }
 
 // Workers explores with n workers running in parallel, each in its own
@@ -88,20 +89,21 @@ func Shard(index, total, depth int) Option {
 // calls the declaration function once per worker: state the function shares
 // across runs through captured variables is shared across workers too and
 // needs synchronization. DETEST_WORKERS overrides n.
-func Workers(n int) Option { return func(m *Model) { m.workers = n } }
+func Workers(n int) Option { return func(sim *Sim) { sim.workers = n } }
 
 // Verbose prints every run's trace.
-func Verbose() Option { return func(m *Model) { m.verbose = true } }
+func Verbose() Option { return func(sim *Sim) { sim.verbose = true } }
 
 // ObserveSQL calls fn for every SQL statement the database/sql driver
 // receives, with the error detest produced for it (nil when executed). Use it
 // to measure which statements of a storage layer detest can execute.
 func ObserveSQL(fn func(query string, err error)) Option {
-	return func(m *Model) { m.sqlObserver = fn }
+	return func(sim *Sim) { sim.sqlObserver = fn }
 }
 
-// Model holds stores, process types, seeds and invariants.
-type Model struct {
+// Sim is the simulated world of one run: its simulated resources, process
+// types, seeds and invariants.
+type Sim struct {
 	t                *testing.T
 	pods             int
 	maxFailures      int
@@ -135,16 +137,16 @@ type Model struct {
 	run *run // current run
 }
 
-func newModelDefaults() *Model {
-	return &Model{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000}
+func newSimDefaults() *Sim {
+	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000}
 }
 
-func newModel(t *testing.T, opts ...Option) *Model {
+func newSim(t *testing.T, opts ...Option) *Sim {
 	t.Helper()
-	m := newModelDefaults()
-	m.t = t
+	sim := newSimDefaults()
+	sim.t = t
 	for _, o := range opts {
-		o(m)
+		o(sim)
 	}
 	if s := os.Getenv("DETEST_SHARD"); s != "" {
 		var idx, total, depth int
@@ -152,40 +154,44 @@ func newModel(t *testing.T, opts ...Option) *Model {
 		if n, _ := fmt.Sscanf(s, "%d/%d/%d", &idx, &total, &depth); n < 2 {
 			t.Fatalf("detest: bad DETEST_SHARD %q, want index/total[/depth]", s)
 		}
-		m.shardIndex, m.shardTotal, m.shardDepth = idx, total, depth
+		sim.shardIndex, sim.shardTotal, sim.shardDepth = idx, total, depth
 	}
-	return m
+	return sim
 }
 
 // declare panics when a declaration method is called after the declaration
 // function returned: the exploration has started and would ignore it.
-func (m *Model) declare(what string) {
-	if m.frozen {
-		panic(fmt.Sprintf("detest: Model.%s called after the declaration function returned", what))
+func (sim *Sim) declare(what string) {
+	if sim.frozen {
+		panic(fmt.Sprintf("detest: Sim.%s called after the declaration function returned", what))
 	}
 }
 
-// Seed registers a function that populates stores at the start of every run.
-func (m *Model) Seed(fn func()) { m.declare("Seed"); m.seeds = append(m.seeds, fn) }
+// Seed registers a function that populates simulated resources at the start
+// of every run.
+func (sim *Sim) Seed(fn func()) { sim.declare("Seed"); sim.seeds = append(sim.seeds, fn) }
 
 // Always registers an invariant checked after every commit and every process
 // completion. s.Prev() is the state at the previous check.
-func (m *Model) Always(fn func(s *State) error) { m.declare("Always"); m.always = append(m.always, fn) }
+func (sim *Sim) Always(fn func(s *State) error) {
+	sim.declare("Always")
+	sim.always = append(sim.always, fn)
+}
 
 // AtQuiescence registers an invariant checked when a run ends: every process
 // finished, every queue drained, every loop and manual budget spent.
-func (m *Model) AtQuiescence(fn func(s *State) error) {
-	m.declare("AtQuiescence")
-	m.atQuiesce = append(m.atQuiesce, fn)
+func (sim *Sim) AtQuiescence(fn func(s *State) error) {
+	sim.declare("AtQuiescence")
+	sim.atQuiesce = append(sim.atQuiesce, fn)
 }
 
 // ExpectViolation declares that the exploration must find a violation whose
 // message contains substr. Explore then fails the test when it finds none or a
 // different one. Use it to pin a known bug, such as the code before a fix.
-func (m *Model) ExpectViolation(substr string) { m.declare("ExpectViolation"); m.expect = &substr }
+func (sim *Sim) ExpectViolation(substr string) { sim.declare("ExpectViolation"); sim.expect = &substr }
 
-// Now returns the model clock of the current run.
-func (m *Model) Now() int64 { return m.run.clock }
+// Now returns the simulated clock of the current run.
+func (sim *Sim) Now() int64 { return sim.run.clock }
 
 // result is the outcome of an exploration.
 type result struct {
@@ -235,46 +241,46 @@ func (r *result) report() string {
 
 // check runs the exhaustive exploration. DETEST_SCHEDULE replays one schedule
 // instead.
-func (m *Model) check() *result {
+func (sim *Sim) check() *result {
 	start := time.Now()
 	if s := os.Getenv("DETEST_SCHEDULE"); s != "" {
 		var prefix []choice
 		for _, f := range strings.Split(s, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil {
-				m.t.Fatalf("detest: bad DETEST_SCHEDULE: %v", err)
+				sim.t.Fatalf("detest: bad DETEST_SCHEDULE: %v", err)
 			}
 			prefix = append(prefix, choice{picked: v, replay: true})
 		}
-		r := m.newRun(prefix)
+		r := sim.newRun(prefix)
 		r.tracing = true
 		v := r.execute()
 		fmt.Fprintf(os.Stderr, "--- replay\n%s\n", r.traceString())
 		if v != nil && v.kind == "fatal" {
 			return &result{Runs: 1, Fatal: v.err}
 		}
-		return m.makeResult(r, v, 1, len(r.choices), true, start)
+		return sim.makeResult(r, v, 1, len(r.choices), true, start)
 	}
-	f := m.frontier
+	f := sim.frontier
 	if f == nil {
 		// A lone exploration, as the package's own tests start one; Explore
 		// always passes the frontier it saves and resumes.
-		f = newFrontier(1, m.maxRuns)
-		m.frontier = f
-		return f.merge([]*result{m.checkShared(f, 0)}, 1)
+		f = newFrontier(1, sim.maxRuns)
+		sim.frontier = f
+		return f.merge([]*result{sim.checkShared(f, 0)}, 1)
 	}
-	return m.checkShared(f, m.worker)
+	return sim.checkShared(f, sim.worker)
 }
 
-func (m *Model) printRun(n int, r *run) {
+func (sim *Sim) printRun(n int, r *run) {
 	fmt.Fprintf(os.Stderr, "--- run %d\n%s\n", n, r.traceString())
 }
 
 // retrace runs a violating schedule again with the trace kept, which exploring
 // runs skip. The run is deterministic, so it violates again; if it does not,
 // the original violation is reported with the code's nondeterminism noted.
-func (m *Model) retrace(r *run, v *violation) (*run, *violation) {
-	rr := m.newRun(append([]choice(nil), r.choices...))
+func (sim *Sim) retrace(r *run, v *violation) (*run, *violation) {
+	rr := sim.newRun(append([]choice(nil), r.choices...))
 	rr.tracing = true
 	if rv := rr.execute(); rv != nil {
 		return rr, rv
@@ -285,18 +291,18 @@ func (m *Model) retrace(r *run, v *violation) (*run, *violation) {
 
 // ownsPrefix reports whether the subtree under the first shardDepth choices
 // belongs to this shard.
-func (m *Model) ownsPrefix(prefix []choice) bool {
+func (sim *Sim) ownsPrefix(prefix []choice) bool {
 	// FNV-1a over the picks, which like the shard count are small and
 	// non-negative, so the conversions cannot overflow.
 	h := uint32(2166136261)
-	for _, c := range prefix[:m.shardDepth] {
+	for _, c := range prefix[:sim.shardDepth] {
 		h ^= uint32(c.picked) //nolint:gosec
 		h *= 16777619
 	}
-	return int(h%uint32(m.shardTotal)) == m.shardIndex //nolint:gosec
+	return int(h%uint32(sim.shardTotal)) == sim.shardIndex //nolint:gosec
 }
 
-func (m *Model) makeResult(r *run, v *violation, runs, depth int, complete bool, start time.Time) *result {
+func (sim *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, start time.Time) *result {
 	var sched []string
 	for _, c := range r.choices {
 		sched = append(sched, strconv.Itoa(c.picked))

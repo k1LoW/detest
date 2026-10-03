@@ -48,7 +48,7 @@ func (q *qmsg) String() string {
 // Queue is an at-least-once, unordered message queue.
 type Queue struct {
 	name      string
-	m         *Model
+	sim       *Sim
 	msgs      []*qmsg
 	nextID    int
 	dupBudget int
@@ -62,14 +62,14 @@ type QueueOption func(*Queue)
 // Duplicates lets the explorer deliver up to n messages twice per run.
 func Duplicates(n int) QueueOption { return func(q *Queue) { q.dups = n } }
 
-// Queue registers a queue store.
-func (m *Model) Queue(name string, opts ...QueueOption) *Queue {
-	m.declare("Queue")
-	q := &Queue{name: name, m: m}
+// Queue registers a simulated queue.
+func (sim *Sim) Queue(name string, opts ...QueueOption) *Queue {
+	sim.declare("Queue")
+	q := &Queue{name: name, sim: sim}
 	for _, o := range opts {
 		o(q)
 	}
-	m.queues = append(m.queues, q)
+	sim.queues = append(sim.queues, q)
 	return q
 }
 
@@ -83,9 +83,9 @@ func (q *Queue) reset() {
 func (q *Queue) Name() string { return q.name }
 
 func (q *Queue) push(msg Msg) {
-	if q.m.run != nil {
-		q.m.run.version++
-		q.m.run.queuesTouched = true
+	if q.sim.run != nil {
+		q.sim.run.version++
+		q.sim.run.queuesTouched = true
 	}
 	q.nextID++
 	q.msgs = append(q.msgs, &qmsg{id: q.nextID, msg: msg})

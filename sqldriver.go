@@ -35,7 +35,7 @@ func (c *sqlConnector) Driver() driver.Driver { return sqlDriver{} }
 type sqlDriver struct{}
 
 func (sqlDriver) Open(string) (driver.Conn, error) {
-	return nil, fmt.Errorf("detest: use Model.OpenSQL")
+	return nil, fmt.Errorf("detest: use Sim.DB")
 }
 
 // sqlConn is a connection. It holds the open detest transaction, if any.
@@ -58,7 +58,7 @@ func (c *sqlConn) Ping(context.Context) error {
 // current returns the process issuing statements on this connection. Outside
 // a run (seeding) or outside any process, statements run directly on the
 // committed state without yielding.
-func (c *sqlConn) current() *Proc { return c.db.m.Current() }
+func (c *sqlConn) current() *Proc { return c.db.sim.Current() }
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	if c.tx != nil {
@@ -162,15 +162,15 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)
 	if err != nil {
-		if c.db.m.sqlObserver != nil {
-			c.db.m.sqlObserver(query, err)
+		if c.db.sim.sqlObserver != nil {
+			c.db.sim.sqlObserver(query, err)
 		}
 		return nil, 0, err
 	}
 	tx, auto := c.statementTx()
 	res, err := stmt.exec(tx, args)
-	if c.db.m.sqlObserver != nil {
-		c.db.m.sqlObserver(query, err)
+	if c.db.sim.sqlObserver != nil {
+		c.db.sim.sqlObserver(query, err)
 	}
 	if auto {
 		if err != nil || tx.aborted {

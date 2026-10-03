@@ -64,8 +64,8 @@ func TestFromPostgres(t *testing.T) {
 		t.Errorf("Tables(users):\n%s", only)
 	}
 
-	detest.Explore(t, func(t *testing.T, m *detest.Model) {
-		db, _ := m.DB("app", postgres.New())
+	detest.Explore(t, func(t *testing.T, sim *detest.Sim) {
+		db, _ := sim.DB("app", postgres.New())
 		exec := func(q string, args ...any) error {
 			_, err := db.Exec(q, args...)
 			return err

@@ -16,10 +16,10 @@ import (
 // detest, and the lost update the exploration would otherwise find does not
 // appear.
 func TestInjectedMutexHeldAcrossYieldPoint(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		db, store := m.DB("app", postgres.New())
-		mu := m.Mutex("counter")
-		m.Seed(func() {
+	Explore(t, func(t *testing.T, sim *Sim) {
+		db, store := sim.DB("app", postgres.New())
+		mu := sim.Mutex("counter")
+		sim.Seed(func() {
 			_, _ = db.Exec(`INSERT INTO "counters" ("id","n") VALUES ($1,$2)`, "c", int64(0))
 		})
 		handler := func(p *Proc) error {
@@ -32,9 +32,9 @@ func TestInjectedMutexHeldAcrossYieldPoint(t *testing.T) {
 			_, err := db.Exec(`UPDATE "counters" SET "n"=$1 WHERE "id" = $2`, n+1, "c")
 			return err
 		}
-		m.Manual("req_a", 1, handler)
-		m.Manual("req_b", 1, handler)
-		m.AtQuiescence(func(s *State) error {
+		sim.Manual("req_a", 1, handler)
+		sim.Manual("req_b", 1, handler)
+		sim.AtQuiescence(func(s *State) error {
 			row, _ := s.Row(store, "counters", "c")
 			if row.Int64("n") != 2 {
 				return fmt.Errorf("lost update: n = %d", row.Int64("n"))
@@ -53,10 +53,10 @@ func TestUninjectedMutexStalls(t *testing.T) {
 		// Compiling the SQL parser takes seconds under -race; keep it out of
 		// the one second the watchdog is given here.
 		_ = CheckSQL(postgres.New(), `SELECT 1`)
-		Explore(t, func(t *testing.T, m *Model) {
-			db, _ := m.DB("app", postgres.New())
+		Explore(t, func(t *testing.T, sim *Sim) {
+			db, _ := sim.DB("app", postgres.New())
 			var mu sync.Mutex
-			m.Seed(func() {
+			sim.Seed(func() {
 				_, _ = db.Exec(`INSERT INTO "counters" ("id","n") VALUES ($1,$2)`, "c", int64(0))
 			})
 			handler := func(p *Proc) error {
@@ -65,8 +65,8 @@ func TestUninjectedMutexStalls(t *testing.T) {
 				_, err := db.Exec(`UPDATE "counters" SET "n"=$1 WHERE "id" = $2`, int64(1), "c")
 				return err
 			}
-			m.Manual("req_a", 1, handler)
-			m.Manual("req_b", 1, handler)
+			sim.Manual("req_a", 1, handler)
+			sim.Manual("req_b", 1, handler)
 		})
 		return
 	}
@@ -101,19 +101,19 @@ func TestInjectedMutexAndRowLockInOppositeOrder(t *testing.T) {
 			if tc.schedule != "" {
 				t.Setenv("DETEST_SCHEDULE", tc.schedule)
 			}
-			Explore(t, func(t *testing.T, m *Model) {
-				db, _ := m.DB("app", postgres.New())
-				mu := m.Mutex("cache")
-				m.Seed(func() {
+			Explore(t, func(t *testing.T, sim *Sim) {
+				db, _ := sim.DB("app", postgres.New())
+				mu := sim.Mutex("cache")
+				sim.Seed(func() {
 					_, _ = db.Exec(`INSERT INTO "jobs" ("id","status") VALUES ($1,$2)`, "j1", "RUNNING")
 				})
-				m.Manual("mutex_first", 1, func(p *Proc) error {
+				sim.Manual("mutex_first", 1, func(p *Proc) error {
 					mu.Lock()
 					defer mu.Unlock()
 					_, err := db.Exec(`UPDATE "jobs" SET "status"=$1 WHERE "id" = $2`, "CANCELED", "j1")
 					return err
 				})
-				m.Manual("row_first", 1, func(p *Proc) error {
+				sim.Manual("row_first", 1, func(p *Proc) error {
 					tx, err := db.BeginTx(p.Context(), nil)
 					if err != nil {
 						return err
@@ -126,21 +126,21 @@ func TestInjectedMutexAndRowLockInOppositeOrder(t *testing.T) {
 					mu.Unlock() //nolint:staticcheck // waiting for the mutex is the point
 					return tx.Commit()
 				})
-				m.ExpectViolation(tc.want)
+				sim.ExpectViolation(tc.want)
 			})
 		})
 	}
 }
 
 func TestInjectedMutexLockedTwice(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		mu := m.Mutex("m")
-		m.Manual("relock", 1, func(p *Proc) error {
+	Explore(t, func(t *testing.T, sim *Sim) {
+		mu := sim.Mutex("m")
+		sim.Manual("relock", 1, func(p *Proc) error {
 			mu.Lock()
 			mu.Lock()
 			return nil
 		})
-		m.ExpectViolation("held by relock")
+		sim.ExpectViolation("held by relock")
 	})
 }
 
@@ -148,11 +148,11 @@ func TestInjectedMutexLockedTwice(t *testing.T) {
 // it under the write lock. The readers never see the row change in between,
 // and holding the read lock together does not block them.
 func TestInjectedRWMutexExcludesWriter(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		db, _ := m.DB("app", postgres.New())
-		rw := m.RWMutex("counter")
+	Explore(t, func(t *testing.T, sim *Sim) {
+		db, _ := sim.DB("app", postgres.New())
+		rw := sim.RWMutex("counter")
 		var torn []string
-		m.Seed(func() {
+		sim.Seed(func() {
 			torn = nil
 			_, _ = db.Exec(`INSERT INTO "counters" ("id","n") VALUES ($1,$2)`, "c", int64(0))
 		})
@@ -177,15 +177,15 @@ func TestInjectedRWMutexExcludesWriter(t *testing.T) {
 			}
 			return nil
 		}
-		m.Manual("reader_a", 1, reader)
-		m.Manual("reader_b", 1, reader)
-		m.Manual("writer", 1, func(p *Proc) error {
+		sim.Manual("reader_a", 1, reader)
+		sim.Manual("reader_b", 1, reader)
+		sim.Manual("writer", 1, func(p *Proc) error {
 			rw.Lock()
 			defer rw.Unlock()
 			_, err := db.Exec(`UPDATE "counters" SET "n"=$1 WHERE "id" = $2`, int64(1), "c")
 			return err
 		})
-		m.AtQuiescence(func(s *State) error {
+		sim.AtQuiescence(func(s *State) error {
 			if len(torn) > 0 {
 				return fmt.Errorf("torn read: %s", strings.Join(torn, ", "))
 			}
@@ -198,9 +198,9 @@ func TestInjectedRWMutexExcludesWriter(t *testing.T) {
 // As with sync.RWMutex, the waiting writer keeps the second RLock out, and the
 // writer waits for the first one: a deadlock.
 func TestInjectedRWMutexRecursiveReadLock(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		rw := m.RWMutex("cache")
-		m.Manual("reader", 1, func(p *Proc) error {
+	Explore(t, func(t *testing.T, sim *Sim) {
+		rw := sim.RWMutex("cache")
+		sim.Manual("reader", 1, func(p *Proc) error {
 			rw.RLock()
 			defer rw.RUnlock()
 			p.Step("calls a helper that takes the read lock again")
@@ -208,24 +208,24 @@ func TestInjectedRWMutexRecursiveReadLock(t *testing.T) {
 			defer rw.RUnlock()
 			return nil
 		})
-		m.Manual("writer", 1, func(p *Proc) error {
+		sim.Manual("writer", 1, func(p *Proc) error {
 			rw.Lock()
 			defer rw.Unlock()
 			return nil
 		})
-		m.ExpectViolation("held by a waiting writer")
+		sim.ExpectViolation("held by a waiting writer")
 	})
 }
 
 func TestInjectedRWMutexUpgrade(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		rw := m.RWMutex("m")
-		m.Manual("upgrade", 1, func(p *Proc) error {
+	Explore(t, func(t *testing.T, sim *Sim) {
+		rw := sim.RWMutex("m")
+		sim.Manual("upgrade", 1, func(p *Proc) error {
 			rw.RLock()
 			rw.Lock()
 			return nil
 		})
-		m.ExpectViolation("cycle of waits")
+		sim.ExpectViolation("cycle of waits")
 	})
 }
 

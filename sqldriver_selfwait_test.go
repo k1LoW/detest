@@ -21,10 +21,10 @@ func TestSQLDriverRPCInsideTransactionSharedDB(t *testing.T) {
 			name = "callee writes the same row"
 		}
 		t.Run(name, func(t *testing.T) {
-			Explore(t, func(t *testing.T, m *Model) {
-				orderDB, db := m.DB("shared", postgres.New()) // order service's handle
-				invDB := db.Open()                            // inventory service's handle, same database
-				m.Seed(func() {
+			Explore(t, func(t *testing.T, sim *Sim) {
+				orderDB, db := sim.DB("shared", postgres.New()) // order service's handle
+				invDB := db.Open()                              // inventory service's handle, same database
+				sim.Seed(func() {
 					_, _ = orderDB.Exec(`INSERT INTO "orders" ("id","status") VALUES ($1,$2)`, "o1", "PENDING")
 					_, _ = orderDB.Exec(`INSERT INTO "orders" ("id","status") VALUES ($1,$2)`, "o2", "PENDING")
 				})
@@ -43,7 +43,7 @@ func TestSQLDriverRPCInsideTransactionSharedDB(t *testing.T) {
 					}
 					return tx.Commit()
 				}
-				m.Manual("order_handler", 1, func(p *Proc) error {
+				sim.Manual("order_handler", 1, func(p *Proc) error {
 					ctx := p.Context()
 					tx, err := orderDB.BeginTx(ctx, nil)
 					if err != nil {
@@ -61,7 +61,7 @@ func TestSQLDriverRPCInsideTransactionSharedDB(t *testing.T) {
 					return tx.Commit()
 				})
 				if sameRow {
-					m.ExpectViolation("own open transaction")
+					sim.ExpectViolation("own open transaction")
 				}
 			})
 		})

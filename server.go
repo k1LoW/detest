@@ -23,7 +23,7 @@ const (
 	Serializable   = sqlir.Serializable
 )
 
-// SQLError is a database error the store raises: a unique violation, a
+// SQLError is a database error the simulated database raises: a unique violation, a
 // deadlock and so on, with the server's SQLSTATE and the table, column and
 // constraint involved. The server's Errors option converts it into the error
 // type of the production code's driver.

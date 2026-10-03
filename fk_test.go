@@ -9,8 +9,8 @@ import (
 )
 
 func TestForeignKeys(t *testing.T) {
-	m := newModel(t)
-	db, store := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, store := sim.DB("app", postgres.New())
 	mustExec(t, db, `
 CREATE TABLE orgs (id text PRIMARY KEY, name text);
 CREATE TABLE teams (id text PRIMARY KEY, org_id text NOT NULL REFERENCES orgs (id) ON DELETE CASCADE);
@@ -53,14 +53,14 @@ INSERT INTO audits (id, org_id) VALUES ('a1', 'o2');
 // A child inserted while its parent is deleted: the insert's FOR KEY SHARE on
 // the parent makes the delete wait, so no schedule leaves an orphan.
 func TestForeignKeyConcurrentDelete(t *testing.T) {
-	Explore(t, func(t *testing.T, m *Model) {
-		db, store := m.DB("app", postgres.New())
+	Explore(t, func(t *testing.T, sim *Sim) {
+		db, store := sim.DB("app", postgres.New())
 		mustExec(t, db, `
 CREATE TABLE orgs (id text PRIMARY KEY);
 CREATE TABLE teams (id text PRIMARY KEY, org_id text NOT NULL REFERENCES orgs (id));
 `)
-		m.Seed(func() { mustExec(t, db, `INSERT INTO orgs (id) VALUES ('o1')`) })
-		m.Manual("add_team", 1, func(p *Proc) error {
+		sim.Seed(func() { mustExec(t, db, `INSERT INTO orgs (id) VALUES ('o1')`) })
+		sim.Manual("add_team", 1, func(p *Proc) error {
 			tx, err := db.BeginTx(p.Context(), nil)
 			if err != nil {
 				return err
@@ -72,14 +72,14 @@ CREATE TABLE teams (id text PRIMARY KEY, org_id text NOT NULL REFERENCES orgs (i
 			p.Step("does more work in the transaction")
 			return tx.Commit()
 		})
-		m.Manual("delete_org", 1, func(p *Proc) error {
+		sim.Manual("delete_org", 1, func(p *Proc) error {
 			_, err := db.ExecContext(p.Context(), `DELETE FROM orgs WHERE id = 'o1'`)
 			if errors.Is(err, ErrForeignKeyViolation) {
 				return nil // the team was added first
 			}
 			return err
 		})
-		m.AtQuiescence(func(s *State) error {
+		sim.AtQuiescence(func(s *State) error {
 			orgs, teams := len(s.Rows(store, "orgs")), len(s.Rows(store, "teams"))
 			if teams > 0 && orgs == 0 {
 				return fmt.Errorf("orphan team")

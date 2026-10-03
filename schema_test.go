@@ -19,8 +19,8 @@ func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
 }
 
 func TestSchemaKeysAndUniques(t *testing.T) {
-	m := newModel(t)
-	db, store := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, store := sim.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE memberships (tenant_id text, user_id text, role text, PRIMARY KEY (tenant_id, user_id))`)
 	mustExec(t, db, `CREATE TABLE users (id serial PRIMARY KEY, email text UNIQUE, name text)`)
 	mustExec(t, db, `CREATE UNIQUE INDEX users_lower_name ON users (lower(name)) WHERE name IS NOT NULL`)
@@ -77,8 +77,8 @@ func TestSchemaKeysAndUniques(t *testing.T) {
 }
 
 func TestSchemaOnConflict(t *testing.T) {
-	m := newModel(t)
-	db, store := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, store := sim.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE users (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, email text NOT NULL, visits int DEFAULT 0)`)
 	mustExec(t, db, `ALTER TABLE ONLY users ADD CONSTRAINT users_email_key UNIQUE (email)`)
 	upsert := `INSERT INTO users (email, visits) VALUES ($1, 1) ON CONFLICT (email) DO UPDATE SET visits = users.visits + 1`
@@ -101,8 +101,8 @@ func TestSchemaOnConflict(t *testing.T) {
 func TestSchemaConcurrentInsertsOfOneUniqueValue(t *testing.T) {
 	for _, onConflict := range []bool{true, false} {
 		t.Run(fmt.Sprintf("on_conflict=%v", onConflict), func(t *testing.T) {
-			Explore(t, func(t *testing.T, m *Model) {
-				db, store := m.DB("app", postgres.New())
+			Explore(t, func(t *testing.T, sim *Sim) {
+				db, store := sim.DB("app", postgres.New())
 				mustExec(t, db, `CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE)`)
 				q := `INSERT INTO users (id, email) VALUES ($1, $2)`
 				if onConflict {
@@ -125,9 +125,9 @@ func TestSchemaConcurrentInsertsOfOneUniqueValue(t *testing.T) {
 						return tx.Commit()
 					}
 				}
-				m.Manual("signup_a", 1, signup("u1"))
-				m.Manual("signup_b", 1, signup("u2"))
-				m.AtQuiescence(func(s *State) error {
+				sim.Manual("signup_a", 1, signup("u1"))
+				sim.Manual("signup_b", 1, signup("u2"))
+				sim.AtQuiescence(func(s *State) error {
 					if n := len(s.Rows(store, "users")); n != 1 {
 						return fmt.Errorf("%d users with one email", n)
 					}
@@ -140,8 +140,8 @@ func TestSchemaConcurrentInsertsOfOneUniqueValue(t *testing.T) {
 
 // A schema dump carries statements detest does not need; they run as no-ops.
 func TestSchemaDump(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	mustExec(t, db, `
 SET statement_timeout = 0;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -179,8 +179,8 @@ GRANT SELECT ON TABLE public.orders TO reader;
 }
 
 func TestSchemaSearchPath(t *testing.T) {
-	m := newModel(t)
-	db, store := m.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
+	sim := newSim(t)
+	db, store := sim.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
 	mustExec(t, db, `CREATE TABLE public.invoices (id text PRIMARY KEY, total int)`)
 	mustExec(t, db, `CREATE TABLE billing.invoices (id text PRIMARY KEY, total int)`)
 	mustExec(t, db, `INSERT INTO invoices (id, total) VALUES ('i1', 10)`)        // billing, first on the path
@@ -206,8 +206,8 @@ func TestSchemaSearchPath(t *testing.T) {
 // Migrations evolve a schema: views, renames, dropped constraints, indexes
 // and columns, all of which must leave detest's definitions as Postgres's.
 func TestSchemaEvolution(t *testing.T) {
-	m := newModel(t)
-	db, store := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, store := sim.DB("app", postgres.New())
 	mustExec(t, db, `
 CREATE TABLE exports (id text PRIMARY KEY, workspace_id text, name text, legacy text, CONSTRAINT exports_ws_name_key UNIQUE (workspace_id, name));
 CREATE UNIQUE INDEX exports_legacy_idx ON exports (legacy);
@@ -241,8 +241,8 @@ ALTER TABLE exporters DROP COLUMN legacy;
 
 // A function in FROM is lateral: it sees the row it joins to.
 func TestLateralFunction(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE policies (id text PRIMARY KEY, slots int)`)
 	mustExec(t, db, `INSERT INTO policies (id, slots) VALUES ('p1', 2), ('p2', 0), ('p3', 1)`)
 	got := rowsOf(t, db, `SELECT p.id, gs - 1 FROM policies p CROSS JOIN LATERAL generate_series(1, p.slots) AS gs ORDER BY p.id, gs`)
@@ -252,8 +252,8 @@ func TestLateralFunction(t *testing.T) {
 }
 
 func TestColumnTypes(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE counters (id uuid PRIMARY KEY, small smallint, n integer, big bigint)`)
 	const id = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 	mustExec(t, db, `INSERT INTO counters (id, small, n, big) VALUES ($1, 1, 1, 9223372036854775806)`, id)

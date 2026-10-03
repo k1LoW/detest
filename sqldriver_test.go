@@ -15,10 +15,10 @@ import (
 func TestSQLDriverLostUpdate(t *testing.T) {
 	for _, cas := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cas=%v", cas), func(t *testing.T) {
-			Explore(t, func(t *testing.T, m *Model) {
-				sqlDB, db := m.DB("app", postgres.New())
+			Explore(t, func(t *testing.T, sim *Sim) {
+				sqlDB, db := sim.DB("app", postgres.New())
 				commits := 0
-				m.Seed(func() {
+				sim.Seed(func() {
 					commits = 0
 					if _, err := sqlDB.Exec(`INSERT INTO "accounts" ("id","balance") VALUES ($1,$2)`, "a", int64(100)); err != nil {
 						t.Fatal(err)
@@ -57,9 +57,9 @@ func TestSQLDriverLostUpdate(t *testing.T) {
 					commits++
 					return nil
 				}
-				m.Manual("withdraw_a", 1, withdraw)
-				m.Manual("withdraw_b", 1, withdraw)
-				m.AtQuiescence(func(s *State) error {
+				sim.Manual("withdraw_a", 1, withdraw)
+				sim.Manual("withdraw_b", 1, withdraw)
+				sim.AtQuiescence(func(s *State) error {
 					row, _ := s.Row(db, "accounts", "a")
 					if b := row.Int64("balance"); b != 100-30*int64(commits) {
 						return fmt.Errorf("lost update: balance %d after %d committed withdrawals", b, commits)
@@ -67,7 +67,7 @@ func TestSQLDriverLostUpdate(t *testing.T) {
 					return nil
 				})
 				if !cas {
-					m.ExpectViolation("lost update")
+					sim.ExpectViolation("lost update")
 				}
 			})
 		})

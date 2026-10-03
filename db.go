@@ -100,11 +100,11 @@ func (r Row) String() string {
 
 type lockKey struct{ table, key string }
 
-// DB is a database store with row-level locks and Read Committed visibility.
+// DB is a simulated database with row-level locks and Read Committed visibility.
 type DB struct {
 	name      string
 	kind      Server
-	m         *Model
+	sim       *Sim
 	committed map[string]map[string]Row
 	locks     map[lockKey]rowLock
 	touched   map[string]bool // tables committed to since the run's last snapshot
@@ -560,27 +560,27 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 }
 
 // DB declares a database on a server of kind s, such as postgres.New(), and
-// returns a database/sql handle on it with the store itself. Production storage code (GORM, sqlx, sqlc,
+// returns a database/sql handle on it with the database itself. Production storage code (GORM, sqlx, sqlc,
 // database/sql) runs unchanged on the handle: every statement is a yield
 // point, and transactions map to detest transactions of the process issuing
-// them. A hand-written model uses the store's Tx API instead and can ignore
+// them. A hand-written model uses the database's Tx API instead and can ignore
 // the handle. Explore closes the handle after the exploration; closing it in
 // the declaration function would close it before any run.
-func (m *Model) DB(name string, s Server) (*sql.DB, *DB) {
-	m.declare("DB")
+func (sim *Sim) DB(name string, s Server) (*sql.DB, *DB) {
+	sim.declare("DB")
 	if s.Parser() == nil {
-		m.t.Fatal("detest: DB needs a server, such as postgres.New()")
+		sim.t.Fatal("detest: DB needs a server, such as postgres.New()")
 	}
 	if err := s.Check(s.Isolation()); err != nil {
-		m.t.Fatal(err)
+		sim.t.Fatal(err)
 	}
-	db := &DB{name: name, kind: s, m: m}
+	db := &DB{name: name, kind: s, sim: sim}
 	db.reset()
-	m.dbs = append(m.dbs, db)
+	sim.dbs = append(sim.dbs, db)
 	return db.Open(), db
 }
 
-// Name returns the store name.
+// Name returns the database name.
 func (db *DB) Name() string { return db.name }
 
 func (db *DB) reset() {
@@ -1075,7 +1075,7 @@ func (tx *Tx) rollback() { tx.release() }
 func (tx *Tx) release() {
 	tx.closed = true
 	if tx.p != nil && tx.p.r.over() {
-		// The run ended and the next one resets the stores. Releasing here
+		// The run ended and the next one resets the simulated resources. Releasing here
 		// would race with the other cleanups running while the processes unwind.
 		return
 	}
@@ -1083,16 +1083,16 @@ func (tx *Tx) release() {
 }
 
 // Peek returns the committed rows of a table without yielding. It is for fakes
-// that need to observe another store's state (for example a fake runtime that
+// that need to observe another database's state (for example a fake runtime that
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
 func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 
-// Open returns another database/sql handle on the store, a pool of its own,
+// Open returns another database/sql handle on the database, a pool of its own,
 // for a second service that shares the database.
 func (db *DB) Open() *sql.DB {
 	sqlDB := sql.OpenDB(&sqlConnector{db: db})
-	db.m.sqlDBs = append(db.m.sqlDBs, sqlDB)
+	db.sim.sqlDBs = append(db.sim.sqlDBs, sqlDB)
 	return sqlDB
 }
 

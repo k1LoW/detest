@@ -12,8 +12,8 @@ import (
 // The statements below run outside any process (no run, no yields), which
 // exercises the executor directly through database/sql.
 func TestSQLExecutorFeatures(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	exec := func(q string, args ...any) sql.Result {
 		t.Helper()
 		res, err := db.Exec(q, args...)

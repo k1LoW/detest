@@ -1,7 +1,7 @@
 // Package pqerr makes detest's database errors look like lib/pq's, for code
 // under test that branches on *pq.Error:
 //
-//	db, store := m.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))
+//	db, store := sim.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))
 package pqerr
 
 import (

@@ -163,14 +163,14 @@ func precedes(a, b []int) bool {
 // children returns the subtrees below prefix that the run with choices c did
 // not enter: at every choice the run made past the prefix, the alternatives it
 // did not pick. They are ordered so that the stack yields the deepest first.
-func (m *Model) children(c []choice, prefix int) [][]choice {
+func (sim *Sim) children(c []choice, prefix int) [][]choice {
 	var out [][]choice
 	for j := prefix; j < len(c); j++ {
 		for v := c[j].n - 1; v > c[j].picked; v-- {
 			p := make([]choice, j+1)
 			copy(p, c[:j])
 			p[j] = choice{label: c[j].label, n: c[j].n, picked: v}
-			if m.shardTotal > 1 && len(p) >= m.shardDepth && !m.ownsPrefix(p) {
+			if sim.shardTotal > 1 && len(p) >= sim.shardDepth && !sim.ownsPrefix(p) {
 				continue // another machine's subtree
 			}
 			out = append(out, p)
@@ -180,7 +180,7 @@ func (m *Model) children(c []choice, prefix int) [][]choice {
 }
 
 // checkShared is check for one of several workers sharing f.
-func (m *Model) checkShared(f *frontier, worker int) *result {
+func (sim *Sim) checkShared(f *frontier, worker int) *result {
 	start := time.Now()
 	runs, maxDepth := 0, 0
 	for {
@@ -189,12 +189,12 @@ func (m *Model) checkShared(f *frontier, worker int) *result {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		runs++
-		r := m.newRun(prefix)
-		r.tracing = m.verbose
+		r := sim.newRun(prefix)
+		r.tracing = sim.verbose
 		v := r.execute()
 		maxDepth = max(maxDepth, len(r.choices))
-		if m.verbose {
-			m.printRun(runs, r)
+		if sim.verbose {
+			sim.printRun(runs, r)
 		}
 		if v != nil && v.kind == "fatal" {
 			f.fail(v.err)
@@ -203,14 +203,14 @@ func (m *Model) checkShared(f *frontier, worker int) *result {
 		if v != nil {
 			choices := r.choices
 			if !r.tracing {
-				r, v = m.retrace(r, v)
+				r, v = sim.retrace(r, v)
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, m.makeResult(r, v, runs, maxDepth, false, start))
+			f.found(choices, sim.makeResult(r, v, runs, maxDepth, false, start))
 			continue
 		}
-		f.finish(m.children(r.choices, len(prefix)))
+		f.finish(sim.children(r.choices, len(prefix)))
 	}
 }
 

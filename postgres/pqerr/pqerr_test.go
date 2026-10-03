@@ -14,8 +14,8 @@ import (
 // Production code that branches on *pq.Error takes the same branch on
 // detest's store.
 func TestConvert(t *testing.T) {
-	detest.Explore(t, func(t *testing.T, m *detest.Model) {
-		db, _ := m.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))
+	detest.Explore(t, func(t *testing.T, sim *detest.Sim) {
+		db, _ := sim.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))
 		if _, err := db.Exec(`CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE)`); err != nil {
 			t.Fatal(err)
 		}

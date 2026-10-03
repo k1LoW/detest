@@ -19,16 +19,16 @@ type waitable interface {
 // locks is reported as a progress violation.
 type Mutex struct {
 	name   string
-	m      *Model
+	sim    *Sim
 	held   bool
 	holder *Proc // nil while held by code outside any process, such as a seed
 }
 
 // Mutex registers a mutex. It is unlocked at the start of every run.
-func (m *Model) Mutex(name string) *Mutex {
-	m.declare("Mutex")
-	mu := &Mutex{name: name, m: m}
-	m.locks = append(m.locks, mu)
+func (sim *Sim) Mutex(name string) *Mutex {
+	sim.declare("Mutex")
+	mu := &Mutex{name: name, sim: sim}
+	sim.locks = append(sim.locks, mu)
 	return mu
 }
 
@@ -43,7 +43,7 @@ func (mu *Mutex) holders(*Proc) []*Proc {
 
 // Lock acquires the mutex, waiting while another process holds it.
 func (mu *Mutex) Lock() {
-	p := mu.m.Current()
+	p := mu.sim.Current()
 	if p == nil {
 		if mu.held {
 			panic(fmt.Sprintf("detest: mutex %s locked outside a process while held", mu.name))
@@ -64,7 +64,7 @@ func (mu *Mutex) Unlock() {
 		panic(fmt.Sprintf("detest: unlock of unlocked mutex %s", mu.name))
 	}
 	mu.held, mu.holder = false, nil
-	mu.m.released(mu, "unlock "+mu.name)
+	mu.sim.released(mu, "unlock "+mu.name)
 }
 
 // RWMutex is the sync.RWMutex counterpart of Mutex. As with sync.RWMutex, a
@@ -72,7 +72,7 @@ func (mu *Mutex) Unlock() {
 // read lock again while a writer waits deadlocks; detest reports that cycle.
 type RWMutex struct {
 	name           string
-	m              *Model
+	sim            *Sim
 	writing        bool
 	writer         *Proc // nil while write-locked outside any process
 	readers        map[*Proc]int
@@ -82,11 +82,11 @@ type RWMutex struct {
 
 // RWMutex registers a reader/writer mutex. It is unlocked at the start of
 // every run.
-func (m *Model) RWMutex(name string) *RWMutex {
-	m.declare("RWMutex")
-	rw := &RWMutex{name: name, m: m}
+func (sim *Sim) RWMutex(name string) *RWMutex {
+	sim.declare("RWMutex")
+	rw := &RWMutex{name: name, sim: sim}
 	rw.reset()
-	m.locks = append(m.locks, rw)
+	sim.locks = append(sim.locks, rw)
 	return rw
 }
 
@@ -103,7 +103,7 @@ func (rw *RWMutex) holders(waiter *Proc) []*Proc {
 		out = append(out, rw.writer)
 	}
 	if rw.pendingWriters[waiter] {
-		for _, p := range rw.m.run.procs {
+		for _, p := range rw.sim.run.procs {
 			// Including waiter itself catches an upgrade from a read lock.
 			if rw.readers[p] > 0 {
 				out = append(out, p)
@@ -111,7 +111,7 @@ func (rw *RWMutex) holders(waiter *Proc) []*Proc {
 		}
 		return out
 	}
-	for _, p := range rw.m.run.procs {
+	for _, p := range rw.sim.run.procs {
 		if rw.pendingWriters[p] && p != waiter {
 			out = append(out, p)
 		}
@@ -123,7 +123,7 @@ func (rw *RWMutex) readLocked() bool { return rw.outsideReaders > 0 || len(rw.re
 
 // Lock acquires the write lock, waiting while any reader or writer holds it.
 func (rw *RWMutex) Lock() {
-	p := rw.m.Current()
+	p := rw.sim.Current()
 	if p == nil {
 		if rw.writing || rw.readLocked() {
 			panic(fmt.Sprintf("detest: rwmutex %s locked outside a process while held", rw.name))
@@ -150,13 +150,13 @@ func (rw *RWMutex) Unlock() {
 		panic(fmt.Sprintf("detest: unlock of unlocked rwmutex %s", rw.name))
 	}
 	rw.writing, rw.writer = false, nil
-	rw.m.released(rw, "unlock "+rw.name)
+	rw.sim.released(rw, "unlock "+rw.name)
 }
 
 // RLock acquires a read lock, waiting while a writer holds the lock or waits
 // for it.
 func (rw *RWMutex) RLock() {
-	p := rw.m.Current()
+	p := rw.sim.Current()
 	if p == nil {
 		if rw.writing {
 			panic(fmt.Sprintf("detest: rwmutex %s read-locked outside a process while write-locked", rw.name))
@@ -178,7 +178,7 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
-	p := rw.m.Current()
+	p := rw.sim.Current()
 	switch {
 	case p != nil && rw.readers[p] > 0:
 	case rw.outsideReaders > 0:
@@ -186,7 +186,7 @@ func (rw *RWMutex) RUnlock() {
 		p = nil
 	default:
 		p = nil
-		for _, q := range rw.m.run.procs {
+		for _, q := range rw.sim.run.procs {
 			if rw.readers[q] > 0 {
 				p = q
 				break
@@ -201,7 +201,7 @@ func (rw *RWMutex) RUnlock() {
 			delete(rw.readers, p)
 		}
 	}
-	rw.m.released(rw, "runlock "+rw.name)
+	rw.sim.released(rw, "runlock "+rw.name)
 }
 
 // RLocker returns a sync.Locker that calls RLock and RUnlock.
@@ -221,12 +221,12 @@ func procName(p *Proc) string {
 
 // released records the release by the calling process and lets every process
 // waiting for l retry; each re-checks the lock when it is resumed.
-func (m *Model) released(l waitable, op string) {
-	r := m.run
+func (sim *Sim) released(l waitable, op string) {
+	r := sim.run
 	if r == nil || r.over() {
 		return // after the run, the next one resets the locks
 	}
-	if p := m.Current(); p != nil {
+	if p := sim.Current(); p != nil {
 		r.noteAt(p, "%s", op)
 	}
 	for _, w := range r.procs {

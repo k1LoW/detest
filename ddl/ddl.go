@@ -1,8 +1,8 @@
 // Package ddl reads the table definitions of a live database and writes them
-// as DDL that detest's store accepts: tables, column defaults, primary keys,
+// as DDL that detest's simulated database accepts: tables, column defaults, primary keys,
 // unique constraints and unique indexes. Run it against the database a
 // project's integration tests already use, then execute the result on the
-// handle detest.Model.DB returns.
+// handle detest.Sim.DB returns.
 package ddl
 
 import (

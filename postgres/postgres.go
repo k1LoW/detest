@@ -1,5 +1,5 @@
 // Package postgres is PostgreSQL for detest: pass postgres.New() to
-// detest.Model.DB. It parses SQL with the real PostgreSQL grammar (pg_query
+// detest.Sim.DB. It parses SQL with the real PostgreSQL grammar (pg_query
 // compiled to wasm, pure Go) and converts the AST into detest's IR.
 package postgres
 

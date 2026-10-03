@@ -13,8 +13,8 @@ import (
 // A transaction asking for a level detest does not implement for the server
 // fails instead of running with other semantics than production's.
 func TestBeginTxIsolation(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	for _, tc := range []struct {
 		level sql.IsolationLevel
 		ok    bool
@@ -55,8 +55,8 @@ func TestServerIsolation(t *testing.T) {
 // Without an Errors option the code under test sees *SQLError, which carries
 // the server's SQLSTATE and matches the kind's error with errors.Is.
 func TestSQLError(t *testing.T) {
-	m := newModel(t)
-	db, _ := m.DB("app", postgres.New())
+	sim := newSim(t)
+	db, _ := sim.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE)`)
 	mustExec(t, db, `INSERT INTO users (id, email) VALUES ('u1', 'a@x')`)
 	for _, tc := range []struct {

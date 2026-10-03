@@ -11,15 +11,15 @@ import (
 // write is committed although the caller sees a transport error.
 func TestExternalDoFailAfterKeepsCalleeEffect(t *testing.T) {
 	var runs, callerSawError, calleeCommitted int // accumulated across runs
-	Explore(t, func(t *testing.T, m *Model) {
-		orderDB, db := m.DB("shared", postgres.New())
+	Explore(t, func(t *testing.T, sim *Sim) {
+		orderDB, db := sim.DB("shared", postgres.New())
 		invDB := db.Open()
-		rpc := m.External("CancelOrder")
-		m.Seed(func() {
+		rpc := sim.External("CancelOrder")
+		sim.Seed(func() {
 			runs++
 			_, _ = orderDB.Exec(`INSERT INTO "orders" ("id","status") VALUES ($1,$2)`, "o1", "PENDING")
 		})
-		m.Manual("caller", 1, func(p *Proc) error {
+		sim.Manual("caller", 1, func(p *Proc) error {
 			err := rpc.Do(p, "o1", func() error { // the callee: a real handler would go here
 				_, err := invDB.Exec(`UPDATE "orders" SET "status"=$1 WHERE "id" = $2`, "CANCELED", "o1")
 				return err
@@ -29,7 +29,7 @@ func TestExternalDoFailAfterKeepsCalleeEffect(t *testing.T) {
 			}
 			return nil
 		})
-		m.AtQuiescence(func(s *State) error {
+		sim.AtQuiescence(func(s *State) error {
 			row, _ := s.Row(db, "orders", "o1")
 			if row.Str("status") == "CANCELED" {
 				calleeCommitted++

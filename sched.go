@@ -90,40 +90,40 @@ func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = p
 
 // OnMessage registers a process type started by delivering a message of q.
 // A returned error redelivers the message, bounded by MaxRedeliveries.
-func (m *Model) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
-	m.declare("OnMessage")
-	pt := &procType{name: name, kind: trigMessage, instances: m.pods, queue: q, msgFn: fn}
+func (sim *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
+	sim.declare("OnMessage")
+	pt := &procType{name: name, kind: trigMessage, instances: sim.pods, queue: q, msgFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
 	q.consumers = append(q.consumers, pt)
-	m.types = append(m.types, pt)
+	sim.types = append(sim.types, pt)
 }
 
 // Loop registers a periodic process type that the scheduler may start at any
 // point, at most maxRuns times per run.
-func (m *Model) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
-	m.declare("Loop")
-	pt := &procType{name: name, kind: trigLoop, instances: m.pods, maxRuns: maxRuns, loopFn: fn}
+func (sim *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	sim.declare("Loop")
+	pt := &procType{name: name, kind: trigLoop, instances: sim.pods, maxRuns: maxRuns, loopFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
-	m.types = append(m.types, pt)
+	sim.types = append(sim.types, pt)
 }
 
 // Manual registers a process type started at an arbitrary point, such as a
 // user-issued cancel, at most maxRuns times per run.
-func (m *Model) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
-	m.declare("Manual")
+func (sim *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	sim.declare("Manual")
 	pt := &procType{name: name, kind: trigManual, instances: 1, maxRuns: maxRuns, loopFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
-	m.types = append(m.types, pt)
+	sim.types = append(sim.types, pt)
 }
 
 type run struct {
-	m        *Model
+	sim      *Sim
 	prefix   []choice
 	choices  []choice
 	pos      int
@@ -141,7 +141,7 @@ type run struct {
 	prev     *State
 	version  int
 	idleAt   map[*procType]int
-	pending  *violation // raised by a store during a step
+	pending  *violation // raised by a simulated resource during a step
 	tracing  bool       // keep the trace (see note)
 	snap     *State     // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
@@ -181,20 +181,20 @@ type Proc struct {
 // Name returns the instance name, such as "sweeper#2".
 func (p *Proc) Name() string { return p.name }
 
-func (m *Model) newRun(prefix []choice) *run {
-	r := &run{m: m, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
+func (sim *Sim) newRun(prefix []choice) *run {
+	r := &run{sim: sim, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	m.run = r
-	for _, db := range m.dbs {
+	sim.run = r
+	for _, db := range sim.dbs {
 		db.reset()
 	}
-	for _, q := range m.queues {
+	for _, q := range sim.queues {
 		q.reset()
 	}
-	for _, l := range m.locks {
+	for _, l := range sim.locks {
 		l.reset()
 	}
-	for _, fn := range m.seeds {
+	for _, fn := range sim.seeds {
 		fn()
 	}
 	return r
@@ -209,9 +209,9 @@ func (r *run) choose(label string, n int) int {
 		var mismatch error
 		switch {
 		case !c.replay && c.n != n:
-			mismatch = fmt.Errorf("detest: the model is nondeterministic, or the checkpoint is of another version of it: choice %d (%s) had %d options, now %d", r.pos, label, c.n, n)
+			mismatch = fmt.Errorf("detest: the simulation is nondeterministic, or the checkpoint is of another version of it: choice %d (%s) had %d options, now %d", r.pos, label, c.n, n)
 		case c.picked >= n:
-			mismatch = fmt.Errorf("detest: the schedule picks %d of %d options at choice %d (%s): it is of another version of the model", c.picked, n, r.pos, label)
+			mismatch = fmt.Errorf("detest: the schedule picks %d of %d options at choice %d (%s): it is of another version of the simulation", c.picked, n, r.pos, label)
 		}
 		if mismatch != nil {
 			// This may be a process's goroutine, which cannot fail the test.
@@ -239,7 +239,7 @@ func (r *run) execute() (v *violation) {
 	defer func() {
 		close(r.abort)
 		// Let the processes left parked unwind, and database/sql roll back the
-		// transactions they left open, before the next run resets the stores.
+		// transactions they left open, before the next run resets the simulated resources.
 		r.cancel()
 		synctest.Wait()
 		if rec := recover(); rec != nil {
@@ -249,8 +249,8 @@ func (r *run) execute() (v *violation) {
 		}
 	}()
 	for {
-		if r.m.progress != nil {
-			r.m.progress.Add(1)
+		if r.sim.progress != nil {
+			r.sim.progress.Add(1)
 		}
 		r.settleOutside()
 		opts := r.enabled()
@@ -284,7 +284,7 @@ func (r *run) execute() (v *violation) {
 		}
 	}
 	s := r.snapshot()
-	for _, fn := range r.m.atQuiesce {
+	for _, fn := range r.sim.atQuiesce {
 		if err := fn(s); err != nil {
 			return &violation{kind: "quiescence invariant", err: err}
 		}
@@ -293,12 +293,12 @@ func (r *run) execute() (v *violation) {
 }
 
 func (r *run) checkAlways() *violation {
-	if len(r.m.always) == 0 {
+	if len(r.sim.always) == 0 {
 		return nil
 	}
 	s := r.snapshot()
 	s.prev = r.prev
-	for _, fn := range r.m.always {
+	for _, fn := range r.sim.always {
 		if err := fn(s); err != nil {
 			return &violation{kind: "always invariant", err: err}
 		}
@@ -324,7 +324,7 @@ func (r *run) enabled() []option {
 	// the current process keeps running while it is runnable.
 	cur := r.current
 	curRunnable := cur != nil && cur.state == stateReady
-	bounded := r.m.boundPreemptions && r.preempts >= r.m.maxPreemptions && curRunnable
+	bounded := r.sim.boundPreemptions && r.preempts >= r.sim.maxPreemptions && curRunnable
 	for _, p := range r.procs {
 		if p.state != stateReady {
 			continue
@@ -344,7 +344,7 @@ func (r *run) enabled() []option {
 		return opts
 	}
 	// Deliver a message to a consumer.
-	for _, q := range r.m.queues {
+	for _, q := range r.sim.queues {
 		for _, pt := range q.consumers {
 			if r.active(pt) >= pt.instances {
 				continue
@@ -361,7 +361,7 @@ func (r *run) enabled() []option {
 		}
 	}
 	// Start a loop tick or a manual action.
-	for _, pt := range r.m.types {
+	for _, pt := range r.sim.types {
 		if pt.kind != trigLoop && pt.kind != trigManual {
 			continue
 		}
@@ -604,7 +604,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			if ev.err != nil {
 				r.note(p, "nack %s", p.msg)
 				p.msg.redelivered++
-				if p.msg.redelivered <= r.m.maxRedeliveries {
+				if p.msg.redelivered <= r.sim.maxRedeliveries {
 					p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
 					r.queuesTouched = true
 				} else {
@@ -683,16 +683,16 @@ func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
 	p.wait()
 }
 
-// Step records a model-level step with no store effect, such as a decision made
+// Step records a step with no effect on a simulated resource, such as a decision made
 // by an external environment. It is a yield point.
 func (p *Proc) Step(format string, args ...any) {
 	p.yieldf(format, args...)
 }
 
-// Now returns the model clock.
+// Now returns the simulated clock.
 func (p *Proc) Now() int64 { return p.r.clock }
 
-// WaitUntil blocks until the model clock reaches t. The clock advances only when
+// WaitUntil blocks until the simulated clock reaches t. The clock advances only when
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
 	if p.r.clock >= t {
@@ -802,7 +802,7 @@ func isLibraryFrame(fn string) bool {
 	return false
 }
 
-// State is a snapshot of committed store contents for invariants.
+// State is a snapshot of the committed contents of databases and queues for invariants.
 type State struct {
 	dbs    map[string]map[string]map[string]Row
 	queues map[string][]Msg
@@ -835,7 +835,7 @@ func (s *State) Row(db *DB, table string, key ...any) (RowView, bool) {
 }
 
 // RowView is a committed row as an invariant sees it. It shares the row with
-// the store rather than copying it, so it offers no way to change it.
+// the database rather than copying it, so it offers no way to change it.
 type RowView struct{ r Row }
 
 // Get returns a column's value and whether the row has the column. A NULL
@@ -843,7 +843,7 @@ type RowView struct{ r Row }
 func (v RowView) Get(col string) (any, bool) {
 	x, ok := v.r[col]
 	if b, isBytes := x.([]byte); isBytes {
-		x = append([]byte(nil), b...) // the store's bytes stay unchanged
+		x = append([]byte(nil), b...) // the database's bytes stay unchanged
 	}
 	return x, ok
 }
@@ -880,8 +880,8 @@ func (r *run) snapshot() *State {
 		return r.snap
 	}
 	r.queuesTouched = false
-	s := &State{dbs: make(map[string]map[string]map[string]Row, len(r.m.dbs)), queues: map[string][]Msg{}}
-	for _, db := range r.m.dbs {
+	s := &State{dbs: make(map[string]map[string]map[string]Row, len(r.sim.dbs)), queues: map[string][]Msg{}}
+	for _, db := range r.sim.dbs {
 		var prev map[string]map[string]Row
 		if r.snap != nil {
 			prev = r.snap.dbs[db.name]
@@ -902,7 +902,7 @@ func (r *run) snapshot() *State {
 		s.dbs[db.name] = ts
 	}
 	r.snap = s
-	for _, q := range r.m.queues {
+	for _, q := range r.sim.queues {
 		for _, m := range q.msgs {
 			s.queues[q.name] = append(s.queues[q.name], m.msg)
 		}
@@ -911,7 +911,7 @@ func (r *run) snapshot() *State {
 }
 
 func (r *run) dbsTouched() bool {
-	for _, db := range r.m.dbs {
+	for _, db := range r.sim.dbs {
 		if len(db.touched) > 0 {
 			return true
 		}
@@ -924,11 +924,11 @@ func (r *run) dbsTouched() bool {
 // boundaries (clients, drivers) use this instead. A goroutine the process
 // itself spawned is not registered and falls back to the process the
 // scheduler resumed last.
-func (m *Model) Current() *Proc {
-	if m.run == nil {
+func (sim *Sim) Current() *Proc {
+	if sim.run == nil {
 		return nil
 	}
-	r := m.run
+	r := sim.run
 	// While no process is blocked outside detest, every process but the
 	// resumed one is parked inside detest and cannot be calling, so the lookup
 	// below would return r.current anyway. It is skipped because goroutineID

@@ -34,7 +34,7 @@ func (o Outcome) String() string {
 // External is a declared external service call.
 type External struct {
 	name     string
-	m        *Model
+	sim      *Sim
 	outcomes []Outcome
 }
 
@@ -51,13 +51,13 @@ func Failures(o ...Outcome) ExternalOption {
 func ReadOnly() ExternalOption { return Failures(FailBefore) }
 
 // External declares an external call whose effect is modeled by hand.
-func (m *Model) External(name string, opts ...ExternalOption) *External {
-	m.declare("External")
-	e := &External{name: name, m: m, outcomes: []Outcome{Success, FailBefore, FailAfter}}
+func (sim *Sim) External(name string, opts ...ExternalOption) *External {
+	sim.declare("External")
+	e := &External{name: name, sim: sim, outcomes: []Outcome{Success, FailBefore, FailAfter}}
 	for _, o := range opts {
 		o(e)
 	}
-	m.externals = append(m.externals, e)
+	sim.externals = append(sim.externals, e)
 	return e
 }
 
@@ -67,7 +67,7 @@ func (m *Model) External(name string, opts ...ExternalOption) *External {
 // and rolls the effect back; ErrUnavailable is a transport failure.
 func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) error {
 	n := len(e.outcomes)
-	if p.r.failures >= p.r.m.maxFailures {
+	if p.r.failures >= p.r.sim.maxFailures {
 		n = 1
 	}
 	i := 0
@@ -106,7 +106,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 // returns ErrUnavailable, modeling a response lost after the callee committed.
 func (e *External) Do(p *Proc, desc string, call func() error) error {
 	n := len(e.outcomes)
-	if p.r.failures >= p.r.m.maxFailures {
+	if p.r.failures >= p.r.sim.maxFailures {
 		n = 1
 	}
 	i := 0
@@ -152,7 +152,7 @@ type transport struct {
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	p := t.e.m.Current()
+	p := t.e.sim.Current()
 	if p == nil {
 		return t.serve(req), nil // outside any process, such as in a seed
 	}

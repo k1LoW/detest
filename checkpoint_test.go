@@ -15,9 +15,9 @@ func TestCheckpointResumes(t *testing.T) {
 	for _, workers := range []int{1, 4} {
 		t.Run(map[int]string{1: "one worker", 4: "four workers"}[workers], func(t *testing.T) {
 			var full, resumed atomic.Int64 // the workers' seeds run concurrently
-			Explore(t, func(t *testing.T, m *Model) {
-				counterModel(m, true)
-				m.Seed(func() { full.Add(1) })
+			Explore(t, func(t *testing.T, sim *Sim) {
+				counterModel(sim, true)
+				sim.Seed(func() { full.Add(1) })
 			}, MaxPreemptions(2), Workers(workers))
 
 			path := filepath.Join(t.TempDir(), "ckpt")
@@ -25,9 +25,9 @@ func TestCheckpointResumes(t *testing.T) {
 			rounds := 0
 			for {
 				rounds++
-				Explore(t, func(t *testing.T, m *Model) {
-					counterModel(m, true)
-					m.Seed(func() { resumed.Add(1) })
+				Explore(t, func(t *testing.T, sim *Sim) {
+					counterModel(sim, true)
+					sim.Seed(func() { resumed.Add(1) })
 				}, MaxPreemptions(2), Workers(workers), MaxRuns(30))
 				if _, err := os.Stat(path); os.IsNotExist(err) {
 					break // finished: the checkpoint is gone
@@ -49,9 +49,9 @@ func TestCheckpointFindsTheViolation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ckpt")
 	t.Setenv("DETEST_CHECKPOINT", path)
 	for range 100 {
-		Explore(t, func(t *testing.T, m *Model) {
-			counterModel(m, false)
-			m.ExpectViolation("lost update")
+		Explore(t, func(t *testing.T, sim *Sim) {
+			counterModel(sim, false)
+			sim.ExpectViolation("lost update")
 		}, MaxRuns(2))
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return
@@ -60,12 +60,12 @@ func TestCheckpointFindsTheViolation(t *testing.T) {
 	t.Fatal("the violation was not found")
 }
 
-// A checkpoint or schedule of another version of the model fails the test
+// A checkpoint or schedule of another version of the simulation fails the test
 // with the reason, rather than crashing. The exploration runs in a child
 // process because the test is meant to fail.
 func TestStaleCheckpointFailsTheTest(t *testing.T) {
 	if os.Getenv("DETEST_STALE_CHILD") == "1" {
-		Explore(t, func(t *testing.T, m *Model) { counterModel(m, true) })
+		Explore(t, func(t *testing.T, sim *Sim) { counterModel(sim, true) })
 		return
 	}
 	stale := filepath.Join(t.TempDir(), "ckpt")

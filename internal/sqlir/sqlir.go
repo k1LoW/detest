@@ -513,7 +513,7 @@ var (
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation}
 )
 
-// SQLError is a database error detest's store raises, with what drivers
+// SQLError is a database error detest's simulated database raises, with what drivers
 // report about it: the SQLSTATE, the MySQL error number, the table, column
 // and constraint.
 type SQLError struct {

@@ -1,5 +1,5 @@
 // Package mysql is MySQL (InnoDB) for detest: pass mysql.New() to
-// detest.Model.DB. Neither its parser nor its isolation semantics are
+// detest.Sim.DB. Neither its parser nor its isolation semantics are
 // implemented yet: the IR already covers MySQL's statement shapes (INSERT
 // IGNORE, ON DUPLICATE KEY UPDATE, UPDATE/DELETE LIMIT), so a parser only has
 // to convert a MySQL AST into it, but Repeatable Read, InnoDB's default, has
