@@ -5,6 +5,7 @@ package postgres
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -1333,12 +1334,27 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 }
 
 // isConstElement reports whether an array element is a constant or a
-// parameter, possibly cast, whose evaluation cannot fail before comparing.
+// parameter, possibly cast to text or varchar as pg_dump writes it, whose
+// evaluation cannot fail and keeps its value.
 func isConstElement(n *pg.Node) bool {
 	for n.GetTypeCast() != nil {
+		if _, ok := plainTextCast(n.GetTypeCast(), "text", "varchar"); !ok {
+			return false
+		}
 		n = n.GetTypeCast().Arg
 	}
 	return n.GetAConst() != nil || n.GetParamRef() != nil
+}
+
+// plainTextCast returns the type of a cast to one of types without a type
+// modifier, such as varchar(1), which would change the value.
+func plainTextCast(tc *pg.TypeCast, types ...string) (string, bool) {
+	if len(tc.TypeName.GetTypmods()) > 0 {
+		return "", false
+	}
+	names := tc.TypeName.GetNames()
+	typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
+	return typ, slices.Contains(types, typ)
 }
 
 func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
@@ -1403,15 +1419,12 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		arr := e.Rexpr
 		var casts []string // outermost first
 		for arr.GetTypeCast() != nil {
-			names := arr.GetTypeCast().TypeName.GetNames()
-			typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
 			// pg_dump casts the array only to text[]. A cast to another type
-			// coerces each element in Postgres, as '01' to 1 for int[], which
-			// detest's casts do not do for every value.
-			switch typ {
-			case "text", "varchar", "bpchar":
-			default:
-				return nil, c.unsupported("ANY or ALL over an array cast to " + typ + "[]")
+			// coerces each element in Postgres, as '01' to 1 for int[] or
+			// 'a ' to 'a' for bpchar[], which detest's casts do not do.
+			typ, ok := plainTextCast(arr.GetTypeCast(), "text")
+			if !ok {
+				return nil, c.unsupported("ANY or ALL over an array cast to a type other than text[]")
 			}
 			casts = append(casts, typ)
 			arr = arr.GetTypeCast().Arg
