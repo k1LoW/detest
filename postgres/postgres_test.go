@@ -41,6 +41,8 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT * FROM t WHERE a = ANY (ARRAY['ab'::varchar(1)])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['1'::int])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['a']::text)`,
+		`SELECT * FROM t WHERE a = ANY ((ARRAY[1.20])::text[])`,
+		`SELECT * FROM t WHERE a = ANY (ARRAY[1.20::text])`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY['{a}'::text[]])`,
 		`SELECT 1 UNION SELECT 2 FOR UPDATE`,
 		`(SELECT 1 FROM t FOR UPDATE) UNION SELECT 2`,
@@ -101,7 +103,7 @@ func TestCheckInDumpForm(t *testing.T) {
 
 // A cast of the array casts each element, so it stays on the elements.
 func TestAnyKeepsArrayCast(t *testing.T) {
-	st, err := parser{}.Parse(`SELECT 1 WHERE n = ANY ((ARRAY[1, 2])::text[])`)
+	st, err := parser{}.Parse(`SELECT 1 WHERE n = ANY ((ARRAY['1', '2'])::text[])`)
 	if err != nil {
 		t.Fatal(err)
 	}

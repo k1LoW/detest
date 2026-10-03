@@ -1349,15 +1349,21 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 
 // isConstElement reports whether an array element is a constant or a
 // parameter, possibly cast to text or varchar as pg_dump writes it, whose
-// evaluation cannot fail and keeps its value.
-func isConstElement(n *pg.Node) bool {
+// evaluation cannot fail and keeps its value. A number that becomes text,
+// through its own cast or the array's (textCast), is not one: Postgres keeps
+// its digits as written (1.20), which detest's number does not.
+func isConstElement(n *pg.Node, textCast bool) bool {
 	for n.GetTypeCast() != nil {
 		if _, ok := plainTextCast(n.GetTypeCast(), false, "text", "varchar"); !ok {
 			return false
 		}
+		textCast = true
 		n = n.GetTypeCast().Arg
 	}
-	return n.GetAConst() != nil || n.GetParamRef() != nil
+	if k := n.GetAConst(); k != nil {
+		return !textCast || k.Isnull || k.GetSval() != nil
+	}
+	return n.GetParamRef() != nil
 }
 
 // plainTextCast returns the type of a cast to one of types, or to an array
@@ -1456,7 +1462,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		// at the first match, so an element that can fail (1/0) would raise
 		// in one and not the other.
 		for _, el := range arr.GetAArrayExpr().Elements {
-			if !isConstElement(el) {
+			if !isConstElement(el, len(casts) > 0) {
 				return nil, c.unsupported("ANY or ALL over an array with an element other than a constant or parameter")
 			}
 		}
@@ -1469,7 +1475,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			return nil, err
 		}
 		// A cast of the array casts each element, so it is kept on them:
-		// 'a' = ANY ((ARRAY[1])::text[]) compares 'a' with '1', not with 1.
+		// x = ANY ((ARRAY['1'])::text[]) compares x with the text '1'.
 		for i := range list {
 			for _, typ := range slices.Backward(casts) {
 				list[i] = &sqlir.Cast{X: list[i], Type: typ}
