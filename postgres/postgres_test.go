@@ -16,6 +16,9 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT CURRENT_USER`,
 		`SELECT * FROM t WHERE created_by = SESSION_USER`,
 		`ALTER TABLE t ALTER COLUMN b DROP EXPRESSION`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (nextval('s')) STORED)`,
+		`CREATE TABLE t (a int, b timestamptz GENERATED ALWAYS AS (now()) STORED)`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS ((SELECT 1)) STORED)`,
 		`CREATE TABLE t (a int, b int DEFAULT 1 GENERATED ALWAYS AS (a * 2) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS IDENTITY GENERATED ALWAYS AS (a * 2) STORED)`,
 		`ALTER TABLE t ALTER COLUMN b SET EXPRESSION AS (a * 3)`,
@@ -64,6 +67,7 @@ func TestStillSupported(t *testing.T) {
 		`UPDATE t SET name = 'x'`,
 		`SELECT count(DISTINCT a) FROM t`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a * 2) STORED)`,
+		`CREATE TABLE t (a text, b text GENERATED ALWAYS AS (lower(coalesce(a, ''))) STORED)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[$1, -1, 'x'::text])`,
 	} {
 		if _, err := (parser{}).Parse(q); err != nil {

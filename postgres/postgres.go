@@ -407,6 +407,9 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			col.Default = sequenceDefault(table, d.Colname)
 		case pg.ConstrType_CONSTR_GENERATED:
 			col.Generated = c.defaultExpr(k.RawExpr)
+			if err := c.immutable(col.Generated); err != nil {
+				return col, nil, nil, err
+			}
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
@@ -419,6 +422,39 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		return col, nil, nil, c.unsupported("a default or identity on a generated column")
 	}
 	return col, cons, checks, nil
+}
+
+// mutableFuncs are the functions detest evaluates that Postgres does not
+// mark immutable, which a generation expression may not call. A function
+// detest does not know is let through: the schema loads, and a write that
+// needs it fails then.
+var mutableFuncs = map[string]bool{
+	"nextval": true, "setval": true, "currval": true, "gen_random_uuid": true, "uuid_generate_v4": true,
+	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true,
+	"statement_timestamp": true, "random": true, "concat": true,
+	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
+	"count": true, "sum": true, "min": true, "max": true, "avg": true,
+}
+
+// immutable refuses what Postgres does not allow in a generation expression:
+// a function that is not immutable, such as nextval or now, an aggregate, a
+// subquery or a parameter. detest would otherwise run it on every write.
+func (c *pgConv) immutable(e sqlir.Expr) error {
+	for _, x := range sqlir.Exprs(e) {
+		switch v := x.(type) {
+		case *sqlir.FuncCall:
+			if mutableFuncs[v.Name] {
+				return c.unsupported("generated column calling " + v.Name)
+			}
+		case *sqlir.SubQuery, *sqlir.Exists, *sqlir.Param, *sqlir.WindowFunc:
+			return c.unsupported("generated column with a subquery, parameter or window function")
+		case *sqlir.InExpr:
+			if v.Sub != nil {
+				return c.unsupported("generated column with a subquery")
+			}
+		}
+	}
+	return nil
 }
 
 // relnameOf is a table name without its schema, as constraint names use it.
