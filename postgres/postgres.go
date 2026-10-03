@@ -1463,7 +1463,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			return nil, err
 		}
 		// A cast of the array casts each element, so it is kept on them:
-		// 1 = ANY (ARRAY['01']::int[]) compares 1 with 1, not with '01'.
+		// 'a' = ANY ((ARRAY[1])::text[]) compares 'a' with '1', not with 1.
 		for i := range list {
 			for _, typ := range slices.Backward(casts) {
 				list[i] = &sqlir.Cast{X: list[i], Type: typ}
