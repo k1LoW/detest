@@ -404,6 +404,8 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			col.Default = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_IDENTITY:
 			col.Default = sequenceDefault(table, d.Colname)
+		case pg.ConstrType_CONSTR_GENERATED:
+			return col, nil, nil, c.unsupported("generated column")
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
@@ -921,6 +923,9 @@ func (c *pgConv) fromItem(n *pg.Node) (*sqlir.TableRef, []sqlir.Join, error) {
 		if len(rightJoins) > 0 {
 			return nil, nil, c.unsupported("nested join on the right")
 		}
+		if j.IsNatural {
+			return nil, nil, c.unsupported("NATURAL JOIN")
+		}
 		kind := sqlir.InnerJoin
 		switch j.Jointype {
 		case pg.JoinType_JOIN_LEFT:
@@ -973,7 +978,11 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		out.Alias = s.Relation.Alias.Aliasname
 	}
 	for _, col := range s.Cols {
-		out.Columns = append(out.Columns, col.GetResTarget().GetName())
+		name, err := c.targetColumn(col.GetResTarget())
+		if err != nil {
+			return nil, err
+		}
+		out.Columns = append(out.Columns, name)
 	}
 	sel := s.SelectStmt.GetSelectStmt()
 	if sel == nil {
@@ -1011,11 +1020,15 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		case pg.OnConflictAction_ONCONFLICT_UPDATE:
 			for _, t := range oc.TargetList {
 				rt := t.GetResTarget()
+				name, err := c.targetColumn(rt)
+				if err != nil {
+					return nil, err
+				}
 				e, err := c.expr(rt.Val)
 				if err != nil {
 					return nil, err
 				}
-				conf.Set = append(conf.Set, sqlir.Assignment{Column: rt.Name, Value: e})
+				conf.Set = append(conf.Set, sqlir.Assignment{Column: name, Value: e})
 			}
 			if oc.WhereClause != nil {
 				w, err := c.expr(oc.WhereClause)
@@ -1036,6 +1049,16 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 	return out, nil
 }
 
+// targetColumn is the column an INSERT or SET target writes. A subscript or
+// field (tags[1], addr.city) writes part of the column, which detest would
+// otherwise apply to the whole of it.
+func (c *pgConv) targetColumn(rt *pg.ResTarget) (string, error) {
+	if len(rt.Indirection) > 0 {
+		return "", c.unsupported("subscript or field in a target column")
+	}
+	return rt.Name, nil
+}
+
 func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 	if s.WithClause != nil {
 		return nil, c.unsupported("CTE on UPDATE")
@@ -1046,11 +1069,15 @@ func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 	}
 	for _, t := range s.TargetList {
 		rt := t.GetResTarget()
+		name, err := c.targetColumn(rt)
+		if err != nil {
+			return nil, err
+		}
 		e, err := c.expr(rt.Val)
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: rt.Name, Value: e})
+		out.Set = append(out.Set, sqlir.Assignment{Column: name, Value: e})
 	}
 	for _, f := range s.FromClause {
 		t, joins, err := c.fromItem(f)
@@ -1213,6 +1240,14 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		return nil, c.unsupported("subquery kind")
 	case *pg.Node_FuncCall:
 		fc := e.FuncCall
+		switch {
+		case fc.AggFilter != nil:
+			return nil, c.unsupported("aggregate FILTER")
+		case len(fc.AggOrder) > 0:
+			return nil, c.unsupported("ORDER BY in an aggregate")
+		case fc.AggWithinGroup:
+			return nil, c.unsupported("WITHIN GROUP")
+		}
 		args, err := c.exprs(fc.Args)
 		if err != nil {
 			return nil, err
@@ -1241,7 +1276,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		return &sqlir.FuncCall{Name: name, Args: args}, nil
 	case *pg.Node_SqlvalueFunction:
-		return &sqlir.FuncCall{Name: "now"}, nil
+		switch e.SqlvalueFunction.Op {
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N,
+			pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
+			return &sqlir.FuncCall{Name: "now"}, nil
+		}
+		return nil, c.unsupported("SQL value function " + e.SqlvalueFunction.Op.String())
 	case *pg.Node_CaseExpr:
 		out := &sqlir.CaseExpr{}
 		var err error

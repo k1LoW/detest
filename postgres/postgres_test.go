@@ -1,10 +1,55 @@
 package postgres
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
+
+// SQL whose meaning detest would change by converting it must fail as
+// unsupported, so a test never passes against a query that behaves
+// differently on a real server.
+func TestUnsupportedRatherThanApproximated(t *testing.T) {
+	for _, q := range []string{
+		`SELECT CURRENT_DATE`,
+		`SELECT CURRENT_USER`,
+		`SELECT * FROM t WHERE created_by = SESSION_USER`,
+		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a * 2) STORED)`,
+		`SELECT * FROM a NATURAL JOIN b`,
+		`SELECT * FROM a NATURAL LEFT JOIN b`,
+		`UPDATE t SET tags[1] = 'x'`,
+		`UPDATE t SET addr.city = 'x'`,
+		`INSERT INTO t (tags[1]) VALUES ('x')`,
+		`INSERT INTO t (id, tags) VALUES (1, '{}') ON CONFLICT (id) DO UPDATE SET tags[1] = 'x'`,
+		`SELECT count(*) FILTER (WHERE done) FROM jobs`,
+		`SELECT string_agg(name, ',' ORDER BY name) FROM t`,
+		`SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t`,
+		`SELECT * FROM t WHERE a > ANY (ARRAY[1, 2])`,
+		`SELECT * FROM t WHERE a = ALL (ARRAY[1, 2])`,
+		`SELECT * FROM t WHERE a = ANY ($1)`,
+	} {
+		_, err := parser{}.Parse(q)
+		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
+func TestStillSupported(t *testing.T) {
+	for _, q := range []string{
+		`SELECT CURRENT_TIMESTAMP`,
+		`SELECT LOCALTIMESTAMP(3)`,
+		`SELECT * FROM a CROSS JOIN b`,
+		`SELECT * FROM a JOIN b ON a.id = b.a_id`,
+		`UPDATE t SET name = 'x'`,
+		`SELECT count(DISTINCT a) FROM t`,
+	} {
+		if _, err := (parser{}).Parse(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
 
 // pg_dump writes CHECK (status IN ('a', 'b')) as = ANY over an array, which
 // must still become a check and not be dropped as one detest cannot evaluate.
