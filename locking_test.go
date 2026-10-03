@@ -434,3 +434,37 @@ func TestTxAPIRefusesGeneratedValues(t *testing.T) {
 		})
 	})
 }
+
+// ON CONFLICT DO UPDATE that waited on a row whose conflicting value changed
+// meanwhile inserts the proposed row instead of updating that one.
+func TestUpsertRechecksConflictAfterWait(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE, n int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO u VALUES (1, 'a', 0)`) })
+		var written string
+		s.Seed(func() { written = "" })
+		s.Manual("renamer", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE u SET email = 'b' WHERE id = 1`); err != nil {
+				return err
+			}
+			p.Step("holds the row")
+			return tx.Commit()
+		})
+		s.Manual("upsert", 1, func(p *Proc) error {
+			return db.QueryRowContext(p.Context(), `INSERT INTO u VALUES (3, 'a', 1) ON CONFLICT (email) DO UPDATE SET n = u.n + 1 RETURNING email`).Scan(&written)
+		})
+		s.AtQuiescence(func(*State) error {
+			// The row written, inserted or updated, holds the proposed email.
+			if written != "a" {
+				return fmt.Errorf("upsert wrote a row with email %q", written)
+			}
+			return nil
+		})
+	})
+}

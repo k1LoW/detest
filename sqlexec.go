@@ -964,7 +964,16 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if err != nil {
 				return nil, err
 			}
-			if ok {
+			if !ok {
+				continue
+			}
+			// The row may no longer conflict after the wait, when its
+			// arbiter value changed: then the insert is tried again too.
+			again, err := x.findConflict(table, ins.OnConflict.Columns, row)
+			if err != nil {
+				return nil, err
+			}
+			if again != nil && again.Key() == key {
 				cur, lk = c, lockKey{table, key}
 				break
 			}
