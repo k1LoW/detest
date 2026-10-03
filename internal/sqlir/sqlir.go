@@ -447,12 +447,12 @@ func (l IsolationLevel) String() string {
 	return fmt.Sprintf("IsolationLevel(%d)", int(l))
 }
 
-// Server describes a kind of database server to detest: the SQL it parses,
+// Impl describes a kind of database server to detest: the SQL it parses,
 // the level its transactions run at unless they ask for another, the levels
 // detest implements for it, its search_path, and its error codes. The
 // concurrency semantics of a level differ between kinds, so detest implements
 // each kind and level pair on its own.
-type Server struct {
+type Impl struct {
 	name       string
 	parser     Parser
 	isolation  IsolationLevel
@@ -479,14 +479,22 @@ type ServerSpec struct {
 	Convert func(*SQLError) error
 }
 
+// Server is a kind of database server as the code using detest holds it,
+// such as postgres.New() returns: a handle with nothing to call on it. detest
+// reaches the description through ImplOf.
+type Server struct{ impl *Impl }
+
 // NewServer describes a server.
 func NewServer(spec ServerSpec) Server {
-	return Server{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
-		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert}
+	return Server{impl: &Impl{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
+		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert}}
 }
 
+// ImplOf returns the description behind s, nil for the zero Server.
+func ImplOf(s Server) *Impl { return s.impl }
+
 // Error returns a database error of kind with the server's codes.
-func (s Server) Error(kind ErrorKind, message, table, column, constraint string) *SQLError {
+func (s *Impl) Error(kind ErrorKind, message, table, column, constraint string) *SQLError {
 	e := &SQLError{Kind: kind, Message: message, Table: table, Column: column, Constraint: constraint}
 	if s.codes != nil {
 		e.Code, e.Number = s.codes(kind)
@@ -496,7 +504,7 @@ func (s Server) Error(kind ErrorKind, message, table, column, constraint string)
 
 // Convert returns err as the driver of the production code would: an
 // SQLError in it goes through the server's Convert.
-func (s Server) Convert(err error) error {
+func (s *Impl) Convert(err error) error {
 	var se *SQLError
 	if s.convert == nil || !errors.As(err, &se) {
 		return err
@@ -578,19 +586,19 @@ func (e *SQLError) Error() string {
 func (e *SQLError) Is(target error) bool { return kindErrors[e.Kind] == target }
 
 // Name identifies the kind, such as "postgres".
-func (s Server) Name() string { return s.name }
+func (s *Impl) Name() string { return s.name }
 
 // Parser parses the server's SQL.
-func (s Server) Parser() Parser { return s.parser }
+func (s *Impl) Parser() Parser { return s.parser }
 
 // Isolation is the level transactions run at unless they ask for another.
-func (s Server) Isolation() IsolationLevel { return s.isolation }
+func (s *Impl) Isolation() IsolationLevel { return s.isolation }
 
 // SearchPath is the schemas an unqualified table name is looked up in.
-func (s Server) SearchPath() []string { return s.searchPath }
+func (s *Impl) SearchPath() []string { return s.searchPath }
 
 // Check reports whether detest implements level for the server.
-func (s Server) Check(level IsolationLevel) error {
+func (s *Impl) Check(level IsolationLevel) error {
 	if !slices.Contains(s.supported, level) {
 		return fmt.Errorf("detest: %s at %s is not implemented", s.name, level)
 	}

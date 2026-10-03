@@ -117,7 +117,7 @@ type lockKey struct{ table, key string }
 // DB is a simulated database with row-level locks and Read Committed visibility.
 type DB struct {
 	name      string
-	kind      Server
+	kind      *sqlir.Impl
 	s         *Sim
 	committed map[string]map[string]Row
 	locks     map[lockKey]rowLock
@@ -302,7 +302,7 @@ func (db *DB) Open() *sql.DB {
 	return sqlDB
 }
 
-func (def *tableDef) addConstraint(kind Server, table string, u sqlir.UniqueDef) error {
+func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.UniqueDef) error {
 	if !u.Primary {
 		if u.Name == "" {
 			u.Name = defaultConstraintName(table, u)
@@ -480,13 +480,14 @@ func (db *DB) assignKey(table string, row Row) error {
 // the declaration function would close it before any run.
 func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
 	s.declare("DB")
-	if srv.Parser() == nil {
+	kind := sqlir.ImplOf(srv)
+	if kind == nil || kind.Parser() == nil {
 		s.t.Fatal("detest: DB needs a server, such as postgres.New()")
 	}
-	if err := srv.Check(srv.Isolation()); err != nil {
+	if err := kind.Check(kind.Isolation()); err != nil {
 		s.t.Fatal(err)
 	}
-	db := &DB{name: name, kind: srv, s: s}
+	db := &DB{name: name, kind: kind, s: s}
 	db.reset()
 	s.dbs = append(s.dbs, db)
 	return db.Open(), db

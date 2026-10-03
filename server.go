@@ -8,8 +8,9 @@ import (
 )
 
 // Server is the kind of database server a DB models, such as postgres.New().
-// The packages of the kinds (postgres, mysql) describe it: the SQL it parses,
-// the isolation level its transactions run at, its search_path.
+// The packages of the kinds (postgres, mysql) describe it: the SQL it parses, the
+// isolation level its transactions run at, its search_path. It is a handle to
+// pass to Sim.DB, with nothing to call on it.
 type Server = sqlir.Server
 
 // IsolationLevel is a transaction isolation level.
@@ -64,7 +65,7 @@ func unsupported(what, query string) error { return sqlir.Unsupported(what, quer
 
 // txIsolation is the level a transaction runs at on s: the server's default,
 // or the level BeginTx asked for.
-func txIsolation(s Server, level sql.IsolationLevel) (IsolationLevel, error) {
+func txIsolation(s *sqlir.Impl, level sql.IsolationLevel) (IsolationLevel, error) {
 	var l IsolationLevel
 	switch level {
 	case sql.LevelDefault:

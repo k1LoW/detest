@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k1LoW/detest/internal/sqlir"
 	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
 )
@@ -45,7 +46,8 @@ func TestServerIsolation(t *testing.T) {
 		{"postgres repeatable read", postgres.New(postgres.Isolation(RepeatableRead)), "postgres at Repeatable Read is not implemented"},
 		{"mysql default", mysql.New(), "mysql at Repeatable Read is not implemented"},
 	} {
-		err := tc.s.Check(tc.s.Isolation())
+		kind := sqlir.ImplOf(tc.s)
+		err := kind.Check(kind.Isolation())
 		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 			t.Errorf("%s: %v", tc.name, err)
 		}

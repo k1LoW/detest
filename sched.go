@@ -730,7 +730,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		}
 		p.txs = nil
 		switch {
-		case errors.Is(ev.err, Idle):
+		case errors.Is(ev.err, ErrIdle):
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
 				r.runs[p.pt]--
@@ -754,11 +754,10 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 
 var errNack = fmt.Errorf("detest: nack")
 
-// Idle is returned by a loop process that found nothing to do. The tick does
-// not consume the loop's run budget, which encodes the fairness assumption that
-// a periodic sweep keeps ticking until it has work. It is named for the signal
-// a loop gives, return detest.Idle, rather than as the error it technically is.
-var Idle = fmt.Errorf("detest: idle tick") //nolint:staticcheck
+// ErrIdle is returned by a loop process that found nothing to do. The tick
+// does not consume the loop's run budget, which encodes the fairness
+// assumption that a periodic sweep keeps ticking until it has work.
+var ErrIdle = errors.New("detest: idle tick")
 
 // lose drops the i-th message of q undelivered.
 func (r *run) lose(q *Queue, i int) {

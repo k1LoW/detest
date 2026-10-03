@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/k1LoW/detest"
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // Option narrows what From reads.
@@ -38,13 +39,17 @@ func From(ctx context.Context, db *sql.DB, s detest.Server, opts ...Option) (str
 	for _, o := range opts {
 		o(c)
 	}
-	switch s.Name() {
+	kind := sqlir.ImplOf(s)
+	if kind == nil {
+		return "", fmt.Errorf("ddl: From needs a server, such as postgres.New()")
+	}
+	switch kind.Name() {
 	case "postgres":
 		return fromPostgres(ctx, db, c)
 	case "mysql":
 		return fromMySQL(ctx, db, c)
 	}
-	return "", fmt.Errorf("ddl: server %s is not supported", s.Name())
+	return "", fmt.Errorf("ddl: server %s is not supported", kind.Name())
 }
 
 func (c *config) wants(schema, table string, defaultSchema bool) bool {

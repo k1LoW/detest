@@ -16,11 +16,15 @@ import (
 // kind d, without executing it. Collect the SQL a service emits and run it
 // through CheckSQL to measure coverage before modeling the service.
 func CheckSQL(d Server, query string) error {
-	s, err := parseWith(d.Parser(), query)
+	kind := sqlir.ImplOf(d)
+	if kind == nil {
+		return errors.New("detest: CheckSQL needs a server, such as postgres.New()")
+	}
+	s, err := parseWith(kind.Parser(), query)
 	if err != nil {
 		return err
 	}
-	pdb := &DB{name: "probe", kind: d}
+	pdb := &DB{name: "probe", kind: kind}
 	pdb.reset()
 	probe := &Tx{db: pdb, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, atomic: true, block: true}
 	args := make([]driver.Value, 65536) // more than any statement binds
