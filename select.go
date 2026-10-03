@@ -564,6 +564,16 @@ func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
 	if aggregate || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
 		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 	}
+	// Postgres allows neither in WHERE or ON at all.
+	preds := []sqlir.Expr{sel.Where}
+	for _, j := range sel.Joins {
+		preds = append(preds, j.On)
+	}
+	for _, p := range preds {
+		if hasAggregate(p) || len(windowsIn(p)) > 0 {
+			return lockPlan{}, x.unsupported("an aggregate or window function in WHERE or ON")
+		}
+	}
 	from := x.fromItemsOf(sel)
 	targets, err := x.lockTargets(sel.Lock, from)
 	return lockPlan{from: from, targets: targets}, err
@@ -664,6 +674,21 @@ func lockModeOf(l *sqlir.LockClause) lockMode {
 // DISTINCT ON.
 func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 	var out []*sqlir.WindowFunc
+	for _, t := range sel.Targets {
+		out = append(out, windowsIn(t.Expr)...)
+	}
+	for _, k := range sel.OrderBy {
+		out = append(out, windowsIn(k.Expr)...)
+	}
+	for _, e := range sel.DistinctOn {
+		out = append(out, windowsIn(e)...)
+	}
+	return out
+}
+
+// windowsIn returns the window functions in e, not those of its subqueries.
+func windowsIn(e sqlir.Expr) []*sqlir.WindowFunc {
+	var out []*sqlir.WindowFunc
 	var walk func(e sqlir.Expr)
 	walk = func(e sqlir.Expr) {
 		switch v := e.(type) {
@@ -700,15 +725,7 @@ func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
 			walk(v.Else)
 		}
 	}
-	for _, t := range sel.Targets {
-		walk(t.Expr)
-	}
-	for _, k := range sel.OrderBy {
-		walk(k.Expr)
-	}
-	for _, e := range sel.DistinctOn {
-		walk(e)
-	}
+	walk(e)
 	return out
 }
 
