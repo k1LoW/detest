@@ -813,6 +813,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	cols := ins.Columns
 	if def := x.tx.db.defs[table]; len(cols) == 0 && def != nil {
 		cols = def.columns // INSERT INTO t VALUES (...): the columns in table order
+		if len(ins.Rows) > 0 && len(ins.Rows[0]) < len(cols) {
+			cols = cols[:len(ins.Rows[0])] // or the first N, for N values
+		}
 	}
 	if err := x.insertsGenerated(table, ins, cols); err != nil {
 		return nil, err

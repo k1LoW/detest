@@ -198,6 +198,11 @@ func TestGeneratedColumns(t *testing.T) {
 	if b(1) != 18 {
 		t.Errorf("after reusing the old name: b = %d", b(1))
 	}
+	// Without a column list, N values fill the first N columns.
+	mustExec(t, db, `INSERT INTO t VALUES (4, 3)`)
+	if b(4) != 6 {
+		t.Errorf("VALUES for the first columns: b = %d", b(4))
+	}
 	for _, q := range []string{
 		`INSERT INTO t (id, c, b) VALUES (3, 1, 2)`,
 		`INSERT INTO t VALUES (3, 1, 2)`,
