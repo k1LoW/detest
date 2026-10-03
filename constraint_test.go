@@ -191,6 +191,13 @@ func TestGeneratedColumns(t *testing.T) {
 	if b(1) != 16 {
 		t.Errorf("after RENAME COLUMN: b = %d", b(1))
 	}
+	// A new column that takes the old name does not become the source.
+	mustExec(t, db, `ALTER TABLE t ADD COLUMN a int`)
+	mustExec(t, db, `ALTER TABLE t RENAME COLUMN a TO e`)
+	mustExec(t, db, `UPDATE t SET c = 9, e = 1 WHERE id = 1`)
+	if b(1) != 18 {
+		t.Errorf("after reusing the old name: b = %d", b(1))
+	}
 	for _, q := range []string{
 		`INSERT INTO t (id, c, b) VALUES (3, 1, 2)`,
 		`INSERT INTO t VALUES (3, 1, 2)`,

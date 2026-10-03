@@ -154,7 +154,10 @@ func (c *tableCheck) renameColumn(old, nw string) {
 			c.alias[k], renamed = nw, true
 		}
 	}
-	if !renamed && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+	// A name the expression wrote that already maps elsewhere refers to the
+	// renamed column, not to one that took the name since.
+	_, aliased := c.alias[old]
+	if !renamed && !aliased && slices.ContainsFunc(sqlir.ColumnRefs(c.Expr), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
 		if c.alias == nil {
 			c.alias = map[string]string{}
 		}
