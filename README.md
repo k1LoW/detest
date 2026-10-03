@@ -150,7 +150,7 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 **Not supported**
 
-Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, generated columns, writes to an array element or a field (`SET tags[1] = ...`), `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. MySQL support is in progress, and its parser is not available yet.
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, generated columns, writes to an array element or a field (`SET tags[1] = ...`), locking reads over a view, a subquery or a `LATERAL` item, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. MySQL support is in progress, and its parser is not available yet.
 
 ### Queue
 
