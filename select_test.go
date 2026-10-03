@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k1LoW/detest/postgres"
 )
@@ -232,5 +233,23 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 	var n int64
 	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("count(*) + 1: %d, %v", n, err)
+	}
+}
+
+// CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) round to p fractional digits.
+func TestTimestampPrecision(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for q, unit := range map[string]int{
+		`SELECT CURRENT_TIMESTAMP(0)`: 1e9,
+		`SELECT LOCALTIMESTAMP(3)`:    1e6,
+	} {
+		var ts time.Time
+		if err := db.QueryRow(q).Scan(&ts); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if ts.Nanosecond()%unit != 0 {
+			t.Errorf("%s: %v has more digits", q, ts)
+		}
 	}
 }

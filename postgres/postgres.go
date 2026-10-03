@@ -1292,9 +1292,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		return &sqlir.FuncCall{Name: name, Args: args}, nil
 	case *pg.Node_SqlvalueFunction:
 		switch e.SqlvalueFunction.Op {
-		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N,
-			pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP:
 			return &sqlir.FuncCall{Name: "now"}, nil
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
+			// current_timestamp with an argument cannot be written as a call,
+			// so it is free to carry the precision to round to.
+			return &sqlir.FuncCall{Name: "current_timestamp", Args: []sqlir.Expr{&sqlir.Const{Value: int64(e.SqlvalueFunction.Typmod)}}}, nil
 		}
 		return nil, c.unsupported("SQL value function " + e.SqlvalueFunction.Op.String())
 	case *pg.Node_CaseExpr:

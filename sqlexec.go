@@ -1722,7 +1722,11 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "gen_random_uuid", "uuid_generate_v4":
 		return x.tx.db.newUUID(), nil
 	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
-		return time.Now(), nil
+		now := time.Now()
+		if p, ok := toFloat(d(0)); ok && len(args) > 0 && p >= 0 && p < 9 {
+			now = now.Round(time.Duration(math.Pow10(9 - int(p)))) // CURRENT_TIMESTAMP(p)
+		}
+		return now, nil
 	case "random":
 		return 0.5, nil
 	case "abs":
