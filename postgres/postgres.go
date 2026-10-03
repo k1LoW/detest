@@ -1395,6 +1395,11 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		if arr.GetAArrayExpr() == nil {
 			return nil, c.unsupported("ANY or ALL over an array other than ARRAY[...]")
 		}
+		// IN () has no NULL-free answer for a NULL operand, while = ANY and
+		// <> ALL over an empty array are false and true whatever the operand.
+		if len(arr.GetAArrayExpr().Elements) == 0 {
+			return nil, c.unsupported("ANY or ALL over an empty array")
+		}
 		l, err := c.expr(e.Lexpr)
 		if err != nil {
 			return nil, err
