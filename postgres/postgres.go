@@ -1414,7 +1414,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		// CHECK (status IN ('a', 'b')) back in this form. Only the two forms
 		// that mean IN and NOT IN over a literal array are converted.
 		isAny := e.Kind == pg.A_Expr_Kind_AEXPR_OP_ANY
-		if !(isAny && op == "=") && !(!isAny && op == "<>") {
+		if (!isAny || op != "=") && (isAny || op != "<>") {
 			return nil, c.unsupported("operator " + op + " with ANY or ALL")
 		}
 		arr := e.Rexpr
@@ -1457,8 +1457,8 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		// A cast of the array casts each element, so it is kept on them:
 		// 1 = ANY (ARRAY['01']::int[]) compares 1 with 1, not with '01'.
 		for i := range list {
-			for j := len(casts) - 1; j >= 0; j-- {
-				list[i] = &sqlir.Cast{X: list[i], Type: casts[j]}
+			for _, typ := range slices.Backward(casts) {
+				list[i] = &sqlir.Cast{X: list[i], Type: typ}
 			}
 		}
 		return &sqlir.InExpr{X: l, List: list, Not: !isAny}, nil

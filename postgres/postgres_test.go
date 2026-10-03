@@ -77,7 +77,11 @@ func TestCheckInDumpForm(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.query, err)
 		}
-		changes := st.(*sqlir.SchemaStmt).Changes
+		schema, ok := st.(*sqlir.SchemaStmt)
+		if !ok {
+			t.Fatalf("%s: got %T", tc.query, st)
+		}
+		changes := schema.Changes
 		if len(changes) != 1 || len(changes[0].Checks) != 1 {
 			t.Fatalf("%s: checks %#v", tc.query, changes)
 		}
@@ -94,9 +98,13 @@ func TestAnyKeepsArrayCast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in, ok := st.(*sqlir.SelectStmt).Where.(*sqlir.InExpr)
+	sel, ok := st.(*sqlir.SelectStmt)
+	if !ok {
+		t.Fatalf("got %T", st)
+	}
+	in, ok := sel.Where.(*sqlir.InExpr)
 	if !ok || len(in.List) != 2 {
-		t.Fatalf("got %#v", st.(*sqlir.SelectStmt).Where)
+		t.Fatalf("got %#v", sel.Where)
 	}
 	for _, e := range in.List {
 		if c, ok := e.(*sqlir.Cast); !ok || c.Type != "text" {

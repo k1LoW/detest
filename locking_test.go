@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/k1LoW/detest/postgres"
@@ -173,10 +174,8 @@ func TestForUpdateRecheckRejoins(t *testing.T) {
 			})
 		}
 		s.AtQuiescence(func(*State) error {
-			for _, pr := range pairs {
-				if pr == "b2/b1" {
-					return fmt.Errorf("a row moved to b2 returned joined to b1")
-				}
+			if slices.Contains(pairs, "b2/b1") {
+				return fmt.Errorf("a row moved to b2 returned joined to b1")
 			}
 			return nil
 		})
