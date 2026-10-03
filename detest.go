@@ -89,6 +89,13 @@ func MaxPreemptions(n int) Option {
 // MaxRuns caps the number of runs an exhaustive exploration performs.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
+// MaxDuration caps the wall-clock time an exhaustive exploration takes. Once
+// d has passed, no worker starts another run, and the runs under way finish.
+// The first run is always made, so an exploration resumed from a checkpoint
+// makes progress however short d is; a negative d has passed already.
+// 0 (the default) means unbounded.
+func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
+
 // defaultShardDepth is how many leading choices pick a schedule's shard.
 const defaultShardDepth = 12
 
@@ -140,6 +147,7 @@ type Sim struct {
 	maxPreemptions   int
 	boundPreemptions bool
 	maxRuns          int
+	maxDuration      time.Duration
 	verbose          bool
 	sqlObserver      func(query string, err error)
 	shardIndex       int
@@ -200,7 +208,7 @@ func (s *Sim) Seed(fn func()) { s.declare("Seed"); s.seeds = append(s.seeds, fn)
 // would be passes for nothing; Sometimes is how a test says where it expects
 // to get, such as both processes holding a reservation at once.
 //
-// An exploration that stopped early (MaxRuns, a violation) or explored one
+// An exploration that stopped early (MaxRuns, MaxDuration, a violation) or explored one
 // shard of a split may not have reached the condition yet, so it only logs
 // the conditions it has not seen hold.
 func (s *Sim) Sometimes(name string, fn func(st *State) bool) {
