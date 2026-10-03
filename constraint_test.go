@@ -224,6 +224,8 @@ func TestGeneratedColumns(t *testing.T) {
 		`ALTER TABLE t ADD COLUMN d int GENERATED ALWAYS AS (c + 1) STORED`,
 		`INSERT INTO t (id, c) VALUES (99, 1) ON CONFLICT (id) DO UPDATE SET b = 1`, // no conflict
 		`ALTER TABLE t ALTER COLUMN b SET DEFAULT 1`,
+		`CREATE TABLE z (a int, b int GENERATED ALWAYS AS (coalesce(missing, 0)) STORED)`,
+		`ALTER TABLE t ADD COLUMN z int GENERATED ALWAYS AS (missing + 1) STORED`,
 		`ALTER TABLE t ALTER COLUMN b DROP DEFAULT`,
 		`ALTER TABLE t DROP COLUMN c`,
 	} {

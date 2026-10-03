@@ -203,11 +203,28 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 					return nil, x.unsupported(fmt.Sprintf("a default or identity on generated column %q", c.Name))
 				}
 			}
+			// The columns the table has once the statement is applied.
+			cols := map[string]bool{}
+			if def := tx.db.defs[tx.db.resolve(ch.Table)]; def != nil && !ch.Create {
+				for _, c := range def.columns {
+					cols[c] = true
+				}
+			}
+			for _, c := range ch.Columns {
+				cols[c.Name] = true
+			}
+			for _, c := range ch.DropColumns {
+				delete(cols, c)
+			}
 			for _, col := range order { // in declaration order, for a stable error
 				if slices.Contains(ch.DropColumns, col) {
 					continue
 				}
 				for _, dep := range gens[col].columns() {
+					if !cols[dep] && !slices.Contains(ch.DropColumns, dep) {
+						// Postgres refuses it; detest would read it as NULL.
+						return nil, x.unsupported(fmt.Sprintf("generated column %q, which refers to column %q the table does not have", col, dep))
+					}
 					if _, generated := gens[dep]; generated {
 						// Postgres refuses it; detest would compute it in
 						// declaration order.
