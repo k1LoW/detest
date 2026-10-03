@@ -486,3 +486,22 @@ func TestNoLockKeptOnDeletedRow(t *testing.T) {
 		t.Errorf("lock kept on the deleted row: %v", reader.locks)
 	}
 }
+
+// Following a moved row keeps no lock on the key it left, so an insert of
+// that key does not wait.
+func TestNoLockKeptOnLeftKey(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE j (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO j VALUES (1)`)
+	mustExec(t, db, `UPDATE j SET id = 2 WHERE id = 1`)
+	reader := &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+	table := store.resolve("j")
+	key, _, ok, err := reader.lockLatest(table, "1", reader.lock)
+	if err != nil || !ok || key != "2" {
+		t.Fatalf("lockLatest: %q %v %v", key, ok, err)
+	}
+	if len(store.locks[lockKey{table, "1"}]) != 0 || len(store.locks[lockKey{table, "2"}]) != 1 {
+		t.Errorf("locks: %v", reader.locks)
+	}
+}
