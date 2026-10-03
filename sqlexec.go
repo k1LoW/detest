@@ -424,9 +424,9 @@ type fromItems struct {
 	lateral  bool              // some item depends on the rows before it
 }
 
-// fromItemsOf describes the FROM items of sel without evaluating them, so a
-// locking clause is checked before the query has any effect, such as
-// advancing a sequence.
+// fromItemsOf describes the FROM items of sel without evaluating them or its
+// WITH queries, so a locking clause is checked before the query has any
+// effect, such as advancing a sequence.
 func (x *sqlExec) fromItemsOf(sel *sqlir.SelectStmt) fromItems {
 	from := fromItems{tables: map[string]string{}, kinds: map[string]string{}, nullable: map[string]bool{}}
 	if sel.From == nil {
@@ -447,6 +447,7 @@ func (x *sqlExec) fromItemsOf(sel *sqlir.SelectStmt) fromItems {
 		}
 		from.aliases = append(from.aliases, alias)
 		_, isCTE := x.ctes[t.Name]
+		isCTE = isCTE || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
 		switch {
 		case t.Sub != nil:
 			from.kinds[alias] = "subquery"

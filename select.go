@@ -26,6 +26,14 @@ type selItem struct {
 // and LIMIT. A query with FOR UPDATE takes the locking path instead, which
 // PostgreSQL allows only without grouping, DISTINCT and windows.
 func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	var locking lockPlan
+	if sel.Lock != nil && sel.SetOp == "" && sel.Values == nil {
+		// Checked before the WITH queries run, which may have effects.
+		var err error
+		if locking, err = x.planLocking(sel); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := x.withCTEs(sel.With, outer); err != nil {
 		return nil, nil, err
 	}
@@ -35,7 +43,7 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	case sel.Values != nil:
 		return x.evalValues(sel, outer)
 	case sel.Lock != nil:
-		return x.evalLocking(sel, outer)
+		return x.evalLocking(sel, locking, outer)
 	}
 	rows, err := x.scan(sel, outer)
 	if err != nil {
@@ -479,15 +487,8 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 // locking, and OFFSET and LIMIT after, so they count the rows actually locked
 // (FOR UPDATE SKIP LOCKED skips rows held by others) and the rows OFFSET
 // skips are locked as well.
-func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
-	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
-		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
-	}
-	from := x.fromItemsOf(sel)
-	targets, err := x.lockTargets(sel.Lock, from)
-	if err != nil {
-		return nil, nil, err
-	}
+func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) ([]string, []Row, error) {
+	from, targets := plan.from, plan.targets
 	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
@@ -549,6 +550,23 @@ rows:
 		locked = append(locked, r)
 	}
 	return x.project(sel, locked, outer)
+}
+
+// lockPlan is what a locking read locks, worked out before it runs.
+type lockPlan struct {
+	from    fromItems
+	targets []string
+}
+
+// planLocking checks a locking read and works out the FROM items it locks,
+// from the statement alone.
+func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+	}
+	from := x.fromItemsOf(sel)
+	targets, err := x.lockTargets(sel.Lock, from)
+	return lockPlan{from: from, targets: targets}, err
 }
 
 // lockTargets is the FROM items whose rows a locking clause locks: those it

@@ -110,6 +110,9 @@ func TestForUpdateOverDerivedItems(t *testing.T) {
 	if _, err := db.Exec(`SELECT * FROM (SELECT nextval('s')) q FOR UPDATE`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("subquery: got %v", err)
 	}
+	if _, err := db.Exec(`WITH c AS (SELECT nextval('s') AS v) SELECT * FROM a JOIN c ON true FOR UPDATE OF missing`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("unknown OF with a WITH query: got %v", err)
+	}
 	var n int64
 	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
 		t.Errorf("nextval after a refused locking read: %d, %v", n, err)
