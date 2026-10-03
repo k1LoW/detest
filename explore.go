@@ -22,14 +22,21 @@ import (
 // the code under test uses inside fn: channels and timers created outside the
 // bubble do not count as blocking inside it.
 //
-// The exploration is bounded (preemptions, failures, MaxRuns), and the log
+// The exploration is bounded (preemptions, failures, MaxRuns, MaxDuration), and the log
 // line Explore writes states how far it got. A violating schedule is run once
 // more to record its trace, so seeds and invariants see that run twice.
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	start := time.Now()
 	n := workerCount(opts)
-	f := newFrontier(n, maxRunsOf(opts))
+	maxRuns, maxDuration := limitsOf(opts)
+	f := newFrontier(n, maxRuns)
+	if maxDuration > 0 {
+		// The clock inside the bubbles is fake, so the deadline is kept by a
+		// timer outside them.
+		timer := time.AfterFunc(maxDuration, f.expire)
+		defer timer.Stop()
+	}
 	stop := watchStall(f)
 	defer stop()
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
@@ -151,12 +158,12 @@ func scheduleOf(opts []Option) string {
 	return probe.schedule
 }
 
-func maxRunsOf(opts []Option) int {
+func limitsOf(opts []Option) (maxRuns int, maxDuration time.Duration) {
 	probe := newSimDefaults()
 	for _, o := range opts {
 		o(probe)
 	}
-	return probe.maxRuns
+	return probe.maxRuns, probe.maxDuration
 }
 
 // exploreBubble declares and explores the simulation, alone or as a worker

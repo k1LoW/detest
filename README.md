@@ -175,14 +175,14 @@ Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` j
 
 ## Options and environment variables
 
-The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries` and `detest.MaxRuns` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
+The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
 | Variable | Effect |
 | --- | --- |
 | `DETEST_REPLAY` | Replay one run, given the choices printed with a violation |
 | `DETEST_WORKERS` | Number of workers, overriding `detest.Workers` |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
-| `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` is reached, and to resume from on the next run |
+| `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, and to resume from on the next run |
 | `DETEST_STALL` | How long a process may block outside the scheduler before it is reported (default `30s`) |
 | `DETEST_DEBUG` | Print scheduler events to stderr |
 

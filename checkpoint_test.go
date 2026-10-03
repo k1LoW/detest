@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // An exploration cut short by MaxRuns and resumed from its checkpoint, again
@@ -37,6 +38,40 @@ func TestCheckpointResumes(t *testing.T) {
 				}
 			}
 			if rounds < 3 || resumed.Load() != full.Load() {
+				t.Fatalf("%d rounds explored %d runs, one exploration %d", rounds, resumed.Load(), full.Load())
+			}
+		})
+	}
+}
+
+// An exploration cut short by MaxDuration is saved to its checkpoint as one
+// cut short by MaxRuns is, and makes progress however short the duration.
+func TestCheckpointResumesAfterMaxDuration(t *testing.T) {
+	for _, workers := range []int{1, 4} {
+		t.Run(map[int]string{1: "one worker", 4: "four workers"}[workers], func(t *testing.T) {
+			var full, resumed atomic.Int64
+			Explore(t, func(t *testing.T, s *Sim) {
+				counterModel(s, true)
+				s.Seed(func() { full.Add(1) })
+			}, MaxPreemptions(2), Workers(workers))
+
+			path := filepath.Join(t.TempDir(), "ckpt")
+			t.Setenv("DETEST_CHECKPOINT", path)
+			rounds := 0
+			for {
+				rounds++
+				Explore(t, func(t *testing.T, s *Sim) {
+					counterModel(s, true)
+					s.Seed(func() { resumed.Add(1) })
+				}, MaxPreemptions(2), Workers(workers), MaxDuration(time.Nanosecond))
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					break
+				}
+				if int64(rounds) > full.Load() {
+					t.Fatal("the exploration does not finish")
+				}
+			}
+			if rounds < 2 || resumed.Load() != full.Load() {
 				t.Fatalf("%d rounds explored %d runs, one exploration %d", rounds, resumed.Load(), full.Load())
 			}
 		})

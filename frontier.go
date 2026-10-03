@@ -28,9 +28,10 @@ type frontier struct {
 	stack      [][]choice // LIFO keeps the order depth first and the stack small
 	busy       int        // workers running a prefix taken from the stack
 	stopped    bool
-	incomplete bool // MaxRuns cut the exploration short
+	incomplete bool // MaxRuns or MaxDuration cut the exploration short
 	runs       int
 	maxRuns    int
+	expired    atomic.Bool // MaxDuration has passed
 	// best is the choices of the earliest violating run found so far, in the
 	// depth-first order one worker explores in, with its result. Subtrees
 	// after it are dropped and the ones before it still explored, so the
@@ -118,7 +119,7 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 		f.wakeAll() // the exploration is over: let the others see it
 		return nil, false
 	}
-	if f.runs >= f.maxRuns {
+	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
 		f.wakeAll()
@@ -130,6 +131,9 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 	f.runs++
 	return p, true
 }
+
+// expire stops the exploration from starting another run.
+func (f *frontier) expire() { f.expired.Store(true) }
 
 // finish returns a taken prefix with the subtrees its run revealed.
 func (f *frontier) finish(children [][]choice) {
@@ -328,7 +332,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	return merged
 }
 
-// checkpoint is the rest of an exploration MaxRuns cut short: the subtrees
+// checkpoint is the rest of an exploration MaxRuns or MaxDuration cut short: the subtrees
 // not explored yet, each as the choices that lead to it.
 type checkpoint struct {
 	Version  int             `json:"version"`
