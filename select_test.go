@@ -293,4 +293,8 @@ func TestTransactionTimestamp(t *testing.T) {
 	if err := tx.QueryRow(`SELECT CURRENT_TIMESTAMP(6) = CURRENT_TIMESTAMP(6)`).Scan(&same); err != nil || !same {
 		t.Errorf("CURRENT_TIMESTAMP(6) twice: %v %v", same, err)
 	}
+	// A statement outside a transaction begins its own at the same instant.
+	if err := db.QueryRow(`SELECT now() = statement_timestamp()`).Scan(&same); err != nil || !same {
+		t.Errorf("now() = statement_timestamp() in autocommit: %v %v", same, err)
+	}
 }

@@ -132,6 +132,9 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 		return nil, err
 	}
 	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}, start: time.Now()}
+	if !tx.block && !tx.start.IsZero() {
+		x.start = tx.start // the statement is its own transaction, begun at the same instant
+	}
 	return x.execStatement(s.stmt)
 }
 
