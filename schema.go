@@ -358,14 +358,18 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 		if g == nil {
 			continue
 		}
+		// The schema loads with an expression detest cannot convert or
+		// evaluate, but a value it cannot compute must not be stored as if
+		// it were the column's. One it could not convert is the Unknown
+		// constant, told apart by the expression and not by the value, which
+		// a real expression can equal.
+		k, unconverted := g.Expr.(*sqlir.Const)
+		unconverted = unconverted && k.Value == sqlir.Unknown
 		v, err := x.eval(g.Expr, g.env(table, row))
 		if err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
 		}
-		// The schema loads with an expression detest cannot convert or
-		// evaluate, but a value it cannot compute must not be stored as if
-		// it were the column's. One it could not convert evaluates to Unknown.
-		if err != nil || v == sqlir.Unknown {
+		if err != nil || unconverted {
 			return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
 		}
 		row[col] = v

@@ -257,6 +257,13 @@ func TestGeneratedColumns(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO w (id, a) VALUES (1, 'ab')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("unevaluable generated column: got %v", err)
 	}
+	// A value that happens to be the placeholder's text is still a value.
+	mustExec(t, db, `CREATE TABLE w3 (id int PRIMARY KEY, a text, b text GENERATED ALWAYS AS (a) STORED)`)
+	mustExec(t, db, `INSERT INTO w3 (id, a) VALUES (1, $1)`, Unknown)
+	// A generated column may not refer to another, as in Postgres.
+	if _, err := db.Exec(`CREATE TABLE w4 (a int, b int GENERATED ALWAYS AS (a + 1) STORED, c int GENERATED ALWAYS AS (b + 1) STORED)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("generated column on a generated column: got %v", err)
+	}
 	mustExec(t, db, `CREATE TABLE w2 (id int PRIMARY KEY, a text[], b text GENERATED ALWAYS AS (a[1]) STORED)`)
 	if _, err := db.Exec(`INSERT INTO w2 (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("unconvertible generated column: got %v", err)

@@ -205,6 +205,11 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 					continue
 				}
 				for _, dep := range gens[col].columns() {
+					if _, generated := gens[dep]; generated {
+						// Postgres refuses it; detest would compute it in
+						// declaration order.
+						return nil, x.unsupported(fmt.Sprintf("generated column %q, which refers to generated column %q", col, dep))
+					}
 					if slices.Contains(ch.DropColumns, dep) {
 						return nil, x.unsupported(fmt.Sprintf("dropping column %q, which generated column %q depends on", dep, col))
 					}
