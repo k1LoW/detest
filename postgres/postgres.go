@@ -4,6 +4,7 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -406,7 +407,14 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_IDENTITY:
 			col.Default = sequenceDefault(table, d.Colname)
 		case pg.ConstrType_CONSTR_GENERATED:
-			col.Generated = c.defaultExpr(k.RawExpr)
+			g, err := c.expr(k.RawExpr)
+			if u := (*sqlir.ErrUnsupportedSQL)(nil); errors.As(err, &u) && strings.HasPrefix(u.What, "aggregate ") {
+				return col, nil, nil, err // Postgres refuses an aggregate here, not only detest
+			}
+			if err != nil {
+				g = &sqlir.Const{Value: sqlir.Unknown} // as defaultExpr: the schema still loads
+			}
+			col.Generated = g
 			if err := c.immutable(col.Generated); err != nil {
 				return col, nil, nil, err
 			}
@@ -1307,6 +1315,10 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			return nil, err
 		}
 		call := &sqlir.FuncCall{Name: strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval()), Args: args, Star: fc.AggStar, Distinct: fc.AggDistinct}
+		if sqlir.OtherAggregates[call.Name] {
+			// Refused here, before a WITH query or anything else runs.
+			return nil, c.unsupported("aggregate " + call.Name)
+		}
 		if fc.Over != nil {
 			return c.window(call, fc.Over)
 		}

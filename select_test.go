@@ -345,6 +345,10 @@ func TestOffsetBeforeLimit(t *testing.T) {
 	if !reflect.DeepEqual(got, []int64{2, 3, 4}) {
 		t.Errorf("got %v", got)
 	}
+	// An aggregate detest does not implement is refused before WITH runs.
+	if _, err := db.Exec(`WITH c AS (SELECT nextval('s') AS id) SELECT string_agg(id::text, ',') FROM c`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("string_agg: got %v", err)
+	}
 	// A negative LIMIT is refused before the select list runs.
 	if _, err := db.Exec(`SELECT nextval('s') FROM t LIMIT -1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("negative LIMIT: got %v", err)
