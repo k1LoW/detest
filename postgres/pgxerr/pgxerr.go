@@ -12,7 +12,7 @@ import (
 )
 
 // Convert returns e as the *pgconn.PgError Postgres would have sent.
-func Convert(e *detest.SQLError) error {
+func Convert(e *detest.DBError) error {
 	return &pgconn.PgError{
 		Severity:            "ERROR",
 		SeverityUnlocalized: "ERROR",

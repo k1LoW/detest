@@ -470,8 +470,8 @@ type Impl struct {
 	isolation  IsolationLevel
 	supported  []IsolationLevel
 	searchPath []string
-	codes      func(ErrorKind) (sqlstate string, number int)
-	convert    func(*SQLError) error
+	codes      func(DBErrorKind) (sqlstate string, number int)
+	convert    func(*DBError) error
 }
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
@@ -484,11 +484,11 @@ type ServerSpec struct {
 	SearchPath []string
 	// Codes returns the server's SQLSTATE and, for MySQL, its error number
 	// for a kind of error.
-	Codes func(ErrorKind) (sqlstate string, number int)
+	Codes func(DBErrorKind) (sqlstate string, number int)
 	// Convert turns a database error into the error the driver of the
 	// production code returns, such as *pgconn.PgError. nil returns the
-	// SQLError itself.
-	Convert func(*SQLError) error
+	// DBError itself.
+	Convert func(*DBError) error
 }
 
 // Server is a kind of database server as the code using detest holds it,
@@ -506,8 +506,8 @@ func NewServer(spec ServerSpec) Server {
 func ImplOf(s Server) *Impl { return s.impl }
 
 // Error returns a database error of kind with the server's codes.
-func (s *Impl) Error(kind ErrorKind, message, table, column, constraint string) *SQLError {
-	e := &SQLError{Kind: kind, Message: message, Table: table, Column: column, Constraint: constraint}
+func (s *Impl) Error(kind DBErrorKind, message, table, column, constraint string) *DBError {
+	e := &DBError{Kind: kind, Message: message, Table: table, Column: column, Constraint: constraint}
 	if s.codes != nil {
 		e.Code, e.Number = s.codes(kind)
 	}
@@ -515,20 +515,20 @@ func (s *Impl) Error(kind ErrorKind, message, table, column, constraint string) 
 }
 
 // Convert returns err as the driver of the production code would: an
-// SQLError in it goes through the server's Convert.
+// DBError in it goes through the server's Convert.
 func (s *Impl) Convert(err error) error {
-	var se *SQLError
+	var se *DBError
 	if s.convert == nil || !errors.As(err, &se) {
 		return err
 	}
 	return s.convert(se)
 }
 
-// ErrorKind is a class of database error the code under test may branch on.
-type ErrorKind int
+// DBErrorKind is a class of database error the code under test may branch on.
+type DBErrorKind int
 
 const (
-	UniqueViolation ErrorKind = iota + 1
+	UniqueViolation DBErrorKind = iota + 1
 	NotNullViolation
 	Deadlock
 	InFailedTransaction
@@ -549,7 +549,7 @@ const (
 	CheckViolation
 )
 
-// The errors an SQLError of each kind matches with errors.Is.
+// The errors a DBError of each kind matches with errors.Is.
 var (
 	ErrUniqueViolation           = errors.New("detest: unique violation")
 	ErrNotNullViolation          = errors.New("detest: not-null violation")
@@ -570,18 +570,18 @@ var (
 	ErrNoActiveTransaction       = errors.New("detest: no active transaction")
 	ErrInvalidSavepoint          = errors.New("detest: invalid savepoint")
 	ErrCheckViolation            = errors.New("detest: check violation")
-	kindErrors                   = map[ErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
+	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
 		WrongObjectType: ErrWrongObjectType, InvalidTableDefinition: ErrInvalidTableDefinition, NoActiveTransaction: ErrNoActiveTransaction, InvalidSavepoint: ErrInvalidSavepoint,
 		CheckViolation: ErrCheckViolation}
 )
 
-// SQLError is a database error detest's simulated database raises, with what drivers
+// DBError is a database error detest's simulated database raises, with what drivers
 // report about it: the SQLSTATE, the MySQL error number, the table, column
 // and constraint.
-type SQLError struct {
-	Kind       ErrorKind
+type DBError struct {
+	Kind       DBErrorKind
 	Code       string // SQLSTATE, such as "23505"
 	Number     int    // MySQL's error number, such as 1062; 0 for other servers
 	Message    string
@@ -590,15 +590,15 @@ type SQLError struct {
 	Constraint string
 }
 
-func (e *SQLError) Error() string {
+func (e *DBError) Error() string {
 	if e.Code == "" {
 		return "detest: " + e.Message
 	}
 	return fmt.Sprintf("detest: %s (SQLSTATE %s)", e.Message, e.Code)
 }
 
-// Is matches the error of the SQLError's kind, such as ErrUniqueViolation.
-func (e *SQLError) Is(target error) bool { return kindErrors[e.Kind] == target }
+// Is matches the error of the DBError's kind, such as ErrUniqueViolation.
+func (e *DBError) Is(target error) bool { return kindErrors[e.Kind] == target }
 
 // Name identifies the kind, such as "postgres".
 func (s *Impl) Name() string { return s.name }

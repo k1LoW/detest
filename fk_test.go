@@ -24,7 +24,7 @@ INSERT INTO members (id, team_id) VALUES ('m1', 't1'), ('m2', NULL);
 INSERT INTO invites (id, team_id) VALUES ('i1', 't1');
 INSERT INTO audits (id, org_id) VALUES ('a1', 'o2');
 `)
-	var se *SQLError
+	var se *DBError
 	if _, err := db.Exec(`INSERT INTO teams (id, org_id) VALUES ('t2', 'nope')`); !errors.As(err, &se) || se.Code != "23503" || se.Constraint != "teams_org_id_fkey" {
 		t.Fatalf("insert without a parent: %#v", err)
 	}

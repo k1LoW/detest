@@ -25,7 +25,7 @@ import (
 
 // Errors an operation on a simulated resource can return. Models branch on
 // these the way production code branches on database and RPC errors.
-// The database errors are *SQLError values, which match these with errors.Is.
+// The database errors are *DBError values, which match these with errors.Is.
 var (
 	ErrDeadlock                  = sqlir.ErrDeadlock
 	ErrUniqueViolation           = sqlir.ErrUniqueViolation

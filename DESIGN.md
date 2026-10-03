@@ -101,7 +101,7 @@ The database follows PostgreSQL at Read Committed, because the interleavings tha
 - foreign keys, with `FOR KEY SHARE` on the parent, every referential action, `MATCH FULL` and deferred constraints checked at commit;
 - `CHECK` and `NOT NULL`, savepoints, sequences, views and the DDL of real migrations and schema dumps.
 
-Errors are `*SQLError` values with the server's SQLSTATE. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`. A statement detest cannot run fails with `ErrUnsupportedSQL` instead of being approximated.
+Errors are `*DBError` values with the server's SQLSTATE. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`. A statement detest cannot run fails with `ErrUnsupportedSQL` instead of being approximated.
 
 Isolation levels are implemented per kind of server, since their semantics differ between servers. A pair detest does not implement fails when the database is declared, rather than running with the wrong semantics.
 

@@ -1804,9 +1804,9 @@ func assignedColumns(set []sqlir.Assignment) []string {
 }
 
 // kindError is a database error raised where the server is not at hand, such
-// as in arithmetic; eval turns it into the server's SQLError.
+// as in arithmetic; eval turns it into the server's DBError.
 type kindError struct {
-	kind sqlir.ErrorKind
+	kind sqlir.DBErrorKind
 	msg  string
 }
 

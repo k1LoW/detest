@@ -35,7 +35,7 @@ func New(opts ...Option) sqlir.Server {
 	return sqlir.NewServer(sqlir.ServerSpec{Name: "mysql", Parser: parser{}, Isolation: c.isolation, Codes: codes})
 }
 
-func codes(k sqlir.ErrorKind) (string, int) {
+func codes(k sqlir.DBErrorKind) (string, int) {
 	switch k {
 	case sqlir.UniqueViolation:
 		return "23000", 1062 // ER_DUP_ENTRY

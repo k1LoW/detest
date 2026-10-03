@@ -20,7 +20,7 @@ type Option func(*config)
 type config struct {
 	isolation  sqlir.IsolationLevel
 	searchPath []string
-	convert    func(*sqlir.SQLError) error
+	convert    func(*sqlir.DBError) error
 }
 
 // Isolation sets the level transactions run at when they do not ask for one,
@@ -40,8 +40,8 @@ func SearchPath(schemas ...string) Option {
 // test. Production code branches on its driver's error type, such as pgx's
 // *pgconn.PgError; convert builds that type from the SQLSTATE and the details
 // detest reports (pgxerr.Convert does it for pgx). Without Errors the code
-// under test sees *detest.SQLError.
-func Errors(convert func(*sqlir.SQLError) error) Option {
+// under test sees *detest.DBError.
+func Errors(convert func(*sqlir.DBError) error) Option {
 	return func(c *config) { c.convert = convert }
 }
 
@@ -62,7 +62,7 @@ func New(opts ...Option) sqlir.Server {
 	})
 }
 
-func codes(k sqlir.ErrorKind) (string, int) {
+func codes(k sqlir.DBErrorKind) (string, int) {
 	switch k {
 	case sqlir.UniqueViolation:
 		return "23505", 0

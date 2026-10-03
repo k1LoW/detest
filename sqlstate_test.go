@@ -38,7 +38,7 @@ CREATE VIEW item_names AS SELECT name FROM items;
 		{`ALTER TABLE nope RENAME TO other`, nil, "42P01", ErrUndefinedTable},
 	} {
 		_, err := db.Exec(tc.query, tc.args...)
-		var se *SQLError
+		var se *DBError
 		if !errors.As(err, &se) || se.Code != tc.code || !errors.Is(err, tc.is) {
 			t.Errorf("%s: got %v, want SQLSTATE %s", tc.query, err, tc.code)
 		}

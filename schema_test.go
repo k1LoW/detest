@@ -270,7 +270,7 @@ func TestColumnTypes(t *testing.T) {
 		{`SELECT 1 / 0`, nil, "22012"},
 	} {
 		_, err := db.Exec(tc.q, tc.args...)
-		var se *SQLError
+		var se *DBError
 		if !errors.As(err, &se) || se.Code != tc.code {
 			t.Errorf("%s: %v, want SQLSTATE %s", tc.q, err, tc.code)
 		}

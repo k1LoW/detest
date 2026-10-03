@@ -24,16 +24,16 @@ const (
 	Serializable   = sqlir.Serializable
 )
 
-// SQLError is a database error the simulated database raises: a unique violation, a
+// DBError is a database error the simulated database raises: a unique violation, a
 // deadlock and so on, with the server's SQLSTATE and the table, column and
 // constraint involved. The server's Errors option converts it into the error
 // type of the production code's driver.
-type SQLError = sqlir.SQLError
+type DBError = sqlir.DBError
 
-// ErrorKind is the class of an SQLError.
-type ErrorKind = sqlir.ErrorKind
+// DBErrorKind is the class of a DBError.
+type DBErrorKind = sqlir.DBErrorKind
 
-// The kinds of SQLError.
+// The kinds of DBError.
 const (
 	UniqueViolation           = sqlir.UniqueViolation
 	NotNullViolation          = sqlir.NotNullViolation

@@ -118,7 +118,7 @@ CREATE TABLE seats (id text PRIMARY KEY, org_id text, CONSTRAINT seats_org_fkey 
 	}
 	// No parent by the commit: the commit fails and rolls back.
 	err := inTx(`INSERT INTO teams VALUES ('t2', 'nope')`)
-	var se *SQLError
+	var se *DBError
 	if !errors.As(err, &se) || se.Code != "23503" {
 		t.Fatalf("commit without the parent: %v", err)
 	}

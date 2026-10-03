@@ -139,7 +139,7 @@ Processes interact only through simulated resources. Every operation on them is 
 
 **Errors**
 
-Errors are `*detest.SQLError` with PostgreSQL's SQLSTATE, the table, the column and the constraint, and match `detest.ErrUniqueViolation` and the other sentinels with `errors.Is`. Code that branches on its driver's error type gets that type by converting.
+Errors are `*detest.DBError` with PostgreSQL's SQLSTATE, the table, the column and the constraint, and match `detest.ErrUniqueViolation` and the other sentinels with `errors.Is`. Code that branches on its driver's error type gets that type by converting.
 
 ``` go
 s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError

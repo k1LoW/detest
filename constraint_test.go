@@ -35,7 +35,7 @@ INSERT INTO items (id, name, stock, price) VALUES ('a', 'apple', 1, 100);
 		{`INSERT INTO items (id, name, price) VALUES ('b', 'banana', 0)`, ErrCheckViolation, "23514", "", "price_positive"},
 	} {
 		_, err := db.Exec(tc.query)
-		var se *SQLError
+		var se *DBError
 		if !errors.As(err, &se) || !errors.Is(err, tc.is) || se.Code != tc.code || se.Column != tc.column || se.Constraint != tc.constraint {
 			t.Errorf("%s: got %#v", tc.query, err)
 		}

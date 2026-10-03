@@ -12,7 +12,7 @@ import (
 )
 
 // Convert returns e as the *pq.Error Postgres would have sent.
-func Convert(e *detest.SQLError) error {
+func Convert(e *detest.DBError) error {
 	return &pq.Error{
 		Severity:   "ERROR",
 		Code:       pqerror.Code(e.Code),

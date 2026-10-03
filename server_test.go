@@ -54,9 +54,9 @@ func TestServerIsolation(t *testing.T) {
 	}
 }
 
-// Without an Errors option the code under test sees *SQLError, which carries
+// Without an Errors option the code under test sees *DBError, which carries
 // the server's SQLSTATE and matches the kind's error with errors.Is.
-func TestSQLError(t *testing.T) {
+func TestDBError(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE)`)
@@ -72,7 +72,7 @@ func TestSQLError(t *testing.T) {
 		{`INSERT INTO users (email) VALUES ('c@x')`, ErrNotNullViolation, "23502", ""},
 	} {
 		_, err := db.Exec(tc.q)
-		var se *SQLError
+		var se *DBError
 		if !errors.Is(err, tc.is) || !errors.As(err, &se) || se.Code != tc.code || se.Constraint != tc.constraint {
 			t.Errorf("%s: %#v", tc.q, err)
 		}
