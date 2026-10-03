@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -522,6 +523,7 @@ rows:
 			break
 		}
 		latest := map[string]Row{}
+		changed := false
 		for _, a := range targets {
 			table := from.tables[a]
 			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
@@ -545,13 +547,19 @@ rows:
 				continue rows // deleted while waited for
 			}
 			latest[a] = cur
+			changed = changed || !reflect.DeepEqual(cur, r.by[a])
 		}
-		r, ok, err := x.recheck(sel, r, latest, from, outer)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !ok {
-			continue
+		// Postgres re-evaluates the predicate only for a row another
+		// transaction changed, which matters for a volatile one.
+		if changed {
+			var ok bool
+			var err error
+			if r, ok, err = x.recheck(sel, r, latest, from, outer); err != nil {
+				return nil, nil, err
+			}
+			if !ok {
+				continue
+			}
 		}
 		if skipped < offset {
 			skipped++

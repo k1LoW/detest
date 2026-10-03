@@ -505,3 +505,18 @@ func TestNoLockKeptOnLeftKey(t *testing.T) {
 		t.Errorf("locks: %v", reader.locks)
 	}
 }
+
+// A locking read evaluates its predicate once for a row no other transaction
+// changed: a volatile predicate runs as often as in Postgres.
+func TestLockingReadEvaluatesPredicateOnce(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE j (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO j VALUES (1)`)
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	mustExec(t, db, `SELECT id FROM j WHERE nextval('s') > 0 FOR UPDATE`)
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("nextval after one locking read of one row: %d, %v, want 2", n, err)
+	}
+}
