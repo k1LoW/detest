@@ -778,14 +778,16 @@ func (e *procPanic) Error() string {
 
 // same reports whether two violations break the run the same way. A panic is
 // the same by its process and value, as its stack holds addresses that differ
-// between runs.
+// between runs. The value is compared by its type and text rather than with
+// reflect.DeepEqual, which would tell apart equal panics whose values hold a
+// func, a channel or other state made anew in each run.
 func (v *violation) same(o *violation) bool {
 	if v.kind != o.kind {
 		return false
 	}
 	if a, ok := errors.AsType[*procPanic](v.err); ok {
 		b, ok := errors.AsType[*procPanic](o.err)
-		return ok && a.proc == b.proc && fmt.Sprint(a.value) == fmt.Sprint(b.value)
+		return ok && a.proc == b.proc && fmt.Sprintf("%T %v", a.value, a.value) == fmt.Sprintf("%T %v", b.value, b.value)
 	}
 	return v.err.Error() == o.err.Error()
 }

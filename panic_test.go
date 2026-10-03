@@ -88,6 +88,9 @@ func TestPanicSameIgnoresStack(t *testing.T) {
 			}
 		})
 	}
+	if v("b#2", "1", stack).same(v("b#2", 1, stack)) {
+		t.Error(`panic("1") and panic(1) compare as the same`)
+	}
 }
 
 // A process that panics after resuming from a primitive detest does not model
