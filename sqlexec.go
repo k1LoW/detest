@@ -172,18 +172,32 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		return x.execDelete(st)
 	case *sqlir.SchemaStmt:
 		for _, ch := range st.Changes {
+			// Postgres refuses to drop a column a generated column depends
+			// on, or drops both with CASCADE. The generated columns are the
+			// table's and those the same statement adds.
+			gens := map[string]tableCheck{}
+			var order []string
 			if def := tx.db.defs[tx.db.resolve(ch.Table)]; def != nil {
-				// Postgres refuses to drop a column a generated column
-				// depends on, or drops both with CASCADE.
-				for _, col := range def.columns { // in declaration order, for a stable error
-					g := def.generated[col]
-					if g == nil || slices.Contains(ch.DropColumns, col) {
-						continue
+				for _, col := range def.columns {
+					if g := def.generated[col]; g != nil {
+						gens[col] = *g
+						order = append(order, col)
 					}
-					for _, dep := range g.columns() {
-						if slices.Contains(ch.DropColumns, dep) {
-							return nil, x.unsupported(fmt.Sprintf("dropping column %q, which generated column %q depends on", dep, col))
-						}
+				}
+			}
+			for _, c := range ch.Columns {
+				if c.Generated != nil {
+					gens[c.Name] = tableCheck{CheckDef: sqlir.CheckDef{Name: c.Name, Expr: c.Generated}}
+					order = append(order, c.Name)
+				}
+			}
+			for _, col := range order { // in declaration order, for a stable error
+				if slices.Contains(ch.DropColumns, col) {
+					continue
+				}
+				for _, dep := range gens[col].columns() {
+					if slices.Contains(ch.DropColumns, dep) {
+						return nil, x.unsupported(fmt.Sprintf("dropping column %q, which generated column %q depends on", dep, col))
 					}
 				}
 			}

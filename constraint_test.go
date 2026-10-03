@@ -215,6 +215,12 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("nextval after a refused INSERT: %d, %v", n, err)
 	}
 
+	// The same statement may not add a generated column and drop what it reads.
+	mustExec(t, db, `CREATE TABLE v (id int PRIMARY KEY, a int)`)
+	if _, err := db.Exec(`ALTER TABLE v ADD COLUMN b int GENERATED ALWAYS AS (a * 2) STORED, DROP COLUMN a`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ADD and DROP in one ALTER: got %v", err)
+	}
+
 	// A row the transaction inserted counts as a row there already.
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
 	tx, err := db.Begin()
