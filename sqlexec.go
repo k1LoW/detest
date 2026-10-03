@@ -1908,6 +1908,10 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !ok {
 			break
 		}
+		if places != math.Trunc(places) {
+			// round(numeric, integer) is the only signature with two.
+			return nil, x.unsupported("round with a scale that is not an integer")
+		}
 		return roundDecimal(f, int(places)), nil
 	case "power", "pow":
 		a, oka := toFloat(d(0))
