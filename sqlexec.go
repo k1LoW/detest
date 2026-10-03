@@ -1715,11 +1715,11 @@ func castValue(v any, typ string) any {
 // pg_try_advisory_xact_lock is a non-blocking lock held until the end of the
 // transaction, modeled in the DB's lock table.
 // strictFuncs are the functions detest evaluates that Postgres declares
-// strict: given a NULL argument, they return NULL without being called.
-var strictFuncs = map[string]bool{
-	"lower": true, "upper": true, "length": true, "char_length": true, "hashtext": true,
-	"abs": true, "floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true,
-	"make_interval": true,
+// strict, given NULL, they return NULL without being called, with the
+// numbers of arguments their signatures take.
+var strictFuncs = map[string][]int{
+	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
+	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 }
 
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
@@ -1729,8 +1729,14 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		return nil
 	}
-	if strictFuncs[name] && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
-		return nil, nil // a strict function of NULL is NULL
+	if arity, strict := strictFuncs[name]; strict {
+		// Postgres resolves the signature before strictness applies.
+		if !slices.Contains(arity, len(args)) {
+			return nil, x.unsupported(fmt.Sprintf("%s with %d arguments", name, len(args)))
+		}
+		if slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
+			return nil, nil // a strict function of NULL is NULL
+		}
 	}
 	switch name {
 	case "coalesce":
@@ -1843,9 +1849,19 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return numeric(math.Ceil(f)), nil
 		}
 	case "round":
-		if f, ok := toFloat(d(0)); ok {
+		f, ok := toFloat(d(0))
+		if !ok {
+			break
+		}
+		if len(args) == 1 {
 			return numeric(math.Round(f)), nil
 		}
+		places, ok := toFloat(d(1))
+		if !ok {
+			break
+		}
+		scale := math.Pow10(int(places)) // round(x, n), half away from zero as Postgres's numeric
+		return math.Round(f*scale) / scale, nil
 	case "power", "pow":
 		a, oka := toFloat(d(0))
 		b, okb := toFloat(d(1))

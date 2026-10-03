@@ -300,4 +300,16 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 			t.Errorf("%s: %v %v, want NULL", q, v, err)
 		}
 	}
+	// A call no signature takes is refused, NULL or not.
+	for _, q := range []string{`SELECT power(NULL)`, `SELECT abs(NULL, NULL)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	for q, want := range map[string]float64{`SELECT round(2.345, 2)`: 2.35, `SELECT round(1.5)`: 2, `SELECT round(-2.345, 1)`: -2.3} {
+		var v float64
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != want {
+			t.Errorf("%s: %v %v, want %v", q, v, err, want)
+		}
+	}
 }
