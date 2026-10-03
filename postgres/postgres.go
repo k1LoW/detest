@@ -409,9 +409,10 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_GENERATED:
 			g, err := c.expr(k.RawExpr)
 			// Every refusal of an aggregate (string_agg, FILTER, ORDER BY,
-			// WITHIN GROUP) reads "aggregate ...": Postgres refuses an
-			// aggregate here, not only detest.
-			if u := (*sqlir.ErrUnsupportedSQL)(nil); errors.As(err, &u) && strings.HasPrefix(u.What, "aggregate ") {
+			// WITHIN GROUP) reads "aggregate ...", and of a SQL value
+			// function such as CURRENT_DATE "SQL value function ...":
+			// Postgres refuses both here, not only detest.
+			if u := (*sqlir.ErrUnsupportedSQL)(nil); errors.As(err, &u) && (strings.HasPrefix(u.What, "aggregate ") || strings.HasPrefix(u.What, "SQL value function ")) {
 				return col, nil, nil, err
 			}
 			if err != nil {
@@ -445,6 +446,9 @@ var mutableFuncs = map[string]bool{
 	"statement_timestamp": true, "random": true, "concat": true,
 	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
 	"count": true, "sum": true, "min": true, "max": true, "avg": true,
+	// Immutable in Postgres, but detest returns its input rather than the
+	// int4 hash, which a stored value must not differ from.
+	"hashtext": true,
 }
 
 // immutable refuses what Postgres does not allow in a generation expression:

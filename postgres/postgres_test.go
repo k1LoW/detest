@@ -21,6 +21,8 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS ((SELECT 1)) STORED)`,
 		`CREATE TABLE t (a text, b text GENERATED ALWAYS AS (string_agg(a, ',')) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (sum(a ORDER BY a)) STORED)`,
+		`CREATE TABLE t (a int, b date GENERATED ALWAYS AS (CURRENT_DATE) STORED)`,
+		`CREATE TABLE t (a text, b int GENERATED ALWAYS AS (hashtext(a)) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (count(*) FILTER (WHERE a > 0)) STORED)`,
 		`CREATE TABLE t (a int, b int DEFAULT 1 GENERATED ALWAYS AS (a * 2) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS IDENTITY GENERATED ALWAYS AS (a * 2) STORED)`,
