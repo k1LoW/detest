@@ -265,9 +265,14 @@ func sameColumns(u sqlir.UniqueDef, cols []string) bool {
 // its order: the column types, NOT NULL, then CHECK constraints.
 func (x *sqlExec) checkRow(table string, row Row) error {
 	def := x.tx.db.defs[table]
-	if def != nil {
+	if def != nil && len(def.generated) > 0 {
 		// Every write checks its row here, so this is where the generated
-		// columns get their values, before the checks that may read them.
+		// columns get their values: after the values given are checked, as
+		// Postgres coerces them first, and before the checks that may read
+		// the computed ones.
+		if err := x.checkTypes(table, row); err != nil {
+			return err
+		}
 		if err := x.generate(table, def, row); err != nil {
 			return err
 		}

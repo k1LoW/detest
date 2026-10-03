@@ -272,6 +272,12 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("unconvertible generated column: got %v", err)
 	}
 
+	// The values given are checked before the generated column is computed.
+	mustExec(t, db, `CREATE TABLE r (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (100 / (a - 3000000000)) STORED)`)
+	if _, err := db.Exec(`INSERT INTO r (id, a) VALUES (1, 3000000000)`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("out-of-range base value: got %v", err)
+	}
+
 	// A qualified reference still reads the table after it is renamed.
 	mustExec(t, db, `CREATE TABLE q (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (q.a + 1) STORED, CONSTRAINT a_small CHECK (q.a < 10))`)
 	mustExec(t, db, `ALTER TABLE q RENAME TO q2`)
