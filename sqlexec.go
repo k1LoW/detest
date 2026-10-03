@@ -686,7 +686,7 @@ func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) 
 		if n < 0 {
 			return 0, x.unsupported("a negative " + what)
 		}
-		return int(n), nil
+		return int(min(n, math.MaxInt)), nil // no slice is longer than MaxInt
 	case string:
 		// An untyped literal such as '2' reads as a bigint.
 		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
@@ -696,7 +696,7 @@ func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) 
 		if i < 0 {
 			return 0, x.unsupported("a negative " + what)
 		}
-		return int(i), nil
+		return int(min(i, math.MaxInt)), nil
 	}
 	f, ok := toFloat(derefValue(v))
 	switch {
@@ -707,6 +707,8 @@ func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) 
 		return 0, x.unsupported("a negative " + what)
 	case math.IsNaN(f) || f >= math.MaxInt64:
 		return 0, x.unsupported("an " + what + " out of the bigint range")
+	case f >= math.MaxInt:
+		return math.MaxInt, nil
 	}
 	return int(f), nil
 }
