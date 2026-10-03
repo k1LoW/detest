@@ -272,6 +272,18 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("unconvertible generated column: got %v", err)
 	}
 
+	// A qualified reference still reads the table after it is renamed.
+	mustExec(t, db, `CREATE TABLE q (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (q.a + 1) STORED, CONSTRAINT a_small CHECK (q.a < 10))`)
+	mustExec(t, db, `ALTER TABLE q RENAME TO q2`)
+	mustExec(t, db, `INSERT INTO q2 (id, a) VALUES (1, 1)`)
+	var qb int64
+	if err := db.QueryRow(`SELECT b FROM q2 WHERE id = 1`).Scan(&qb); err != nil || qb != 2 {
+		t.Errorf("generated after RENAME TO: %d, %v", qb, err)
+	}
+	if _, err := db.Exec(`INSERT INTO q2 (id, a) VALUES (2, 20)`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("CHECK after RENAME TO: %v", err)
+	}
+
 	// CREATE TABLE of a table that exists is a no-op or a duplicate, whatever
 	// its generated columns.
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS t (x int)`)

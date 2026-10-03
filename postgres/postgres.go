@@ -372,7 +372,17 @@ func (c *pgConv) check(k *pg.Constraint) (sqlir.CheckDef, bool) {
 	if err != nil {
 		return sqlir.CheckDef{}, false
 	}
+	unqualify(e)
 	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true
+}
+
+// unqualify drops the table name from the column references of a CHECK or
+// generation expression, which can only refer to its own table: kept, t.a
+// would read nothing once the table is renamed.
+func unqualify(e sqlir.Expr) {
+	for _, r := range sqlir.ColumnRefs(e) {
+		r.Table = ""
+	}
 }
 
 // columnDef converts a column with the constraints written on it.
@@ -422,6 +432,7 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 			if err := c.immutable(col.Generated, relnameOf(table)); err != nil {
 				return col, nil, nil, err
 			}
+			unqualify(col.Generated)
 		case pg.ConstrType_CONSTR_PRIMARY, pg.ConstrType_CONSTR_UNIQUE:
 			u, _, err := c.constraintDef(k, []string{d.Colname})
 			if err != nil {
