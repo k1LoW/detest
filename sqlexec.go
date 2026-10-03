@@ -1787,7 +1787,9 @@ func roundDecimal(f float64, n int) float64 {
 // converter passes for CURRENT_TIMESTAMP(p), which SQL cannot call itself.
 var otherArity = map[string][]int{
 	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
-	"current_timestamp": {1}, "random": {0},
+	"current_timestamp": {1}, "random": {0}, "nullif": {2},
+	"gen_random_uuid": {0}, "uuid_generate_v4": {0}, "nextval": {1}, "setval": {2, 3},
+	"pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
 }
 
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {

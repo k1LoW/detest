@@ -315,7 +315,7 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 	}
 	// Refused before its arguments are evaluated.
 	mustExec(t, db, `CREATE SEQUENCE s`)
-	for _, q := range []string{`SELECT abs(nextval('s'), 0)`, `SELECT now(nextval('s'))`, `SELECT random(nextval('s'))`} {
+	for _, q := range []string{`SELECT abs(nextval('s'), 0)`, `SELECT now(nextval('s'))`, `SELECT random(nextval('s'))`, `SELECT gen_random_uuid(nextval('s'))`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
 		}
