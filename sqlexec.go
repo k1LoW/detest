@@ -1737,6 +1737,7 @@ func castValue(v any, typ string) any {
 var strictFuncs = map[string][]int{
 	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
+	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
 }
 
 // roundDecimal is round(x, n) on the decimal x was written as, half away from
@@ -1788,8 +1789,7 @@ func roundDecimal(f float64, n int) float64 {
 var otherArity = map[string][]int{
 	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
 	"current_timestamp": {1}, "random": {0}, "nullif": {2},
-	"gen_random_uuid": {0}, "uuid_generate_v4": {0}, "nextval": {1}, "setval": {2, 3},
-	"pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
+	"gen_random_uuid": {0}, "uuid_generate_v4": {0},
 }
 
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {

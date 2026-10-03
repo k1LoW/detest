@@ -320,6 +320,13 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 			t.Errorf("%s: got %v", q, err)
 		}
 	}
+	// nextval and the advisory locks are strict: given NULL, they do nothing.
+	for _, q := range []string{`SELECT nextval(NULL)`, `SELECT setval('s', 5, NULL)`, `SELECT pg_try_advisory_xact_lock(NULL)`} {
+		var v sql.NullString
+		if err := db.QueryRow(q).Scan(&v); err != nil || v.Valid {
+			t.Errorf("%s: %v %v, want NULL", q, v, err)
+		}
+	}
 	var n int64
 	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
 		t.Errorf("nextval after a refused call: %d, %v", n, err)
