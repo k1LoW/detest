@@ -19,6 +19,7 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (nextval('s')) STORED)`,
 		`CREATE TABLE t (a int, b timestamptz GENERATED ALWAYS AS (now()) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS ((SELECT 1)) STORED)`,
+		`CREATE TABLE t (a text, b text GENERATED ALWAYS AS (string_agg(a, ',')) STORED)`,
 		`CREATE TABLE t (a int, b int DEFAULT 1 GENERATED ALWAYS AS (a * 2) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS IDENTITY GENERATED ALWAYS AS (a * 2) STORED)`,
 		`ALTER TABLE t ALTER COLUMN b SET EXPRESSION AS (a * 3)`,

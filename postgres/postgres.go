@@ -443,7 +443,7 @@ func (c *pgConv) immutable(e sqlir.Expr) error {
 	for _, x := range sqlir.Exprs(e) {
 		switch v := x.(type) {
 		case *sqlir.FuncCall:
-			if mutableFuncs[v.Name] {
+			if mutableFuncs[v.Name] || sqlir.OtherAggregates[v.Name] {
 				return c.unsupported("generated column calling " + v.Name)
 			}
 		case *sqlir.SubQuery, *sqlir.Exists, *sqlir.Param, *sqlir.WindowFunc:
