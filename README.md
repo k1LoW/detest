@@ -96,20 +96,82 @@ A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes 
 | `s.Always(fn)`, `s.AtQuiescence(fn)` | Invariants checked after every step, or once every process is done |
 | `s.Sometimes(name, fn)` | A condition at least one run must meet, so that an exploration that never gets near the bug fails |
 
-### Databases
+## Simulated resources
 
-`postgres.New()` parses SQL with the PostgreSQL parser and models Read Committed. Row locks of the four strengths, unique index entries, foreign keys (`FOR KEY SHARE` on the parent, cascades), `NOWAIT`, `SKIP LOCKED`, `lock_timeout`, savepoints and deadlock detection behave as they do on a real server. Migrations and schema dumps can be executed as is. Statements detest does not support fail with `detest.ErrUnsupportedSQL`, and `detest.CheckSQL` checks a statement without running a model.
+Processes interact only through simulated resources. Every operation on them is a scheduling point, and each one models how its real counterpart behaves under concurrency.
 
-Errors are `*detest.SQLError` with the SQLSTATE of the real server. Code that branches on driver error types gets them by converting.
+### Database
+
+`s.DB(name, postgres.New())` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged. SQL is parsed with PostgreSQL's real grammar, and the semantics are those of PostgreSQL at Read Committed.
+
+**Concurrency**
+
+- Row locks of the four strengths (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`) with PostgreSQL's conflict table, taken by writes and by locking reads
+- Waits on locked rows, with the predicate re-checked on the new version after the wait, as Read Committed does
+- `NOWAIT`, `SKIP LOCKED` and `SET LOCAL lock_timeout`
+- Deadlock detection for cycles of row lock waits (40P01), and reports of waits the database cannot detect, through a mutex or an open transaction of the same process
+- Unique indexes, where a concurrent insert of the same value waits for the first transaction and then conflicts
+- Savepoints, and a failed statement aborting its transaction (25P02)
+
+**Constraints**
+
+- Primary keys (composite too), unique constraints and unique indexes, including partial, expression and `NULLS NOT DISTINCT` indexes
+- Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`
+- `CHECK` and `NOT NULL`
+- Column types `uuid`, `smallint` and `integer` are checked on write
+
+**Statements**
+
+- `SELECT` with inner, left and cross joins, `LATERAL`, subqueries, non-recursive CTEs, `GROUP BY` and `HAVING`, aggregates (`count`, `sum`, `min`, `max`, `avg`), window functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value` and the aggregates) over the default frame or the whole partition, `DISTINCT`, `DISTINCT ON`, `UNION`, `INTERSECT`, `EXCEPT`, `VALUES`, `ORDER BY` with `NULLS FIRST | LAST`, `LIMIT` and `OFFSET`
+- `INSERT` with `ON CONFLICT DO NOTHING | DO UPDATE` and `RETURNING`, `INSERT ... SELECT`
+- `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`
+- Common functions, among them `coalesce`, `nullif`, `greatest`, `least`, `lower`, `upper`, `length`, `concat`, `now`, `nextval`, `setval`, `gen_random_uuid`, `generate_series` and the transaction advisory locks
+- Expressions follow SQL's three-valued logic
+
+**Schema**
+
+- `CREATE`, `ALTER` and `DROP` of tables, columns, constraints, indexes, views and materialized views, `CREATE TABLE AS`, `REFRESH MATERIALIZED VIEW`, renames
+- Defaults, serial and identity columns, sequences, with values that repeat from run to run
+- Schemas and `search_path` (`postgres.SearchPath`)
+- Migrations and `pg_dump --schema-only` output run as they are. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
+- `ddl.From` reads the tables of a live database and writes DDL that detest accepts
+- `store.Ignore(...)` takes tables the invariants do not look at, such as an audit log, out of the simulation. Writes to them are dropped and are no scheduling points, which keeps the exploration small
+
+**Errors**
+
+Errors are `*detest.SQLError` with PostgreSQL's SQLSTATE, the table, the column and the constraint, and match `detest.ErrUniqueViolation` and the other sentinels with `errors.Is`. Code that branches on its driver's error type gets that type by converting.
 
 ``` go
 s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError
 s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 ```
 
-`ddl.From` reads the tables of a live database and writes DDL that detest accepts. Tables the invariants do not look at, such as an audit log, can be taken out with `store.Ignore(...)`: writes to them are dropped and are no scheduling points, which keeps the exploration small.
+**Not supported**
 
-### Options and environment variables
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING`, window frames other than the two above, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. The `mysql` package declares a MySQL server, but its parser is not implemented yet.
+
+### Queue
+
+`s.Queue(name)` is an at-least-once, unordered queue, and `s.OnMessage(name, q, fn)` its consumer.
+
+- A handler that returns an error has its message redelivered, up to `detest.MaxRedeliveries` times
+- `detest.Duplicates(n)` delivers up to n messages twice per run
+- `detest.Losses(n)` loses up to n messages per run, to check that a backstop covers them
+- `q.Enqueue(p, msg)` publishes at once, and `tx.Enqueue(q, msg)` on commit
+
+### External service
+
+`s.External(name)` is a call to another service. The explorer tries success, failure before the effect, and failure after it (the effect applied but the response lost), where the caller sees `detest.ErrUnavailable`.
+
+- `ext.Transport(handler)` returns an `http.RoundTripper` serving an `http.Handler` in process, to give generated clients (connect, gRPC-Web, REST) the real handler of the other service
+- `ext.Do(p, desc, fn)` wraps any call
+- `detest.Failures(...)` chooses the failures to try, and `detest.ReadOnly()` drops failure after the effect for reads
+
+### Mutex
+
+`s.Mutex(name)` and `s.RWMutex(name)` replace `sync.Mutex` and `sync.RWMutex` in production code. Waiting for them is visible to the scheduler, so cycles that mix mutexes and row locks are reported. As with `sync.RWMutex`, a waiting writer keeps new readers out.
+
+## Options and environment variables
 
 The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries` and `detest.MaxRuns` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
