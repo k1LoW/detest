@@ -51,6 +51,9 @@ func TestPanicReportsItsSchedule(t *testing.T) {
 		if !regexp.MustCompile(`panic in b#2: boom`).Match(out) || regexp.MustCompile(`(?m)^panic: `).Match(out) {
 			t.Fatalf("%v: expected a test failure naming the panic, not a crash:\n%s", env, out)
 		}
+		if !regexp.MustCompile(`detest\.racyPanic`).Match(out) {
+			t.Fatalf("%v: expected the stack the panic was raised on:\n%s", env, out)
+		}
 		return string(out)
 	}
 	m := regexp.MustCompile(`DETEST_REPLAY=(\S+)`).FindStringSubmatch(run())
@@ -58,4 +61,31 @@ func TestPanicReportsItsSchedule(t *testing.T) {
 		t.Fatal("no schedule reported")
 	}
 	run("DETEST_REPLAY=" + m[1])
+}
+
+// Shrinking keeps a rerun that panics in the same process with the same value,
+// even though its stack differs, and drops one that panics otherwise.
+func TestPanicSameIgnoresStack(t *testing.T) {
+	v := func(proc string, value any, stack string) *violation {
+		return &violation{kind: "panic", err: &procPanic{proc: proc, value: value, stack: stack}}
+	}
+	const stack = "goroutine 1 [running]:\n\tsched.go:+0x10"
+	base := v("b#2", "boom", stack)
+	tests := []struct {
+		name  string
+		other *violation
+		want  bool
+	}{
+		{"different stack", v("b#2", "boom", "goroutine 7 [running]:\n\tsched.go:+0x24"), true},
+		{"different process", v("a#1", "boom", stack), false},
+		{"different value", v("b#2", "bang", stack), false},
+		{"different kind", &violation{kind: "progress", err: base.err}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := base.same(tt.other); got != tt.want {
+				t.Errorf("same() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
