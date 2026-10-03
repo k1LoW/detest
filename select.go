@@ -392,6 +392,12 @@ func (x *sqlExec) finish(sel *sqlir.SelectStmt, cols []string, rows []Row, outer
 }
 
 func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	for _, vs := range sel.Values {
+		// Postgres refuses lists of different lengths before evaluating any.
+		if len(vs) != len(sel.Values[0]) {
+			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
+		}
+	}
 	var cols []string
 	if len(sel.Values) > 0 {
 		for i := range sel.Values[0] {
