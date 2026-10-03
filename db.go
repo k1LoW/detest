@@ -1254,6 +1254,15 @@ func (db *DB) isIgnored(table string) bool { return db.ignored[db.resolve(table)
 // schema is keyed by id.
 func (db *DB) updateLock(table string, cols []string) lockMode {
 	def := db.defs[table]
+	if def != nil {
+		// A generated column changes with the columns it is computed from,
+		// so it counts as written when one of them is.
+		for _, col := range def.columns {
+			if g := def.generated[col]; g != nil && slices.ContainsFunc(g.columns(), func(dep string) bool { return slices.Contains(cols, dep) }) {
+				cols = append(slices.Clip(cols), col)
+			}
+		}
+	}
 	for _, c := range cols {
 		if def == nil {
 			if c == "id" {

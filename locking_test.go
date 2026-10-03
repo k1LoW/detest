@@ -317,3 +317,18 @@ func TestMoveChainEndsAtDeletedKey(t *testing.T) {
 		t.Errorf("row 1 was deleted, but its chain leads to %s", key)
 	}
 }
+
+// Writing a column a generated key is computed from changes the key, so the
+// update takes FOR UPDATE, as Postgres does.
+func TestUpdateLockCountsGeneratedKeys(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY, email text, note text, email_l text GENERATED ALWAYS AS (lower(email)) STORED UNIQUE)`)
+	table := store.resolve("p")
+	if got := store.updateLock(table, []string{"email"}); got != lockUpdate {
+		t.Errorf("email: got %v, want FOR UPDATE", got)
+	}
+	if got := store.updateLock(table, []string{"note"}); got != lockNoKeyUpdate {
+		t.Errorf("note: got %v, want FOR NO KEY UPDATE", got)
+	}
+}
