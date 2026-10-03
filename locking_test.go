@@ -104,6 +104,16 @@ func TestForUpdateOverDerivedItems(t *testing.T) {
 	}
 	// A WITH query is not locked unless named, as in Postgres.
 	mustExec(t, db, `WITH c AS (SELECT id FROM a) SELECT * FROM a JOIN c ON c.id = a.id FOR UPDATE`)
+
+	// The locking clause is refused before the query runs.
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	if _, err := db.Exec(`SELECT * FROM (SELECT nextval('s')) q FOR UPDATE`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("subquery: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after a refused locking read: %d, %v", n, err)
+	}
 }
 
 // After a wait, a row whose join partner no longer matches is left out, and

@@ -37,7 +37,7 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	case sel.Lock != nil:
 		return x.evalLocking(sel, outer)
 	}
-	rows, _, err := x.scan(sel, outer)
+	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -480,18 +480,19 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 // (FOR UPDATE SKIP LOCKED skips rows held by others) and the rows OFFSET
 // skips are locked as well.
 func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
-	rows, from, err := x.scan(sel, outer)
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+	}
+	from := x.fromItemsOf(sel)
+	targets, err := x.lockTargets(sel.Lock, from)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
 	if rows, err = x.where(sel, rows, outer); err != nil {
-		return nil, nil, err
-	}
-	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
-		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
-	}
-	targets, err := x.lockTargets(sel.Lock, from)
-	if err != nil {
 		return nil, nil, err
 	}
 	if err := x.order(sel.OrderBy, rows, outer); err != nil {
