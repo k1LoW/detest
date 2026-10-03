@@ -41,8 +41,19 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			return nil, nil, err
 		}
 	}
+	for _, vs := range sel.Values {
+		// Postgres refuses lists of different lengths when it analyzes the
+		// statement, before evaluating anything.
+		if len(vs) != len(sel.Values[0]) {
+			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
+		}
+	}
+	if err := x.withCTEs(sel.With, outer); err != nil {
+		return nil, nil, err
+	}
 	// OFFSET and LIMIT are taken, and a negative one refused, before the
-	// query has any effect, as Postgres does before fetching rows.
+	// query produces a row, as Postgres does before fetching rows. They may
+	// read the WITH queries, so those come first.
 	offset, limit, err := x.evalBounds(sel, outer)
 	if err != nil {
 		return nil, nil, err
@@ -51,9 +62,6 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 		x.bounds = map[*sqlir.SelectStmt][2]int{}
 	}
 	x.bounds[sel] = [2]int{offset, limit}
-	if err := x.withCTEs(sel.With, outer); err != nil {
-		return nil, nil, err
-	}
 	switch {
 	case sel.SetOp != "":
 		return x.evalSetOp(sel, outer)
@@ -392,12 +400,6 @@ func (x *sqlExec) finish(sel *sqlir.SelectStmt, cols []string, rows []Row, outer
 }
 
 func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
-	for _, vs := range sel.Values {
-		// Postgres refuses lists of different lengths before evaluating any.
-		if len(vs) != len(sel.Values[0]) {
-			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
-		}
-	}
 	var cols []string
 	if len(sel.Values) > 0 {
 		for i := range sel.Values[0] {
