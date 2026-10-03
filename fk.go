@@ -95,7 +95,7 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 		return nil
 	}
 	for _, fk := range def.fks {
-		if fk.Name == skip {
+		if fk.Name == skip || x.tx.db.isIgnored(fk.RefTable) {
 			continue
 		}
 		if fk.MatchFull && partlyNull(row, fk.Columns) {
@@ -348,7 +348,7 @@ func (x *sqlExec) checkDeferred(only func(sqlir.ForeignKey) bool) error {
 		for _, lk := range sortedKeys(tx.writes, table) {
 			row := tx.writes[lk]
 			for _, fk := range tx.db.defs[table].fks {
-				if !only(fk) {
+				if !only(fk) || tx.db.isIgnored(fk.RefTable) {
 					continue
 				}
 				vals, ok := values(row, fk.Columns)

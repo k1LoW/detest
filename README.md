@@ -107,7 +107,7 @@ s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError
 s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 ```
 
-`ddl.From` reads the tables of a live database and writes DDL that detest accepts.
+`ddl.From` reads the tables of a live database and writes DDL that detest accepts. Tables the invariants do not look at, such as an audit log, can be taken out with `store.Ignore(...)`: writes to them are dropped and are no scheduling points, which keeps the exploration small.
 
 ### Options and environment variables
 

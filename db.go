@@ -130,6 +130,7 @@ type DB struct {
 	views    map[string]*sqlir.SchemaChange      // the query of each view
 	seqs     map[string]int64                    // sequence values of the run, for nextval
 	uuids    int64                               // gen_random_uuid values handed out in the run
+	ignored  map[string]bool                     // tables Ignore took out of the simulation
 }
 
 // tableDef is what the schema declares about a table.
@@ -145,6 +146,22 @@ type tableDef struct {
 
 // Name returns the database name.
 func (db *DB) Name() string { return db.name }
+
+// Ignore takes tables out of the simulation: writes to them succeed and are
+// dropped, reads find them empty, they need no CREATE TABLE, take no locks
+// and are no scheduling point, and foreign keys referencing them go
+// unchecked. It is for tables the code under test writes but the invariants
+// do not look at, such as an audit log, whose rows and locks would only grow
+// the exploration. Names resolve on the search path as statements do.
+func (db *DB) Ignore(tables ...string) {
+	db.s.declare("Ignore")
+	if db.ignored == nil {
+		db.ignored = map[string]bool{}
+	}
+	for _, t := range tables {
+		db.ignored[db.resolve(t)] = true
+	}
+}
 
 var defaultSearchPath = []string{"public"}
 
@@ -1078,11 +1095,13 @@ func (tx *Tx) release() {
 // checkTable reports a table that does not exist. A database with a declared
 // schema takes it as complete; one without lets any table spring up empty.
 func (db *DB) checkTable(table string) error {
-	if len(db.defs) == 0 || db.defs[table] != nil || db.views[table] != nil {
+	if len(db.defs) == 0 || db.defs[table] != nil || db.views[table] != nil || db.ignored[table] {
 		return nil
 	}
 	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 }
+
+func (db *DB) isIgnored(table string) bool { return db.ignored[db.resolve(table)] }
 
 // updateLock is the row lock an UPDATE of these columns takes: FOR NO KEY
 // UPDATE unless it changes a key column, one in the primary key or in a

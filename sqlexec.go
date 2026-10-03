@@ -776,6 +776,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if err := x.tx.db.assignKey(table, row); err != nil {
 			return nil, err
 		}
+		if x.tx.db.ignored[table] {
+			out.affected++
+			x.appendReturning(out, ins.Returning, row)
+			continue
+		}
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
 		var existing Row
 		if ins.OnConflict != nil {
@@ -984,6 +989,9 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 
 func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(up.Table)
+	if x.tx.db.ignored[table] {
+		return &sqlResult{cols: x.returningCols(up.Returning, nil)}, nil // nothing to update
+	}
 	alias := up.Alias
 	if alias == "" {
 		alias = relname(up.Table)
@@ -1073,6 +1081,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 }
 
 func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
+	if x.tx.db.isIgnored(del.Table) {
+		return &sqlResult{cols: x.returningCols(del.Returning, nil)}, nil // nothing to delete
+	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
 	cands, err := x.writeCandidates(del.Table, del.Alias, del.Using, del.Where)
 	if err != nil {
