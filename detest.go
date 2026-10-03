@@ -303,8 +303,12 @@ func (r *result) report() string {
 		}
 		return msg
 	}
-	return fmt.Sprintf("detest: %s violated: %v\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
-		r.Kind, r.Err, r.Runs, len(strings.Split(r.Schedule, ",")), r.Schedule, r.Trace)
+	what := fmt.Sprintf("%s violated: %v", r.Kind, r.Err)
+	if r.Kind == "panic" {
+		what = r.Err.Error()
+	}
+	return fmt.Sprintf("detest: %s\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
+		what, r.Runs, len(strings.Split(r.Schedule, ",")), r.Schedule, r.Trace)
 }
 
 // check runs the exhaustive exploration. DETEST_REPLAY or Replay replays
@@ -370,7 +374,7 @@ func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 		prefix[i].picked = 0
 		cr := s.newRun(prefix)
 		cv := cr.execute()
-		if cv != nil && cv.kind == v.kind && cv.err.Error() == v.err.Error() {
+		if cv != nil && cv.same(v) {
 			r, v = cr, cv
 		}
 	}

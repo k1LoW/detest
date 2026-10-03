@@ -129,6 +129,7 @@ A queue is at least once and unordered. A consumer whose handler returns an erro
 
 - `Always` invariants hold after every step; `AtQuiescence` invariants hold once no process can run. Eventual consistency is written as the latter.
 - Progress violations need no invariant. They are a process blocked forever, a cycle of waits through mutexes, and a process waiting for a lock held by its own open transaction.
+- A panic in a process needs no invariant either. It is reported as a violation with its stack and the schedule that replays it, and shrunk like any other, rather than taking the test binary down, since a panic under one interleaving is what the exploration is for.
 - `Sometimes` declares a condition some run must meet. Invariants only say nothing broke, which an exploration that never gets near the bug also satisfies.
 - `ExpectViolation` pins a known violation, and `Replay` pins one schedule, as regression tests.
 
