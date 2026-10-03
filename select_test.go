@@ -185,7 +185,7 @@ func TestLockTimeout(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer tx.Rollback()
+			defer func() { _ = tx.Rollback() }()
 			if _, err := tx.Exec(`SET LOCAL lock_timeout = '1s'`); err != nil {
 				return err
 			}

@@ -69,14 +69,14 @@ func TestStaleCheckpointFailsTheTest(t *testing.T) {
 		return
 	}
 	stale := filepath.Join(t.TempDir(), "ckpt")
-	if err := os.WriteFile(stale, []byte(`{"version":1,"runs":10,"subtrees":[[{"label":"step","n":99,"picked":1}]]}`), 0o644); err != nil {
+	if err := os.WriteFile(stale, []byte(`{"version":1,"runs":10,"subtrees":[[{"label":"step","n":99,"picked":1}]]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, env := range [][]string{
 		{"DETEST_CHECKPOINT=" + stale},
 		{"DETEST_SCHEDULE=7"},
 	} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestStaleCheckpointFailsTheTest$")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestStaleCheckpointFailsTheTest$") //nolint:gosec // the test binary itself
 		cmd.Env = append(append(os.Environ(), "DETEST_STALE_CHILD=1"), env...)
 		out, err := cmd.CombinedOutput()
 		if err == nil {

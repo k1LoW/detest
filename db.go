@@ -684,7 +684,6 @@ type Tx struct {
 	closed   bool
 	deferred []func()
 	atomic   bool
-	auto     bool
 	block    bool // begun with BeginTx, so SAVEPOINT may be used
 	// lockTimeout is set by SET LOCAL lock_timeout: a lock wait may then fail
 	// with 55P03 instead of waiting on, which the explorer chooses.

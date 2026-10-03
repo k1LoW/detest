@@ -70,7 +70,7 @@ func TestUninjectedMutexStalls(t *testing.T) {
 		})
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestUninjectedMutexStalls$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestUninjectedMutexStalls$") //nolint:gosec // the test binary itself
 	cmd.Env = append(os.Environ(), "DETEST_STALL_CHILD=1", "DETEST_STALL=1s")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -123,7 +123,7 @@ func TestInjectedMutexAndRowLockInOppositeOrder(t *testing.T) {
 						return err
 					}
 					mu.Lock()
-					mu.Unlock()
+					mu.Unlock() //nolint:staticcheck // waiting for the mutex is the point
 					return tx.Commit()
 				})
 				m.ExpectViolation(tc.want)

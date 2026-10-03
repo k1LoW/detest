@@ -259,7 +259,7 @@ type savedChoice struct {
 
 // load resumes from the checkpoint at path, if there is one.
 func (f *frontier) load(path string) error {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -296,5 +296,5 @@ func (f *frontier) save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return os.WriteFile(path, b, 0o600) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
 }

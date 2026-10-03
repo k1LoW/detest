@@ -65,7 +65,7 @@ CREATE TABLE teams (id text PRIMARY KEY, org_id text NOT NULL REFERENCES orgs (i
 			if err != nil {
 				return err
 			}
-			defer tx.Rollback()
+			defer func() { _ = tx.Rollback() }()
 			if _, err := tx.Exec(`INSERT INTO teams (id, org_id) VALUES ('t1', 'o1')`); err != nil {
 				return nil // the org was already gone
 			}

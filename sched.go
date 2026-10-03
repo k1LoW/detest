@@ -139,7 +139,6 @@ type run struct {
 	current  *Proc
 	preempts int
 	prev     *State
-	deferred []func()
 	version  int
 	idleAt   map[*procType]int
 	pending  *violation // raised by a store during a step
@@ -561,7 +560,8 @@ func (r *run) waitOutside() bool {
 	p := waiting[chosen]
 	r.outside.Add(-1)
 	r.note(p, "resumes from the primitive it blocked on")
-	r.handleEvent(p, v.Interface().(procEvent))
+	ev, _ := v.Interface().(procEvent) // p.ev carries only procEvent
+	r.handleEvent(p, ev)
 	return true
 }
 
@@ -622,8 +622,9 @@ var errNack = fmt.Errorf("detest: nack")
 
 // Idle is returned by a loop process that found nothing to do. The tick does
 // not consume the loop's run budget, which encodes the fairness assumption that
-// a periodic sweep keeps ticking until it has work.
-var Idle = fmt.Errorf("detest: idle tick")
+// a periodic sweep keeps ticking until it has work. It is named for the signal
+// a loop gives, return detest.Idle, rather than as the error it technically is.
+var Idle = fmt.Errorf("detest: idle tick") //nolint:staticcheck
 
 func (r *run) deliver(q *Queue, i int, pt *procType) {
 	msg := q.msgs[i]

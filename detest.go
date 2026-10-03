@@ -286,12 +286,14 @@ func (m *Model) retrace(r *run, v *violation) (*run, *violation) {
 // ownsPrefix reports whether the subtree under the first shardDepth choices
 // belongs to this shard.
 func (m *Model) ownsPrefix(prefix []choice) bool {
+	// FNV-1a over the picks, which like the shard count are small and
+	// non-negative, so the conversions cannot overflow.
 	h := uint32(2166136261)
 	for _, c := range prefix[:m.shardDepth] {
-		h ^= uint32(c.picked)
+		h ^= uint32(c.picked) //nolint:gosec
 		h *= 16777619
 	}
-	return int(h%uint32(m.shardTotal)) == m.shardIndex
+	return int(h%uint32(m.shardTotal)) == m.shardIndex //nolint:gosec
 }
 
 func (m *Model) makeResult(r *run, v *violation, runs, depth int, complete bool, start time.Time) *result {

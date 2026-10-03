@@ -59,7 +59,7 @@ func Explore(t *testing.T, fn func(t *testing.T, m *Model), opts ...Option) {
 	res.PriorRuns = f.prior
 	if ckpt != "" {
 		if res.Violated || res.Complete {
-			_ = os.Remove(ckpt)
+			_ = os.Remove(ckpt) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
 		} else if err := f.save(ckpt); err != nil {
 			t.Error(err)
 		} else {

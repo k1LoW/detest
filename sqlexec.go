@@ -1220,9 +1220,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 			var lhs []any
-			if re, ok := v.X.(*sqlir.RowExpr); ok {
-				lhs = l.([]any)
-				_ = re
+			if _, ok := v.X.(*sqlir.RowExpr); ok {
+				if lhs, ok = l.([]any); !ok {
+					return nil, x.unsupported("row comparison")
+				}
 			} else {
 				lhs = []any{l}
 			}
@@ -1528,7 +1529,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		var b strings.Builder
 		for i := range args {
 			if v := d(i); v != nil {
-				b.WriteString(fmt.Sprint(v))
+				fmt.Fprint(&b, v)
 			}
 		}
 		return b.String(), nil
