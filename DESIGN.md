@@ -91,9 +91,11 @@ The fingerprint leaves argument values out. Real code puts generated ids and wal
 
 ### Database
 
-The database is an in-memory `database/sql` driver. The code under test, including ORMs such as GORM, sqlx and sqlc, runs on the `*sql.DB` it returns. SQL is parsed with PostgreSQL's real grammar (pg_query) into an internal representation that the executor runs.
+The database is an in-memory `database/sql` driver. The code under test, including ORMs such as GORM, sqlx and sqlc, runs on the `*sql.DB` it returns.
 
-The database follows PostgreSQL at Read Committed, because the interleavings that matter come from its locking rather than from its query planner. It covers the following.
+Each kind of server has a package of its own. It parses the server's dialect with the server's real grammar into an internal representation shared by all of them, which one executor runs, and it describes what differs between servers, such as the isolation levels and the error codes. PostgreSQL (`postgres`, with pg_query) is implemented. MySQL (`mysql`) is in progress. The internal representation already covers MySQL's statement shapes, such as `INSERT IGNORE` and `ON DUPLICATE KEY UPDATE`, while InnoDB's Repeatable Read, with snapshot reads and next-key locks, needs semantics of its own.
+
+For PostgreSQL, detest follows Read Committed, because the interleavings that matter come from its locking rather than from its query planner. It covers the following.
 
 - the four row lock strengths and their conflict table, waits, `NOWAIT`, `SKIP LOCKED`, `lock_timeout`, and deadlock detection for cycles of row lock waits;
 - statement-level snapshots, with the re-check of the predicate after a lock wait that Read Committed does;
@@ -101,7 +103,7 @@ The database follows PostgreSQL at Read Committed, because the interleavings tha
 - foreign keys, with `FOR KEY SHARE` on the parent, every referential action, `MATCH FULL` and deferred constraints checked at commit;
 - `CHECK` and `NOT NULL`, savepoints, sequences, views and the DDL of real migrations and schema dumps.
 
-Errors are `*DBError` values with the server's SQLSTATE. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`. A statement detest cannot run fails with `ErrUnsupportedSQL` instead of being approximated.
+Errors are `*DBError` values with the server's SQLSTATE, and MySQL's error number for MySQL. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`. A statement detest cannot run fails with `ErrUnsupportedSQL` instead of being approximated.
 
 Isolation levels are implemented per kind of server, since their semantics differ between servers. A pair detest does not implement fails when the database is declared, rather than running with the wrong semantics.
 

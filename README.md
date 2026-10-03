@@ -102,7 +102,9 @@ Processes interact only through simulated resources. Every operation on them is 
 
 ### Database
 
-`s.DB(name, postgres.New())` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged. SQL is parsed with PostgreSQL's real grammar, and the semantics are those of PostgreSQL at Read Committed.
+`s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.
+
+Each kind of server has its own package, which parses its SQL dialect with the server's real grammar and gives the locking, constraints and errors of that server, since they differ between servers. `postgres.New()` is PostgreSQL at Read Committed, which the lists below describe. `mysql.New()` (MySQL with InnoDB) is in progress.
 
 **Concurrency**
 
@@ -139,7 +141,7 @@ Processes interact only through simulated resources. Every operation on them is 
 
 **Errors**
 
-Errors are `*detest.DBError` with PostgreSQL's SQLSTATE, the table, the column and the constraint, and match `detest.ErrUniqueViolation` and the other sentinels with `errors.Is`. Code that branches on its driver's error type gets that type by converting.
+Errors are `*detest.DBError` with the server's SQLSTATE (and, for MySQL, its error number), the table, the column and the constraint, and match `detest.ErrUniqueViolation` and the other sentinels with `errors.Is`. Code that branches on its driver's error type gets that type by converting.
 
 ``` go
 s.DB("app", postgres.New(postgres.Errors(pgxerr.Convert))) // *pgconn.PgError
@@ -148,7 +150,7 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 **Not supported**
 
-Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING`, window frames other than the two above, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. The `mysql` package declares a MySQL server, but its parser is not implemented yet.
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING`, window frames other than the two above, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement. MySQL support is in progress, and its parser is not available yet.
 
 ### Queue
 
