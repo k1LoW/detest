@@ -615,18 +615,7 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 // Postgres refuses a negative one of either.
 func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
 	limit = -1
-	if sel.Limit != nil {
-		v, err := x.eval(sel.Limit, &env{outer: outer})
-		if err != nil {
-			return 0, 0, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if f < 0 {
-				return 0, 0, x.unsupported("a negative LIMIT")
-			}
-			limit = int(f)
-		}
-	}
+	// OFFSET first, as Postgres evaluates them.
 	if sel.Offset != nil {
 		v, err := x.eval(sel.Offset, &env{outer: outer})
 		if err != nil {
@@ -637,6 +626,18 @@ func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit 
 				return 0, 0, x.unsupported("a negative OFFSET")
 			}
 			offset = int(f)
+		}
+	}
+	if sel.Limit != nil {
+		v, err := x.eval(sel.Limit, &env{outer: outer})
+		if err != nil {
+			return 0, 0, err
+		}
+		if f, ok := toFloat(derefValue(v)); ok {
+			if f < 0 {
+				return 0, 0, x.unsupported("a negative LIMIT")
+			}
+			limit = int(f)
 		}
 	}
 	return offset, limit, nil

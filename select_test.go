@@ -303,3 +303,29 @@ func TestTransactionTimestamp(t *testing.T) {
 		t.Errorf("now() = statement_timestamp() in autocommit: %v %v", same, err)
 	}
 }
+
+// OFFSET is evaluated before LIMIT, as Postgres does.
+func TestOffsetBeforeLimit(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1), (2), (3), (4), (5)`)
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	rows, err := db.Query(`SELECT id FROM t ORDER BY id LIMIT nextval('s') + 1 OFFSET nextval('s')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	// OFFSET takes 1 and LIMIT 2 + 1.
+	if !reflect.DeepEqual(got, []int64{2, 3, 4}) {
+		t.Errorf("got %v", got)
+	}
+}
