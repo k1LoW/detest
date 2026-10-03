@@ -297,6 +297,11 @@ func TestGeneratedColumns(t *testing.T) {
 		t.Errorf("CREATE TABLE of an existing table: got %v", err)
 	}
 
+	// A change to a table that does not exist is an undefined table.
+	if _, err := db.Exec(`ALTER TABLE missing ADD COLUMN b int GENERATED ALWAYS AS (a + 1) STORED`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("ALTER of a missing table: got %v", err)
+	}
+
 	// A row the transaction inserted counts as a row there already.
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
 	tx, err := db.Begin()

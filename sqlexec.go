@@ -183,8 +183,11 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// Postgres refuses to drop a column a generated column depends
 			// on, or drops both with CASCADE. The generated columns are the
 			// table's and those the same statement adds.
-			if ch.Create && tx.db.defs[tx.db.resolve(ch.Table)] != nil {
-				continue // a no-op or a duplicate table, which applySchema reports
+			if exists := tx.db.defs[tx.db.resolve(ch.Table)] != nil; ch.Create == exists {
+				// A CREATE of a table that exists is a no-op or a duplicate,
+				// and a change to one that does not is an undefined table,
+				// which applySchema reports.
+				continue
 			}
 			gens := map[string]tableCheck{}
 			var order []string
