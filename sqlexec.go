@@ -419,13 +419,28 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 type fromItems struct {
 	aliases  []string          // in FROM order, the first being the base item
 	tables   map[string]string // alias -> table, for the items that are tables
+	kinds    map[string]string // alias -> "subquery", "view", "function" or "cte" for the others
 	nullable map[string]bool   // the right side of a LEFT JOIN
+	lateral  bool              // some item depends on the rows before it
+}
+
+func (x *sqlExec) fromItemKind(t sqlir.TableRef) string {
+	switch {
+	case t.Sub != nil:
+		return "subquery"
+	case t.Func != nil:
+		return "function"
+	}
+	if _, ok := x.ctes[t.Name]; ok {
+		return "cte"
+	}
+	return "view"
 }
 
 // scan produces the FROM rows of a query: the base table joined with each
 // JOIN item by nested loops.
 func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, fromItems, error) {
-	from := fromItems{tables: map[string]string{}, nullable: map[string]bool{}}
+	from := fromItems{tables: map[string]string{}, kinds: map[string]string{}, nullable: map[string]bool{}}
 	if sel.From == nil {
 		return []jrow{{by: map[string]Row{}, merged: Row{}}}, from, nil
 	}
@@ -436,6 +451,8 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, fromItems, er
 	from.aliases = append(from.aliases, alias)
 	if isBase {
 		from.tables[alias] = x.tx.db.resolve(sel.From.Name)
+	} else {
+		from.kinds[alias] = x.fromItemKind(*sel.From)
 	}
 	var out []jrow
 	for _, r := range rows {
@@ -453,6 +470,11 @@ func (x *sqlExec) scan(sel *sqlir.SelectStmt, outer *env) ([]jrow, fromItems, er
 		from.aliases = append(from.aliases, jalias)
 		if jIsBase {
 			from.tables[jalias] = x.tx.db.resolve(join.Table.Name)
+		} else {
+			from.kinds[jalias] = x.fromItemKind(join.Table)
+		}
+		if join.Table.Lateral || join.Table.Func != nil {
+			from.lateral = true
 		}
 		if join.Kind == sqlir.LeftJoin {
 			from.nullable[jalias] = true

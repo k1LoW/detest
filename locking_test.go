@@ -84,3 +84,24 @@ func TestForUpdateTargets(t *testing.T) {
 		t.Errorf("two locking clauses: got %v", err)
 	}
 }
+
+// Postgres locks the tables behind a view or subquery, which detest does not
+// do, so such a locking read is refused rather than run without locks.
+func TestForUpdateOverDerivedItems(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE a (id text PRIMARY KEY)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT id FROM a`)
+	for _, q := range []string{
+		`SELECT * FROM v FOR UPDATE`,
+		`SELECT * FROM (SELECT id FROM a) s FOR UPDATE`,
+		`SELECT * FROM a, LATERAL (SELECT a.id AS x) l FOR UPDATE OF a`,
+		`WITH c AS (SELECT id FROM a) SELECT * FROM c FOR UPDATE OF c`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// A WITH query is not locked unless named, as in Postgres.
+	mustExec(t, db, `WITH c AS (SELECT id FROM a) SELECT * FROM a JOIN c ON c.id = a.id FOR UPDATE`)
+}

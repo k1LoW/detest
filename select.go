@@ -540,13 +540,24 @@ func (x *sqlExec) lockTargets(l *sqlir.LockClause, from fromItems) ([]string, er
 	if len(names) == 0 {
 		names = from.aliases
 	}
+	if from.lateral {
+		// A lateral item's rows come from the rows before it, which the
+		// re-check after a wait would have to feed again.
+		return nil, x.unsupported("FOR UPDATE with LATERAL or a function in FROM")
+	}
 	var out []string
 	for _, a := range names {
 		if !slices.Contains(from.aliases, a) {
 			return nil, x.tx.db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q in FOR UPDATE clause not found in FROM clause", a), a, "", "")
 		}
-		if from.tables[a] == "" {
-			continue // a subquery, CTE or view: detest locks no rows behind it
+		if kind := from.kinds[a]; kind != "" {
+			// Postgres locks the tables behind a view or subquery, which
+			// detest does not. A WITH query or a function it leaves alone
+			// unless named, and then refuses.
+			if (kind == "cte" || kind == "function") && len(l.Of) == 0 {
+				continue
+			}
+			return nil, x.unsupported("FOR UPDATE on a " + kind)
 		}
 		if from.nullable[a] {
 			return nil, x.unsupported("FOR UPDATE on the nullable side of an outer join")
