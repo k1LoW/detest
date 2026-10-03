@@ -34,6 +34,9 @@ type sqlExec struct {
 	args  []driver.Value
 	ctes  map[string][]Row
 	start time.Time // when the statement began, for statement_timestamp()
+	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
+	// before each query runs anything.
+	bounds map[*sqlir.SelectStmt][2]int
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -616,9 +619,18 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 	return nil
 }
 
-// offsetLimit evaluates OFFSET and LIMIT. limit is -1 without a LIMIT.
-// Postgres refuses a negative one of either.
+// offsetLimit returns the OFFSET and LIMIT evalSelect took for sel before
+// running it, evaluating them if it has not.
 func (x *sqlExec) offsetLimit(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
+	if b, ok := x.bounds[sel]; ok {
+		return b[0], b[1], nil
+	}
+	return x.evalBounds(sel, outer)
+}
+
+// evalBounds evaluates OFFSET and LIMIT. limit is -1 without a LIMIT.
+// Postgres refuses a negative one of either.
+func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit int, err error) {
 	limit = -1
 	// OFFSET first, as Postgres evaluates them.
 	if sel.Offset != nil {

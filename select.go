@@ -37,6 +37,16 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			return nil, nil, err
 		}
 	}
+	// OFFSET and LIMIT are taken, and a negative one refused, before the
+	// query has any effect, as Postgres does before fetching rows.
+	offset, limit, err := x.evalBounds(sel, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if x.bounds == nil {
+		x.bounds = map[*sqlir.SelectStmt][2]int{}
+	}
+	x.bounds[sel] = [2]int{offset, limit}
 	if err := x.withCTEs(sel.With, outer); err != nil {
 		return nil, nil, err
 	}

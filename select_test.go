@@ -328,4 +328,12 @@ func TestOffsetBeforeLimit(t *testing.T) {
 	if !reflect.DeepEqual(got, []int64{2, 3, 4}) {
 		t.Errorf("got %v", got)
 	}
+	// A negative LIMIT is refused before the select list runs.
+	if _, err := db.Exec(`SELECT nextval('s') FROM t LIMIT -1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("negative LIMIT: got %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 3 {
+		t.Errorf("nextval after a refused LIMIT: %d, %v", n, err)
+	}
 }
