@@ -869,6 +869,13 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		return nil, err
 	}
 	cols := ins.Columns
+	for _, exprs := range ins.Rows {
+		// Postgres refuses VALUES lists of different lengths before any of
+		// them is evaluated.
+		if len(exprs) != len(ins.Rows[0]) {
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", relname(ins.Table), "", "")
+		}
+	}
 	if def := x.tx.db.defs[table]; len(cols) == 0 && def != nil {
 		cols = def.columns // INSERT INTO t VALUES (...): the columns in table order
 		if len(ins.Rows) > 0 && len(ins.Rows[0]) < len(cols) {

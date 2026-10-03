@@ -345,6 +345,11 @@ func TestOffsetBeforeLimit(t *testing.T) {
 	if !reflect.DeepEqual(got, []int64{2, 3, 4}) {
 		t.Errorf("got %v", got)
 	}
+	// VALUES lists of different lengths are refused before any is evaluated.
+	mustExec(t, db, `CREATE TABLE v (a int, b int)`)
+	if _, err := db.Exec(`INSERT INTO v VALUES (nextval('s')), (1, 2)`); !errors.Is(err, ErrSyntaxError) {
+		t.Errorf("VALUES lengths: got %v", err)
+	}
 	// An aggregate detest does not implement is refused before WITH runs.
 	if _, err := db.Exec(`WITH c AS (SELECT nextval('s') AS id) SELECT string_agg(id::text, ',') FROM c`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("string_agg: got %v", err)
