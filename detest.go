@@ -92,7 +92,8 @@ func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 // MaxDuration caps the wall-clock time an exhaustive exploration takes. Once
 // d has passed, no worker starts another run, and the runs under way finish.
 // The first run is always made, so an exploration resumed from a checkpoint
-// makes progress however short d is. 0 (the default) means unbounded.
+// makes progress however short d is; a negative d has passed already.
+// 0 (the default) means unbounded.
 func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
 
 // defaultShardDepth is how many leading choices pick a schedule's shard.

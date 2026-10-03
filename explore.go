@@ -31,7 +31,7 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
 	f := newFrontier(n, maxRuns)
-	if maxDuration > 0 {
+	if maxDuration != 0 {
 		// The clock inside the bubbles is fake, so the deadline is kept by a
 		// timer outside them.
 		timer := time.AfterFunc(maxDuration, f.expire)
