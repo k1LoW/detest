@@ -1,12 +1,14 @@
 # detest
 
-Deterministic Testing Framework for Go Applications
+**In-Process Deterministic Simulation Testing for Go Applications, based on Stateless Model Checking (SMC)**
 
-Because we detest race conditions, deadlocks, and flaky tests.
+*Because we **detest** race conditions, deadlocks, and flaky tests.*
 
-`detest` explores every interleaving of concurrent Go code and reports the first schedule that breaks an invariant. Databases, message queues, external services and mutexes are modeled so that production code runs on them as is.
+---
 
-Processes (request handlers, workers, consumers, pollers) run inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble under a deterministic scheduler. Each run follows one sequence of scheduling choices, and detest walks all of them depth first. A violation comes with the schedule that produced it, so it can be replayed step by step.
+`detest` is a lightweight, in-process testing framework that brings **Deterministic Simulation Testing (DST)** to standard Go applications using **Stateless Model Checking (SMC)**.
+
+Instead of virtualizing OS threads or low-level network packets, `detest` operates at Go's standard client boundaries (`database/sql`, `http.RoundTripper`) and at mutexes injected in place of `sync.Mutex`, running goroutines inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble. It injects failure scenarios and systematically explores every execution interleaving within configurable bounds, without modifying your production business logic or ORMs.
 
 ## Usage
 
