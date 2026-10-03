@@ -1734,6 +1734,14 @@ var strictFuncs = map[string][]int{
 // zero as Postgres's numeric rounds: on the float, f*10^n is off by a
 // little, so round(-81.865, 2) would come out -81.86.
 func roundDecimal(f float64, n int) float64 {
+	// Past these, a float64 keeps its value or becomes 0, which also bounds
+	// the power of ten below for a scale taken from SQL.
+	switch {
+	case n > 30:
+		return f
+	case n < -330:
+		return 0
+	}
 	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
 	if !ok {
 		return f
