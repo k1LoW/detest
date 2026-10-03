@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // CheckSQL reports whether detest can execute a statement on a database of
@@ -104,6 +107,10 @@ func (t *sqlTx) Commit() error {
 		}
 		tx.p.yieldf("%s: commit", tx.db.name)
 	}
+	if err := tx.checkCommit(); err != nil {
+		tx.rollback()
+		return t.c.db.kind.Convert(err)
+	}
 	tx.commit()
 	return nil
 }
@@ -162,6 +169,12 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)
 	if err != nil {
+		if pe, ok := errors.AsType[*sqlir.ParseError](err); ok {
+			err = c.db.kind.Error(sqlir.SyntaxError, pe.Err.Error(), "", "", "")
+			if c.tx != nil {
+				c.tx.aborted = true // as any failed statement does
+			}
+		}
 		if c.db.s.sqlObserver != nil {
 			c.db.s.sqlObserver(query, err)
 		}
@@ -173,6 +186,9 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		c.db.s.sqlObserver(query, err)
 	}
 	if auto {
+		if err == nil && !tx.aborted {
+			err = tx.checkCommit()
+		}
 		if err != nil || tx.aborted {
 			tx.rollback()
 		} else {

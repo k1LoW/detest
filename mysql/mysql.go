@@ -55,6 +55,16 @@ func codes(k sqlir.ErrorKind) (string, int) {
 		return "22003", 1690 // ER_DATA_OUT_OF_RANGE
 	case sqlir.InvalidTextRepresentation:
 		return "HY000", 1366 // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+	case sqlir.SyntaxError:
+		return "42000", 1064 // ER_PARSE_ERROR
+	case sqlir.DuplicateTable:
+		return "42S01", 1050 // ER_TABLE_EXISTS_ERROR
+	case sqlir.WrongObjectType:
+		return "HY000", 1347 // ER_WRONG_OBJECT
+	case sqlir.InvalidTableDefinition:
+		return "42000", 1068 // ER_MULTIPLE_PRI_KEY
+	case sqlir.InvalidSavepoint:
+		return "42000", 1305 // ER_SP_DOES_NOT_EXIST
 	}
 	return "", 0
 }

@@ -200,10 +200,16 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 		return err
 	}
 	p.yieldf("%s: commit", db.name)
+	if err := tx.checkCommit(); err != nil {
+		tx.rollback()
+		p.tx = nil
+		return err
+	}
 	tx.commit()
 	p.tx = nil
 	return nil
 }
+
 
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
@@ -280,7 +286,7 @@ func (db *DB) Open() *sql.DB {
 	return sqlDB
 }
 
-func (def *tableDef) addConstraint(table string, u sqlir.UniqueDef) error {
+func (def *tableDef) addConstraint(kind Server, table string, u sqlir.UniqueDef) error {
 	if !u.Primary {
 		if u.Name == "" {
 			u.Name = defaultConstraintName(table, u)
@@ -289,7 +295,7 @@ func (def *tableDef) addConstraint(table string, u sqlir.UniqueDef) error {
 		return nil
 	}
 	if def.pk != nil {
-		return fmt.Errorf("detest: table %q has two primary keys", table)
+		return kind.Error(sqlir.InvalidTableDefinition, fmt.Sprintf("multiple primary keys for table %q are not allowed", relname(table)), relname(table), "", "")
 	}
 	def.pkName = u.Name
 	if def.pkName == "" {
@@ -515,7 +521,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return db.indexChange(table, ch)
 	case ch.Object == "view" && !ch.Drop:
 		if _, exists := db.views[table]; exists && !ch.Replace {
-			return fmt.Errorf("detest: view %q already exists", table)
+			return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(table)), relname(table), "", "")
 		}
 		v := ch
 		db.views[table] = &v
@@ -523,7 +529,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	case ch.Drop:
 		_, isView := db.views[table]
 		if db.defs[table] == nil && !isView && !ch.IfExists {
-			return fmt.Errorf("detest: %q does not exist", table)
+			return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 		}
 		delete(db.defs, table)
 		delete(db.committed, table)
@@ -541,7 +547,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			if ch.IfNotExists {
 				return nil
 			}
-			return fmt.Errorf("detest: table %q already exists", table)
+			return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(table)), relname(table), "", "")
 		}
 		def = &tableDef{defaults: map[string]sqlir.Expr{}}
 		db.defs[table] = def
@@ -549,7 +555,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if ch.IfExists {
 			return nil
 		}
-		return fmt.Errorf("detest: table %q is not declared (ALTER TABLE or CREATE INDEX before CREATE TABLE)", table)
+		return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 	}
 	for _, col := range ch.Columns {
 		if !slices.Contains(def.columns, col.Name) {
@@ -571,7 +577,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 	}
 	for _, u := range ch.Constraints {
-		if err := def.addConstraint(table, u); err != nil {
+		if err := def.addConstraint(db.kind, table, u); err != nil {
 			return err
 		}
 	}
@@ -667,6 +673,10 @@ type Tx struct {
 	// with 55P03 instead of waiting on, which the explorer chooses.
 	lockTimeout bool
 	saves       []savepoint
+	// deferAll and deferNamed are what SET CONSTRAINTS set, for ALL and by
+	// constraint name; nil when it was not run.
+	deferAll   *bool
+	deferNamed map[string]bool
 }
 
 // savepoint is what ROLLBACK TO restores: the transaction's writes and the
@@ -794,7 +804,7 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 		moved = true
 	}
 	if !moved && !ch.IfExists {
-		return fmt.Errorf("detest: %q does not exist", table)
+		return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 	}
 	return nil
 }
@@ -882,7 +892,7 @@ func (tx *Tx) pending(table string, f func(lk lockKey, r Row)) {
 // since, and lets an aborted transaction continue, as PostgreSQL does.
 func (tx *Tx) savepoint(op, name string) error {
 	if !tx.block {
-		return fmt.Errorf("detest: %s can only be used in transaction blocks", strings.ToUpper(strings.ReplaceAll(op, "_", " ")))
+		return tx.db.kind.Error(sqlir.NoActiveTransaction, fmt.Sprintf("%s can only be used in transaction blocks", strings.ToUpper(strings.ReplaceAll(op, "_", " "))), "", "", "")
 	}
 	if op == "savepoint" {
 		if err := tx.check(); err != nil {
@@ -900,7 +910,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	for ; i >= 0 && tx.saves[i].name != name; i-- {
 	}
 	if i < 0 {
-		return fmt.Errorf("detest: savepoint %q does not exist", name)
+		return tx.db.kind.Error(sqlir.InvalidSavepoint, fmt.Sprintf("savepoint %q does not exist", name), "", "", "")
 	}
 	if op == "release" {
 		if err := tx.check(); err != nil {

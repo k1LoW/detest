@@ -237,7 +237,7 @@ func (x *sqlExec) conflictTargets(table string, cols []string) ([]sqlir.UniqueDe
 			return []sqlir.UniqueDef{u}, nil
 		}
 	}
-	return nil, fmt.Errorf("detest: there is no unique or exclusion constraint matching the ON CONFLICT specification (%s) on %s", strings.Join(cols, ", "), table)
+	return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, "there is no unique or exclusion constraint matching the ON CONFLICT specification", relname(table), strings.Join(cols, ", "), "")
 }
 
 func sameColumns(u sqlir.UniqueDef, cols []string) bool {

@@ -235,7 +235,9 @@ type ForeignKey struct {
 	RefColumns []string
 	OnDelete   string
 	OnUpdate   string
-	Deferred   bool // INITIALLY DEFERRED: checked at commit
+	Deferrable bool // DEFERRABLE: SET CONSTRAINTS may defer its checks to commit
+	Deferred   bool // INITIALLY DEFERRED: checked at commit unless SET CONSTRAINTS says otherwise
+	MatchFull  bool // MATCH FULL: a key with some but not all columns NULL is a violation
 }
 
 // Assignment is col = expr in SET.
@@ -276,22 +278,30 @@ type SetStmt struct {
 	Local bool
 }
 
+// SetConstraintsStmt is SET CONSTRAINTS ... DEFERRED | IMMEDIATE. No names
+// means ALL.
+type SetConstraintsStmt struct {
+	Names    []string
+	Deferred bool
+}
+
 // RefreshStmt is REFRESH MATERIALIZED VIEW.
 type RefreshStmt struct {
 	Table  string
 	NoData bool
 }
 
-func (*Script) isStatement()            {}
-func (*RefreshStmt) isStatement()       {}
-func (*SavepointStmt) isStatement()     {}
-func (*SetStmt) isStatement()           {}
-func (*CreateTableAsStmt) isStatement() {}
-func (*SelectStmt) isStatement()        {}
-func (*SchemaStmt) isStatement()        {}
-func (*InsertStmt) isStatement()        {}
-func (*UpdateStmt) isStatement()        {}
-func (*DeleteStmt) isStatement()        {}
+func (*Script) isStatement()             {}
+func (*RefreshStmt) isStatement()        {}
+func (*SavepointStmt) isStatement()      {}
+func (*SetStmt) isStatement()            {}
+func (*SetConstraintsStmt) isStatement() {}
+func (*CreateTableAsStmt) isStatement()  {}
+func (*SelectStmt) isStatement()         {}
+func (*SchemaStmt) isStatement()         {}
+func (*InsertStmt) isStatement()         {}
+func (*UpdateStmt) isStatement()         {}
+func (*DeleteStmt) isStatement()         {}
 
 // Expr is an expression node.
 type Expr interface{ isExpr() }
@@ -386,6 +396,19 @@ func (*Cast) isExpr()       {}
 func (*CaseExpr) isExpr()   {}
 func (*Default) isExpr()    {}
 func (*WindowFunc) isExpr() {}
+
+// ParseError is SQL the dialect's grammar rejects, which the server reports as
+// a syntax error.
+type ParseError struct {
+	Query string
+	Err   error
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("detest: cannot parse SQL %q: %v", e.Query, e.Err)
+}
+
+func (e *ParseError) Unwrap() error { return e.Err }
 
 // ErrUnsupportedSQL marks a statement the dialect parsed but detest cannot run.
 type ErrUnsupportedSQL struct {
@@ -495,6 +518,14 @@ const (
 	DivisionByZero
 	NumericValueOutOfRange
 	InvalidTextRepresentation
+	SyntaxError
+	UndefinedParameter
+	InvalidColumnReference
+	DuplicateTable
+	WrongObjectType
+	InvalidTableDefinition
+	NoActiveTransaction
+	InvalidSavepoint
 )
 
 // The errors an SQLError of each kind matches with errors.Is.
@@ -509,8 +540,18 @@ var (
 	ErrDivisionByZero            = errors.New("detest: division by zero")
 	ErrNumericValueOutOfRange    = errors.New("detest: numeric value out of range")
 	ErrInvalidTextRepresentation = errors.New("detest: invalid input syntax")
+	ErrSyntaxError               = errors.New("detest: syntax error")
+	ErrUndefinedParameter        = errors.New("detest: undefined parameter")
+	ErrInvalidColumnReference    = errors.New("detest: invalid column reference")
+	ErrDuplicateTable            = errors.New("detest: relation already exists")
+	ErrWrongObjectType           = errors.New("detest: wrong object type")
+	ErrInvalidTableDefinition    = errors.New("detest: invalid table definition")
+	ErrNoActiveTransaction       = errors.New("detest: no active transaction")
+	ErrInvalidSavepoint          = errors.New("detest: invalid savepoint")
 	kindErrors                   = map[ErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
-		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation}
+		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
+		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
+		WrongObjectType: ErrWrongObjectType, InvalidTableDefinition: ErrInvalidTableDefinition, NoActiveTransaction: ErrNoActiveTransaction, InvalidSavepoint: ErrInvalidSavepoint}
 )
 
 // SQLError is a database error detest's simulated database raises, with what drivers

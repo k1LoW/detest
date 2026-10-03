@@ -160,6 +160,8 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			x.tx.lockTimeout = st.Value != "" && st.Value != "0" && st.Value != "0ms" && st.Value != "0s"
 		}
 		return &sqlResult{}, nil
+	case *sqlir.SetConstraintsStmt:
+		return &sqlResult{}, x.setConstraints(st)
 	case *sqlir.SelectStmt:
 		return x.execSelect(st)
 	case *sqlir.InsertStmt:
@@ -207,7 +209,7 @@ func (x *sqlExec) execRefresh(st *sqlir.RefreshStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(st.Table)
 	mv := x.tx.db.matviews[table]
 	if mv == nil {
-		return nil, fmt.Errorf("detest: %q is not a materialized view", table)
+		return nil, x.tx.db.kind.Error(sqlir.WrongObjectType, fmt.Sprintf("%q is not a materialized view", relname(table)), relname(table), "", "")
 	}
 	for _, r := range x.tx.selectNoYield(table, nil) {
 		lk := lockKey{table, r.Key()}
@@ -712,26 +714,34 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if err := x.tx.db.checkTable(table); err != nil {
 		return nil, err
 	}
+	cols := ins.Columns
+	if def := x.tx.db.defs[table]; len(cols) == 0 && def != nil {
+		cols = def.columns // INSERT INTO t VALUES (...): the columns in table order
+	}
 	var rows []Row
 	switch {
 	case ins.Select != nil:
-		cols, srows, err := x.evalSelect(ins.Select, nil)
+		scols, srows, err := x.evalSelect(ins.Select, nil)
 		if err != nil {
 			return nil, err
 		}
 		for _, sr := range srows {
 			row := Row{}
-			for i, c := range ins.Columns {
-				if i < len(cols) {
-					row[c] = sr[cols[i]]
+			for i, c := range cols {
+				if i < len(scols) {
+					row[c] = sr[scols[i]]
 				}
 			}
 			rows = append(rows, row)
 		}
 	default:
 		for _, exprs := range ins.Rows {
-			if len(exprs) != len(ins.Columns) {
-				return nil, fmt.Errorf("detest: insert has %d columns and %d values: %s", len(ins.Columns), len(exprs), x.query)
+			if len(exprs) != len(cols) {
+				msg := "INSERT has more expressions than target columns"
+				if len(exprs) < len(cols) {
+					msg = "INSERT has more target columns than expressions"
+				}
+				return nil, x.tx.db.kind.Error(sqlir.SyntaxError, msg, relname(ins.Table), "", "")
 			}
 			row := Row{}
 			for i, e := range exprs {
@@ -746,7 +756,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				if _, isDefault := e.(*sqlir.Default); isDefault {
 					continue
 				}
-				row[ins.Columns[i]] = v
+				row[cols[i]] = v
 			}
 			rows = append(rows, row)
 		}
@@ -755,7 +765,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if alias == "" {
 		alias = relname(ins.Table)
 	}
-	out := &sqlResult{cols: x.returningCols(ins.Returning, ins.Columns)}
+	out := &sqlResult{cols: x.returningCols(ins.Returning, cols)}
 	for _, row := range rows {
 		if err := x.applyDefaults(table, row); err != nil {
 			return nil, err
@@ -1134,7 +1144,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		return val, nil
 	case *sqlir.Param:
 		if v.Index < 0 || v.Index >= len(x.args) {
-			return nil, fmt.Errorf("detest: parameter %d out of range in %s", v.Index+1, x.query)
+			return nil, x.tx.db.kind.Error(sqlir.UndefinedParameter, fmt.Sprintf("there is no parameter $%d", v.Index+1), "", "", "")
 		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:

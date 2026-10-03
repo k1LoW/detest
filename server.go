@@ -44,6 +44,14 @@ const (
 	DivisionByZero            = sqlir.DivisionByZero
 	NumericValueOutOfRange    = sqlir.NumericValueOutOfRange
 	InvalidTextRepresentation = sqlir.InvalidTextRepresentation
+	SyntaxError               = sqlir.SyntaxError
+	UndefinedParameter        = sqlir.UndefinedParameter
+	InvalidColumnReference    = sqlir.InvalidColumnReference
+	DuplicateTable            = sqlir.DuplicateTable
+	WrongObjectType           = sqlir.WrongObjectType
+	InvalidTableDefinition    = sqlir.InvalidTableDefinition
+	NoActiveTransaction       = sqlir.NoActiveTransaction
+	InvalidSavepoint          = sqlir.InvalidSavepoint
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

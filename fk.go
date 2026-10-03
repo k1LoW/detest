@@ -1,7 +1,9 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 
@@ -32,6 +34,41 @@ func values(r Row, cols []string) ([]any, bool) {
 	return vals, true
 }
 
+// partlyNull reports a key with some but not all columns NULL, which MATCH
+// FULL refuses.
+func partlyNull(r Row, cols []string) bool {
+	nulls := 0
+	for _, c := range cols {
+		if derefValue(r[c]) == nil {
+			nulls++
+		}
+	}
+	return nulls > 0 && nulls < len(cols)
+}
+
+// isDeferred reports whether fk's checks wait for the commit: INITIALLY
+// DEFERRED, unless SET CONSTRAINTS said otherwise for a deferrable one.
+func (tx *Tx) isDeferred(fk sqlir.ForeignKey) bool {
+	if !fk.Deferrable {
+		return false
+	}
+	if d, ok := tx.deferNamed[fk.Name]; ok {
+		return d
+	}
+	if tx.deferAll != nil {
+		return *tx.deferAll
+	}
+	return fk.Deferred
+}
+
+func (tx *Tx) childViolation(table string, fk sqlir.ForeignKey) error {
+	return tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("insert or update on table %q violates foreign key constraint %q", relname(table), fk.Name), relname(table), "", fk.Name)
+}
+
+func (tx *Tx) parentViolation(table string, ck childKey) error {
+	return tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
+}
+
 func rowMatches(r Row, cols []string, vals []any) bool {
 	for i, c := range cols {
 		if !sameValue(r[c], vals[i]) {
@@ -46,13 +83,26 @@ func rowMatches(r Row, cols []string, vals []any) bool {
 // does, so a concurrent delete of the parent waits for this transaction. old
 // is the row an UPDATE replaces; a key it leaves unchanged is not checked.
 func (x *sqlExec) checkParents(table string, row, old Row) error {
+	return x.checkParentsExcept(table, row, old, "")
+}
+
+// checkParentsExcept is checkParents without the foreign key named skip,
+// which a cascade is applying: its parent row is being rewritten and is not
+// visible with its new key yet.
+func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) error {
 	def := x.tx.db.defs[table]
 	if def == nil {
 		return nil
 	}
 	for _, fk := range def.fks {
+		if fk.Name == skip {
+			continue
+		}
+		if fk.MatchFull && partlyNull(row, fk.Columns) {
+			return x.tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("insert or update on table %q violates foreign key constraint %q: MATCH FULL does not allow mixing of null and nonnull key values", relname(table), fk.Name), relname(table), "", fk.Name)
+		}
 		vals, ok := values(row, fk.Columns)
-		if !ok || fk.Deferred {
+		if !ok || x.tx.isDeferred(fk) {
 			continue
 		}
 		if old != nil {
@@ -65,7 +115,7 @@ func (x *sqlExec) checkParents(table string, row, old Row) error {
 			return err
 		}
 		if !found {
-			return x.tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("insert or update on table %q violates foreign key constraint %q", relname(table), fk.Name), relname(table), "", fk.Name)
+			return x.tx.childViolation(table, fk)
 		}
 	}
 	return nil
@@ -163,32 +213,26 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 					return err
 				}
 			}
-		case "set null":
-			for _, k := range kids {
-				lk := lockKey{ck.table, k.Key()}
-				if err := x.tx.lockMode(lk, x.tx.db.updateLock(ck.table, ck.fk.Columns)); err != nil {
-					return err
-				}
-				cur, ok := x.tx.view(ck.table, k.Key())
-				if !ok {
-					continue
-				}
-				for _, c := range ck.fk.Columns {
-					cur[c] = nil
-				}
-				x.tx.writes[lk] = cur
+		case "set null", "set default":
+			if err := x.setChildren(ck, kids, row, nil, ck.fk.OnDelete); err != nil {
+				return err
 			}
-		case "set default":
-			return x.unsupported("ON DELETE SET DEFAULT")
-		default: // no action, restrict
-			return x.tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
+		case "no action":
+			if x.tx.isDeferred(ck.fk) {
+				continue // the commit checks the children are gone by then
+			}
+			return x.tx.parentViolation(table, ck)
+		default: // restrict, which is never deferred
+			return x.tx.parentViolation(table, ck)
 		}
 	}
 	return nil
 }
 
-// onParentUpdate refuses an update of referenced columns that children still
-// reference. ON UPDATE CASCADE is not modeled.
+// onParentUpdate applies the foreign keys that reference the columns an
+// update of a row changes: NO ACTION and RESTRICT refuse it while children
+// reference the old key, CASCADE moves the children to the new key, SET NULL
+// and SET DEFAULT clear theirs.
 func (x *sqlExec) onParentUpdate(table string, old, row Row) error {
 	for _, ck := range x.tx.db.referencing(table) {
 		cols := x.tx.db.refColumns(ck.fk)
@@ -196,16 +240,229 @@ func (x *sqlExec) onParentUpdate(table string, old, row Row) error {
 		if !ok {
 			continue
 		}
-		if nv, ok := values(row, cols); ok && slices.EqualFunc(ov, nv, sameValue) {
+		nv, _ := values(row, cols)
+		if nv != nil && slices.EqualFunc(ov, nv, sameValue) {
 			continue
 		}
-		if len(x.children(ck.table, ck.fk, ov)) == 0 {
+		kids := x.children(ck.table, ck.fk, ov)
+		if len(kids) == 0 {
 			continue
 		}
-		if ck.fk.OnUpdate == "cascade" || ck.fk.OnUpdate == "set null" || ck.fk.OnUpdate == "set default" {
-			return x.unsupported("ON UPDATE " + ck.fk.OnUpdate)
+		switch ck.fk.OnUpdate {
+		case "cascade", "set null", "set default":
+			if err := x.setChildren(ck, kids, old, row, ck.fk.OnUpdate); err != nil {
+				return err
+			}
+		case "no action":
+			if x.tx.isDeferred(ck.fk) {
+				continue
+			}
+			return x.tx.parentViolation(table, ck)
+		default:
+			return x.tx.parentViolation(table, ck)
 		}
-		return x.tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
 	}
 	return nil
+}
+
+// setChildren rewrites the key of the child rows kids that reference old, a
+// parent row being deleted or updated to parent, as action says: to the
+// parent's new key (cascade), to NULL (set null) or to the columns' defaults
+// (set default). Each child goes through the checks an UPDATE of it would,
+// and its own children follow.
+func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action string) error {
+	def := x.tx.db.defs[ck.table]
+	for _, k := range kids {
+		lk := lockKey{ck.table, k.Key()}
+		if err := x.tx.lockMode(lk, x.tx.db.updateLock(ck.table, ck.fk.Columns)); err != nil {
+			return err
+		}
+		cur, ok := x.tx.view(ck.table, k.Key())
+		if !ok {
+			continue
+		}
+		updated := cur.clone()
+		skip := ""
+		for i, c := range ck.fk.Columns {
+			switch {
+			case action == "cascade":
+				updated[c] = parent[x.tx.db.refColumns(ck.fk)[i]]
+				skip = ck.fk.Name // the parent's new key is not written yet
+			case action == "set default" && def != nil && def.defaults[c] != nil:
+				v, err := x.eval(def.defaults[c], &env{})
+				if err != nil {
+					if !errors.As(err, new(errUnknownExpr)) {
+						return err
+					}
+					v = sqlir.Unknown
+				}
+				updated[c] = v
+			default:
+				updated[c] = nil
+			}
+		}
+		if action == "set default" {
+			// The default may name the very key going away, which the check
+			// below would still find.
+			if vals, ok := values(updated, ck.fk.Columns); ok && rowMatches(old, x.tx.db.refColumns(ck.fk), vals) {
+				return x.tx.childViolation(ck.table, ck.fk)
+			}
+		}
+		if err := x.checkTypes(ck.table, updated); err != nil {
+			return err
+		}
+		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {
+			return err
+		}
+		if err := x.checkParentsExcept(ck.table, updated, cur, skip); err != nil {
+			return err
+		}
+		if err := x.onParentUpdate(ck.table, cur, updated); err != nil {
+			return err
+		}
+		nlk, err := x.rekey(ck.table, lk, updated)
+		if err != nil {
+			return err
+		}
+		x.tx.writes[nlk] = updated
+	}
+	return nil
+}
+
+// checkDeferred runs, at commit or SET CONSTRAINTS ... IMMEDIATE, the checks
+// of the foreign keys deferred until then that only selects: every row the
+// transaction wrote to a child table must have its parent, and every parent
+// key it deleted or changed must have no children left. It looks at the
+// transaction's writes rather than a log of the statements, so a savepoint
+// rolled back or a key rewritten leaves nothing stale to check.
+func (x *sqlExec) checkDeferred(only func(sqlir.ForeignKey) bool) error {
+	tx := x.tx
+	var childTables []string
+	for table, def := range tx.db.defs {
+		if slices.ContainsFunc(def.fks, only) {
+			childTables = append(childTables, table)
+		}
+	}
+	sort.Strings(childTables)
+	for _, table := range childTables {
+		for _, lk := range sortedKeys(tx.writes, table) {
+			row := tx.writes[lk]
+			for _, fk := range tx.db.defs[table].fks {
+				if !only(fk) {
+					continue
+				}
+				vals, ok := values(row, fk.Columns)
+				if !ok {
+					continue
+				}
+				found, err := x.lockParent(fk, vals)
+				if err != nil {
+					return err
+				}
+				if !found {
+					return tx.childViolation(table, fk)
+				}
+			}
+		}
+	}
+	parents := map[string]bool{}
+	for _, def := range tx.db.defs {
+		for _, fk := range def.fks {
+			if only(fk) {
+				parents[fk.RefTable] = true
+			}
+		}
+	}
+	for _, table := range slices.Sorted(maps.Keys(parents)) {
+		for _, key := range tx.touchedKeys(table) {
+			old, existed := tx.db.committed[table][key]
+			if !existed {
+				continue // a row of this transaction's own: no child committed before it
+			}
+			cur, ok := tx.view(table, key)
+			for _, ck := range tx.db.referencing(table) {
+				if !only(ck.fk) {
+					continue
+				}
+				cols := tx.db.refColumns(ck.fk)
+				ov, ok2 := values(old, cols)
+				if !ok2 {
+					continue
+				}
+				if ok {
+					if nv, ok3 := values(cur, cols); ok3 && slices.EqualFunc(ov, nv, sameValue) {
+						continue // the key is still there
+					}
+				}
+				if len(x.children(ck.table, ck.fk, ov)) > 0 {
+					return tx.parentViolation(table, ck)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkCommit runs the foreign key checks deferred to the commit. A failure
+// fails the commit, which rolls the transaction back.
+func (tx *Tx) checkCommit() error { return tx.evaluator().checkDeferred(tx.isDeferred) }
+
+// setConstraints runs SET CONSTRAINTS. Constraints it makes immediate run the
+// checks deferred so far, as Postgres does.
+func (x *sqlExec) setConstraints(st *sqlir.SetConstraintsStmt) error {
+	tx := x.tx
+	var before []sqlir.ForeignKey
+	for _, def := range tx.db.defs {
+		for _, fk := range def.fks {
+			if tx.isDeferred(fk) {
+				before = append(before, fk)
+			}
+		}
+	}
+	if len(st.Names) == 0 {
+		d := st.Deferred
+		tx.deferAll, tx.deferNamed = &d, nil
+	} else {
+		if tx.deferNamed == nil {
+			tx.deferNamed = map[string]bool{}
+		}
+		for _, n := range st.Names {
+			tx.deferNamed[n] = st.Deferred
+		}
+	}
+	if st.Deferred {
+		return nil
+	}
+	return x.checkDeferred(func(fk sqlir.ForeignKey) bool {
+		return !tx.isDeferred(fk) && slices.ContainsFunc(before, func(b sqlir.ForeignKey) bool { return b.Name == fk.Name })
+	})
+}
+
+// touchedKeys returns the keys of table the transaction wrote or deleted, in a
+// fixed order.
+func (tx *Tx) touchedKeys(table string) []string {
+	seen := map[string]bool{}
+	for lk := range tx.writes {
+		if lk.table == table {
+			seen[lk.key] = true
+		}
+	}
+	for lk := range tx.deleted {
+		if lk.table == table {
+			seen[lk.key] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// sortedKeys returns the keys of writes in table, in a fixed order.
+func sortedKeys(writes map[lockKey]Row, table string) []lockKey {
+	var out []lockKey
+	for lk := range writes {
+		if lk.table == table {
+			out = append(out, lk)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
+	return out
 }

@@ -411,7 +411,7 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		return nil, nil, err
 	}
 	if len(lcols) != len(rcols) {
-		return nil, nil, fmt.Errorf("detest: each %s query must have the same number of columns", strings.ToUpper(sel.SetOp))
+		return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, fmt.Sprintf("each %s query must have the same number of columns", strings.ToUpper(sel.SetOp)), "", "", "")
 	}
 	for i, r := range rrows {
 		m := Row{}

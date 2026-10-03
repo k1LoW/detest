@@ -84,6 +84,22 @@ func codes(k sqlir.ErrorKind) (string, int) {
 		return "22003", 0
 	case sqlir.InvalidTextRepresentation:
 		return "22P02", 0
+	case sqlir.SyntaxError:
+		return "42601", 0
+	case sqlir.UndefinedParameter:
+		return "42P02", 0
+	case sqlir.InvalidColumnReference:
+		return "42P10", 0
+	case sqlir.DuplicateTable:
+		return "42P07", 0
+	case sqlir.WrongObjectType:
+		return "42809", 0
+	case sqlir.InvalidTableDefinition:
+		return "42P16", 0
+	case sqlir.NoActiveTransaction:
+		return "25P01", 0
+	case sqlir.InvalidSavepoint:
+		return "3B001", 0
 	}
 	return "", 0
 }
@@ -97,7 +113,7 @@ func (parser) Name() string { return "postgres" }
 func (parser) Parse(query string) (sqlir.Statement, error) {
 	res, err := pgquery.Parse(query)
 	if err != nil {
-		return nil, fmt.Errorf("detest: cannot parse SQL %q: %w", query, err)
+		return nil, &sqlir.ParseError{Query: query, Err: err}
 	}
 	c := &pgConv{query: query}
 	if len(res.Stmts) != 1 {
@@ -136,6 +152,12 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 					out.Value = fmt.Sprint(k.Value)
 				}
 			}
+		}
+		return out, nil
+	case *pg.Node_ConstraintsSetStmt:
+		out := &sqlir.SetConstraintsStmt{Deferred: s.ConstraintsSetStmt.Deferred}
+		for _, n := range s.ConstraintsSetStmt.Constraints {
+			out.Names = append(out.Names, n.GetRangeVar().GetRelname())
 		}
 		return out, nil
 	case *pg.Node_RefreshMatViewStmt:
@@ -382,7 +404,9 @@ func foreignKey(k *pg.Constraint, cols []string) (sqlir.ForeignKey, bool) {
 	action := func(a string) string {
 		return map[string]string{"r": "restrict", "c": "cascade", "n": "set null", "d": "set default"}[a]
 	}
-	fk := sqlir.ForeignKey{Name: k.Conname, RefTable: rangeVarName(k.Pktable), OnDelete: action(k.FkDelAction), OnUpdate: action(k.FkUpdAction), Deferred: k.Initdeferred}
+	// INITIALLY DEFERRED implies DEFERRABLE.
+	fk := sqlir.ForeignKey{Name: k.Conname, RefTable: rangeVarName(k.Pktable), OnDelete: action(k.FkDelAction), OnUpdate: action(k.FkUpdAction),
+		Deferrable: k.Deferrable || k.Initdeferred, Deferred: k.Initdeferred, MatchFull: k.FkMatchtype == "f"}
 	if fk.OnDelete == "" {
 		fk.OnDelete = "no action"
 	}
@@ -399,11 +423,30 @@ func foreignKey(k *pg.Constraint, cols []string) (sqlir.ForeignKey, bool) {
 	return fk, true
 }
 
+// columnForeignKeys converts the REFERENCES of a column. The grammar gives
+// the DEFERRABLE and INITIALLY clauses written after one as constraints of
+// their own that follow it, which apply to it.
 func columnForeignKeys(d *pg.ColumnDef) []sqlir.ForeignKey {
 	var out []sqlir.ForeignKey
 	for _, n := range d.GetConstraints() {
-		if fk, ok := foreignKey(n.GetConstraint(), []string{d.Colname}); ok {
+		k := n.GetConstraint()
+		if fk, ok := foreignKey(k, []string{d.Colname}); ok {
 			out = append(out, fk)
+			continue
+		}
+		if len(out) == 0 || k == nil {
+			continue
+		}
+		last := &out[len(out)-1]
+		switch k.Contype {
+		case pg.ConstrType_CONSTR_ATTR_DEFERRABLE:
+			last.Deferrable = true
+		case pg.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE:
+			last.Deferrable = false
+		case pg.ConstrType_CONSTR_ATTR_DEFERRED:
+			last.Deferrable, last.Deferred = true, true
+		case pg.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			last.Deferred = false
 		}
 	}
 	return out

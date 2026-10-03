@@ -36,6 +36,14 @@ var (
 	ErrDivisionByZero            = sqlir.ErrDivisionByZero
 	ErrNumericValueOutOfRange    = sqlir.ErrNumericValueOutOfRange
 	ErrInvalidTextRepresentation = sqlir.ErrInvalidTextRepresentation
+	ErrSyntaxError               = sqlir.ErrSyntaxError
+	ErrUndefinedParameter        = sqlir.ErrUndefinedParameter
+	ErrInvalidColumnReference    = sqlir.ErrInvalidColumnReference
+	ErrDuplicateTable            = sqlir.ErrDuplicateTable
+	ErrWrongObjectType           = sqlir.ErrWrongObjectType
+	ErrInvalidTableDefinition    = sqlir.ErrInvalidTableDefinition
+	ErrNoActiveTransaction       = sqlir.ErrNoActiveTransaction
+	ErrInvalidSavepoint          = sqlir.ErrInvalidSavepoint
 	ErrUnavailable               = errors.New("detest: external call failed (transport)")
 	ErrNotFound                  = errors.New("detest: not found")
 	ErrFailedPrecondition        = errors.New("detest: failed precondition")
