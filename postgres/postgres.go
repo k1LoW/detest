@@ -346,7 +346,11 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
 				continue
 			}
-			if chk, ok := c.check(e.Constraint); ok {
+			chk, ok, err := c.check(e.Constraint, ch.Table)
+			if err != nil {
+				return ch, err
+			}
+			if ok {
 				ch.Checks = append(ch.Checks, chk)
 				continue
 			}
@@ -364,16 +368,30 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 
 // check converts a CHECK constraint. One detest cannot evaluate is dropped,
 // as a default it cannot evaluate becomes unknown: the schema still loads.
-func (c *pgConv) check(k *pg.Constraint) (sqlir.CheckDef, bool) {
+func (c *pgConv) check(k *pg.Constraint, table string) (sqlir.CheckDef, bool, error) {
 	if k == nil || k.Contype != pg.ConstrType_CONSTR_CHECK {
-		return sqlir.CheckDef{}, false
+		return sqlir.CheckDef{}, false, nil
 	}
 	e, err := c.expr(k.RawExpr)
 	if err != nil {
-		return sqlir.CheckDef{}, false
+		return sqlir.CheckDef{}, false, nil
+	}
+	if err := c.ownColumns(e, table); err != nil {
+		return sqlir.CheckDef{}, false, err
 	}
 	unqualify(e)
-	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true
+	return sqlir.CheckDef{Name: k.Conname, Expr: e}, true, nil
+}
+
+// ownColumns refuses a column reference qualified by a name other than
+// table's, which a CHECK or generation expression cannot refer to.
+func (c *pgConv) ownColumns(e sqlir.Expr, table string) error {
+	for _, r := range sqlir.ColumnRefs(e) {
+		if r.Table != "" && r.Table != relnameOf(table) && r.Table != table {
+			return c.unsupported("a constraint or generated column referring to " + r.Table + "." + r.Column)
+		}
+	}
+	return nil
 }
 
 // unqualify drops the table name from the column references of a CHECK or
@@ -406,7 +424,11 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_NOTNULL:
 			col.NotNull = true
 		case pg.ConstrType_CONSTR_CHECK:
-			if chk, ok := c.check(k); ok {
+			chk, ok, err := c.check(k, table)
+			if err != nil {
+				return col, nil, nil, err
+			}
+			if ok {
 				if chk.Name == "" {
 					chk.Name = relnameOf(table) + "_" + d.Colname + "_check"
 				}
@@ -469,9 +491,8 @@ func (c *pgConv) immutable(e sqlir.Expr, table string) error {
 	for _, x := range sqlir.Exprs(e) {
 		switch v := x.(type) {
 		case *sqlir.ColumnRef:
-			// Only the table's own columns are in scope.
-			if v.Table != "" && v.Table != table {
-				return c.unsupported("generated column referring to " + v.Table + "." + v.Column)
+			if err := c.ownColumns(v, table); err != nil {
+				return err
 			}
 		case *sqlir.FuncCall:
 			if mutableFuncs[v.Name] || sqlir.OtherAggregates[v.Name] {
@@ -674,7 +695,11 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 				ch.ForeignKeys = append(ch.ForeignKeys, fk)
 				continue
 			}
-			if chk, ok := c.check(cmd.Def.GetConstraint()); ok {
+			chk, ok, err := c.check(cmd.Def.GetConstraint(), ch.Table)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				ch.Checks = append(ch.Checks, chk)
 				continue
 			}
