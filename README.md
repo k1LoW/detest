@@ -1,6 +1,6 @@
 # detest
 
-**In-Process Deterministic Simulation Testing for Go Applications, based on Stateless Model Checking (SMC)**
+In-Process Deterministic Simulation Testing for Go Applications, based on Stateless Model Checking (SMC)
 
 *Because we **detest** race conditions, deadlocks, and flaky tests.*
 
