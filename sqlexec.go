@@ -1782,8 +1782,20 @@ func roundDecimal(f float64, n int) float64 {
 // checkArity refuses a call to a function detest knows that no signature of
 // it takes, before its arguments are evaluated, as Postgres resolves the
 // signature when it plans the statement.
+// otherArity are the numbers of arguments of functions detest evaluates
+// that are not strict. current_timestamp takes the one precision the
+// converter passes for CURRENT_TIMESTAMP(p), which SQL cannot call itself.
+var otherArity = map[string][]int{
+	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
+	"current_timestamp": {1}, "random": {0},
+}
+
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
-	if arity, known := strictFuncs[f.Name]; known && !slices.Contains(arity, len(f.Args)) {
+	arity, known := strictFuncs[f.Name]
+	if !known {
+		arity, known = otherArity[f.Name]
+	}
+	if known && !slices.Contains(arity, len(f.Args)) {
 		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
 	}
 	return nil
