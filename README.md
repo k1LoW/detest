@@ -4,7 +4,9 @@ Deterministic Testing Framework for Go Applications
 
 Because we detest race conditions, deadlocks, and flaky tests.
 
-`detest` explores every interleaving of concurrent Go backend code that talks to a database, and reports the first schedule that breaks an invariant. It runs your production code as is. Processes (request handlers, workers, consumers) run inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble under a deterministic scheduler, and the database is an in-memory `database/sql` driver that models PostgreSQL's Read Committed row locking. Each run follows one sequence of scheduling choices, and detest walks all of them depth first. A violation comes with the schedule that produced it, so it can be replayed step by step.
+`detest` explores every interleaving of concurrent Go code and reports the first schedule that breaks an invariant. Databases, message queues, external services and mutexes are modeled so that production code runs on them as is.
+
+Processes (request handlers, workers, consumers, pollers) run inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble under a deterministic scheduler. Each run follows one sequence of scheduling choices, and detest walks all of them depth first. A violation comes with the schedule that produced it, so it can be replayed step by step.
 
 ## Usage
 
