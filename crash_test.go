@@ -104,3 +104,34 @@ func TestCrashRedeliversTheMessage(t *testing.T) {
 		})
 	}, MaxCrashes(1))
 }
+
+// A crash at a commit's yield point rolls the transaction back and frees its
+// row locks, so another worker can take the row with SKIP LOCKED.
+func TestCrashAtCommitReleasesTheLocks(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE jobs (id text PRIMARY KEY, status text NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO jobs VALUES ('j1', 'pending')`) })
+		s.Manual("worker", 2, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var id string
+			if err := tx.QueryRow(`SELECT id FROM jobs WHERE status = 'pending' FOR UPDATE SKIP LOCKED`).Scan(&id); err != nil {
+				return nil // nothing left
+			}
+			if _, err := tx.Exec(`UPDATE jobs SET status = 'done' WHERE id = $1`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "jobs", "j1"); row.Str("status") != "done" {
+				return fmt.Errorf("job j1 left %s", row.Str("status"))
+			}
+			return nil
+		})
+	}, MaxCrashes(1))
+}

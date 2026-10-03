@@ -62,7 +62,18 @@ func (c *sqlConn) Ping(context.Context) error {
 	return nil
 }
 
-func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.Tx, err error) {
+	defer func() {
+		// A begin cut short by the end of the run returns no Tx, so
+		// database/sql never rolls it back: the connection must not keep it.
+		if rec := recover(); rec != nil {
+			if _, ok := rec.(abortSentinel); !ok {
+				panic(rec)
+			}
+			c.tx, err = nil, errRunOver
+		}
+	}()
+	c.dropStaleTx()
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
 	}
@@ -85,7 +96,8 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx
 
 // ExecContext and QueryContext return database errors as the server's Errors
 // option converts them, the type the production code's driver returns.
-func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
+	defer recoverRunOver(&err)
 	rows, affected, err := c.run(query, args)
 	if err != nil {
 		return nil, c.db.kind.Convert(err)
@@ -96,20 +108,26 @@ func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.N
 
 type sqlTx struct{ c *sqlConn }
 
-func (t *sqlTx) Commit() error {
+func (t *sqlTx) Commit() (err error) {
+	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
 		return nil
 	}
 	if tx.p != nil {
-		tx.p.forgetTx(tx)
+		// The process keeps the transaction until the commit is done, so a
+		// crash at the commit's yield point rolls it back.
+		defer tx.p.forgetTxUnlessOver(tx)
 		if tx.aborted {
 			tx.p.yieldf("%s: commit (aborted transaction rolls back)", tx.db.name)
 			tx.rollback()
 			return t.c.db.kind.Convert(tx.abortedError())
 		}
 		tx.p.yieldf("%s: commit", tx.db.name)
+		if tx.closed {
+			return errRunOver // the process crashed at the yield point
+		}
 	}
 	if err := tx.checkCommit(); err != nil {
 		tx.rollback()
@@ -119,18 +137,28 @@ func (t *sqlTx) Commit() error {
 	return nil
 }
 
-func (t *sqlTx) Rollback() error {
+func (t *sqlTx) Rollback() (err error) {
+	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
 		return nil
 	}
 	if tx.p != nil {
-		tx.p.forgetTx(tx)
+		defer tx.p.forgetTxUnlessOver(tx)
 		tx.p.yieldf("%s: rollback", tx.db.name)
 	}
 	tx.rollback()
 	return nil
+}
+
+// forgetTxUnlessOver is forgetTx while the run lasts. Once it is over, the
+// process unwinding and database/sql's cleanup of the transaction may both
+// get here at once, and the list no longer matters.
+func (p *Proc) forgetTxUnlessOver(tx *Tx) {
+	if !p.r.over() {
+		p.forgetTx(tx)
+	}
 }
 
 func (p *Proc) forgetTx(tx *Tx) {
@@ -142,7 +170,8 @@ func (p *Proc) forgetTx(tx *Tx) {
 	}
 }
 
-func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
+	defer recoverRunOver(&err)
 	rows, _, err := c.run(query, args)
 	if err != nil {
 		return nil, c.db.kind.Convert(err)
@@ -153,11 +182,38 @@ func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.
 // current returns the process issuing statements on this connection. Outside
 // a run (seeding) or outside any process, statements run directly on the
 // committed state without yielding.
+// errRunOver is what a statement of a process returns once its run ended:
+// the process is unwinding and nothing it does counts.
+var errRunOver = errors.New("detest: the run ended")
+
+// recoverRunOver turns the panic that unwinds a process of an ended run into
+// an error, at the driver's entry points. database/sql releases some of its
+// locks only on its error paths, not on a panic: a Tx's read lock taken for
+// a query stays held, and the Tx's cleanup on context cancellation then
+// waits for it forever.
+func recoverRunOver(err *error) {
+	if rec := recover(); rec != nil {
+		if _, ok := rec.(abortSentinel); !ok {
+			panic(rec)
+		}
+		*err = errRunOver
+	}
+}
+
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
 // statementTx returns the transaction a statement runs in: the open one, or an
 // autocommit transaction committed right after the statement.
+// dropStaleTx forgets a transaction of an ended run that the connection still
+// holds, so that a pooled connection carries nothing into the next run.
+func (c *sqlConn) dropStaleTx() {
+	if c.tx != nil && c.tx.p != nil && c.tx.p.r.over() {
+		c.tx = nil
+	}
+}
+
 func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
+	c.dropStaleTx()
 	if c.tx != nil {
 		return c.tx, false
 	}
