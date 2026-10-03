@@ -778,9 +778,10 @@ func (e *procPanic) Error() string {
 
 // same reports whether two violations break the run the same way. A panic is
 // the same by its process and value, as its stack holds addresses that differ
-// between runs. The value is compared by its type and text rather than with
-// reflect.DeepEqual, which would tell apart equal panics whose values hold a
-// func, a channel or other state made anew in each run.
+// between runs. The value is compared by its type and text, as the report
+// shows it. A value holding a channel or a func prints an address that differs
+// between runs, so such a panic is not shrunk; canonicalizing values to shrink
+// it is not worth the code, as the unshrunk schedule still replays it.
 func (v *violation) same(o *violation) bool {
 	if v.kind != o.kind {
 		return false
