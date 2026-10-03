@@ -1,0 +1,789 @@
+package detest
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/k1LoW/detest/internal/sqlir"
+)
+
+// selItem is one row of a query on its way out: the context its expressions
+// are evaluated in (a row of FROM, or a group when the query aggregates) and
+// the output row once projected.
+type selItem struct {
+	ctx *env
+	agg *aggEnv // set for a group
+	jr  jrow    // the FROM row, for SELECT *
+	out Row
+}
+
+// evalSelect runs a query in PostgreSQL's order: FROM and WHERE, grouping and
+// HAVING, window functions, the select list, ORDER BY, DISTINCT, then OFFSET
+// and LIMIT. A query with FOR UPDATE takes the locking path instead, which
+// PostgreSQL allows only without grouping, DISTINCT and windows.
+func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	if err := x.withCTEs(sel.With, outer); err != nil {
+		return nil, nil, err
+	}
+	switch {
+	case sel.SetOp != "":
+		return x.evalSetOp(sel, outer)
+	case sel.Values != nil:
+		return x.evalValues(sel, outer)
+	case sel.Lock != nil:
+		return x.evalLocking(sel, outer)
+	}
+	rows, _, err := x.scan(sel, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rows, err = x.where(sel, rows, outer); err != nil {
+		return nil, nil, err
+	}
+	var items []*selItem
+	if isAggregate(sel) {
+		if items, err = x.groups(sel, rows, outer); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		for _, r := range rows {
+			items = append(items, &selItem{ctx: r.env(outer), jr: r})
+		}
+	}
+	if wins := windowsOf(sel); len(wins) > 0 {
+		if err := x.computeWindows(wins, items); err != nil {
+			return nil, nil, err
+		}
+	}
+	cols, err := x.projectItems(sel, items, rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := x.sortItems(sel.OrderBy, items, cols); err != nil {
+		return nil, nil, err
+	}
+	if items, err = x.distinct(sel, items, cols); err != nil {
+		return nil, nil, err
+	}
+	out := make([]Row, len(items))
+	for i, it := range items {
+		out[i] = it.out
+	}
+	out, err = x.slice(sel, out, outer)
+	return cols, out, err
+}
+
+func (x *sqlExec) where(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]jrow, error) {
+	if sel.Where == nil {
+		return rows, nil
+	}
+	var kept []jrow
+	for _, r := range rows {
+		ok, err := x.evalBool(sel.Where, r.env(outer))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			kept = append(kept, r)
+		}
+	}
+	return kept, nil
+}
+
+func isAggregate(sel *sqlir.SelectStmt) bool {
+	if len(sel.GroupBy) > 0 || sel.Having != nil {
+		return true
+	}
+	for _, t := range sel.Targets {
+		if hasAggregate(t.Expr) {
+			return true
+		}
+	}
+	return false
+}
+
+// groups folds the rows into groups by GROUP BY and keeps those HAVING
+// accepts. Without GROUP BY the whole input is one group, even when empty.
+func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*selItem, error) {
+	type group struct{ rows []jrow }
+	var gs []*group
+	index := map[string]*group{}
+	for _, r := range rows {
+		var kb strings.Builder
+		for _, g := range sel.GroupBy {
+			v, err := x.eval(g, r.env(outer))
+			if err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(&kb, "%v|", derefValue(v))
+		}
+		k := kb.String()
+		g, ok := index[k]
+		if !ok {
+			g = &group{}
+			index[k] = g
+			gs = append(gs, g)
+		}
+		g.rows = append(g.rows, r)
+	}
+	if len(gs) == 0 && len(sel.GroupBy) == 0 {
+		gs = append(gs, &group{})
+	}
+	var items []*selItem
+	for _, g := range gs {
+		sample := jrow{by: map[string]Row{}, merged: Row{}}
+		if len(g.rows) > 0 {
+			sample = g.rows[0]
+		}
+		genv := &aggEnv{env: sample.env(outer), rows: g.rows, x: x}
+		if sel.Having != nil {
+			ok, err := x.evalBoolAgg(sel.Having, genv)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		items = append(items, &selItem{ctx: genv.env, agg: genv, jr: sample})
+	}
+	return items, nil
+}
+
+// value evaluates e for an item: over its group when the query aggregates.
+func (x *sqlExec) value(it *selItem, e sqlir.Expr) (any, error) {
+	if it.agg != nil {
+		return x.evalAgg(e, it.agg)
+	}
+	return x.eval(e, it.ctx)
+}
+
+func (x *sqlExec) projectItems(sel *sqlir.SelectStmt, items []*selItem, rows []jrow) ([]string, error) {
+	keys := outputKeys(sel.Targets)
+	var cols []string
+	for i, t := range sel.Targets {
+		if t.Star {
+			cols = append(cols, starColumns(t, rows)...)
+			continue
+		}
+		cols = append(cols, keys[i])
+	}
+	for _, it := range items {
+		o := Row{}
+		for i, t := range sel.Targets {
+			if t.Star {
+				src := it.jr.merged
+				if t.Table != "" {
+					src = it.jr.by[t.Table]
+				}
+				for k, v := range src {
+					if k != "_key" {
+						o[k] = v
+					}
+				}
+				continue
+			}
+			v, err := x.value(it, t.Expr)
+			if err != nil {
+				return nil, err
+			}
+			o[keys[i]] = v
+		}
+		it.out = o
+	}
+	return cols, nil
+}
+
+func starColumns(t sqlir.Target, rows []jrow) []string {
+	set := map[string]bool{}
+	for _, r := range rows {
+		src := r.merged
+		if t.Table != "" {
+			src = r.by[t.Table]
+		}
+		for k := range src {
+			if k != "_key" {
+				set[k] = true
+			}
+		}
+	}
+	all := make([]string, 0, len(set))
+	for k := range set {
+		all = append(all, k)
+	}
+	sort.Strings(all)
+	return all
+}
+
+// outputValue resolves an ORDER BY or DISTINCT ON item as PostgreSQL does: an
+// output column name or position, else an expression over the input.
+func (x *sqlExec) outputValue(it *selItem, e sqlir.Expr, cols []string) (any, error) {
+	switch v := e.(type) {
+	case *sqlir.ColumnRef:
+		if v.Table == "" {
+			if val, ok := it.out[v.Column]; ok {
+				return val, nil
+			}
+		}
+	case *sqlir.Const:
+		if n, ok := v.Value.(int64); ok && n >= 1 && int(n) <= len(cols) {
+			return it.out[cols[n-1]], nil
+		}
+	}
+	if it.ctx == nil {
+		return x.eval(e, &env{merged: it.out})
+	}
+	return x.value(it, e)
+}
+
+func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	vals := make([][]any, len(items))
+	for i, it := range items {
+		vals[i] = make([]any, len(keys))
+		for j, k := range keys {
+			v, err := x.outputValue(it, k.Expr, cols)
+			if err != nil {
+				if _, unknown := err.(errUnknownExpr); unknown {
+					continue // order by an expression detest cannot evaluate: keep the order
+				}
+				return err
+			}
+			vals[i][j] = v
+		}
+	}
+	idx := make([]int, len(items))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, vals[idx[a]], vals[idx[b]]) })
+	sorted := make([]*selItem, len(items))
+	for i, j := range idx {
+		sorted[i] = items[j]
+	}
+	copy(items, sorted)
+	return nil
+}
+
+// orderedBefore reports whether a sorts before b under keys, placing NULLs
+// last when ascending and first when descending unless NULLS says otherwise.
+func orderedBefore(keys []sqlir.OrderKey, a, b []any) bool {
+	for j, k := range keys {
+		va, vb := derefValue(a[j]), derefValue(b[j])
+		nullsFirst := k.Nulls == sqlir.NullsFirst || (k.Nulls == 0 && k.Desc)
+		switch {
+		case va == nil && vb == nil:
+			continue
+		case va == nil:
+			return nullsFirst
+		case vb == nil:
+			return !nullsFirst
+		}
+		c, ok := compareValues(va, vb)
+		if !ok || c == 0 {
+			continue
+		}
+		if k.Desc {
+			return c > 0
+		}
+		return c < 0
+	}
+	return false
+}
+
+// distinct keeps the first item of each DISTINCT ON key, or of each distinct
+// output row, in the order ORDER BY left them.
+func (x *sqlExec) distinct(sel *sqlir.SelectStmt, items []*selItem, cols []string) ([]*selItem, error) {
+	if !sel.Distinct && len(sel.DistinctOn) == 0 {
+		return items, nil
+	}
+	seen := map[string]bool{}
+	var kept []*selItem
+	for _, it := range items {
+		var kb strings.Builder
+		if len(sel.DistinctOn) > 0 {
+			for _, e := range sel.DistinctOn {
+				v, err := x.outputValue(it, e, cols)
+				if err != nil {
+					return nil, err
+				}
+				fmt.Fprintf(&kb, "%#v|", derefValue(v))
+			}
+		} else {
+			for _, c := range cols {
+				fmt.Fprintf(&kb, "%#v|", derefValue(it.out[c]))
+			}
+		}
+		if k := kb.String(); !seen[k] {
+			seen[k] = true
+			kept = append(kept, it)
+		}
+	}
+	return kept, nil
+}
+
+// slice applies OFFSET and LIMIT.
+func (x *sqlExec) slice(sel *sqlir.SelectStmt, rows []Row, outer *env) ([]Row, error) {
+	if sel.Offset != nil {
+		v, err := x.eval(sel.Offset, &env{outer: outer})
+		if err != nil {
+			return nil, err
+		}
+		if f, ok := toFloat(derefValue(v)); ok {
+			if int(f) < len(rows) {
+				rows = rows[int(f):]
+			} else {
+				rows = nil
+			}
+		}
+	}
+	if sel.Limit != nil {
+		v, err := x.eval(sel.Limit, &env{outer: outer})
+		if err != nil {
+			return nil, err
+		}
+		if f, ok := toFloat(derefValue(v)); ok && int(f) < len(rows) {
+			rows = rows[:int(f)]
+		}
+	}
+	return rows, nil
+}
+
+// finish orders, then slices, rows that are already output rows: those of a
+// set operation or a VALUES list.
+func (x *sqlExec) finish(sel *sqlir.SelectStmt, cols []string, rows []Row, outer *env) ([]string, []Row, error) {
+	items := make([]*selItem, len(rows))
+	for i, r := range rows {
+		items[i] = &selItem{out: r}
+	}
+	if err := x.sortItems(sel.OrderBy, items, cols); err != nil {
+		return nil, nil, err
+	}
+	for i, it := range items {
+		rows[i] = it.out
+	}
+	rows, err := x.slice(sel, rows, outer)
+	return cols, rows, err
+}
+
+func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	var cols []string
+	if len(sel.Values) > 0 {
+		for i := range sel.Values[0] {
+			cols = append(cols, fmt.Sprintf("column%d", i+1))
+		}
+	}
+	en := outer
+	if en == nil {
+		en = &env{}
+	}
+	rows := make([]Row, 0, len(sel.Values))
+	for _, vs := range sel.Values {
+		r := Row{}
+		for i, e := range vs {
+			v, err := x.eval(e, en)
+			if err != nil {
+				return nil, nil, err
+			}
+			if i < len(cols) {
+				r[cols[i]] = v
+			}
+		}
+		rows = append(rows, r)
+	}
+	return x.finish(sel, cols, rows, outer)
+}
+
+// evalSetOp combines two queries by column position, with the left one's
+// column names. UNION, INTERSECT and EXCEPT remove duplicates; with ALL they
+// keep them as a multiset.
+func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	lcols, lrows, err := x.evalSelect(sel.Larg, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	rcols, rrows, err := x.evalSelect(sel.Rarg, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(lcols) != len(rcols) {
+		return nil, nil, fmt.Errorf("detest: each %s query must have the same number of columns", strings.ToUpper(sel.SetOp))
+	}
+	for i, r := range rrows {
+		m := Row{}
+		for j, c := range rcols {
+			m[lcols[j]] = r[c]
+		}
+		rrows[i] = m
+	}
+	key := func(r Row) string {
+		var kb strings.Builder
+		for _, c := range lcols {
+			fmt.Fprintf(&kb, "%#v|", derefValue(r[c]))
+		}
+		return kb.String()
+	}
+	var out []Row
+	switch sel.SetOp {
+	case "union":
+		out = append(append(out, lrows...), rrows...)
+		if !sel.SetAll {
+			seen := map[string]bool{}
+			var kept []Row
+			for _, r := range out {
+				if k := key(r); !seen[k] {
+					seen[k] = true
+					kept = append(kept, r)
+				}
+			}
+			out = kept
+		}
+	case "intersect", "except":
+		right := map[string]int{}
+		for _, r := range rrows {
+			right[key(r)]++
+		}
+		emitted := map[string]bool{}
+		for _, r := range lrows {
+			k := key(r)
+			in := right[k] > 0
+			if sel.SetOp == "except" {
+				in = !in
+			}
+			switch {
+			case sel.SetAll && sel.SetOp == "intersect" && in:
+				right[k]--
+				out = append(out, r)
+			case sel.SetAll && sel.SetOp == "except":
+				if right[k] > 0 {
+					right[k]--
+				} else {
+					out = append(out, r)
+				}
+			case !sel.SetAll && in && !emitted[k]:
+				emitted[k] = true
+				out = append(out, r)
+			}
+		}
+	}
+	return x.finish(sel, lcols, out, outer)
+}
+
+// evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY and LIMIT
+// before locking, in scan order, so LIMIT counts the rows actually locked
+// (FOR UPDATE SKIP LOCKED skips rows held by others).
+func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	rows, baseTable, err := x.scan(sel, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rows, err = x.where(sel, rows, outer); err != nil {
+		return nil, nil, err
+	}
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+		return nil, nil, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+	}
+	if err := x.order(sel.OrderBy, rows, outer); err != nil {
+		return nil, nil, err
+	}
+	rows, limit, err := x.offsetLimit(sel, rows, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	mode := lockModeOf(sel.Lock)
+	if baseTable != "" {
+		var locked []jrow
+		for _, r := range rows {
+			if limit >= 0 && len(locked) >= limit {
+				break
+			}
+			lk := lockKey{baseTable, r.base.Key()}
+			if x.tx.heldByOther(lk, mode) {
+				if sel.Lock.SkipLocked {
+					continue
+				}
+				if sel.Lock.NoWait {
+					return nil, nil, x.tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(baseTable)), relname(baseTable), "", "")
+				}
+			}
+			if err := x.tx.lockMode(lk, mode); err != nil {
+				return nil, nil, err
+			}
+			if cur, ok := x.tx.view(baseTable, r.base.Key()); ok {
+				r = newJrow(x.aliasOf(sel), cur)
+			}
+			locked = append(locked, r)
+		}
+		rows = locked
+	} else if limit >= 0 && limit < len(rows) {
+		rows = rows[:limit]
+	}
+	return x.project(sel, rows, outer)
+}
+
+// lockModeOf is the row lock a locking clause takes.
+func lockModeOf(l *sqlir.LockClause) lockMode {
+	switch l.Strength {
+	case "no key update":
+		return lockNoKeyUpdate
+	case "share":
+		return lockShare
+	case "key share":
+		return lockKeyShare
+	}
+	return lockUpdate
+}
+
+// windowsOf returns the window functions of the select list, ORDER BY and
+// DISTINCT ON.
+func windowsOf(sel *sqlir.SelectStmt) []*sqlir.WindowFunc {
+	var out []*sqlir.WindowFunc
+	var walk func(e sqlir.Expr)
+	walk = func(e sqlir.Expr) {
+		switch v := e.(type) {
+		case *sqlir.WindowFunc:
+			out = append(out, v)
+		case *sqlir.FuncCall:
+			for _, a := range v.Args {
+				walk(a)
+			}
+		case *sqlir.BinaryExpr:
+			walk(v.L)
+			walk(v.R)
+		case *sqlir.UnaryExpr:
+			walk(v.X)
+		case *sqlir.Cast:
+			walk(v.X)
+		case *sqlir.CaseExpr:
+			walk(v.Arg)
+			for _, w := range v.Whens {
+				walk(w.When)
+				walk(w.Then)
+			}
+			walk(v.Else)
+		}
+	}
+	for _, t := range sel.Targets {
+		walk(t.Expr)
+	}
+	for _, k := range sel.OrderBy {
+		walk(k.Expr)
+	}
+	for _, e := range sel.DistinctOn {
+		walk(e)
+	}
+	return out
+}
+
+// computeWindows evaluates each window function for every item and keeps the
+// value in the item's context, where eval finds it.
+func (x *sqlExec) computeWindows(wins []*sqlir.WindowFunc, items []*selItem) error {
+	for _, it := range items {
+		if it.ctx.win == nil {
+			it.ctx.win = map[*sqlir.WindowFunc]any{}
+		}
+	}
+	for _, w := range wins {
+		var parts [][]*selItem
+		index := map[string]int{}
+		for _, it := range items {
+			var kb strings.Builder
+			for _, e := range w.Partition {
+				v, err := x.value(it, e)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(&kb, "%#v|", derefValue(v))
+			}
+			k := kb.String()
+			i, ok := index[k]
+			if !ok {
+				i = len(parts)
+				index[k] = i
+				parts = append(parts, nil)
+			}
+			parts[i] = append(parts[i], it)
+		}
+		for _, part := range parts {
+			if err := x.computeWindow(w, part); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
+	keys := make([][]any, len(part))
+	for i, it := range part {
+		keys[i] = make([]any, len(w.Order))
+		for j, k := range w.Order {
+			v, err := x.value(it, k.Expr)
+			if err != nil {
+				return err
+			}
+			keys[i][j] = v
+		}
+	}
+	idx := make([]int, len(part))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(w.Order, keys[idx[a]], keys[idx[b]]) })
+	sorted := make([]*selItem, len(part))
+	skeys := make([][]any, len(part))
+	for i, j := range idx {
+		sorted[i], skeys[i] = part[j], keys[j]
+	}
+	peer := func(a, b int) bool {
+		return !orderedBefore(w.Order, skeys[a], skeys[b]) && !orderedBefore(w.Order, skeys[b], skeys[a])
+	}
+	// lastPeer[i] is the last row sharing row i's ORDER BY values: the end of
+	// the default frame.
+	lastPeer := make([]int, len(sorted))
+	for i := len(sorted) - 1; i >= 0; i-- {
+		lastPeer[i] = i
+		if i+1 < len(sorted) && peer(i, i+1) {
+			lastPeer[i] = lastPeer[i+1]
+		}
+	}
+	arg := func(it *selItem, n int) (any, error) {
+		if n >= len(w.Func.Args) {
+			return nil, nil
+		}
+		return x.value(it, w.Func.Args[n])
+	}
+	rank, dense := 0, 0
+	for i, it := range sorted {
+		frameEnd := len(sorted) - 1
+		if len(w.Order) > 0 && !w.Whole {
+			frameEnd = lastPeer[i]
+		}
+		if i == 0 || !peer(i-1, i) {
+			rank, dense = i+1, dense+1
+		}
+		var v any
+		switch name := w.Func.Name; name {
+		case "row_number":
+			v = int64(i + 1)
+		case "rank":
+			v = int64(rank)
+		case "dense_rank":
+			v = int64(dense)
+		case "count", "sum", "min", "max", "avg":
+			var vals []any
+			n := 0
+			for _, f := range sorted[:frameEnd+1] {
+				n++
+				if w.Func.Star {
+					continue
+				}
+				a, err := arg(f, 0)
+				if err != nil {
+					return err
+				}
+				if derefValue(a) != nil {
+					vals = append(vals, a)
+				}
+			}
+			v = foldAggregate(name, w.Func.Star, vals, n)
+		case "first_value", "last_value":
+			at := 0
+			if name == "last_value" {
+				at = frameEnd
+			}
+			var err error
+			if v, err = arg(sorted[at], 0); err != nil {
+				return err
+			}
+		case "lag", "lead":
+			off := int64(1)
+			if len(w.Func.Args) > 1 {
+				o, err := arg(it, 1)
+				if err != nil {
+					return err
+				}
+				if n, ok := toInt64(derefValue(o)); ok {
+					off = n
+				}
+			}
+			at := i - int(off)
+			if name == "lead" {
+				at = i + int(off)
+			}
+			var err error
+			if at >= 0 && at < len(sorted) {
+				v, err = arg(sorted[at], 0)
+			} else {
+				v, err = arg(it, 2)
+			}
+			if err != nil {
+				return err
+			}
+		default:
+			return x.unsupported("window function " + name)
+		}
+		it.ctx.win[w] = v
+	}
+	return nil
+}
+
+// foldAggregate folds the non-NULL values of an aggregate's argument; n is
+// the row count, which count(*) returns.
+func foldAggregate(name string, star bool, vals []any, n int) any {
+	switch name {
+	case "count":
+		if star {
+			return int64(n)
+		}
+		return int64(len(vals))
+	case "sum", "avg":
+		if len(vals) == 0 {
+			return nil
+		}
+		total := 0.0
+		for _, val := range vals {
+			f, _ := toFloat(derefValue(val))
+			total += f
+		}
+		if name == "avg" {
+			return total / float64(len(vals))
+		}
+		return numeric(total)
+	default:
+		if len(vals) == 0 {
+			return nil
+		}
+		best := vals[0]
+		for _, val := range vals[1:] {
+			c, _ := compareValues(val, best)
+			if (name == "min" && c < 0) || (name == "max" && c > 0) {
+				best = val
+			}
+		}
+		return best
+	}
+}
+
+// outputKeys are the keys of the select list's columns in an output row: the
+// column names, with a repeated name told apart by a suffix the driver strips
+// (Postgres returns both ?column? columns of SELECT 1, 2 under that name).
+func outputKeys(targets []sqlir.Target) []string {
+	keys := make([]string, len(targets))
+	seen := map[string]bool{}
+	for i, t := range targets {
+		if t.Star {
+			continue
+		}
+		k := targetName(t)
+		if seen[k] {
+			k = fmt.Sprintf("%s\x00%d", k, i)
+		}
+		seen[k] = true
+		keys[i] = k
+	}
+	return keys
+}

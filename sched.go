@@ -1,0 +1,951 @@
+package detest
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing/synctest"
+	"time"
+)
+
+type choice struct {
+	label  string
+	n      int
+	picked int
+	replay bool
+}
+
+type violation struct {
+	kind string
+	err  error
+}
+
+type procState int
+
+const (
+	stateReady procState = iota
+	stateBlockedLock
+	stateBlockedTime
+	stateBlockedOutside // blocked on a primitive detest does not model (channel, timer, WaitGroup)
+	stateDone
+)
+
+type eventKind int
+
+const (
+	evYield eventKind = iota
+	evBlocked
+	evDone
+)
+
+type procEvent struct {
+	kind eventKind
+	err  error
+}
+
+type abortSentinel struct{}
+
+type triggerKind int
+
+const (
+	trigMessage triggerKind = iota
+	trigLoop
+	trigManual
+	trigSpawn
+)
+
+type procType struct {
+	name      string
+	kind      triggerKind
+	instances int
+	maxRuns   int
+	queue     *Queue
+	loopFn    func(p *Proc) error
+	msgFn     func(p *Proc, msg Msg) error
+	after     func(s *State) bool
+	when      func() bool
+}
+
+// ProcOption configures a process type.
+type ProcOption func(*procType)
+
+// Instances sets how many instances of a process type may run concurrently.
+func Instances(n int) ProcOption { return func(pt *procType) { pt.instances = n } }
+
+// After restricts a manual process to start only once the predicate holds.
+func After(pred func(s *State) bool) ProcOption { return func(pt *procType) { pt.after = pred } }
+
+// When lets a loop or manual process start only while pred holds. Use it to
+// express that a periodic sweep has work to do: a tick that would find nothing
+// is a no-op whose position in the schedule does not matter, and skipping it
+// removes the branching those no-op ticks would add. pred reads committed
+// state (for example through DB.Peek) and must not yield.
+func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = pred } }
+
+// OnMessage registers a process type started by delivering a message of q.
+// A returned error redelivers the message, bounded by MaxRedeliveries.
+func (m *Model) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
+	m.declare("OnMessage")
+	pt := &procType{name: name, kind: trigMessage, instances: m.pods, queue: q, msgFn: fn}
+	for _, o := range opts {
+		o(pt)
+	}
+	q.consumers = append(q.consumers, pt)
+	m.types = append(m.types, pt)
+}
+
+// Loop registers a periodic process type that the scheduler may start at any
+// point, at most maxRuns times per run.
+func (m *Model) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	m.declare("Loop")
+	pt := &procType{name: name, kind: trigLoop, instances: m.pods, maxRuns: maxRuns, loopFn: fn}
+	for _, o := range opts {
+		o(pt)
+	}
+	m.types = append(m.types, pt)
+}
+
+// Manual registers a process type started at an arbitrary point, such as a
+// user-issued cancel, at most maxRuns times per run.
+func (m *Model) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
+	m.declare("Manual")
+	pt := &procType{name: name, kind: trigManual, instances: 1, maxRuns: maxRuns, loopFn: fn}
+	for _, o := range opts {
+		o(pt)
+	}
+	m.types = append(m.types, pt)
+}
+
+type run struct {
+	m        *Model
+	prefix   []choice
+	choices  []choice
+	pos      int
+	procs    []*Proc
+	nextID   int
+	clock    int64
+	trace    []step
+	failures int
+	runs     map[*procType]int
+	abort    chan struct{}
+	ctx      context.Context // Proc.Context; canceled when the run ends
+	cancel   context.CancelFunc
+	current  *Proc
+	preempts int
+	prev     *State
+	deferred []func()
+	version  int
+	idleAt   map[*procType]int
+	pending  *violation // raised by a store during a step
+	tracing  bool       // keep the trace (see note)
+	snap     *State     // the latest snapshot, whose tables the next one reuses
+	// queuesTouched records a queue change since snap was taken.
+	queuesTouched bool
+	// outside counts the processes blocked outside detest, which may wake and
+	// call into detest without being resumed. Those calls run concurrently with
+	// the resumed process, hence atomic.
+	outside atomic.Int32
+	gidMu   sync.Mutex
+	byGid   map[string]*Proc // process by goroutine id, for attributing statements
+}
+
+type step struct {
+	proc string
+	op   string
+	loc  string
+}
+
+// Proc is one running process instance.
+type Proc struct {
+	name     string
+	pt       *procType
+	r        *run
+	resume   chan struct{}
+	ev       chan procEvent
+	state    procState
+	waitRow  *rowWait // the row lock we wait for
+	waitLock waitable // Mutex or RWMutex we wait for
+	waitAt   int64
+	tx       *Tx   // transaction opened by a hand-written model through DB.Tx
+	txs      []*Tx // transactions opened through the database/sql driver
+	msg      *qmsg
+	err      error
+	gid      string // goroutine id, for inspecting its state in runtime.Stack
+}
+
+// Name returns the instance name, such as "sweeper#2".
+func (p *Proc) Name() string { return p.name }
+
+func (m *Model) newRun(prefix []choice) *run {
+	r := &run{m: m, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
+	m.run = r
+	for _, db := range m.dbs {
+		db.reset()
+	}
+	for _, q := range m.queues {
+		q.reset()
+	}
+	for _, l := range m.locks {
+		l.reset()
+	}
+	for _, fn := range m.seeds {
+		fn()
+	}
+	return r
+}
+
+func (r *run) choose(label string, n int) int {
+	if n <= 0 {
+		panic("detest: choose with n <= 0")
+	}
+	if r.pos < len(r.prefix) {
+		c := r.prefix[r.pos]
+		var mismatch error
+		switch {
+		case !c.replay && c.n != n:
+			mismatch = fmt.Errorf("detest: the model is nondeterministic, or the checkpoint is of another version of it: choice %d (%s) had %d options, now %d", r.pos, label, c.n, n)
+		case c.picked >= n:
+			mismatch = fmt.Errorf("detest: the schedule picks %d of %d options at choice %d (%s): it is of another version of the model", c.picked, n, r.pos, label)
+		}
+		if mismatch != nil {
+			// This may be a process's goroutine, which cannot fail the test.
+			// The scheduler ends the run after the step and Explore fails the
+			// test; the run goes on until then with the first option.
+			r.pending = &violation{kind: "fatal", err: mismatch}
+			c = choice{}
+		}
+		c.label, c.n = label, n
+		r.choices = append(r.choices, c)
+		r.pos++
+		return c.picked
+	}
+	r.choices = append(r.choices, choice{label: label, n: n})
+	r.pos++
+	return 0
+}
+
+type option struct {
+	desc  string
+	apply func()
+}
+
+func (r *run) execute() (v *violation) {
+	defer func() {
+		close(r.abort)
+		// Let the processes left parked unwind, and database/sql roll back the
+		// transactions they left open, before the next run resets the stores.
+		r.cancel()
+		synctest.Wait()
+		if rec := recover(); rec != nil {
+			if _, ok := rec.(abortSentinel); !ok {
+				panic(rec)
+			}
+		}
+	}()
+	for {
+		if r.m.progress != nil {
+			r.m.progress.Add(1)
+		}
+		r.settleOutside()
+		opts := r.enabled()
+		if len(opts) == 0 {
+			if r.advanceClock() {
+				continue
+			}
+			if r.waitOutside() {
+				continue
+			}
+			break
+		}
+		i := 0
+		if len(opts) > 1 {
+			i = r.choose("step", len(opts))
+		}
+		opts[i].apply()
+		if r.pending != nil {
+			return r.pending
+		}
+		if v := r.checkAlways(); v != nil {
+			return v
+		}
+	}
+	for _, p := range r.procs {
+		if p.state == stateBlockedLock {
+			return &violation{kind: "progress", err: fmt.Errorf("process %s blocked forever on a lock", p.name)}
+		}
+		if p.state == stateBlockedOutside {
+			return &violation{kind: "progress", err: fmt.Errorf("process %s is blocked on a channel or WaitGroup that nothing left running can release", p.name)}
+		}
+	}
+	s := r.snapshot()
+	for _, fn := range r.m.atQuiesce {
+		if err := fn(s); err != nil {
+			return &violation{kind: "quiescence invariant", err: err}
+		}
+	}
+	return nil
+}
+
+func (r *run) checkAlways() *violation {
+	if len(r.m.always) == 0 {
+		return nil
+	}
+	s := r.snapshot()
+	s.prev = r.prev
+	for _, fn := range r.m.always {
+		if err := fn(s); err != nil {
+			return &violation{kind: "always invariant", err: err}
+		}
+	}
+	s.prev = nil
+	r.prev = s
+	return nil
+}
+
+func (r *run) active(pt *procType) int {
+	n := 0
+	for _, p := range r.procs {
+		if p.pt == pt && p.state != stateDone {
+			n++
+		}
+	}
+	return n
+}
+
+func (r *run) enabled() []option {
+	var opts []option
+	// Resume a runnable process. Preemption bounding: once the budget is spent,
+	// the current process keeps running while it is runnable.
+	cur := r.current
+	curRunnable := cur != nil && cur.state == stateReady
+	bounded := r.m.boundPreemptions && r.preempts >= r.m.maxPreemptions && curRunnable
+	for _, p := range r.procs {
+		if p.state != stateReady {
+			continue
+		}
+		if bounded && p != cur {
+			continue
+		}
+		p := p
+		opts = append(opts, option{desc: "resume " + p.name, apply: func() {
+			if curRunnable && p != cur {
+				r.preempts++
+			}
+			r.resume(p)
+		}})
+	}
+	if bounded {
+		return opts
+	}
+	// Deliver a message to a consumer.
+	for _, q := range r.m.queues {
+		for _, pt := range q.consumers {
+			if r.active(pt) >= pt.instances {
+				continue
+			}
+			for i := range q.msgs {
+				q, pt, i := q, pt, i
+				opts = append(opts, option{desc: fmt.Sprintf("deliver %s[%d] to %s", q.name, i, pt.name), apply: func() {
+					if curRunnable {
+						r.preempts++
+					}
+					r.deliver(q, i, pt)
+				}})
+			}
+		}
+	}
+	// Start a loop tick or a manual action.
+	for _, pt := range r.m.types {
+		if pt.kind != trigLoop && pt.kind != trigManual {
+			continue
+		}
+		if r.runs[pt] >= pt.maxRuns || r.active(pt) >= pt.instances {
+			continue
+		}
+		// A loop that went idle keeps ticking only once something changed.
+		if v, idle := r.idleAt[pt]; idle && v == r.version {
+			continue
+		}
+		if pt.after != nil && !pt.after(r.snapshot()) {
+			continue
+		}
+		if pt.when != nil && !pt.when() {
+			continue
+		}
+		pt := pt
+		opts = append(opts, option{desc: "start " + pt.name, apply: func() {
+			if curRunnable {
+				r.preempts++
+			}
+			r.runs[pt]++
+			p := r.spawn(pt, nil)
+			r.resume(p)
+		}})
+	}
+	return opts
+}
+
+func (r *run) advanceClock() bool {
+	var min int64
+	found := false
+	for _, p := range r.procs {
+		if p.state == stateBlockedTime && (!found || p.waitAt < min) {
+			min, found = p.waitAt, true
+		}
+	}
+	if !found {
+		return false
+	}
+	r.clock = min
+	r.note(nil, "clock advances to %d", min)
+	for _, p := range r.procs {
+		if p.state == stateBlockedTime && p.waitAt <= r.clock {
+			p.state = stateReady
+		}
+	}
+	return true
+}
+
+func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
+	r.nextID++
+	p := &Proc{name: fmt.Sprintf("%s#%d", pt.name, r.nextID), pt: pt, r: r,
+		// A process sends at most one event before it parks or exits, so with
+		// room for it the send never blocks, saving a goroutine wakeup per step.
+		resume: make(chan struct{}), ev: make(chan procEvent, 1), msg: msg}
+	r.procs = append(r.procs, p)
+	go p.main()
+	return p
+}
+
+func (p *Proc) main() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if _, ok := rec.(abortSentinel); ok {
+				return
+			}
+			p.ev <- procEvent{kind: evDone, err: fmt.Errorf("panic in %s: %v\n%s", p.name, rec, debugStack())}
+			return
+		}
+		p.ev <- procEvent{kind: evDone, err: p.err}
+	}()
+	p.gid = goroutineID()
+	p.r.gidMu.Lock()
+	p.r.byGid[p.gid] = p
+	p.r.gidMu.Unlock()
+	<-p.resume
+	switch p.pt.kind {
+	case trigMessage:
+		p.err = p.pt.msgFn(p, p.msg.msg)
+	default:
+		p.err = p.pt.loopFn(p)
+	}
+}
+
+// goroutineID returns the current goroutine's id from its stack header.
+func goroutineID() string {
+	buf := make([]byte, 64)
+	n := runtime.Stack(buf, false)
+	s := string(buf[:n])
+	s = strings.TrimPrefix(s, "goroutine ")
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		return s[:i]
+	}
+	return ""
+}
+
+func debugStack() string {
+	buf := make([]byte, 1<<14)
+	n := runtime.Stack(buf, false)
+	return string(buf[:n])
+}
+
+// resume lets p run until its next yield, block or completion. A process that
+// blocks on a primitive detest does not model (a channel, a timer, a
+// WaitGroup) never reports back; resume detects that once the bubble is idle
+// and parks it as blocked outside, so other processes can run.
+var debugSched = os.Getenv("DETEST_DEBUG") != ""
+
+func (r *run) resume(p *Proc) {
+	r.current = p
+	if debugSched {
+		fmt.Fprintf(os.Stderr, "[detest] resume %s (state %d, gid %s)\n", p.name, p.state, p.gid)
+	}
+	p.resume <- struct{}{}
+	ev, ok := r.awaitEvent(p)
+	if debugSched {
+		fmt.Fprintf(os.Stderr, "[detest] %s -> event ok=%v kind=%d\n", p.name, ok, ev.kind)
+	}
+	if !ok {
+		p.state = stateBlockedOutside
+		r.outside.Add(1)
+		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+		return
+	}
+	r.handleEvent(p, ev)
+}
+
+// awaitEvent waits until every other goroutine of the bubble is durably
+// blocked, then takes p's event if p is blocked sending one. A p blocked
+// anywhere else is blocked outside detest.
+//
+// synctest.Wait does not return while a goroutine is blocked on a sync.Mutex,
+// which is not a durable block. Such a hang is left to the stall watchdog;
+// inspecting goroutine stacks here instead stops the world on every step.
+func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
+	synctest.Wait()
+	select {
+	case ev := <-p.ev:
+		return ev, true
+	default:
+		return procEvent{}, false
+	}
+}
+
+// settleOutside picks up processes that were blocked outside detest and have
+// since reached a yield point or finished. synctest.Wait makes the set of
+// processes reporting back depend only on the schedule, so scheduling stays
+// deterministic.
+func (r *run) settleOutside() {
+	var outside []*Proc
+	for _, p := range r.procs {
+		if p.state == stateBlockedOutside {
+			outside = append(outside, p)
+		}
+	}
+	if len(outside) == 0 {
+		return
+	}
+	synctest.Wait()
+	for _, p := range outside {
+		select {
+		case ev := <-p.ev:
+			r.outside.Add(-1)
+			r.note(p, "resumes from the primitive it blocked on")
+			r.handleEvent(p, ev)
+		default:
+		}
+	}
+}
+
+// waitOutside blocks until a process parked outside detest reports back, when
+// nothing else can run. Blocking here is what lets the bubble advance its fake
+// clock for a process sleeping on a timer.
+func (r *run) waitOutside() bool {
+	var waiting []*Proc
+	for _, p := range r.procs {
+		if p.state == stateBlockedOutside {
+			waiting = append(waiting, p)
+		}
+	}
+	if len(waiting) == 0 {
+		return false
+	}
+	cases := make([]reflect.SelectCase, 0, len(waiting)+1)
+	for _, p := range waiting {
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.ev)})
+	}
+	timeout := time.NewTimer(outsideWaitLimit)
+	defer timeout.Stop()
+	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timeout.C)})
+	chosen, v, _ := reflect.Select(cases)
+	if chosen == len(waiting) {
+		return false // nothing reported back in time: left to the quiescence check
+	}
+	p := waiting[chosen]
+	r.outside.Add(-1)
+	r.note(p, "resumes from the primitive it blocked on")
+	r.handleEvent(p, v.Interface().(procEvent))
+	return true
+}
+
+// outsideWaitLimit bounds how long the scheduler waits for a process parked
+// outside detest when nothing else can run. The bubble's clock is fake, so it
+// only fires when no earlier timer exists.
+const outsideWaitLimit = 10 * time.Second
+
+func (r *run) handleEvent(p *Proc, ev procEvent) {
+	switch ev.kind {
+	case evYield:
+		p.state = stateReady // trace already recorded by the process
+	case evBlocked:
+		// state set by the process
+	case evDone:
+		p.state = stateDone
+		if p.tx != nil && !p.tx.closed {
+			p.tx.rollback()
+		}
+		for _, tx := range p.txs {
+			if !tx.closed {
+				tx.rollback()
+			}
+		}
+		p.txs = nil
+		switch {
+		case ev.err == Idle:
+			r.note(p, "done (idle, budget not consumed)")
+			if p.pt.kind == trigLoop {
+				r.runs[p.pt]--
+				r.idleAt[p.pt] = r.version
+			}
+			ev.err = nil
+		case ev.err != nil && ev.err != errNack:
+			r.note(p, "done with error: %v", ev.err)
+		case ev.err == nil:
+			r.note(p, "done")
+		}
+		if p.msg != nil {
+			if ev.err != nil {
+				r.note(p, "nack %s", p.msg)
+				p.msg.redelivered++
+				if p.msg.redelivered <= r.m.maxRedeliveries {
+					p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
+					r.queuesTouched = true
+				} else {
+					r.note(p, "drop %s after %d redeliveries", p.msg, p.msg.redelivered-1)
+				}
+			}
+		}
+		if ev.err != nil && strings.HasPrefix(ev.err.Error(), "panic in ") {
+			panic(ev.err)
+		}
+	}
+}
+
+var errNack = fmt.Errorf("detest: nack")
+
+// Idle is returned by a loop process that found nothing to do. The tick does
+// not consume the loop's run budget, which encodes the fairness assumption that
+// a periodic sweep keeps ticking until it has work.
+var Idle = fmt.Errorf("detest: idle tick")
+
+func (r *run) deliver(q *Queue, i int, pt *procType) {
+	msg := q.msgs[i]
+	q.msgs = append(q.msgs[:i:i], q.msgs[i+1:]...)
+	r.queuesTouched = true
+	if q.dupBudget > 0 {
+		if r.choose("duplicate delivery", 2) == 1 {
+			q.dupBudget--
+			dup := *msg
+			dup.duplicate = true
+			q.msgs = append(q.msgs, &dup)
+			r.note(nil, "duplicate %s stays in %s", msg, q.name)
+		}
+	}
+	p := r.spawn(pt, msg)
+	r.note(p, "receives %s", msg.String())
+	r.resume(p)
+}
+
+// over reports whether the run ended. Processes left parked then unwind and
+// database/sql rolls back the transactions they left open, concurrently with
+// each other and with nothing scheduling them.
+func (r *run) over() bool {
+	select {
+	case <-r.abort:
+		return true
+	default:
+		return false
+	}
+}
+
+// yieldf hands control to the scheduler after recording the operation.
+func (p *Proc) yieldf(format string, args ...any) {
+	if p.r.over() {
+		return // cleanup after the run runs through without scheduling
+	}
+	p.r.noteAt(p, format, args...)
+	p.ev <- procEvent{kind: evYield}
+	p.wait()
+}
+
+func (p *Proc) wait() {
+	select {
+	case <-p.resume:
+	case <-p.r.abort:
+		panic(abortSentinel{})
+	}
+}
+
+// blockOnRow blocks until a row lock we need may be free.
+func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
+	p.state = stateBlockedLock
+	p.waitRow = &w
+	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
+	p.ev <- procEvent{kind: evBlocked}
+	p.wait()
+}
+
+// Step records a model-level step with no store effect, such as a decision made
+// by an external environment. It is a yield point.
+func (p *Proc) Step(format string, args ...any) {
+	p.yieldf(format, args...)
+}
+
+// Now returns the model clock.
+func (p *Proc) Now() int64 { return p.r.clock }
+
+// WaitUntil blocks until the model clock reaches t. The clock advances only when
+// nothing else can run, as in testing/synctest.
+func (p *Proc) WaitUntil(t int64) {
+	if p.r.clock >= t {
+		return
+	}
+	p.state = stateBlockedTime
+	p.waitAt = t
+	p.r.noteAt(p, "waits until clock %d", t)
+	p.ev <- procEvent{kind: evBlocked}
+	p.wait()
+}
+
+// Choose picks one of n alternatives; the explorer tries them all.
+func (p *Proc) Choose(label string, n int) int {
+	return p.r.choose(label, n)
+}
+
+// Spawn starts another process instance from this one, such as a scheduler
+// starting a runner.
+func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
+	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn}
+	np := p.r.spawn(pt, nil)
+	p.r.noteAt(p, "spawns %s", np.name)
+}
+
+// note records an operation in the trace. The trace is kept only by a run that
+// prints it (a replay, Verbose, or the rerun of a violating schedule), so
+// exploring runs neither format operations nor walk the stack for locations.
+func (r *run) note(p *Proc, format string, args ...any) {
+	if r.tracing {
+		r.addStep(p, format, args, "")
+	}
+}
+
+// noteAt is note with the location in the code under test.
+func (r *run) noteAt(p *Proc, format string, args ...any) {
+	if r.tracing {
+		r.addStep(p, format, args, callerLoc())
+	}
+}
+
+func (r *run) addStep(p *Proc, format string, args []any, loc string) {
+	if r.over() {
+		return // cleanup after the run, such as a deferred Unlock while unwinding
+	}
+	name := "-"
+	if p != nil {
+		name = p.name
+	}
+	op := format
+	if len(args) > 0 {
+		op = fmt.Sprintf(format, args...)
+	}
+	r.trace = append(r.trace, step{proc: name, op: op, loc: loc})
+}
+
+// lazyString defers building an argument of note until the trace is kept.
+type lazyString func() string
+
+func (f lazyString) String() string { return f() }
+
+func (r *run) traceString() string {
+	var b strings.Builder
+	w := 0
+	for _, s := range r.trace {
+		if len(s.proc) > w {
+			w = len(s.proc)
+		}
+	}
+	for i, s := range r.trace {
+		fmt.Fprintf(&b, "  %3d  %-*s  %s", i+1, w, s.proc, s.op)
+		if s.loc != "" {
+			fmt.Fprintf(&b, "   (%s)", s.loc)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func callerLoc() string {
+	pcs := make([]uintptr, 32)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if !strings.HasPrefix(f.Function, "github.com/k1LoW/detest.") && !isLibraryFrame(f.Function) {
+			short := f.File
+			if i := strings.LastIndex(short, "/"); i >= 0 {
+				short = short[i+1:]
+			}
+			return fmt.Sprintf("%s:%d", short, f.Line)
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
+// isLibraryFrame reports frames of the database and ORM plumbing between a
+// model and detest's driver, so trace locations point at the caller's code.
+func isLibraryFrame(fn string) bool {
+	for _, prefix := range []string{"database/sql", "gorm.io/", "github.com/pganalyze/", "github.com/wasilibs/", "reflect.", "runtime."} {
+		if strings.HasPrefix(fn, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// State is a snapshot of committed store contents for invariants.
+type State struct {
+	dbs    map[string]map[string]map[string]Row
+	queues map[string][]Msg
+	prev   *State
+}
+
+// Prev returns the snapshot taken at the previous Always check, or nil.
+func (s *State) Prev() *State { return s.prev }
+
+// Rows returns the committed rows of a table sorted by key.
+func (s *State) Rows(db *DB, table string) []RowView {
+	t := s.dbs[db.name][db.resolve(table)]
+	keys := make([]string, 0, len(t))
+	for k := range t {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]RowView, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, RowView{t[k]})
+	}
+	return out
+}
+
+// Row returns one committed row by its primary key: the values of the
+// declared primary key columns in order, or the id column's value.
+func (s *State) Row(db *DB, table string, key ...any) (RowView, bool) {
+	r, ok := s.dbs[db.name][db.resolve(table)][encodeKey(key)]
+	return RowView{r}, ok
+}
+
+// RowView is a committed row as an invariant sees it. It shares the row with
+// the store rather than copying it, so it offers no way to change it.
+type RowView struct{ r Row }
+
+// Get returns a column's value and whether the row has the column. A NULL
+// column returns nil and true.
+func (v RowView) Get(col string) (any, bool) {
+	x, ok := v.r[col]
+	if b, isBytes := x.([]byte); isBytes {
+		x = append([]byte(nil), b...) // the store's bytes stay unchanged
+	}
+	return x, ok
+}
+
+// Str returns a column formatted as a string ("" when absent or NULL).
+func (v RowView) Str(col string) string { return v.r.Str(col) }
+
+// Int returns an integer column (0 when absent, NULL or not an integer).
+func (v RowView) Int(col string) int { return v.r.Int(col) }
+
+// Int64 returns an integer column (0 when absent, NULL or not an integer).
+func (v RowView) Int64(col string) int64 { return v.r.Int64(col) }
+
+// Bool returns a boolean column (false when absent, NULL or not a boolean).
+func (v RowView) Bool(col string) bool { return v.r.Bool(col) }
+
+// Key returns the row's key, which State.Row looks the row up by.
+func (v RowView) Key() string { return v.r.Key() }
+
+func (v RowView) String() string { return v.r.String() }
+
+// Clone returns a copy of the row to change.
+func (v RowView) Clone() Row { return v.r.clone() }
+
+// Queue returns the messages currently in a queue.
+func (s *State) Queue(q *Queue) []Msg { return s.queues[q.name] }
+
+// snapshot shares the committed rows instead of copying them: a commit
+// replaces a row rather than changing it, and State clones a row only when an
+// invariant reads it. A table untouched since the previous snapshot of the run
+// reuses that snapshot's table, so a step that commits nothing copies no rows.
+func (r *run) snapshot() *State {
+	if r.snap != nil && !r.queuesTouched && !r.dbsTouched() {
+		return r.snap
+	}
+	r.queuesTouched = false
+	s := &State{dbs: make(map[string]map[string]map[string]Row, len(r.m.dbs)), queues: map[string][]Msg{}}
+	for _, db := range r.m.dbs {
+		var prev map[string]map[string]Row
+		if r.snap != nil {
+			prev = r.snap.dbs[db.name]
+		}
+		ts := make(map[string]map[string]Row, len(db.committed))
+		for tn, t := range db.committed {
+			if pt, ok := prev[tn]; ok && !db.touched[tn] {
+				ts[tn] = pt
+				continue
+			}
+			rows := make(map[string]Row, len(t))
+			for k, row := range t {
+				rows[k] = row
+			}
+			ts[tn] = rows
+		}
+		clear(db.touched)
+		s.dbs[db.name] = ts
+	}
+	r.snap = s
+	for _, q := range r.m.queues {
+		for _, m := range q.msgs {
+			s.queues[q.name] = append(s.queues[q.name], m.msg)
+		}
+	}
+	return s
+}
+
+func (r *run) dbsTouched() bool {
+	for _, db := range r.m.dbs {
+		if len(db.touched) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Current returns the process whose goroutine is calling. Production code
+// called from a process does not carry the *Proc, so fakes injected at its
+// boundaries (clients, drivers) use this instead. A goroutine the process
+// itself spawned is not registered and falls back to the process the
+// scheduler resumed last.
+func (m *Model) Current() *Proc {
+	if m.run == nil {
+		return nil
+	}
+	r := m.run
+	// While no process is blocked outside detest, every process but the
+	// resumed one is parked inside detest and cannot be calling, so the lookup
+	// below would return r.current anyway. It is skipped because goroutineID
+	// takes a runtime-wide lock, which parallel workers contend on.
+	if r.outside.Load() == 0 {
+		return r.current
+	}
+	gid := goroutineID()
+	r.gidMu.Lock()
+	p, ok := r.byGid[gid]
+	r.gidMu.Unlock()
+	if ok {
+		return p
+	}
+	return r.current
+}
+
+// Context returns a context for production code called from this process. It
+// is canceled when the run ends, which lets database/sql roll back a
+// transaction the process left open when the run was cut short.
+func (p *Proc) Context() context.Context { return p.r.ctx }

@@ -1,0 +1,557 @@
+// Package sqlir is the SQL intermediate representation detest's executor
+// runs, shared with the parsers of the database servers detest models: the
+// postgres package converts pg_query's AST into it, and a MySQL parser can
+// convert vitess's AST into the same shapes. It also holds what describes a
+// server to detest, so those packages need not import detest itself.
+package sqlir
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+)
+
+// Parser parses a query string of one engine's SQL into detest's statement IR.
+type Parser interface {
+	// Name identifies the SQL dialect in error messages and the parse cache.
+	Name() string
+	// Parse parses exactly one statement, or a script of schema statements
+	// (a schema dump or a migration) into one SchemaStmt. Placeholders ($1 or
+	// ?) become Param nodes numbered from 0 in argument order.
+	Parse(query string) (Statement, error)
+}
+
+// Statement is one parsed SQL statement.
+type Statement interface{ isStatement() }
+
+// SelectStmt is a query, possibly with CTEs, joins and aggregation.
+type SelectStmt struct {
+	With       []CTE
+	Distinct   bool
+	DistinctOn []Expr
+	// A set operation combines Larg and Rarg; Targets through Having are then
+	// empty and OrderBy, Limit and Offset apply to the combined rows.
+	SetOp      string // "union", "intersect" or "except"
+	SetAll     bool
+	Larg, Rarg *SelectStmt
+	// Values is a VALUES list used as a query; its columns are column1, ...
+	Values  [][]Expr
+	Targets []Target
+	From    *TableRef // nil for SELECT without FROM
+	Joins   []Join
+	Where   Expr
+	GroupBy []Expr
+	Having  Expr
+	OrderBy []OrderKey
+	Limit   Expr
+	Offset  Expr
+	Lock    *LockClause
+}
+
+// CTE is a common table expression.
+type CTE struct {
+	Name   string
+	Select *SelectStmt
+}
+
+// TableRef is a base table, a CTE reference or a derived table.
+type TableRef struct {
+	Name  string
+	Alias string
+	Sub   *SelectStmt
+	// Func is a set-returning function in FROM, such as generate_series;
+	// Columns are the column names the alias gives it.
+	Func       *FuncCall
+	Columns    []string
+	Ordinality bool
+	// Lateral evaluates the item once per row of the items before it, which
+	// it may refer to. A function in FROM is always lateral.
+	Lateral bool
+}
+
+// JoinKind distinguishes inner and outer joins.
+type JoinKind int
+
+const (
+	InnerJoin JoinKind = iota
+	LeftJoin
+	RightJoin
+	FullJoin
+	CrossJoin
+)
+
+// Join is a joined table with its condition.
+type Join struct {
+	Kind  JoinKind
+	Table TableRef
+	On    Expr
+}
+
+// Target is one SELECT list item.
+type Target struct {
+	Expr  Expr
+	Alias string
+	Star  bool   // SELECT * or t.*
+	Table string // qualifier of t.*
+}
+
+// OrderKey is one ORDER BY item.
+type OrderKey struct {
+	Expr Expr
+	Desc bool
+	// Nulls is NullsFirst or NullsLast, or 0 for the default: last when
+	// ascending, first when descending.
+	Nulls int
+}
+
+const (
+	NullsFirst = 1
+	NullsLast  = 2
+)
+
+// WindowFunc is a function computed over the rows of a window: Func over the
+// rows sharing Partition, ordered by Order. Whole means the frame is the whole
+// partition (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+// otherwise it is the default, from the partition's start to the current
+// row's last peer.
+type WindowFunc struct {
+	Func      *FuncCall
+	Partition []Expr
+	Order     []OrderKey
+	Whole     bool
+}
+
+// LockClause is FOR UPDATE / FOR SHARE with its wait policy.
+type LockClause struct {
+	Strength   string // "update", "no key update", "share" or "key share"
+	SkipLocked bool
+	NoWait     bool
+}
+
+// InsertStmt is INSERT ... VALUES or INSERT ... SELECT.
+type InsertStmt struct {
+	Table      string
+	Alias      string
+	Columns    []string
+	Rows       [][]Expr
+	Select     *SelectStmt
+	OnConflict *OnConflict
+	Returning  []Target
+}
+
+// OnConflict is ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ... WHERE ...
+// (MySQL's INSERT IGNORE and ON DUPLICATE KEY UPDATE map here too).
+type OnConflict struct {
+	Columns   []string
+	DoNothing bool
+	Set       []Assignment
+	Where     Expr
+}
+
+// UpdateStmt is UPDATE ... SET ... [FROM ...] WHERE ... [RETURNING ...].
+type UpdateStmt struct {
+	Table     string
+	Alias     string
+	Set       []Assignment
+	From      []TableRef
+	Where     Expr
+	Returning []Target
+	Limit     Expr
+}
+
+// DeleteStmt is DELETE FROM ... [USING ...] WHERE ... [RETURNING ...].
+type DeleteStmt struct {
+	Table     string
+	Alias     string
+	Using     []TableRef
+	Where     Expr
+	Returning []Target
+	Limit     Expr
+}
+
+// SchemaStmt declares table structure: the tables, their primary keys,
+// unique constraints and column defaults. A schema statement detest does not
+// need (a function, a sequence, a grant, a comment, a session setting) adds
+// nothing. Table names are as written, possibly schema-qualified.
+type SchemaStmt struct {
+	Changes []SchemaChange
+}
+
+// SchemaChange is what one statement declares about one table.
+type SchemaChange struct {
+	Table       string
+	Create      bool // CREATE TABLE
+	Drop        bool // DROP TABLE
+	IfNotExists bool
+	IfExists    bool
+	Columns     []ColumnDef
+	Constraints []UniqueDef
+	ForeignKeys []ForeignKey
+	// Object is what Drop and the renames act on besides a table: "view",
+	// "matview" or "index" (Table then names the index).
+	Object           string
+	DropColumns      []string
+	DropConstraints  []string
+	RenameTo         string    // ALTER TABLE ... RENAME TO
+	RenameColumn     [2]string // old and new name
+	RenameConstraint [2]string // old and new name of a constraint or index
+	// View is the query of CREATE [OR REPLACE] VIEW, with the column names
+	// the view gives it.
+	View        *SelectStmt
+	ViewColumns []string
+	Replace     bool
+}
+
+// ColumnDef is a column with its default, if any. A serial or identity column
+// defaults to nextval of a sequence named after it.
+type ColumnDef struct {
+	Name    string
+	Default Expr
+	// Type is the column's type name as Postgres normalizes it ("int4",
+	// "uuid", "text"), or empty when the statement does not change it.
+	Type string
+	// TypeOnly changes the type and leaves the default (ALTER COLUMN TYPE).
+	TypeOnly bool
+}
+
+// UniqueDef is a primary key, a unique constraint or a unique index. Elems are
+// column references or, for an expression index, expressions over the row;
+// Where makes it a partial index.
+type UniqueDef struct {
+	Name             string
+	Primary          bool
+	Elems            []Expr
+	Where            Expr
+	NullsNotDistinct bool
+}
+
+// ForeignKey is a FOREIGN KEY or REFERENCES constraint. RefColumns empty
+// means the referenced table's primary key. OnDelete and OnUpdate are
+// "no action", "restrict", "cascade", "set null" or "set default".
+type ForeignKey struct {
+	Name       string
+	Columns    []string
+	RefTable   string
+	RefColumns []string
+	OnDelete   string
+	OnUpdate   string
+	Deferred   bool // INITIALLY DEFERRED: checked at commit
+}
+
+// Assignment is col = expr in SET.
+type Assignment struct {
+	Column string
+	Value  Expr
+}
+
+// Script is several statements run in order, as a migration file runs. A
+// failing statement stops the script; the statements before it stay applied
+// unless an enclosing transaction rolls them back.
+type Script struct {
+	Stmts []Statement
+}
+
+// CreateTableAsStmt is CREATE TABLE ... AS SELECT, or CREATE MATERIALIZED
+// VIEW, which keeps the query for REFRESH.
+type CreateTableAsStmt struct {
+	Table        string
+	Columns      []string // the column names given, if any
+	Select       *SelectStmt
+	NoData       bool
+	IfNotExists  bool
+	Materialized bool
+}
+
+// SavepointStmt is SAVEPOINT, RELEASE SAVEPOINT or ROLLBACK TO SAVEPOINT.
+type SavepointStmt struct {
+	Op   string // "savepoint", "release" or "rollback_to"
+	Name string
+}
+
+// SetStmt is SET [LOCAL] name = value. detest acts on lock_timeout; other
+// settings do nothing.
+type SetStmt struct {
+	Name  string
+	Value string
+	Local bool
+}
+
+// RefreshStmt is REFRESH MATERIALIZED VIEW.
+type RefreshStmt struct {
+	Table  string
+	NoData bool
+}
+
+func (*Script) isStatement()            {}
+func (*RefreshStmt) isStatement()       {}
+func (*SavepointStmt) isStatement()     {}
+func (*SetStmt) isStatement()           {}
+func (*CreateTableAsStmt) isStatement() {}
+func (*SelectStmt) isStatement()        {}
+func (*SchemaStmt) isStatement()        {}
+func (*InsertStmt) isStatement()        {}
+func (*UpdateStmt) isStatement()        {}
+func (*DeleteStmt) isStatement()        {}
+
+// Expr is an expression node.
+type Expr interface{ isExpr() }
+
+// ColumnRef is [table.]column. Table "excluded" refers to the proposed row in
+// ON CONFLICT DO UPDATE.
+type ColumnRef struct{ Table, Column string }
+
+// Param is a positional parameter, 0-based.
+type Param struct{ Index int }
+
+// Const is a literal: int64, float64, string, bool or nil.
+type Const struct{ Value any }
+
+// BinaryExpr is a binary operator: comparison, arithmetic, AND, OR, LIKE.
+type BinaryExpr struct {
+	Op   string // = <> < <= > >= + - * / % AND OR LIKE ILIKE NOT LIKE
+	L, R Expr
+}
+
+// UnaryExpr is NOT or unary minus.
+type UnaryExpr struct {
+	Op string
+	X  Expr
+}
+
+// InExpr is x [NOT] IN (list | subquery).
+type InExpr struct {
+	X    Expr
+	List []Expr
+	Sub  *SelectStmt
+	Not  bool
+}
+
+// IsNull is x IS [NOT] NULL.
+type IsNull struct {
+	X   Expr
+	Not bool
+}
+
+// FuncCall is a function or aggregate call.
+type FuncCall struct {
+	Name     string // lower case
+	Args     []Expr
+	Star     bool // count(*)
+	Distinct bool
+}
+
+// SubQuery is a scalar subquery.
+type SubQuery struct{ Select *SelectStmt }
+
+// Exists is [NOT] EXISTS (subquery).
+type Exists struct {
+	Select *SelectStmt
+	Not    bool
+}
+
+// RowExpr is (a, b, c).
+type RowExpr struct{ Items []Expr }
+
+// Cast is x::type or CAST(x AS type). Type is lower case.
+type Cast struct {
+	X    Expr
+	Type string
+}
+
+// CaseExpr is CASE [x] WHEN ... THEN ... ELSE ... END.
+type CaseExpr struct {
+	Arg   Expr
+	Whens []CaseWhen
+	Else  Expr
+}
+
+// CaseWhen is one WHEN/THEN pair.
+type CaseWhen struct{ When, Then Expr }
+
+// Default is the DEFAULT keyword in VALUES or SET.
+type Default struct{}
+
+func (*ColumnRef) isExpr()  {}
+func (*Param) isExpr()      {}
+func (*Const) isExpr()      {}
+func (*BinaryExpr) isExpr() {}
+func (*UnaryExpr) isExpr()  {}
+func (*InExpr) isExpr()     {}
+func (*IsNull) isExpr()     {}
+func (*FuncCall) isExpr()   {}
+func (*SubQuery) isExpr()   {}
+func (*Exists) isExpr()     {}
+func (*RowExpr) isExpr()    {}
+func (*Cast) isExpr()       {}
+func (*CaseExpr) isExpr()   {}
+func (*Default) isExpr()    {}
+func (*WindowFunc) isExpr() {}
+
+// ErrUnsupportedSQL marks a statement the dialect parsed but detest cannot run.
+type ErrUnsupportedSQL struct {
+	What  string
+	Query string
+}
+
+func (e *ErrUnsupportedSQL) Error() string {
+	return fmt.Sprintf("detest: unsupported SQL (%s): %s", e.What, e.Query)
+}
+
+// Unsupported reports a statement or expression detest cannot run.
+func Unsupported(what, query string) error { return &ErrUnsupportedSQL{What: what, Query: query} }
+
+// Unknown is the value of an expression detest cannot evaluate.
+const Unknown = "<unknown expression>"
+
+// IsolationLevel is a transaction isolation level.
+type IsolationLevel int
+
+const (
+	ReadCommitted IsolationLevel = iota + 1
+	RepeatableRead
+	Serializable
+)
+
+func (l IsolationLevel) String() string {
+	switch l {
+	case ReadCommitted:
+		return "Read Committed"
+	case RepeatableRead:
+		return "Repeatable Read"
+	case Serializable:
+		return "Serializable"
+	}
+	return fmt.Sprintf("IsolationLevel(%d)", int(l))
+}
+
+// Server describes a kind of database server to detest: the SQL it parses,
+// the level its transactions run at unless they ask for another, the levels
+// detest implements for it, its search_path, and its error codes. The
+// concurrency semantics of a level differ between kinds, so detest implements
+// each kind and level pair on its own.
+type Server struct {
+	name       string
+	parser     Parser
+	isolation  IsolationLevel
+	supported  []IsolationLevel
+	searchPath []string
+	codes      func(ErrorKind) (sqlstate string, number int)
+	convert    func(*SQLError) error
+}
+
+// ServerSpec is what the package of a kind, such as postgres.New, tells
+// detest about the server.
+type ServerSpec struct {
+	Name       string
+	Parser     Parser
+	Isolation  IsolationLevel
+	Supported  []IsolationLevel
+	SearchPath []string
+	// Codes returns the server's SQLSTATE and, for MySQL, its error number
+	// for a kind of error.
+	Codes func(ErrorKind) (sqlstate string, number int)
+	// Convert turns a database error into the error the driver of the
+	// production code returns, such as *pgconn.PgError. nil returns the
+	// SQLError itself.
+	Convert func(*SQLError) error
+}
+
+// NewServer describes a server.
+func NewServer(spec ServerSpec) Server {
+	return Server{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
+		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert}
+}
+
+// Error returns a database error of kind with the server's codes.
+func (s Server) Error(kind ErrorKind, message, table, column, constraint string) *SQLError {
+	e := &SQLError{Kind: kind, Message: message, Table: table, Column: column, Constraint: constraint}
+	if s.codes != nil {
+		e.Code, e.Number = s.codes(kind)
+	}
+	return e
+}
+
+// Convert returns err as the driver of the production code would: an
+// SQLError in it goes through the server's Convert.
+func (s Server) Convert(err error) error {
+	var se *SQLError
+	if s.convert == nil || !errors.As(err, &se) {
+		return err
+	}
+	return s.convert(se)
+}
+
+// ErrorKind is a class of database error the code under test may branch on.
+type ErrorKind int
+
+const (
+	UniqueViolation ErrorKind = iota + 1
+	NotNullViolation
+	Deadlock
+	InFailedTransaction
+	LockNotAvailable
+	UndefinedTable
+	ForeignKeyViolation
+	DivisionByZero
+	NumericValueOutOfRange
+	InvalidTextRepresentation
+)
+
+// The errors an SQLError of each kind matches with errors.Is.
+var (
+	ErrUniqueViolation           = errors.New("detest: unique violation")
+	ErrNotNullViolation          = errors.New("detest: not-null violation")
+	ErrDeadlock                  = errors.New("detest: deadlock detected, transaction aborted")
+	ErrInFailedTx                = errors.New("detest: transaction already aborted")
+	ErrLockNotAvailable          = errors.New("detest: lock not available")
+	ErrUndefinedTable            = errors.New("detest: relation does not exist")
+	ErrForeignKeyViolation       = errors.New("detest: foreign key violation")
+	ErrDivisionByZero            = errors.New("detest: division by zero")
+	ErrNumericValueOutOfRange    = errors.New("detest: numeric value out of range")
+	ErrInvalidTextRepresentation = errors.New("detest: invalid input syntax")
+	kindErrors                   = map[ErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
+		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation}
+)
+
+// SQLError is a database error detest's store raises, with what drivers
+// report about it: the SQLSTATE, the MySQL error number, the table, column
+// and constraint.
+type SQLError struct {
+	Kind       ErrorKind
+	Code       string // SQLSTATE, such as "23505"
+	Number     int    // MySQL's error number, such as 1062; 0 for other servers
+	Message    string
+	Table      string
+	Column     string
+	Constraint string
+}
+
+func (e *SQLError) Error() string {
+	if e.Code == "" {
+		return "detest: " + e.Message
+	}
+	return fmt.Sprintf("detest: %s (SQLSTATE %s)", e.Message, e.Code)
+}
+
+// Is matches the error of the SQLError's kind, such as ErrUniqueViolation.
+func (e *SQLError) Is(target error) bool { return kindErrors[e.Kind] == target }
+
+// Name identifies the kind, such as "postgres".
+func (s Server) Name() string { return s.name }
+
+// Parser parses the server's SQL.
+func (s Server) Parser() Parser { return s.parser }
+
+// Isolation is the level transactions run at unless they ask for another.
+func (s Server) Isolation() IsolationLevel { return s.isolation }
+
+// SearchPath is the schemas an unqualified table name is looked up in.
+func (s Server) SearchPath() []string { return s.searchPath }
+
+// Check reports whether detest implements level for the server.
+func (s Server) Check(level IsolationLevel) error {
+	if !slices.Contains(s.supported, level) {
+		return fmt.Errorf("detest: %s at %s is not implemented", s.name, level)
+	}
+	return nil
+}
