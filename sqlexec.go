@@ -711,6 +711,10 @@ var otherAggregates = map[string]bool{
 	"regr_count": true, "regr_intercept": true, "regr_r2": true, "regr_slope": true,
 	"regr_sxx": true, "regr_sxy": true, "regr_syy": true, "stddev": true, "stddev_pop": true,
 	"stddev_samp": true, "variance": true, "var_pop": true, "var_samp": true,
+	"json_agg_strict": true, "jsonb_agg_strict": true, "json_object_agg_strict": true,
+	"json_object_agg_unique": true, "json_object_agg_unique_strict": true,
+	"jsonb_object_agg_strict": true, "jsonb_object_agg_unique": true, "jsonb_object_agg_unique_strict": true,
+	"mode": true, "percentile_cont": true, "percentile_disc": true,
 }
 
 func hasAggregate(e sqlir.Expr) bool {
