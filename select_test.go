@@ -243,6 +243,7 @@ func TestTimestampPrecision(t *testing.T) {
 	for q, unit := range map[string]int{
 		`SELECT CURRENT_TIMESTAMP(0)`: 1e9,
 		`SELECT LOCALTIMESTAMP(3)`:    1e6,
+		`SELECT CURRENT_TIMESTAMP(7)`: 1e3, // reduced to 6, as Postgres does
 	} {
 		var ts time.Time
 		if err := db.QueryRow(q).Scan(&ts); err != nil {
@@ -250,6 +251,12 @@ func TestTimestampPrecision(t *testing.T) {
 		}
 		if ts.Nanosecond()%unit != 0 {
 			t.Errorf("%s: %v has more digits", q, ts)
+		}
+	}
+	// The other time functions take no argument.
+	for _, q := range []string{`SELECT now(3)`, `SELECT clock_timestamp(3)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
 		}
 	}
 }

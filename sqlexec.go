@@ -1722,11 +1722,17 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "gen_random_uuid", "uuid_generate_v4":
 		return x.tx.db.newUUID(), nil
 	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
-		now := time.Now()
-		if p, ok := toFloat(d(0)); ok && len(args) > 0 && p >= 0 && p < 9 {
-			now = now.Round(time.Duration(math.Pow10(9 - int(p)))) // CURRENT_TIMESTAMP(p)
+		if len(args) == 0 {
+			return time.Now(), nil
 		}
-		return now, nil
+		// Only CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) take an argument,
+		// which the converter passes as current_timestamp's.
+		p, ok := toFloat(d(0))
+		if name != "current_timestamp" || len(args) > 1 || !ok || p < 0 {
+			return nil, x.unsupported(name + " with these arguments")
+		}
+		// Postgres reduces a precision above 6 to 6, with a warning.
+		return time.Now().Round(time.Duration(math.Pow10(9 - int(min(p, 6))))), nil
 	case "random":
 		return 0.5, nil
 	case "abs":
