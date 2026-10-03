@@ -1591,6 +1591,9 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		}
 		return v, err
 	case "||":
+		if derefValue(l) == nil || derefValue(r) == nil {
+			return nil, nil // NULL || x is NULL
+		}
 		return fmt.Sprint(derefValue(l)) + fmt.Sprint(derefValue(r)), nil
 	}
 	return nil, errUnknownExpr{"operator " + op}
@@ -1711,12 +1714,23 @@ func castValue(v any, typ string) any {
 // callFunc evaluates the scalar functions that appear on control paths.
 // pg_try_advisory_xact_lock is a non-blocking lock held until the end of the
 // transaction, modeled in the DB's lock table.
+// strictFuncs are the functions detest evaluates that Postgres declares
+// strict: given a NULL argument, they return NULL without being called.
+var strictFuncs = map[string]bool{
+	"lower": true, "upper": true, "length": true, "char_length": true, "hashtext": true,
+	"abs": true, "floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true,
+	"make_interval": true,
+}
+
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	d := func(i int) any {
 		if i < len(args) {
 			return derefValue(args[i])
 		}
 		return nil
+	}
+	if strictFuncs[name] && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
+		return nil, nil // a strict function of NULL is NULL
 	}
 	switch name {
 	case "coalesce":

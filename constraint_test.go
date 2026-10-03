@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -283,5 +284,20 @@ func TestGeneratedColumns(t *testing.T) {
 	}
 	if _, err := tx.Exec(`ALTER TABLE u ADD COLUMN d int GENERATED ALWAYS AS (id + 1) STORED`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("ADD COLUMN after an insert in the transaction: got %v", err)
+	}
+}
+
+// A strict function of NULL is NULL, so NULLs do not collide in a unique
+// generated column, as in Postgres.
+func TestStrictFunctionsOfNull(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE users (id int PRIMARY KEY, email text, email_l text GENERATED ALWAYS AS (lower(email)) STORED UNIQUE)`)
+	mustExec(t, db, `INSERT INTO users (id) VALUES (1), (2)`)
+	for _, q := range []string{`SELECT lower(NULL)`, `SELECT length(NULL)`, `SELECT 'a' || NULL`, `SELECT abs(NULL)`} {
+		var v sql.NullString
+		if err := db.QueryRow(q).Scan(&v); err != nil || v.Valid {
+			t.Errorf("%s: %v %v, want NULL", q, v, err)
+		}
 	}
 }
