@@ -354,6 +354,8 @@ func TestOffsetBeforeLimit(t *testing.T) {
 	if _, err := db.Exec(`WITH c AS (SELECT nextval('s') AS id) SELECT string_agg(id::text, ',') FROM c`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("string_agg: got %v", err)
 	}
+	// The largest bigint is a valid OFFSET.
+	mustExec(t, db, `SELECT id FROM t OFFSET 9223372036854775807`)
 	// OFFSET and LIMIT out of the bigint range are refused, not wrapped.
 	for _, q := range []string{`SELECT id FROM t OFFSET 1e100`, `SELECT id FROM t LIMIT 1e100`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {

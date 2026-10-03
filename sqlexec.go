@@ -655,36 +655,45 @@ func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit i
 	limit = -1
 	// OFFSET first, as Postgres evaluates them.
 	if sel.Offset != nil {
-		v, err := x.eval(sel.Offset, &env{outer: outer})
-		if err != nil {
+		if offset, err = x.evalBound(sel.Offset, "OFFSET", outer); err != nil {
 			return 0, 0, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if f < 0 {
-				return 0, 0, x.unsupported("a negative OFFSET")
-			}
-			if math.IsNaN(f) || f >= math.MaxInt64 {
-				return 0, 0, x.unsupported("an OFFSET out of the bigint range")
-			}
-			offset = int(f)
 		}
 	}
 	if sel.Limit != nil {
-		v, err := x.eval(sel.Limit, &env{outer: outer})
-		if err != nil {
+		if limit, err = x.evalBound(sel.Limit, "LIMIT", outer); err != nil {
 			return 0, 0, err
-		}
-		if f, ok := toFloat(derefValue(v)); ok {
-			if f < 0 {
-				return 0, 0, x.unsupported("a negative LIMIT")
-			}
-			if math.IsNaN(f) || f >= math.MaxInt64 {
-				return 0, 0, x.unsupported("a LIMIT out of the bigint range")
-			}
-			limit = int(f)
 		}
 	}
 	return offset, limit, nil
+}
+
+// evalBound evaluates an OFFSET or LIMIT, a bigint that may not be negative.
+// -1 is NULL, which is no LIMIT. An integer stays one: a float cannot hold
+// the largest bigint.
+func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) {
+	v, err := x.eval(e, &env{outer: outer})
+	if err != nil {
+		return 0, err
+	}
+	switch n := derefValue(v).(type) {
+	case nil:
+		return -1, nil
+	case int64:
+		if n < 0 {
+			return 0, x.unsupported("a negative " + what)
+		}
+		return int(n), nil
+	}
+	f, ok := toFloat(derefValue(v))
+	switch {
+	case !ok:
+		return -1, nil
+	case f < 0:
+		return 0, x.unsupported("a negative " + what)
+	case math.IsNaN(f) || f >= math.MaxInt64:
+		return 0, x.unsupported("an " + what + " out of the bigint range")
+	}
+	return int(f), nil
 }
 
 func (x *sqlExec) project(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {
