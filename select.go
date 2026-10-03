@@ -561,7 +561,8 @@ type lockPlan struct {
 // planLocking checks a locking read and works out the FROM items it locks,
 // from the statement alone.
 func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
-	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+	aggregate := isAggregate(sel) || slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
+	if aggregate || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
 		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 	}
 	from := x.fromItemsOf(sel)
