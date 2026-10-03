@@ -1326,6 +1326,13 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			// Refused here, before a WITH query or anything else runs.
 			return nil, c.unsupported("aggregate " + call.Name)
 		}
+		switch {
+		case !call.Distinct:
+		case call.Name == "count", call.Name == "sum", call.Name == "min", call.Name == "max", call.Name == "avg":
+		default:
+			// Postgres takes DISTINCT only in an aggregate's arguments.
+			return nil, c.unsupported("DISTINCT in a call to " + call.Name)
+		}
 		if fc.Over != nil {
 			return c.window(call, fc.Over)
 		}
