@@ -17,6 +17,9 @@ func (r *run) mixOptions(opts []option) {
 		switch o.kind {
 		case optResume, optCrash:
 			r.mixString(o.p.name)
+		case optLose:
+			r.mixString(o.q.name)
+			r.mixInt(int64(o.i))
 		case optDeliver:
 			r.mixString(o.q.name)
 			r.mixInt(int64(o.i))

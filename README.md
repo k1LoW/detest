@@ -90,7 +90,7 @@ A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes 
 | `s.DB(name, server)` | A database. It returns a `*sql.DB` to hand to production code and a `*detest.DB` to read in invariants |
 | `s.Manual(name, n, fn)` | A process type started up to `n` times |
 | `s.Loop(name, n, fn)` | A process that runs `fn` repeatedly, such as a poller or a reaper |
-| `s.Queue(name)`, `s.OnMessage(name, q, fn)` | A message queue and its consumer, with redelivery |
+| `s.Queue(name)`, `s.OnMessage(name, q, fn)` | A message queue and its consumer, with redelivery, and with duplicates (`detest.Duplicates`) or losses (`detest.Losses`) when asked |
 | `s.External(name)` | A call to another service, which may fail before its effect or lose the response after it. `Transport(h)` gives an `http.RoundTripper` serving an `http.Handler` |
 | `s.Mutex(name)`, `s.RWMutex(name)` | Locks the scheduler can see, to inject in place of `sync.Mutex` |
 | `s.Always(fn)`, `s.AtQuiescence(fn)` | Invariants checked after every step, or once every process is done |

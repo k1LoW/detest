@@ -271,6 +271,7 @@ const (
 	optDeliver
 	optStart
 	optCrash
+	optLose
 )
 
 // apply does o. preempt reports whether it takes the CPU from the current
@@ -289,6 +290,8 @@ func (r *run) apply(o option, preempt bool) {
 		r.resume(r.spawn(o.pt, nil))
 	case optCrash:
 		r.crash(o.p)
+	case optLose:
+		r.lose(o.q, o.i)
 	}
 }
 
@@ -328,7 +331,7 @@ func (r *run) execute() (v *violation) {
 		}
 		o := opts[i]
 		cur := r.current
-		r.apply(o, o.kind != optCrash && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
+		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
 		if r.pending != nil {
 			return r.pending
 		}
@@ -428,6 +431,14 @@ func (r *run) enabled() []option {
 	}
 	if bounded {
 		return opts
+	}
+	// Lose a message, on a lossy queue.
+	for _, q := range r.s.queues {
+		if q.lossBudget > 0 {
+			for i := range q.msgs {
+				opts = append(opts, option{kind: optLose, q: q, i: i})
+			}
+		}
 	}
 	// Deliver a message to a consumer.
 	for _, q := range r.s.queues {
@@ -748,6 +759,16 @@ var errNack = fmt.Errorf("detest: nack")
 // a periodic sweep keeps ticking until it has work. It is named for the signal
 // a loop gives, return detest.Idle, rather than as the error it technically is.
 var Idle = fmt.Errorf("detest: idle tick") //nolint:staticcheck
+
+// lose drops the i-th message of q undelivered.
+func (r *run) lose(q *Queue, i int) {
+	msg := q.msgs[i]
+	q.msgs = append(q.msgs[:i:i], q.msgs[i+1:]...)
+	q.lossBudget--
+	r.queuesTouched = true
+	r.version++
+	r.note(nil, "%s: %s is lost", q.name, msg)
+}
 
 func (r *run) deliver(q *Queue, i int, pt *procType) {
 	msg := q.msgs[i]

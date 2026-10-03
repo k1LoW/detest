@@ -47,13 +47,15 @@ func (q *qmsg) String() string {
 
 // Queue is an at-least-once, unordered message queue.
 type Queue struct {
-	name      string
-	s         *Sim
-	msgs      []*qmsg
-	nextID    int
-	dupBudget int
-	dups      int
-	consumers []*procType
+	name       string
+	s          *Sim
+	msgs       []*qmsg
+	nextID     int
+	dupBudget  int
+	dups       int
+	lossBudget int
+	losses     int
+	consumers  []*procType
 }
 
 // QueueOption configures a Queue.
@@ -61,6 +63,13 @@ type QueueOption func(*Queue)
 
 // Duplicates lets the explorer deliver up to n messages twice per run.
 func Duplicates(n int) QueueOption { return func(q *Queue) { q.dups = n } }
+
+// Losses lets the explorer lose up to n messages per run: a message waiting
+// in the queue may vanish instead of being delivered, as one can when a
+// broker fails over or a publish is never confirmed. It checks that a
+// backstop, such as a sweeper over the database, covers every path a lost
+// message would leave unfinished.
+func Losses(n int) QueueOption { return func(q *Queue) { q.losses = n } }
 
 // Queue registers a simulated queue.
 func (s *Sim) Queue(name string, opts ...QueueOption) *Queue {
@@ -89,6 +98,7 @@ func (q *Queue) reset() {
 	q.msgs = nil
 	q.nextID = 0
 	q.dupBudget = q.dups
+	q.lossBudget = q.losses
 }
 
 func (q *Queue) push(msg Msg) {
