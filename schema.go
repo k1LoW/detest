@@ -487,30 +487,46 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 				}
 				n = float64(0)
 			}
+			if l, ok := def.nums[col]; ok && t == "numeric" && !x.tx.db.kind.InnoDB() {
+				if n, err = scaledNumeric(n, l); err != nil {
+					return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, "numeric field overflow", relname(table), col, "")
+				}
+			}
 			row[col], v = n, n
 		}
-		// A number written to a text column is stored as its text, as
-		// Postgres's assignment does, so it compares as text afterwards.
-		if textTypes[t] && isNumber(v) {
+		if textTypes[t] {
+			// A number written to a text column is stored as its text, as
+			// Postgres's assignment does, so it compares as text afterwards.
 			// Postgres keeps the digits of a numeric literal (1.20) and a
 			// driver sends a float parameter as it formats it, which the
 			// value does not tell apart.
-			if _, ok := integer(v); !ok {
-				return x.unsupported(fmt.Sprintf("a number with a fraction written to the text column %q", col))
+			switch {
+			case isNumber(v):
+				if _, ok := integer(v); !ok {
+					return x.unsupported(fmt.Sprintf("a number with a fraction written to the text column %q", col))
+				}
+				v = fmt.Sprint(v)
+			case isOther(v) && v != sqlir.Unknown:
+				// The text a driver sends for a boolean or a time depends
+				// on the driver, which detest does not model.
+				return x.unsupported(fmt.Sprintf("a %T written to the text column %q", v, col))
 			}
-			row[col] = fmt.Sprint(v)
+			// Bytes written to a text column are the text they hold, so
+			// they order as text.
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			if str, ok := v.(string); ok {
+				if l, limited := def.strs[col]; limited && l.maxLen > 0 {
+					stored, err := x.pgTextLimit(table, col, t, str, l.maxLen)
+					if err != nil {
+						return err
+					}
+					str = stored
+				}
+				row[col] = str
+			}
 			continue
-		}
-		// Bytes written to a text column are the text they hold, so they
-		// order as text.
-		if b, ok := v.([]byte); ok && textTypes[t] {
-			row[col] = string(b)
-			continue
-		}
-		// The text a driver sends for a boolean or a time depends on the
-		// driver, which detest does not model.
-		if textTypes[t] && isOther(v) && v != sqlir.Unknown {
-			return x.unsupported(fmt.Sprintf("a %T written to the text column %q", v, col))
 		}
 		switch t {
 		case "double", "float", "decimal":
@@ -655,12 +671,72 @@ func (x *sqlExec) mysqlStoredText(t string, v any, fsp int) (any, error) {
 	return v, nil
 }
 
-// strLimit is what a MySQL string column holds: at most maxLen characters,
-// or, with members, one of them (ENUM) or a set of them (SET).
+// strLimit is what a string column holds: at most maxLen characters, or,
+// with members, one of them (a MySQL ENUM) or a set of them (SET).
 type strLimit struct {
 	maxLen  int
 	members []string
 	set     bool
+}
+
+// pgTextLimit is s as a Postgres varchar(n) or char(n) column stores it.
+// Characters past n are dropped when they are spaces and refused otherwise.
+// A char(n) pads a shorter value with spaces and then compares it without
+// them, which detest's plain strings do not follow, so only values of the
+// declared length are supported there.
+func (x *sqlExec) pgTextLimit(table, col, t, s string, n int) (string, error) {
+	if utf8.RuneCountInString(s) > n {
+		if utf8.RuneCountInString(strings.TrimRight(s, " ")) > n {
+			name := fmt.Sprintf("character varying(%d)", n)
+			if t == "bpchar" {
+				name = fmt.Sprintf("character(%d)", n)
+			}
+			return "", x.tx.db.kind.Error(sqlir.StringDataRightTruncation, "value too long for type "+name, relname(table), col, "")
+		}
+		s = string([]rune(s)[:n])
+	}
+	if t == "bpchar" && utf8.RuneCountInString(s) < n {
+		return "", x.unsupported(fmt.Sprintf("a value shorter than the char(%d) column %q, which Postgres pads with spaces", n, col))
+	}
+	return s, nil
+}
+
+// numLimit is a NUMERIC(p, s) column's precision and scale.
+type numLimit struct {
+	precision int
+	scale     int
+}
+
+// scaledNumeric is v as a NUMERIC(p, s) column stores it: rounded to s
+// places, half away from zero, and refused when more than p - s digits are
+// left before the point. The rounding reads the shortest decimal form of
+// the float rather than its binary value, so 1.005 rounds to 1.01 as the
+// text written does, not to 1.00 as the nearest float would.
+func scaledNumeric(v any, l numLimit) (any, error) {
+	f, ok := toFloat(v)
+	if !ok || math.IsInf(f, 0) || math.IsNaN(f) {
+		return v, nil
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
+	if !ok {
+		return v, nil
+	}
+	unit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(l.scale)), nil)
+	num := new(big.Int).Mul(r.Num(), unit)
+	q, rem := new(big.Int).QuoRem(num, r.Denom(), new(big.Int))
+	if rem.Abs(rem).Lsh(rem, 1).Cmp(r.Denom()) >= 0 {
+		if num.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(l.precision)), nil)
+	if new(big.Int).Abs(q).Cmp(limit) >= 0 {
+		return nil, errors.New("numeric field overflow")
+	}
+	out, _ := new(big.Rat).SetFrac(q, unit).Float64()
+	return numericValue(out), nil
 }
 
 // mysqlMember is v as an ENUM or a SET column stores it: the members it

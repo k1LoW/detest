@@ -426,6 +426,26 @@ func unqualify(e sqlir.Expr) {
 // columnDef converts a column with the constraints written on it.
 func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
 	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
+	mods := typmods(d.TypeName)
+	switch col.Type {
+	case "varchar":
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "bpchar":
+		// char without a length is char(1).
+		col.MaxLen = 1
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "numeric":
+		if len(mods) >= 1 {
+			col.Precision = mods[0]
+		}
+		if len(mods) == 2 {
+			col.Scale = mods[1]
+		}
+	}
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
 	}
@@ -634,6 +654,20 @@ func typeName(t *pg.TypeName) string {
 		return "int2"
 	}
 	return n
+}
+
+// typmods are the integers a type is declared with, as varchar(255) and
+// numeric(10, 2) carry them.
+func typmods(t *pg.TypeName) []int {
+	var out []int
+	for _, m := range t.GetTypmods() {
+		k := m.GetAConst()
+		if k == nil || k.GetIval() == nil {
+			return nil
+		}
+		out = append(out, int(k.GetIval().Ival))
+	}
+	return out
 }
 
 func isSerial(t *pg.TypeName) bool {

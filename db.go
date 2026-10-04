@@ -220,9 +220,11 @@ type tableDef struct {
 	indexes  []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
 	autoInc  map[string]bool       // MySQL's AUTO_INCREMENT columns
 	onUpdate map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
-	// strs are MySQL's limits on what a string column holds: CHAR(n) and
-	// VARCHAR(n) lengths, and ENUM and SET members.
+	// strs are the limits on what a string column holds: CHAR(n) and
+	// VARCHAR(n) lengths, and MySQL's ENUM and SET members.
 	strs map[string]strLimit
+	// nums are the Postgres NUMERIC(p, s) columns' precision and scale.
+	nums map[string]numLimit
 	// collation is a MySQL table's default collation, and ci the text
 	// columns whose collation is case-insensitive, which detest's exact
 	// string comparison does not follow.
@@ -571,6 +573,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.defaults, col)
 	delete(def.onUpdate, col)
 	delete(def.strs, col)
+	delete(def.nums, col)
 	delete(def.ci, col)
 	delete(def.fsp, col)
 	delete(def.generated, col)
@@ -600,6 +603,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if l, ok := def.strs[old]; ok {
 		delete(def.strs, old)
 		def.strs[nw] = l
+	}
+	if l, ok := def.nums[old]; ok {
+		delete(def.nums, old)
+		def.nums[nw] = l
 	}
 	if def.ci[old] {
 		delete(def.ci, old)
@@ -995,6 +1002,14 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				def.strs[col.Name] = strLimit{maxLen: col.MaxLen, members: col.Members, set: col.Set}
 			} else {
 				delete(def.strs, col.Name)
+			}
+			if col.Precision > 0 {
+				if def.nums == nil {
+					def.nums = map[string]numLimit{}
+				}
+				def.nums[col.Name] = numLimit{precision: col.Precision, scale: col.Scale}
+			} else {
+				delete(def.nums, col.Name)
 			}
 			// A whole column definition, which says ON UPDATE again or drops
 			// it, as MySQL's MODIFY and CHANGE do; ALTER COLUMN leaves it.
