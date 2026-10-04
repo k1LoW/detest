@@ -1614,7 +1614,7 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
-	tx.deferred = append(tx.deferred, func() { q.push(msg) })
+	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
 // pending applies f to the rows tx has written to table and not committed.
@@ -1928,7 +1928,7 @@ func (tx *Tx) commit() {
 		fn()
 	}
 	if tx.p != nil && len(tx.writes)+len(tx.deleted)+len(tx.deferred) > 0 {
-		tx.p.r.version++
+		tx.p.r.bump(tx.p)
 	}
 	tx.release()
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
 )
 
@@ -67,6 +68,26 @@ func TestLoopTicksAgainAfterAChangeDuringAnIdleTick(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+// An idle tick's own commit does not wake the loop again. On MySQL an UPDATE
+// that leaves a row as it was reports no affected rows but still commits.
+func TestLoopIdleTickIsNotWokenByItsOwnCommit(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true)`) })
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = 'w1'`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+	}, MaxRuns(100))
 }
 
 // When keeps a process from starting while its predicate is false.

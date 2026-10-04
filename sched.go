@@ -190,10 +190,14 @@ type Proc struct {
 	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
-	// started is the run's version when the process started. An idle loop
-	// tick saw no change made after it, so the loop may tick again once the
-	// version moves past it, even through a commit made while the tick ran.
+	// started is the run's version when the process started, and bumps
+	// counts the version changes the process made itself. An idle loop tick
+	// saw no change another process made after it started, even one
+	// committed while the tick ran, so such a change lets the loop tick
+	// again. Its own writes do not: a MySQL UPDATE leaving a row as it was
+	// reports no affected rows yet commits, and would wake the loop forever.
 	started int
+	bumps   int
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -697,7 +701,16 @@ func (r *run) crash(p *Proc) {
 	if p.msg != nil {
 		r.redeliver(p)
 	}
+	r.bump(nil)
+}
+
+// bump records a change of committed state. p is the process that made it,
+// or nil for a change the scheduler made.
+func (r *run) bump(p *Proc) {
 	r.version++
+	if p != nil {
+		p.bumps++
+	}
 }
 
 // redeliver puts back the message p failed to handle, unless it was
@@ -762,7 +775,11 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
 				r.runs[p.pt]--
-				r.idleAt[p.pt] = p.started
+				if r.version-p.started > p.bumps {
+					r.idleAt[p.pt] = p.started
+				} else {
+					r.idleAt[p.pt] = r.version
+				}
 			}
 			ev.err = nil
 		case ev.err != nil && !errors.Is(ev.err, errNack):
@@ -829,7 +846,7 @@ func (r *run) lose(q *Queue, i int) {
 	q.msgs = append(q.msgs[:i:i], q.msgs[i+1:]...)
 	q.lossBudget--
 	r.queuesTouched = true
-	r.version++
+	r.bump(nil)
 	r.note(nil, "%s: %s is lost", q.name, msg)
 }
 
