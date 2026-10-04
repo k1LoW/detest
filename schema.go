@@ -29,15 +29,6 @@ func (tx *Tx) evaluator() *sqlExec {
 	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string][]Row{}, start: time.Now()}
 }
 
-// unconverted reports whether e stands for a schema expression the dialect
-// could not convert, which it loads as the Unknown constant so that a dump
-// still builds. It is told apart by the expression and not by the value,
-// which a real expression can equal.
-func unconverted(e sqlir.Expr) bool {
-	k, ok := e.(*sqlir.Const)
-	return ok && k.Value == sqlir.Unknown
-}
-
 // applyDefaults fills the columns a new row leaves out with their declared
 // defaults, in declaration order so sequences advance deterministically.
 func (x *sqlExec) applyDefaults(table string, row Row) error {
@@ -86,7 +77,7 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 	if err != nil && !errors.As(err, new(errUnknownExpr)) {
 		return nil, err
 	}
-	if err != nil || unconverted(d) {
+	if err != nil {
 		if def.reads(col) {
 			return nil, x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint or generated column reads", col))
 		}
@@ -341,9 +332,6 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 		}
 	}
 	for _, c := range def.checks {
-		if unconverted(c.Expr) {
-			return x.unsupported(fmt.Sprintf("check constraint %q, whose expression detest cannot convert", c.Name))
-		}
 		v, err := x.eval(c.Expr, c.env(table, row))
 		if err != nil {
 			return x.unsupportedExpr(err, fmt.Sprintf("in check constraint %q", c.Name))
@@ -422,7 +410,7 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 		if err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
 		}
-		if err != nil || unconverted(g.Expr) {
+		if err != nil {
 			return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
 		}
 		row[col] = v

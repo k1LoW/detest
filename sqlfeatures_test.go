@@ -280,3 +280,15 @@ func TestSetDefault(t *testing.T) {
 		}
 	}
 }
+
+// A default that is the literal Unknown string is a default like any other,
+// not one detest failed to convert.
+func TestLiteralUnknownDefault(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE lu (id int PRIMARY KEY, d text DEFAULT '<unknown expression>' UNIQUE)`)
+	mustExec(t, db, `INSERT INTO lu (id) VALUES (1)`)
+	if _, err := db.Exec(`INSERT INTO lu (id) VALUES (2)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("second row with the literal default: got %v", err)
+	}
+}

@@ -367,7 +367,7 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 }
 
 // check converts a CHECK constraint. One detest cannot convert is kept as
-// the unknown constant, as a default it cannot convert is: the schema still
+// Unconverted, as a default it cannot convert is: the schema still
 // loads, and a write to the table fails as unsupported instead of passing a
 // constraint the server would have checked.
 func (c *pgConv) check(k *pg.Constraint, table string) (sqlir.CheckDef, bool, error) {
@@ -376,7 +376,7 @@ func (c *pgConv) check(k *pg.Constraint, table string) (sqlir.CheckDef, bool, er
 	}
 	e, err := c.expr(k.RawExpr)
 	if err != nil {
-		return sqlir.CheckDef{Name: k.Conname, Expr: &sqlir.Const{Value: sqlir.Unknown}}, true, nil
+		return sqlir.CheckDef{Name: k.Conname, Expr: &sqlir.Unconverted{}}, true, nil
 	}
 	if err := c.ownColumns(e, table); err != nil {
 		return sqlir.CheckDef{}, false, err
@@ -450,7 +450,7 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 				return col, nil, nil, err
 			}
 			if err != nil {
-				g = &sqlir.Const{Value: sqlir.Unknown} // as defaultExpr: the schema still loads
+				g = &sqlir.Unconverted{} // as defaultExpr: the schema still loads
 			}
 			col.Generated = g
 			if err := c.immutable(col.Generated, relnameOf(table)); err != nil {
@@ -530,12 +530,12 @@ func relnameOf(table string) string {
 }
 
 // defaultExpr converts a column default. A default detest cannot convert
-// becomes the unknown value instead of failing the whole schema, which is
+// becomes Unconverted instead of failing the whole schema, which is
 // often a dump with defaults no invariant looks at.
 func (c *pgConv) defaultExpr(n *pg.Node) sqlir.Expr {
 	e, err := c.expr(n)
 	if err != nil {
-		return &sqlir.Const{Value: sqlir.Unknown}
+		return &sqlir.Unconverted{}
 	}
 	return e
 }

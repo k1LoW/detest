@@ -310,7 +310,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 				if err != nil && !errors.As(err, new(errUnknownExpr)) {
 					return err
 				}
-				if err != nil || unconverted(def.defaults[c]) {
+				if err != nil {
 					return x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute, for ON ... SET DEFAULT", c))
 				}
 				updated[c] = v

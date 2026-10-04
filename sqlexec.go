@@ -1434,6 +1434,8 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		return nil, x.unsupported("window function outside the select list, ORDER BY or DISTINCT ON")
 	case *sqlir.Default:
 		return nil, nil
+	case *sqlir.Unconverted:
+		return nil, errUnknownExpr{"an expression detest could not convert"}
 	case *sqlir.Cast:
 		val, err := x.eval(v.X, en)
 		if err != nil {
