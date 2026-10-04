@@ -1019,23 +1019,29 @@ func (x *sqlExec) columnRanges(col, alias, table string, conjuncts []sqlir.Expr)
 		c, ok := e.(*sqlir.ColumnRef)
 		return ok && c.Column == col && (c.Table == "" || c.Table == alias || c.Table == relname(table))
 	}
-	isNullConstant := func(e sqlir.Expr) bool {
-		if len(sqlir.ColumnRefs(e)) > 0 || volatile(e) {
-			return false
+	// eval evaluates a constant of the search: an expression of no column,
+	// or of the outer row's columns only in a joined table's search.
+	eval := func(e sqlir.Expr) (any, bool) {
+		if volatile(e) {
+			return nil, false
+		}
+		if len(sqlir.ColumnRefs(e)) > 0 {
+			return x.outerConstant(e, table)
 		}
 		v, err := x.eval(e, &env{})
-		return err == nil && derefValue(v) == nil
+		return v, err == nil
+	}
+	isNullConstant := func(e sqlir.Expr) bool {
+		v, ok := eval(e)
+		return ok && derefValue(v) == nil
 	}
 	numeric, text := false, false
 	if def := x.tx.db.defs[table]; def != nil {
 		numeric, text = mysqlNumericType(def.types[col]), mysqlTextType(def.types[col])
 	}
 	constant := func(e sqlir.Expr) (any, bool) {
-		if len(sqlir.ColumnRefs(e)) > 0 || volatile(e) {
-			return nil, false
-		}
-		v, err := x.eval(e, &env{})
-		if err != nil || derefValue(v) == nil {
+		v, ok := eval(e)
+		if !ok || derefValue(v) == nil {
 			return nil, false
 		}
 		if numeric {

@@ -51,6 +51,34 @@ type sqlExec struct {
 	// selectStmt is set for a SELECT statement, as opposed to the query of
 	// an INSERT ... SELECT or a CREATE TABLE ... SELECT.
 	selectStmt bool
+	// searchOuter is the row a joined table's search is run for, whose
+	// columns the search takes as constants.
+	searchOuter *searchOuter
+}
+
+// searchOuter is the outer row of a joined table's search: the columns of
+// env that are not the searched table's are constants to it.
+type searchOuter struct {
+	table, alias string
+	env          *env
+}
+
+// outerConstant evaluates e as a constant of the joined table's search: an
+// expression with no column of the searched table, evaluated with the outer
+// row.
+func (x *sqlExec) outerConstant(e sqlir.Expr, table string) (any, bool) {
+	o := x.searchOuter
+	if o == nil || o.table != table {
+		return nil, false
+	}
+	def := x.tx.db.defs[table]
+	for _, c := range sqlir.ColumnRefs(e) {
+		if c.Table == o.alias || c.Table == relname(table) || c.Table == "" && def != nil && slices.Contains(def.columns, c.Column) {
+			return nil, false
+		}
+	}
+	v, err := x.eval(e, o.env)
+	return v, err == nil
 }
 
 // env is the evaluation context of an expression: the rows of the tables in

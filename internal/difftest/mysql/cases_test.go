@@ -373,6 +373,47 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A locking read joining a table it looks up by a unique key first
+		// searches the joined table's index with each row found, and locks
+		// the gaps it reads there, as a search of its own would.
+		Name: "a locking join locks the joined table's gaps",
+		Schema: []string{
+			`CREATE TABLE a (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE b (id INT PRIMARY KEY, a_id INT NOT NULL, KEY (a_id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO a (id) VALUES (1), (2)`, `INSERT INTO b VALUES (1, 1), (5, 5)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE`),
+			difftest.S(1, `INSERT INTO b VALUES (6, 6)`),
+			difftest.S(1, `INSERT INTO b VALUES (2, 2)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, a_id FROM b ORDER BY id`),
+		},
+	},
+	{
+		// A locking read over a join locks the joined table's index too.
+		Name: "deadlock victim weighs a locking join",
+		Schema: []string{
+			`CREATE TABLE a (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE b (id INT PRIMARY KEY, a_id INT NOT NULL, KEY (a_id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO a (id) VALUES (1), (2)`, `INSERT INTO b VALUES (1, 1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.Q(0, `SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE`),
+			difftest.S(1, `UPDATE a SET v = 1 WHERE id = 2`),
+			difftest.S(1, `UPDATE a SET v = 2 WHERE id = 2`),
+			difftest.S(1, `UPDATE a SET v = 1 WHERE id = 1`),
+			difftest.S(0, `UPDATE a SET v = 1 WHERE id = 2`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

@@ -828,7 +828,7 @@ func TestLockingJoinOf(t *testing.T) {
 						return err
 					}
 					defer func() { _ = tx.Rollback() }()
-					rows, err := tx.Query("SELECT a.id FROM a JOIN b ON b.a_id = a.id FOR UPDATE OF a")
+					rows, err := tx.Query("SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE OF a")
 					if err != nil {
 						return err
 					}

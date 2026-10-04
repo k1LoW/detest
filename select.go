@@ -742,18 +742,21 @@ rows:
 	return locked, nil
 }
 
-// rangeLocks takes InnoDB's next-key locks of the first table's search. A
-// joined table keeps the locks on the rows the join read: InnoDB also locks
-// around each lookup into it, which only a join plan would tell, and locking
-// it whole instead would explore deadlocks MySQL does not have.
+// rangeLocks takes InnoDB's next-key locks of the first table's search, and
+// of a joined table's lookup for each row the first table's search finds.
+// Which table MySQL reads first is its optimizer's choice, except when the
+// first one is a const table, looked up by a unique key, which it reads
+// before the others; a locking join of any other shape is refused.
 func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, error) {
 	f := sel.From
 	if f == nil || f.Name == "" || x.isCTE(f.Name) {
 		return nil, nil
 	}
-	alias := f.Alias
-	if alias == "" {
-		alias = relname(f.Name)
+	alias := cmp.Or(f.Alias, relname(f.Name))
+	table := x.tx.db.resolve(f.Name)
+	mode := lockModeOf(sel.Lock)
+	if len(sel.Joins) > 0 && (x.tx.iso == RepeatableRead || x.tx.iso == Serializable) {
+		return nil, x.joinLocks(sel, plan, table, alias, mode)
 	}
 	if !slices.Contains(plan.targets, alias) {
 		return nil, nil // FOR UPDATE OF names other tables
@@ -765,7 +768,50 @@ func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, e
 			return nil, err
 		}
 	}
-	return stop, x.nextKeyLocks(x.tx.db.resolve(f.Name), alias, sel.Where, lockModeOf(sel.Lock), sel.Lock, stop)
+	return stop, x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, stop)
+}
+
+// joinLocks takes the next-key locks of a locking read joining a const table,
+// first, with one more: the first table's lookup, then the joined table's
+// search by ON and WHERE with each row found, as MySQL's nested loop runs
+// them.
+func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias string, mode lockMode) error {
+	if len(sel.Joins) > 1 {
+		return x.unsupported("a locking read joining more than two tables, whose join order MySQL's optimizer chooses")
+	}
+	j := sel.Joins[0]
+	if j.Table.Name == "" || x.isCTE(j.Table.Name) {
+		return x.unsupported("a locking read joining a subquery, a CTE or a function")
+	}
+	sr := x.searchRange(table, alias, sel.Where)
+	if !sr.unique {
+		return x.unsupported("a locking read joining tables whose first table is not looked up by a unique key, so MySQL's optimizer chooses which table it reads first")
+	}
+	if slices.Contains(plan.targets, alias) {
+		if err := x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, nil); err != nil {
+			return err
+		}
+	}
+	jalias := cmp.Or(j.Table.Alias, relname(j.Table.Name))
+	if !slices.Contains(plan.targets, jalias) {
+		return nil
+	}
+	jtable := x.tx.db.resolve(j.Table.Name)
+	where := j.On
+	if sel.Where != nil {
+		where = &sqlir.BinaryExpr{Op: "AND", L: j.On, R: sel.Where}
+	}
+	defer func() { x.searchOuter = nil }()
+	for _, r := range x.tx.selectNoYield(table, nil) {
+		if !slices.ContainsFunc(sr.ranges, func(rg valRange) bool { return rg.contains(keyOf(r, sr.key)) }) {
+			continue
+		}
+		x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}
+		if err := x.nextKeyLocks(jtable, jalias, where, mode, sel.Lock, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // isCTE reports whether name is a CTE of the statement, which shadows a table

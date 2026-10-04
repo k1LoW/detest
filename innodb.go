@@ -219,16 +219,17 @@ func (tx *Tx) inheritGap(table string, row Row, whole bool) {
 	rows := tx.lockingRows(table)
 	for _, ix := range indexes {
 		k := keyOf(row, ix.key)
-		var gap valRange
+		var lo, hi ixKey
 		for _, r := range rows {
 			v := keyOf(r, ix.key)
 			switch c := keyCompare(v, k); {
-			case c < 0 && (!gap.hasLo || keyCompare(v, gap.lo.(ixKey)) > 0):
-				gap.lo, gap.hasLo, gap.loOpen = v, true, true
-			case c > 0 && (!gap.hasHi || keyCompare(v, gap.hi.(ixKey)) < 0):
-				gap.hi, gap.hasHi, gap.hiOpen = v, true, true
+			case c < 0 && (lo == nil || keyCompare(v, lo) > 0):
+				lo = v
+			case c > 0 && (hi == nil || keyCompare(v, hi) < 0):
+				hi = v
 			}
 		}
+		gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: ix.key, ranges: []valRange{gap}})
 		tx.noteLockStruct(table, ix.name, lockUpdate, "record")
 		tx.noteLockStruct(table, ix.name, lockUpdate, "gap")
