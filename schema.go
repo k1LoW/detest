@@ -459,6 +459,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if !ok {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
 			}
+			if strings.HasPrefix(t, "int") {
+				if n, ok = integralNumber(n); !ok {
+					return x.unsupported(fmt.Sprintf("a number with a fraction written to the %s column %q", name, col))
+				}
+			}
 			row[col], v = n, n
 		}
 		// A number written to a text column is stored as its text, as
@@ -663,6 +668,26 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 
 // numberTypes are the number types by the name Postgres gives them in errors.
 var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
+
+// integralNumber returns a float written to an integer column as an integer.
+// Postgres rounds a numeric literal with a fraction but refuses a float
+// parameter with one, and the value does not tell which of the two it came
+// from, so one with a fraction is refused.
+func integralNumber(v any) (any, bool) {
+	var f float64
+	switch n := v.(type) {
+	case float64:
+		f = n
+	case float32:
+		f = float64(n)
+	default:
+		return v, true
+	}
+	if f != math.Trunc(f) || math.Abs(f) >= 1<<53 {
+		return nil, false
+	}
+	return int64(f), true
+}
 
 // textTypes are the character types.
 var textTypes = map[string]bool{"text": true, "varchar": true, "bpchar": true}

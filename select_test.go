@@ -468,6 +468,17 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id) VALUES ('01')`); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("got %v, want a unique violation", err)
 	}
+	// Postgres rounds a numeric literal and refuses a float parameter with a
+	// fraction, which detest cannot tell apart; a whole float is an integer.
+	for _, q := range []string{`INSERT INTO t (id) VALUES (1.5)`, `UPDATE t SET id = 2.5 WHERE id = 1`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	mustExec(t, db, `INSERT INTO t (id) VALUES ($1)`, 6.0)
+	if got := rowsOf(t, db, `SELECT id FROM t WHERE id = '06'`); !reflect.DeepEqual(got, []string{"6"}) {
+		t.Errorf("whole float: got %v", got)
+	}
 	// A value of another type is not converted, where Postgres refuses it.
 	for _, v := range []any{true, time.Unix(0, 0)} {
 		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
