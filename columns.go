@@ -118,22 +118,39 @@ func (c *columnChecker) tableColumns(name string) colSet {
 // outputColumns is the names a query's rows have, nil when a select list
 // item's name depends on more than detest looks at, such as a *.
 func outputColumns(sel *sqlir.SelectStmt) colSet {
+	return namesSet(outputNames(sel))
+}
+
+// outputNames are the names of a query's columns in order, nil as for
+// outputColumns.
+func outputNames(sel *sqlir.SelectStmt) []string {
 	for sel.SetOp != "" && sel.Larg != nil {
 		sel = sel.Larg
 	}
+	var out []string
 	if len(sel.Values) > 0 {
-		s := colSet{}
 		for i := range sel.Values[0] {
-			s[fmt.Sprintf("column%d", i+1)] = true
+			out = append(out, fmt.Sprintf("column%d", i+1))
 		}
-		return s
+		return out
 	}
-	s := colSet{}
 	for _, t := range sel.Targets {
 		if t.Star {
 			return nil
 		}
-		n := targetName(t)
+		out = append(out, targetName(t))
+	}
+	return out
+}
+
+// namesSet is the set of names, a name given twice marked as such; nil
+// for nil.
+func namesSet(names []string) colSet {
+	if names == nil {
+		return nil
+	}
+	s := colSet{}
+	for _, n := range names {
 		_, seen := s[n]
 		s[n] = !seen
 	}
@@ -175,10 +192,14 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 		cols = c.tableColumns(t.Name)
 	}
-	if len(t.Columns) > 0 && t.Func == nil && cols != nil {
-		// AS alias(a, b) renames the first columns; which the others are
-		// detest does not track.
+	if len(t.Columns) > 0 && t.Func == nil {
+		// AS alias(a, b) renames the first columns, which needs them in
+		// order.
+		names := outputNames(t.Sub)
 		cols = nil
+		if names != nil {
+			cols = namesSet(renamedCols(names, t.Columns))
+		}
 	}
 	sc.items[alias] = cols
 	return nil
