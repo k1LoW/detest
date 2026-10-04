@@ -292,3 +292,19 @@ func TestLiteralUnknownDefault(t *testing.T) {
 		t.Errorf("second row with the literal default: got %v", err)
 	}
 }
+
+// A table without a primary key tells its rows apart by their values, so a
+// second equal row, whether written or from a default detest stood in for,
+// is refused rather than reported as a duplicate key.
+func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE nk (n int, d bigint DEFAULT txid_current())`)
+	mustExec(t, db, `INSERT INTO nk (n) VALUES (1)`)
+	mustExec(t, db, `INSERT INTO nk VALUES (2, 5)`)
+	for _, q := range []string{`INSERT INTO nk (n) VALUES (1)`, `INSERT INTO nk VALUES (2, 5)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+}

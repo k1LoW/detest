@@ -1100,6 +1100,13 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		if _, exists := x.tx.view(table, row.Key()); exists {
+			// A table without a primary key tells its rows apart by their
+			// values, as detest has no row identity of its own, so a second
+			// equal row is refused rather than reported as a duplicate key
+			// Postgres would not raise.
+			if def := x.tx.db.defs[table]; def != nil && len(def.pk) == 0 {
+				return nil, x.unsupported("a row equal to one already in a table without a primary key")
+			}
 			return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 		}
 		if err := x.checkUniques(table, row, "", nil); err != nil {
