@@ -824,7 +824,17 @@ func TestCastToNumber(t *testing.T) {
 			t.Errorf("%s with NaN: got %v, want unsupported", q, err)
 		}
 	}
-	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
+	// A numeric rounds half away from zero and a float half to even, told
+	// apart by the expression's form; a parameter's is unknown.
+	if got := rowsOf(t, db, `SELECT 2.5::int, (-2.5)::int, 2.5::float8::int, (0.5 * 5)::int, round(2.5), round(2.5::float8)`); !reflect.DeepEqual(got, []string{"3,-3,2,3,3,2"}) {
+		t.Errorf("casts and round of halves: got %v", got)
+	}
+	for _, q := range []string{`SELECT $1::int`, `SELECT round($1)`} {
+		if _, err := db.Exec(q, 2.5); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with 2.5: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{`SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
 		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`,
 		`SELECT true::bigint`, `SELECT true::smallint`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -853,5 +863,43 @@ func TestNumberKeysByValue(t *testing.T) {
 	db, _ := s.DB("app", postgres.New())
 	if got := rowsOf(t, db, `SELECT '-0.0'::numeric`); !reflect.DeepEqual(got, []string{"0"}) {
 		t.Errorf("'-0.0'::numeric: got %v", got)
+	}
+}
+
+// Values Postgres converts by a type detest does not keep are refused, and
+// the ones the statement or the schema tells are converted as Postgres does.
+func TestValueFormsByType(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1))`)
+	mustExec(t, db, `INSERT INTO t (id, ratio, name) VALUES (1, 0.5, 'a')`)
+	for _, q := range []string{
+		`SELECT 1 || 2`, `SELECT 'a' || 1.5`, `SELECT 1.5::text`, `SELECT ratio::text FROM t`,
+		`SELECT coalesce(name, 1) FROM t`, `SELECT CASE WHEN id = 1 THEN name ELSE 2 END FROM t`, `SELECT greatest(name, 1) FROM t`,
+		`SELECT id FROM t UNION SELECT '1'`, `SELECT id FROM t INTERSECT SELECT '1'`,
+		`SELECT round(ratio) FROM t`, `INSERT INTO t (id, c) VALUES (2, 'ab')`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, tc := range []struct {
+		q    string
+		want error
+	}{
+		{`INSERT INTO t (id, v) VALUES (2, 'abcd')`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, c) VALUES (2, 'abcd')`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, v) VALUES (2, 1234)`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, price) VALUES (2, 999.95)`, ErrNumericValueOutOfRange},
+		{`SELECT 'o'::bool`, ErrInvalidTextRepresentation},
+	} {
+		if _, err := db.Exec(tc.q); !errors.Is(err, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, err, tc.want)
+		}
+	}
+	mustExec(t, db, `INSERT INTO t (id, v, c, price) VALUES (2, 'abc ', 'abc  ', 1.05)`)
+	got := rowsOf(t, db, `SELECT v, c, price = 1.1, 'yes'::bool, 2::bool, CASE WHEN id = 2 THEN 1 ELSE '2' END = 1 FROM t WHERE id = 2`)
+	if want := []string{"abc,abc,true,true,true,true"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("converted values: got %v, want %v", got, want)
 	}
 }

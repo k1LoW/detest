@@ -540,6 +540,20 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		}
 		rrows[i] = m
 	}
+	// Postgres gives each column of a set operation one type, so '1' under
+	// an integer column is the integer 1, and text under it is an error.
+	// detest keeps values, which compare as text against a number here, so
+	// a column that holds both is refused.
+	for _, c := range lcols {
+		text, num := false, false
+		for _, r := range slices.Concat(lrows, rrows) {
+			text = text || isText(r[c])
+			num = num || isNumber(r[c])
+		}
+		if text && num {
+			return nil, nil, x.unsupported("a set operation over a column of text and a number")
+		}
+	}
 	key := func(r Row) string {
 		var kb strings.Builder
 		for _, c := range lcols {

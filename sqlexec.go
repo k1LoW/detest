@@ -971,10 +971,17 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
+		if v.Name == "round" && len(args) == 1 {
+			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
+				return out, err
+			}
+		}
 		out, err := x.callFunc(v.Name, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
-			out = commonNumber(v.Args, out)
+			if err == nil {
+				out, err = x.branchValue(v.Args, out)
+			}
 		}
 		return out, err
 	case *sqlir.BinaryExpr:
@@ -1004,7 +1011,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
-		return x.cast(val, v.Type)
+		return x.cast(x.halfToInteger(v, val), v.Type)
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -1834,7 +1841,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
-		return x.cast(val, v.Type)
+		return x.cast(x.halfToInteger(v, val), v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -2076,12 +2083,18 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			if hit {
 				out, err := x.eval(w.Then, en)
-				return commonNumber(caseBranches(v), out), err
+				if err != nil {
+					return nil, err
+				}
+				return x.branchValue(caseBranches(v), out)
 			}
 		}
 		if v.Else != nil {
 			out, err := x.eval(v.Else, en)
-			return commonNumber(caseBranches(v), out), err
+			if err != nil {
+				return nil, err
+			}
+			return x.branchValue(caseBranches(v), out)
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -2107,10 +2120,17 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
+		if v.Name == "round" && len(args) == 1 {
+			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
+				return out, err
+			}
+		}
 		out, err := x.callFunc(v.Name, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
-			out = commonNumber(v.Args, out)
+			if err == nil {
+				out, err = x.branchValue(v.Args, out)
+			}
 		}
 		return out, err
 	}
@@ -2299,6 +2319,14 @@ func isText(v any) bool {
 	return false
 }
 
+func isFloat(v any) bool {
+	switch derefValue(v).(type) {
+	case float64, float32:
+		return true
+	}
+	return false
+}
+
 func isNumber(v any) bool {
 	v = derefValue(v)
 	if _, ok := v.(time.Duration); ok {
@@ -2468,6 +2496,16 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if derefValue(l) == nil || derefValue(r) == nil {
 			return nil, nil // NULL || x is NULL
 		}
+		// text || anything concatenates, but Postgres has no || for two
+		// numbers and fails the statement.
+		if isNumber(l) && isNumber(r) {
+			return nil, errUnknownExpr{"|| of two numbers"}
+		}
+		// As a cast to text, the text of a numeric or a float is not the
+		// float's.
+		if isFloat(l) || isFloat(r) {
+			return nil, errUnknownExpr{"|| of a numeric or a float"}
+		}
 		return fmt.Sprint(derefValue(l)) + fmt.Sprint(derefValue(r)), nil
 	}
 	return nil, errUnknownExpr{"operator " + op}
@@ -2553,6 +2591,36 @@ func arith(op string, l, r any) (any, error) {
 // gives all of them: a float when one of them is a float, as CASE WHEN ...
 // THEN 1 ELSE 1.5 END is a numeric, so a later division is not integer
 // division. Only literals and casts show their type before they run.
+// branchValue is the value one branch of CASE, COALESCE, GREATEST, LEAST or
+// NULLIF gives, as the common type of all the branches: a number as
+// commonNumber gives it, and text as a number when another branch is typed as
+// one, which is how Postgres reads an untyped literal there, such as the '2'
+// of CASE WHEN ... THEN 1 ELSE '2' END. Text that reads as no number has no
+// common type with a number in Postgres, which fails the statement whatever
+// row it reads, so it is refused. MySQL converts between the two instead.
+func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
+	if x.tx.db.kind.InnoDB() || !slices.ContainsFunc(exprs, numberTyped) {
+		return commonNumber(exprs, v), nil
+	}
+	if s, ok := derefValue(v).(string); ok {
+		f, err := parseNumber(s)
+		if err != nil || isOtherNumberText(s) {
+			return nil, x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
+		}
+		return commonNumber(exprs, numericValue(f)), nil
+	}
+	return commonNumber(exprs, v), nil
+}
+
+// numberTyped reports whether e is a number by its own form, before any value
+// is seen: a number literal, or an expression floatTyped knows.
+func numberTyped(e sqlir.Expr) bool {
+	if k, ok := e.(*sqlir.Const); ok && isNumber(k.Value) {
+		return true
+	}
+	return floatTyped(e)
+}
+
 func commonNumber(exprs []sqlir.Expr, v any) any {
 	n, ok := integer(derefValue(v))
 	if !ok || !slices.ContainsFunc(exprs, floatTyped) {
@@ -2600,6 +2668,90 @@ func caseBranches(c *sqlir.CaseExpr) []sqlir.Expr {
 		out = append(out, c.Else)
 	}
 	return out
+}
+
+// numberKind is the number type an expression has by its own form: a
+// literal with a point is a numeric, a cast says its type, and arithmetic is
+// a float when one operand is. Nothing is known of a column or a function.
+type numberKind int
+
+const (
+	unknownKind numberKind = iota
+	numericKind
+	floatKind
+)
+
+func exprNumberKind(e sqlir.Expr) numberKind {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		if isNumber(e.Value) {
+			return numericKind
+		}
+	case *sqlir.Cast:
+		switch e.Type {
+		case "numeric":
+			return numericKind
+		case "float8", "float4", "double precision", "real":
+			return floatKind
+		}
+	case *sqlir.UnaryExpr:
+		if e.Op == "-" {
+			return exprNumberKind(e.X)
+		}
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			l, r := exprNumberKind(e.L), exprNumberKind(e.R)
+			switch {
+			case l == floatKind || r == floatKind:
+				return floatKind
+			case l == numericKind && r == numericKind:
+				return numericKind
+			}
+		}
+	}
+	return unknownKind
+}
+
+// roundHalf is round(v) when v ends in .5, which Postgres rounds away from
+// zero for a numeric and to even for a float: round(2.5) is 3 and
+// round(2.5::float8) is 2. The value does not tell the two apart, so one of
+// a form exprNumberKind does not know is refused. ok is false for any other
+// value, which callFunc rounds.
+func (x *sqlExec) roundHalf(e sqlir.Expr, v any) (any, bool, error) {
+	f, isNum := toFloat(derefValue(v))
+	if x.tx.db.kind.InnoDB() || !isNum || math.Abs(f-math.Trunc(f)) != 0.5 {
+		return nil, false, nil
+	}
+	switch exprNumberKind(e) {
+	case numericKind:
+		return math.Round(f), true, nil
+	case floatKind:
+		return math.RoundToEven(f), true, nil
+	}
+	return nil, true, x.unsupported("round of a number ending in .5 whose type detest does not know")
+}
+
+// halfToInteger rounds a value ending in .5 before a cast to an integer, by
+// the form of the expression cast, as roundHalf does; castInteger refuses the
+// value when the form tells nothing.
+func (x *sqlExec) halfToInteger(c *sqlir.Cast, v any) any {
+	switch c.Type {
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
+	default:
+		return v
+	}
+	f, isNum := toFloat(derefValue(v))
+	if x.tx.db.kind.InnoDB() || !isNum || !isNumber(derefValue(v)) || math.Abs(f-math.Trunc(f)) != 0.5 {
+		return v
+	}
+	switch exprNumberKind(c.X) {
+	case numericKind:
+		return math.Round(f)
+	case floatKind:
+		return math.RoundToEven(f)
+	}
+	return v
 }
 
 // asKindOf returns f as an integer when v is one and as a float otherwise, so
@@ -2783,12 +2935,30 @@ func castValue(v any, typ string) (any, error) {
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to %s", v, typ)}
 	case "text", "varchar", "bpchar":
+		// A numeric's text keeps the digits it was written or computed
+		// with (1.50, 3.0) and a float's is formatted by Postgres's own
+		// rules, neither of which the float detest keeps gives.
+		switch v.(type) {
+		case float64, float32:
+			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
+		}
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":
-		if b, ok := v.(bool); ok {
+		// Text reads as boolean input does, and an integer is true unless
+		// zero; Postgres has no cast from a numeric or a float.
+		switch b := v.(type) {
+		case bool:
 			return b, nil
+		case string:
+			out, ok := parseBool(b)
+			if !ok {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", b)}
+			}
+			return out, nil
+		case int64:
+			return b != 0, nil
 		}
-		return fmt.Sprint(v) == "true", nil
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to boolean", v)}
 	case "interval":
 		if s, ok := v.(string); ok {
 			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {
