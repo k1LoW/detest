@@ -764,3 +764,20 @@ func TestCastToNumber(t *testing.T) {
 		}
 	}
 }
+
+// Equal numbers have one key, so a unique index or a row lock on a value
+// written once as an integer and once as a float is one entry.
+func TestNumberKeysByValue(t *testing.T) {
+	for _, tc := range []struct{ a, b any }{
+		{int64(1000000), float64(1e6)},
+		{int64(0), math.Copysign(0, -1)},
+		{int64(9007199254740994), float64(9007199254740994)},
+	} {
+		if ka, kb := keyString(tc.a), keyString(tc.b); ka != kb {
+			t.Errorf("keyString(%v) = %q, keyString(%v) = %q", tc.a, ka, tc.b, kb)
+		}
+	}
+	if keyString(1.5) == keyString(int64(1)) || keyString(1.5) != "1.5" {
+		t.Errorf("keyString(1.5) = %q", keyString(1.5))
+	}
+}
