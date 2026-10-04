@@ -145,6 +145,17 @@ func (c *conv) script(stmts []ast.StmtNode) (sqlir.Statement, error) {
 	if locked != nil {
 		return nil, c.unsupported("LOCK TABLES without UNLOCK TABLES")
 	}
+	results := 0
+	for _, st := range out.Stmts {
+		if _, ok := st.(*sqlir.SelectStmt); ok {
+			results++
+		}
+	}
+	if results > 1 {
+		// database/sql would see the last result set only, where the
+		// driver hands the first and moves on with NextResultSet.
+		return nil, c.unsupported("a multi-statement query of more than one result set")
+	}
 	return out, nil
 }
 
@@ -275,6 +286,23 @@ func (c *conv) set(s *ast.SetStmt) (sqlir.Statement, error) {
 				}
 			}
 			return nil, c.unsupported("SET " + v.Name)
+		}
+		if v.IsSystem && strings.EqualFold(v.Name, "time_zone") {
+			// detest keeps temporal values in UTC, as a dump sets the zone
+			// to while it loads rows and then restores it from a variable.
+			// Another zone changes NOW() and what DATETIME and TIMESTAMP
+			// hold, which detest does not follow.
+			if _, restore := v.Value.(*ast.VariableExpr); restore {
+				continue
+			}
+			if e, err := c.expr(v.Value); err == nil {
+				if k, ok := e.(*sqlir.Const); ok {
+					if z, isStr := k.Value.(string); isStr && (z == "+00:00" || strings.EqualFold(z, "UTC")) {
+						continue
+					}
+				}
+			}
+			return nil, c.unsupported("time_zone set to a zone other than UTC")
 		}
 		if strings.EqualFold(v.Name, "foreign_key_checks") {
 			// A dump turns the checks off while it loads tables in name

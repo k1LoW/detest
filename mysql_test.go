@@ -4390,6 +4390,30 @@ func TestPostgresSavepointUndoesSessionLockTimeout(t *testing.T) {
 	}
 }
 
+// time_zone is accepted as UTC, which detest keeps temporal values in, and
+// as a dump restores it from a variable; another zone is refused.
+func TestMySQLTimeZone(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "SET @OLD_TIME_ZONE=@@TIME_ZONE")
+	mustExec(t, db, "SET TIME_ZONE='+00:00'")
+	mustExec(t, db, "SET TIME_ZONE=@OLD_TIME_ZONE")
+	mustExec(t, db, "SET time_zone = 'UTC'")
+	for _, q := range []string{"SET time_zone = '+09:00'", "SET time_zone = 'Asia/Tokyo'", "SET time_zone = 'SYSTEM'"} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+}
+
+// CheckSQL refuses a multi-statement query of more than one result set, as
+// running it does.
+func TestMySQLCheckSQLMultipleResultSets(t *testing.T) {
+	if err := CheckSQL(mysql.New(), "SELECT 1; SELECT 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CheckSQL: %v, want unsupported", err)
+	}
+}
+
 // ROLLBACK TO a savepoint restores the transaction's Postgres lock timeout
 // as it was there.
 func TestPostgresSavepointRestoresLockTimeout(t *testing.T) {

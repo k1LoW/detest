@@ -285,17 +285,6 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		// MySQL runs each statement of a multi-statement query as its own:
 		// committed on its own under autocommit, rolled back alone when it
 		// fails. A failing one stops the rest.
-		results := 0
-		for _, st := range script.Stmts {
-			if _, ok := st.(*sqlir.SelectStmt); ok {
-				results++
-			}
-		}
-		if results > 1 {
-			// database/sql would see the last result set only, where the
-			// driver hands the first and moves on with NextResultSet.
-			return nil, 0, sqlir.Unsupported("a multi-statement query of more than one result set", query)
-		}
 		var rows *sqlRows
 		var affected, lastID int64
 		for _, st := range script.Stmts {
