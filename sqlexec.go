@@ -1972,13 +1972,15 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				if _, row := derefValue(val).([]any); row {
 					return nil, x.unsupported("IN of a value among rows")
 				}
-				if derefValue(val) == nil || derefValue(l) == nil {
-					sawNull = true
-					continue // NULL equals nothing, itself included
-				}
+				// Typed first, as a NULL of text compared with a number is
+				// refused before any value is seen.
 				lt, vt, err := x.untypedPair(v.X, l, it, val)
 				if err != nil {
 					return nil, err
+				}
+				if derefValue(val) == nil || derefValue(l) == nil {
+					sawNull = true
+					continue // NULL equals nothing, itself included
 				}
 				if equalValues(x.comparable(lt, vt)) {
 					in = true
@@ -2109,6 +2111,11 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if _, ok := r.([]any); ok {
 		return nil, nil, x.unsupported("row comparison")
 	}
+	// A cast to text is text by its type even when its value is NULL, which
+	// Postgres refuses to compare with a number before any value is seen.
+	if textCast(le) && isNumber(r) || isNumber(l) && textCast(re) {
+		return nil, nil, x.unsupported("a comparison of text with a number")
+	}
 	// A parameter compared with text is sent as text, and the text a driver
 	// formats a float as is not modeled, unlike an integer's.
 	if floatParam(le, l, r) || floatParam(re, r, l) {
@@ -2196,6 +2203,11 @@ func paramText(e sqlir.Expr, v any) any {
 		}
 	}
 	return v
+}
+
+func textCast(e sqlir.Expr) bool {
+	c, ok := e.(*sqlir.Cast)
+	return ok && (c.Type == "text" || c.Type == "varchar" || c.Type == "bpchar")
 }
 
 func floatParam(e sqlir.Expr, v, other any) bool {

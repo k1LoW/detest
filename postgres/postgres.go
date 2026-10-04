@@ -1499,19 +1499,20 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 
 // textElements reports whether Postgres types an array of these elements as
 // text: each is a string literal, NULL, a parameter or a cast to text or
-// varchar, and one at least is a string or such a cast. A number among them
-// would make the array a number's instead.
+// varchar, and one at least is a string or such a cast, or every one is NULL.
+// A number among them would make the array a number's instead.
 func textElements(elements []*pg.Node) bool {
-	str := false
+	str, nulls := false, len(elements) > 0
 	for _, el := range elements {
 		if tc := el.GetTypeCast(); tc != nil {
 			if _, ok := plainTextCast(tc, false, "text", "varchar"); !ok {
 				return false
 			}
-			str = true
+			str, nulls = true, false
 			continue
 		}
 		if el.GetParamRef() != nil {
+			nulls = false
 			continue
 		}
 		k := el.GetAConst()
@@ -1519,12 +1520,12 @@ func textElements(elements []*pg.Node) bool {
 		case k == nil:
 			return false
 		case k.GetSval() != nil:
-			str = true
+			str, nulls = true, false
 		case !k.Isnull:
 			return false
 		}
 	}
-	return str
+	return str || nulls
 }
 
 // isConstElement reports whether an array element is a constant or a
