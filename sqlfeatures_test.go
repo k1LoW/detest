@@ -181,12 +181,27 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE CHECK (d <> 'x'))`,
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE UNIQUE)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE, u text GENERATED ALWAYS AS (upper(d)) STORED)`,
-		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT now() * 2 REFERENCES c (id))`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text NOT NULL DEFAULT CURRENT_DATE)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
 	} {
 		mustExec(t, db, ddl)
 		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: insert leaving out a default a key, constraint or generated column reads: got %v", ddl, err)
 		}
 		mustExec(t, db, `DROP TABLE e`)
+	}
+	// SET DEFAULT in a referential action always writes a foreign key
+	// column, so a default detest cannot compute is refused there, and the
+	// child keeps its row.
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE k (id int PRIMARY KEY, pid int DEFAULT length(CURRENT_USER) REFERENCES p (id) ON DELETE SET DEFAULT)`)
+	mustExec(t, db, `INSERT INTO p VALUES (1)`)
+	mustExec(t, db, `INSERT INTO k VALUES (1, 1)`)
+	if _, err := db.Exec(`DELETE FROM p WHERE id = 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ON DELETE SET DEFAULT with a default detest cannot compute: got %v", err)
+	}
+	var pid, parents int64
+	if err := db.QueryRow(`SELECT pid, (SELECT count(*) FROM p) FROM k WHERE id = 1`).Scan(&pid, &parents); err != nil || pid != 1 || parents != 1 {
+		t.Errorf("after the refused delete: pid=%d parents=%d err=%v; want both unchanged", pid, parents, err)
 	}
 }
