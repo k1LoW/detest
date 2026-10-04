@@ -34,8 +34,19 @@ func start() error {
 		ctx := context.Background()
 		// The module waits 60 seconds for the server, which a machine busy
 		// with other test runs can take longer than to start it.
-		myCtr, myErr = tcmysql.Run(ctx, "mysql:8.4", tcmysql.WithUsername("root"), tcmysql.WithPassword("detest"),
-			testcontainers.WithWaitStrategyAndDeadline(10*time.Minute, wait.ForLog("port: 3306  MySQL Community Server"), wait.ForListeningPort("3306/tcp")))
+		// testcontainers' own reaper container gets a fixed 60 seconds to
+		// start, so a start that fails is tried again.
+		for attempt := range 3 {
+			myCtr, myErr = tcmysql.Run(ctx, "mysql:8.4", tcmysql.WithUsername("root"), tcmysql.WithPassword("detest"),
+				testcontainers.WithWaitStrategyAndDeadline(10*time.Minute, wait.ForLog("port: 3306  MySQL Community Server"), wait.ForListeningPort("3306/tcp")))
+			if myErr == nil {
+				break
+			}
+			if myCtr != nil {
+				_ = myCtr.Terminate(ctx)
+			}
+			myErr = fmt.Errorf("start mysql (attempt %d): %w", attempt+1, myErr)
+		}
 		if myErr != nil {
 			return
 		}

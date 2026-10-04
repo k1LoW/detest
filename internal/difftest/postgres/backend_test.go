@@ -35,8 +35,19 @@ func start() error {
 		ctx := context.Background()
 		// BasicWaitStrategies waits 60 seconds for the server, which a
 		// machine busy with other test runs can take longer than to start it.
-		pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", testcontainers.WithWaitStrategyAndDeadline(10*time.Minute,
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2), wait.ForListeningPort("5432/tcp")))
+		// testcontainers' own reaper container gets a fixed 60 seconds to
+		// start, so a start that fails is tried again.
+		for attempt := range 3 {
+			pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", testcontainers.WithWaitStrategyAndDeadline(10*time.Minute,
+				wait.ForLog("database system is ready to accept connections").WithOccurrence(2), wait.ForListeningPort("5432/tcp")))
+			if pgErr == nil {
+				break
+			}
+			if pgCtr != nil {
+				_ = pgCtr.Terminate(ctx)
+			}
+			pgErr = fmt.Errorf("start postgres (attempt %d): %w", attempt+1, pgErr)
+		}
 		if pgErr != nil {
 			return
 		}
