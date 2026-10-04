@@ -968,6 +968,10 @@ func (c *pgConv) with(w *pg.WithClause) ([]sqlir.CTE, error) {
 	var out []sqlir.CTE
 	for _, n := range w.Ctes {
 		cte := n.GetCommonTableExpr()
+		if len(cte.Aliascolnames) > 0 {
+			// The CTE's rows are keyed by the names its query gives them.
+			return nil, c.unsupported("a column alias list on a CTE")
+		}
 		sel, err := c.selectStmt(cte.Ctequery.GetSelectStmt())
 		if err != nil {
 			return nil, err
