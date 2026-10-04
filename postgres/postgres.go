@@ -1347,15 +1347,18 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		case pg.SubLinkType_EXPR_SUBLINK:
 			return &sqlir.SubQuery{Select: sel}, nil
 		case pg.SubLinkType_ANY_SUBLINK:
+			// IN (subquery) comes with no operator and = ANY (subquery)
+			// with =, and both are IN. NOT IN arrives as a NOT around one.
+			// Another operator compares with each row, <> ANY meaning
+			// "differs from one", which IN cannot express.
+			if n := e.SubLink.OperName; len(n) > 0 && (len(n) > 1 || n[0].GetString_().GetSval() != "=") {
+				return nil, c.unsupported("an operator other than = with ANY (subquery)")
+			}
 			x, err := c.expr(e.SubLink.Testexpr)
 			if err != nil {
 				return nil, err
 			}
-			not := false
-			if len(e.SubLink.OperName) > 0 && e.SubLink.OperName[0].GetString_().GetSval() == "<>" {
-				not = true
-			}
-			return &sqlir.InExpr{X: x, Sub: sel, Not: not}, nil
+			return &sqlir.InExpr{X: x, Sub: sel}, nil
 		}
 		return nil, c.unsupported("subquery kind")
 	case *pg.Node_FuncCall:
