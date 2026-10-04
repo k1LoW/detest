@@ -364,32 +364,6 @@ func sequenceName(s string) string {
 	return strings.Join(parts, ".")
 }
 
-// seqName is the sequence name s refers to: one qualified by a schema as
-// written, else the first on the search path that exists, else where an
-// unqualified CREATE SEQUENCE puts it, the first schema of the path. A
-// sequence in public goes by its bare name, as sequenceName gives it.
-func (db *DB) seqName(s string) string {
-	s = sequenceName(s)
-	if strings.Contains(s, ".") {
-		return s
-	}
-	path := db.kind.SearchPath()
-	if len(path) == 0 {
-		path = defaultSearchPath
-	}
-	in := func(schema string) string { return sequenceName(schema + "." + s) }
-	for _, schema := range path {
-		q := in(schema)
-		if _, ok := db.seqDefs[q]; ok {
-			return q
-		}
-		if _, ok := db.seqs[q]; ok {
-			return q
-		}
-	}
-	return in(path[0])
-}
-
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	table = db.resolve(table)
@@ -876,6 +850,32 @@ type seqDef struct {
 }
 
 // seq returns the options of seq, those of a sequence declared without any
+// seqName is the sequence name s refers to: one qualified by a schema as
+// written, else the first on the search path that exists, else where an
+// unqualified CREATE SEQUENCE puts it, the first schema of the path. A
+// sequence in public goes by its bare name, as sequenceName gives it.
+func (db *DB) seqName(s string) string {
+	if strings.Contains(s, ".") {
+		return sequenceName(s)
+	}
+	s = sequenceName(s)
+	path := db.kind.SearchPath()
+	if len(path) == 0 {
+		path = defaultSearchPath
+	}
+	in := func(schema string) string { return sequenceName(schema + "." + s) }
+	for _, schema := range path {
+		q := in(schema)
+		if _, ok := db.seqDefs[q]; ok {
+			return q
+		}
+		if _, ok := db.seqs[q]; ok {
+			return q
+		}
+	}
+	return in(path[0])
+}
+
 // when it was not.
 func (db *DB) seqOptions(seq string) seqDef {
 	if d := db.seqDefs[seq]; d != nil {
