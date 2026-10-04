@@ -556,7 +556,9 @@ func TestMySQLSavepointKeepsLocks(t *testing.T) {
 				return err
 			}
 			defer func() { _ = tx.Rollback() }()
-			for _, q := range []string{"SAVEPOINT sp", "SELECT id FROM t WHERE id = 1 FOR UPDATE", "ROLLBACK TO SAVEPOINT sp"} {
+			// A read first starts the transaction in InnoDB: a rollback to a
+			// savepoint taken before that rolls back every lock.
+			for _, q := range []string{"SELECT v FROM t", "SAVEPOINT sp", "SELECT id FROM t WHERE id = 1 FOR UPDATE", "ROLLBACK TO SAVEPOINT sp"} {
 				if _, err := tx.Exec(q); err != nil {
 					return err
 				}
@@ -828,7 +830,7 @@ func TestLockingJoinOf(t *testing.T) {
 						return err
 					}
 					defer func() { _ = tx.Rollback() }()
-					rows, err := tx.Query("SELECT a.id FROM a JOIN b ON b.a_id = a.id FOR UPDATE OF a")
+					rows, err := tx.Query("SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE OF a")
 					if err != nil {
 						return err
 					}
@@ -2045,54 +2047,35 @@ func TestMySQLTwentyFirstReviewFindings(t *testing.T) {
 	}
 }
 
-// A locking read over a LEFT JOIN keeps the left row when the joined row it
-// waited for is deleted.
-func TestMySQLLockingLeftJoinKeepsTheLeftRow(t *testing.T) {
-	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysqlBin())
-		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
-		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
-		s.Seed(func() { mustExec(t, db, "INSERT INTO a VALUES (1)") })
-		s.Seed(func() { mustExec(t, db, "INSERT INTO b VALUES (1, 1)") })
-		broke := false
-		s.Seed(func() { broke = false })
-		s.Manual("deleter", 1, func(p *Proc) error {
-			tx, err := db.BeginTx(p.Context(), nil)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tx.Rollback() }()
-			if _, err := tx.Exec("DELETE FROM b WHERE id = 1"); err != nil {
-				return err
-			}
-			p.Step("holds b's row")
-			return tx.Commit()
-		})
-		s.Manual("reader", 1, func(p *Proc) error {
-			tx, err := db.BeginTx(p.Context(), nil)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tx.Rollback() }()
-			rows, err := tx.Query("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id FOR UPDATE")
-			if err != nil {
-				return err
-			}
-			n := 0
-			for rows.Next() {
-				n++
-			}
-			_ = rows.Close()
-			broke = broke || n != 1
-			return tx.Commit()
-		})
-		s.AtQuiescence(func(*State) error {
-			if broke {
-				return fmt.Errorf("the LEFT JOIN lost a's row")
-			}
-			return nil
-		})
-	})
+// A locking read over a LEFT JOIN that would lock the nullable side is
+// refused, as the row it locks there may be none; FOR UPDATE OF the left
+// table runs.
+func TestMySQLLockingLeftJoinOnTheNullableSide(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
+	mustExec(t, db, "INSERT INTO a VALUES (1)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("FOR UPDATE over the nullable side: got %v, want ErrUnsupportedSQL", err)
+	}
+	rows, err := tx.Query("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE OF a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	_ = rows.Close()
+	if n != 1 {
+		t.Errorf("FOR UPDATE OF a read %d rows, want a's one", n)
+	}
 }
 
 func TestMySQLTwentySecondReviewFindings(t *testing.T) {
@@ -4060,8 +4043,8 @@ func TestMySQLCompositeIndexSearch(t *testing.T) {
 	if _, err := tx.Exec("SELECT v FROM t WHERE tenant = 1 AND id > 4 AND id < 8 FOR UPDATE"); err != nil {
 		t.Fatal(err)
 	}
-	if !locked(keyOfRow(1, 5)) || !locked(keyOfRow(1, 9)) || locked(keyOfRow(1, 1)) || locked(keyOfRow(2, 1)) {
-		t.Error("a range on the second column should lock (1, 5) and the next record (1, 9) only")
+	if !locked(keyOfRow(1, 5)) || locked(keyOfRow(1, 9)) || locked(keyOfRow(1, 1)) || locked(keyOfRow(2, 1)) {
+		t.Error("a range on the second column should lock (1, 5) only, and the gap before the next record (1, 9)")
 	}
 	covered := func(tenant, id int64) bool {
 		r := Row{"tenant": tenant, "id": id}
@@ -4737,4 +4720,208 @@ func TestMySQLDoubleColumnsAndVolatileNullif(t *testing.T) {
 	if _, err := db.Exec("SELECT NULLIF(UUID(), '')"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("NULLIF(UUID(), ''): %v, want unsupported", err)
 	}
+}
+
+// InnoDB rolls back the lighter transaction of a deadlock, by the undo
+// records it wrote and the lock structs it holds, and of equal ones the one
+// that closed the cycle, which comes first.
+func TestInnoDBDeadlockVictim(t *testing.T) {
+	s := newSim(t)
+	_, store := s.DB("app", mysqlBin())
+	tx := func(undo int) *Tx {
+		return &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, undo: undo}
+	}
+	closer, other := tx(1), tx(1)
+	if v := innodbVictim([]*Tx{closer, other}); v != closer {
+		t.Error("of equal weights, the transaction that closed the cycle is the victim")
+	}
+	heavy, light := tx(3), tx(1)
+	if v := innodbVictim([]*Tx{heavy, light}); v != light {
+		t.Error("the lighter transaction is the victim")
+	}
+}
+
+// A secondary index search records the primary key's record lock struct only
+// for a row it reaches: one that finds nothing holds the secondary index's
+// locks alone.
+func TestInnoDBLockStructsOfASecondarySearch(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 10), (2, 20)")
+	for _, c := range []struct {
+		q       string
+		primary bool
+	}{
+		{"SELECT id FROM t WHERE k = 15 FOR UPDATE", false},
+		{"SELECT id FROM t WHERE k = 10 FOR UPDATE", true},
+	} {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(c.q); err != nil {
+			t.Fatal(err)
+		}
+		var structs map[lockStruct]bool
+		_ = conn.Raw(func(dc any) error {
+			if sc, ok := dc.(*sqlConn); ok && sc.tx != nil {
+				structs = sc.tx.lockStructs
+			}
+			return nil
+		})
+		if got := structs[structKey(store.resolve("t"), "PRIMARY", lockUpdate, "record")]; got != c.primary {
+			t.Errorf("%s: primary key record struct %v, want %v (%v)", c.q, got, c.primary, structs)
+		}
+		_ = tx.Rollback()
+		_ = conn.Close()
+	}
+}
+
+// Index names stay apart whatever their columns are called, a column named
+// after several others or PRIMARY, and two indexes over the same columns.
+func TestSecondaryIndexNamesAreDistinct(t *testing.T) {
+	names := []string{
+		"PRIMARY",
+		secondaryIndex("", []string{"PRIMARY"}), secondaryIndex("", []string{"x,y"}), secondaryIndex("", []string{"x", "y"}), secondaryIndex("", []string{"x|y"}),
+		secondaryIndex("PRIMARY", nil), secondaryIndex("x", []string{"x"}), secondaryIndex("x_2", []string{"x"}),
+	}
+	for i := range names {
+		for j := range i {
+			if names[i] == names[j] {
+				t.Errorf("index names %d and %d collide: %q", j, i, names[i])
+			}
+		}
+	}
+}
+
+// A statement refused as unsupported is listed after the exploration, as an
+// application that drops the error would hide it.
+func TestReportListsUnsupportedStatements(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
+		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
+		s.Manual("reader", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			_, _ = tx.Exec("SELECT a.id FROM a JOIN b ON b.a_id = a.id FOR UPDATE")
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Violated || len(res.Unsupported) != 1 || !strings.Contains(res.Unsupported[0], "a locking read joining tables") {
+		t.Fatalf("want the locking join listed as unsupported, got %q", res.Unsupported)
+	}
+	if !strings.Contains(res.report(), res.Unsupported[0]) {
+		t.Fatalf("report does not list it:\n%s", res.report())
+	}
+}
+
+// A locking join whose locks depend on MySQL's plan is refused, and the
+// refused statement leaves no lock struct behind.
+func TestLockingJoinRefusals(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT, KEY (a_id))")
+	mustExec(t, db, "INSERT INTO a VALUES (1, 0), (2, 0)")
+	for _, c := range []struct {
+		level sql.IsolationLevel
+		q     string
+	}{
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id IN (1, 2) FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 LIMIT 1 FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id OR b.id = a.id WHERE a.id = 1 FOR UPDATE"},
+		{sql.LevelReadCommitted, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE"},
+	} {
+		q := c.q
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{Isolation: c.level})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		_ = conn.Raw(func(dc any) error {
+			if sc, ok := dc.(*sqlConn); ok && sc.tx != nil && len(sc.tx.lockStructs) > 0 {
+				t.Errorf("%s: a refused statement left lock structs %v", q, sc.tx.lockStructs)
+			}
+			return nil
+		})
+		_ = tx.Rollback()
+		_ = conn.Close()
+	}
+}
+
+// The direct transaction API weighs a deadlock victim by the undo records
+// of its writes as the SQL executor does, and a failed write's goes with it.
+func TestInnoDBTxAPIUndo(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE t (id VARCHAR(5) PRIMARY KEY, code VARCHAR(5), UNIQUE KEY (code))")
+		var got []int
+		s.Seed(func() { got = nil })
+		s.Manual("writer", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				_ = tx.Insert("t", Row{"id": "a", "code": "x"})
+				got = append(got, tx.undo)
+				_ = tx.Insert("t", Row{"id": "b", "code": "x"}) // a duplicate code
+				got = append(got, tx.undo)
+				_, _ = tx.Update("t", "a", Row{"code": "y"})
+				got = append(got, tx.undo)
+				_, _ = tx.Delete("t", "a")
+				got = append(got, tx.undo)
+				return nil
+			})
+		})
+		s.AtQuiescence(func(*State) error {
+			if want := []int{1, 1, 2, 3}; !slices.Equal(got, want) {
+				return fmt.Errorf("undo after insert, failed insert, update, delete: %v, want %v", got, want)
+			}
+			return nil
+		})
+	})
+}
+
+// Inserts of a key already there through the transaction API fail under
+// shared duplicate-check locks, which do not wait for each other.
+func TestInnoDBTxAPIDuplicatesShare(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE t (id VARCHAR(5) PRIMARY KEY)")
+		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES ('a')") })
+		open, shared := false, false
+		s.Seed(func() { open, shared = false, false })
+		s.Manual("first", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if err := tx.Insert("t", Row{"id": "a"}); err == nil {
+					return fmt.Errorf("a duplicate went in")
+				}
+				open = true
+				p.Step("holds its duplicate check")
+				open = false
+				return nil
+			})
+		})
+		s.Manual("second", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				err := tx.Insert("t", Row{"id": "a"})
+				shared = shared || err != nil && open
+				return nil
+			})
+		})
+		s.Sometimes("the second fails while the first holds its check", func(*State) bool { return shared })
+	})
 }

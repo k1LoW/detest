@@ -261,6 +261,14 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 }
 
 func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64, error) {
+	rows, affected, err := c.runQuery(query, named)
+	if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
+		c.db.s.refuse(u)
+	}
+	return rows, affected, err
+}
+
+func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, int64, error) {
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		args[i] = nv.Value
@@ -317,7 +325,14 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 	if innodb {
 		mark = tx.markStatement()
 	}
+	// A statement starts the transaction in InnoDB when it reads or locks
+	// its data (selectNoYield, snapshotRows, lockWith); a refused one leaves
+	// it as it was.
+	started := tx.started
 	res, err := stmt.exec(tx, args)
+	if errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
+		tx.started = started
+	}
 	if c.db.s.sqlObserver != nil {
 		c.db.s.sqlObserver(query, err)
 	}

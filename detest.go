@@ -289,13 +289,29 @@ type result struct {
 	Fatal error
 	// Unreached are the Sometimes conditions no run explored so far met.
 	Unreached []string
-	Schedule  string
-	Trace     string
-	Elapsed   time.Duration
+	// Unsupported are the statements refused with ErrUnsupportedSQL in any
+	// run, which an application that does not report the error hides.
+	Unsupported []string
+	Schedule    string
+	Trace       string
+	Elapsed     time.Duration
 }
 
-// report formats the outcome for humans.
+// report formats the outcome for humans, with the statements refused as
+// unsupported after it.
 func (r *result) report() string {
+	var msg strings.Builder
+	msg.WriteString(r.outcome())
+	if len(r.Unsupported) > 0 {
+		msg.WriteString("\ndetest: statements refused as unsupported (ErrUnsupportedSQL), which the application got as an error:")
+		for _, u := range r.Unsupported {
+			msg.WriteString("\n  " + u)
+		}
+	}
+	return msg.String()
+}
+
+func (r *result) outcome() string {
 	if !r.Violated && r.Replay {
 		if r.CutRuns > 0 {
 			return fmt.Sprintf("detest: replayed schedule %s without violation, but it was cut at MaxIdleTicks and its invariants at quiescence were not checked", r.Schedule)
@@ -336,6 +352,13 @@ func (r *result) report() string {
 	}
 	return fmt.Sprintf("detest: %s\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		what, r.Runs, choices, r.Schedule, r.Trace)
+}
+
+// refuse records a statement refused as unsupported, for the report.
+func (s *Sim) refuse(err *ErrUnsupportedSQL) {
+	if s.frontier != nil {
+		s.frontier.refuse(err.Error())
+	}
 }
 
 // check runs the exhaustive exploration. DETEST_REPLAY or Replay replays
