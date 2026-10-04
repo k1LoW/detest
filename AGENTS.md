@@ -83,6 +83,7 @@ An approximation still has two obligations. It must be deterministic, because a 
 - For an approximation, write the simplest form and say in a comment what the server does and why detest does not, so the next reader does not take the difference for a bug. Do not add an option to make it exact.
 - Leave unchecked what cannot happen under the assumptions, such as a failed DDL statement's partial state. Rejecting it is not needed either.
 - Check a proposed rejection against the statements the existing tests run, and against what migrations and dumps routinely contain. A rejection that stops a schema from loading is wrong even when the form is out of scope.
+- When fixing how a simulated database behaves, add a case to `internal/difftest/` wherever the behavior can be written as one, so that it is checked against the real server rather than against what the fix assumes the server does.
 - Ask the maintainer when it is unclear which answer something gets.
 
 ### Review comments
