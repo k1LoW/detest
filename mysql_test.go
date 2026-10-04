@@ -4243,3 +4243,16 @@ func TestMySQLUnconvertedCheck(t *testing.T) {
 		t.Errorf("a write the check guards: %v, want unsupported", err)
 	}
 }
+
+// A column added with a default gives existing rows the default as an
+// insert would store it, converted to the column's type.
+func TestMySQLBackfillConvertsTheDefault(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
+	mustExec(t, db, "INSERT INTO t VALUES (1)")
+	mustExec(t, db, "ALTER TABLE t ADD COLUMN n INT DEFAULT '5'")
+	if got := derefValue(store.Peek("t")[0]["n"]); got != int64(5) {
+		t.Errorf("backfilled %#v, want int64 5", got)
+	}
+}

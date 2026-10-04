@@ -1102,6 +1102,11 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, tx *Tx) error {
 			}
 			n[c.Name] = v
 		}
+		// The default is stored as an insert stores it, converted to the
+		// column's type and checked against it.
+		if err := x.checkTypes(table, n); err != nil {
+			return nil, err
+		}
 		return n, nil
 	}
 	for k, r := range db.committed[table] {
