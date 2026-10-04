@@ -230,7 +230,7 @@ func (x *sqlExec) projectItems(sel *sqlir.SelectStmt, items []*selItem, rows []j
 			}
 			v, err := x.value(it, t.Expr)
 			if err != nil {
-				return nil, err
+				return nil, x.unsupportedExpr(err, "in the select list")
 			}
 			o[keys[i]] = v
 		}

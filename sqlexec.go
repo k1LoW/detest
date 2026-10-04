@@ -980,7 +980,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		if x.tx.db.ignored[table] {
 			out.affected++
-			x.appendReturning(out, ins.Returning, row)
+			if err := x.appendReturning(out, ins.Returning, row); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
@@ -1068,7 +1070,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
 			out.affected++
-			x.appendReturning(out, ins.Returning, updated)
+			if err := x.appendReturning(out, ins.Returning, updated); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		lk = lockKey{table, row.Key()}
@@ -1087,7 +1091,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		out.affected++
-		x.appendReturning(out, ins.Returning, row)
+		if err := x.appendReturning(out, ins.Returning, row); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1142,9 +1148,9 @@ func (x *sqlExec) returningCols(ret []sqlir.Target, all []string) []string {
 	return cols
 }
 
-func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) {
+func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) error {
 	if len(ret) == 0 {
-		return
+		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
 	e := &env{merged: row}
@@ -1155,10 +1161,14 @@ func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) {
 			}
 			break
 		}
-		v, _ := x.eval(t.Expr, e)
+		v, err := x.eval(t.Expr, e)
+		if err != nil {
+			return x.unsupportedExpr(err, "in RETURNING")
+		}
 		vals = append(vals, toDriverValue(v))
 	}
 	out.rows = append(out.rows, vals)
+	return nil
 }
 
 // --- UPDATE / DELETE ---
@@ -1293,7 +1303,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		}
 		x.tx.writes[lk] = updated
 		out.affected++
-		x.appendReturning(out, up.Returning, updated)
+		if err := x.appendReturning(out, up.Returning, updated); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1344,7 +1356,9 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		out.affected++
-		x.appendReturning(out, del.Returning, cur)
+		if err := x.appendReturning(out, del.Returning, cur); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
