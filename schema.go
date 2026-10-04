@@ -429,7 +429,8 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if v == nil {
 			continue
 		}
-		if t := def.types[col]; x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
+		t := def.types[col]
+		if x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
 			if l, ok := def.strs[col]; ok && l.members != nil {
 				stored, err := x.mysqlMember(table, col, l, v)
 				if err != nil {
@@ -450,8 +451,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		}
 		// Unknown stands for a value detest could not compute, not one the
 		// statement wrote, so it is kept to be reported where it is read.
-		if name, ok := numberTypes[def.types[col]]; ok && !x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
-			n, ok := columnNumber(v, def.types[col])
+		if name, ok := numberTypes[t]; ok && !x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
+			if !isNumber(v) && !isText(v) {
+				return x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, name, col))
+			}
+			n, ok := columnNumber(v, t)
 			if !ok {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
 			}

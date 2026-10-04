@@ -468,6 +468,12 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id) VALUES ('01')`); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("got %v, want a unique violation", err)
 	}
+	// A value of another type is not converted, where Postgres refuses it.
+	for _, v := range []any{true, time.Unix(0, 0)} {
+		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%T: got %v, want unsupported", v, err)
+		}
+	}
 	for _, q := range []string{
 		`INSERT INTO t (id) VALUES ('abc')`,
 		`INSERT INTO t (id) VALUES ('1.5')`,
