@@ -229,6 +229,9 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 		// taken for a full scan, it would lock the whole table.
 		return x.unsupported("a locking search with OR on an indexed column (write it as IN)")
 	}
+	if sr := x.searchRange(table, alias, where); !sr.unique && x.unequalOnIndex(table, alias, where) {
+		return x.unsupported("a locking search with <>, != or NOT IN on an indexed column")
+	}
 	switch sr := x.searchRange(table, alias, where); {
 	case sr.ambiguous:
 		// Which index MySQL searches, and so which range it locks, depends
@@ -756,6 +759,84 @@ func (x *sqlExec) prefixSearch(table, alias string, where sqlir.Expr) error {
 	return nil
 }
 
+// likePrefix is the literal start of a LIKE pattern, before its first
+// wildcard, with backslash escapes undone, and whether it has a wildcard.
+func likePrefix(p string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; c {
+		case '\\':
+			if i+1 < len(p) {
+				i++
+				b.WriteByte(p[i])
+				continue
+			}
+			b.WriteByte(c)
+		case '%', '_':
+			return b.String(), true
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), false
+}
+
+// likeUpper is the least string above every string that starts with
+// prefix, in the byte order detest compares strings in. ok is false when
+// none is, for a prefix of 0xff bytes only.
+func likeUpper(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for len(b) > 0 {
+		if b[len(b)-1] < 0xff {
+			b[len(b)-1]++
+			return string(b), true
+		}
+		b = b[:len(b)-1]
+	}
+	return "", false
+}
+
+// unequalOnIndex reports whether a conjunct of where is <>, != or NOT IN
+// on the leading column of one of table's indexes, which MySQL's optimizer
+// may search as the ranges around the values or by a full scan.
+func (x *sqlExec) unequalOnIndex(table, alias string, where sqlir.Expr) bool {
+	def := x.tx.db.defs[table]
+	if def == nil || where == nil {
+		return false
+	}
+	leading := map[string]bool{}
+	if len(def.pk) > 0 {
+		leading[def.pk[0]] = true
+	}
+	for _, u := range def.uniques {
+		if c, ok := u.Elems[0].(*sqlir.ColumnRef); ok {
+			leading[c.Column] = true
+		}
+	}
+	for _, ix := range def.indexes {
+		if len(ix.Columns) > 0 {
+			leading[ix.Columns[0]] = true
+		}
+	}
+	isLeading := func(e sqlir.Expr) bool {
+		c, ok := e.(*sqlir.ColumnRef)
+		return ok && leading[c.Column] && (c.Table == "" || c.Table == alias || c.Table == relname(table))
+	}
+	for _, e := range splitAnd(where) {
+		switch e := e.(type) {
+		case *sqlir.BinaryExpr:
+			if (e.Op == "<>" || e.Op == "!=") && (isLeading(e.L) || isLeading(e.R)) {
+				return true
+			}
+		case *sqlir.InExpr:
+			if e.Not && isLeading(e.X) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // orOnIndex reports whether a conjunct of where is an OR that refers to a
 // column of one of table's indexes.
 func (x *sqlExec) orOnIndex(table, alias string, where sqlir.Expr) bool {
@@ -889,25 +970,54 @@ func (x *sqlExec) columnRanges(col, alias, table string, conjuncts []sqlir.Expr)
 			if !ok {
 				continue
 			}
-			switch op {
-			case "=", "<=>": // the bound is no NULL, which <=> would match as =
-				allow([]any{v})
-			case ">", ">=":
-				switch {
-				case !bound.hasLo || greater(v, bound.lo):
-					bound.lo, bound.hasLo, bound.loOpen = v, true, op == ">"
-				case op == ">" && !greater(bound.lo, v):
-					bound.loOpen = true // the same bound, open if either conjunct is
+			type cond struct {
+				op string
+				v  any
+			}
+			conds := []cond{{op, v}}
+			if op == "LIKE" {
+				// LIKE on a text column searches the range of strings that
+				// start with the pattern's literal prefix; one without a
+				// wildcard is an equality.
+				s, isStr := v.(string)
+				if !text || !isStr || !isCol(e.L) {
+					continue
 				}
-				found = true
-			case "<", "<=":
+				prefix, wild := likePrefix(s)
 				switch {
-				case !bound.hasHi || greater(bound.hi, v):
-					bound.hi, bound.hasHi, bound.hiOpen = v, true, op == "<"
-				case op == "<" && !greater(v, bound.hi):
-					bound.hiOpen = true
+				case !wild:
+					conds = []cond{{"=", prefix}}
+				case prefix == "":
+					continue // a leading wildcard bounds nothing
+				default:
+					conds = []cond{{">=", prefix}}
+					if hi, ok := likeUpper(prefix); ok {
+						conds = append(conds, cond{"<", hi})
+					}
 				}
-				found = true
+			}
+			for _, c := range conds {
+				op, v := c.op, c.v
+				switch op {
+				case "=", "<=>": // the bound is no NULL, which <=> would match as =
+					allow([]any{v})
+				case ">", ">=":
+					switch {
+					case !bound.hasLo || greater(v, bound.lo):
+						bound.lo, bound.hasLo, bound.loOpen = v, true, op == ">"
+					case op == ">" && !greater(bound.lo, v):
+						bound.loOpen = true // the same bound, open if either conjunct is
+					}
+					found = true
+				case "<", "<=":
+					switch {
+					case !bound.hasHi || greater(bound.hi, v):
+						bound.hi, bound.hasHi, bound.hiOpen = v, true, op == "<"
+					case op == "<" && !greater(v, bound.hi):
+						bound.hiOpen = true
+					}
+					found = true
+				}
 			}
 		case *sqlir.IsNull:
 			if !e.Not && isCol(e.X) {

@@ -4523,3 +4523,34 @@ func TestMySQLNullSafeEqualBoundNull(t *testing.T) {
 		t.Error("row 3, past the NULL keys and the next record, is locked")
 	}
 }
+
+// LIKE with a literal prefix on an indexed text column searches the range
+// of strings that start with it, so the search locks those and its gaps,
+// not the whole table; <>, != and NOT IN on an indexed column are refused.
+func TestMySQLLikePrefixSearch(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(10), KEY (code))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 'aa'), (2, 'ab'), (3, 'ba'), (4, 'ca')")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("SELECT id FROM t WHERE code LIKE 'a%' FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	table := store.resolve("t")
+	locked := func(k string) bool { return len(store.locks[lockKey{table, k}]) > 0 }
+	if !locked("1") || !locked("2") || !locked("3") || locked("4") {
+		t.Error("LIKE 'a%' should lock 'aa', 'ab' and the next record 'ba' only")
+	}
+	for _, q := range []string{"SELECT id FROM t WHERE code <> 'aa' FOR UPDATE", "SELECT id FROM t WHERE code NOT IN ('aa') FOR UPDATE"} {
+		if _, err := tx.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	if p, wild := likePrefix(`a\%b%`); p != "a%b" || !wild {
+		t.Errorf("likePrefix: %q, %v", p, wild)
+	}
+}
