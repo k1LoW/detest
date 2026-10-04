@@ -374,7 +374,13 @@ CREATE TABLE ga (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v text);
 CREATE TABLE u (id int PRIMARY KEY, email text, deleted bool NOT NULL DEFAULT false);
 CREATE UNIQUE INDEX u_email ON u (email) WHERE NOT deleted;
 CREATE SEQUENCE cached CACHE 20;
+CREATE SEQUENCE kept START 5;
+CREATE SEQUENCE IF NOT EXISTS kept START 10;
 `)
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('kept')`).Scan(&n); err != nil || n != 5 {
+		t.Errorf("CREATE SEQUENCE IF NOT EXISTS must keep the sequence: %d %v", n, err)
+	}
 	mustExec(t, db, `INSERT INTO ga (v) VALUES ('a')`)
 	mustExec(t, db, `INSERT INTO ga (id, v) VALUES (DEFAULT, 'b')`)
 	mustExec(t, db, `INSERT INTO ga (id, v) OVERRIDING SYSTEM VALUE VALUES (10, 'c')`)

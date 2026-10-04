@@ -961,6 +961,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	switch {
 	case ch.Object == "sequence":
 		if ch.Sequence != nil {
+			if _, exists := db.seqDefs[sequenceName(ch.Table)]; exists && ch.Create && ch.IfNotExists {
+				return nil
+			}
 			db.alterSequence(ch.Table, ch.Sequence, ch.Create)
 		}
 		return nil
