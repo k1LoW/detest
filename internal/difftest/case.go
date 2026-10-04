@@ -17,10 +17,12 @@ type Case struct {
 	// Conns is the number of connections the steps use.
 	Conns int
 	Steps []Step
-	// Racy marks a case whose outcome on the real server depends on timing,
-	// such as which session breaks a deadlock. detest then has to give the
-	// real server's outcome among others, not only it.
-	Racy bool
+	// Pauses runs the case once more on the real server per entry, sleeping
+	// before the steps an entry maps, for a case whose outcome on the server
+	// depends on timing, such as which session breaks a deadlock. detest has
+	// no time between steps, so it has to give every outcome these runs give
+	// and no other.
+	Pauses []map[int]time.Duration
 }
 
 // Step runs one statement on connection Conn (0-based). BEGIN, COMMIT and
@@ -29,9 +31,6 @@ type Case struct {
 type Step struct {
 	Conn int
 	SQL  string
-	// Pause waits before the step on the real server, to steer a racy case
-	// to one of its outcomes. detest has no time between steps.
-	Pause time.Duration
 }
 
 // S is a shorthand for Step.

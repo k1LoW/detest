@@ -20,35 +20,43 @@ import (
 // in flight has finished or waits for a lock, so a step marked as waited
 // waited on both.
 //
-// detest explores every interleaving the steps leave open. They must all end
-// the same way as the real server, since an outcome the real server never
-// gives is one an application test would report wrongly.
+// detest explores every interleaving the steps leave open, and the outcomes
+// they end in must be the ones the real server gives, no more and no fewer.
+// An outcome the server never gives is one an application test would report
+// wrongly, and one detest never gives is a bug it cannot find.
 func Run(t *testing.T, b Backend, c Case) {
 	t.Helper()
-	want := runReal(t, b, c)
-	if t.Failed() {
-		return
+	var want []string
+	for _, pauses := range append([]map[int]time.Duration{nil}, c.Pauses...) {
+		w := runReal(t, b, c, pauses)
+		if t.Failed() {
+			return
+		}
+		if !slices.Contains(want, w) {
+			want = append(want, w)
+		}
 	}
 	got := runDetest(t, b, c)
 	if t.Failed() {
-		t.Logf("the real server gives\n%s", want)
-		return
-	}
-	if len(got) == 1 && got[0] == want {
-		return
-	}
-	if c.Racy && slices.Contains(got, want) {
+		for _, w := range want {
+			t.Logf("the real server gives\n%s", w)
+		}
 		return
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "detest differs from the real server\n--- real\n%s", want)
-	for i, g := range got {
-		if g == want {
-			continue
+	for _, w := range want {
+		if !slices.Contains(got, w) {
+			fmt.Fprintf(&sb, "--- real, never given by detest\n%s", w)
 		}
-		fmt.Fprintf(&sb, "--- detest (%d of %d outcomes)\n%s", i+1, len(got), g)
 	}
-	t.Error(sb.String())
+	for _, g := range got {
+		if !slices.Contains(want, g) {
+			fmt.Fprintf(&sb, "--- detest, never given by the real server\n%s", g)
+		}
+	}
+	if sb.Len() > 0 {
+		t.Errorf("detest differs from the real server\n%s", sb.String())
+	}
 }
 
 type stepResult struct {
@@ -301,20 +309,31 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 	return outcomes
 }
 
-func runReal(t *testing.T, b Backend, c Case) string {
+func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) string {
 	t.Helper()
-	ctx := t.Context()
 	db := b.Open(t)
+	// Canceled before waiting for the connections, so that a statement still
+	// waiting for a lock when the case fails ends rather than hangs the test.
+	ctx, cancel := context.WithCancel(t.Context())
+	results := make(chan stepDone, len(c.Steps))
+	cmds := make([]chan int, c.Conns)
+	ids := make([]int64, c.Conns)
+	var wg sync.WaitGroup
+	defer func() {
+		for _, ch := range cmds {
+			if ch != nil {
+				close(ch)
+			}
+		}
+		cancel()
+		wg.Wait()
+	}()
 	for _, q := range append(append([]string{}, c.Schema...), c.Seed...) {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			t.Fatalf("real setup: %s: %v", q, err)
 		}
 	}
 
-	results := make(chan stepDone, len(c.Steps))
-	cmds := make([]chan int, c.Conns)
-	ids := make([]int64, c.Conns)
-	var wg sync.WaitGroup
 	for i := range c.Conns {
 		conn, err := db.Conn(ctx)
 		if err != nil {
@@ -335,12 +354,6 @@ func runReal(t *testing.T, b Backend, c Case) string {
 			}
 		})
 	}
-	defer func() {
-		for _, ch := range cmds {
-			close(ch)
-		}
-		wg.Wait()
-	}()
 
 	res := make([]stepResult, len(c.Steps))
 	pending := map[int]int{} // step -> conn
@@ -355,7 +368,7 @@ func runReal(t *testing.T, b Backend, c Case) string {
 			}
 		}
 		last[st.Conn] = k
-		time.Sleep(st.Pause)
+		time.Sleep(pauses[k])
 		pending[k] = st.Conn
 		cmds[st.Conn] <- k
 		if err := settle(ctx, b, db, ids, pending, results, res); err != nil {

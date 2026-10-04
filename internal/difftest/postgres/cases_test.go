@@ -56,18 +56,23 @@ var cases = []difftest.Case{
 		},
 	},
 	{
-		// The first waiter's deadlock check runs after the cycle closed, and
-		// it aborts itself.
-		Name:   "deadlock breaks the first waiter",
-		Schema: stockSchema, Seed: stockSeed, Conns: 2, Racy: true,
-		Steps: deadlockSteps(0),
-	},
-	{
-		// The first waiter's check found no cycle yet, so the session that
-		// closed it aborts itself.
-		Name:   "deadlock breaks the session closing the cycle",
-		Schema: stockSchema, Seed: stockSeed, Conns: 2, Racy: true,
-		Steps: deadlockSteps(300 * time.Millisecond), // longer than deadlock_timeout
+		// Run at once, the first waiter's deadlock check runs after the cycle
+		// closed, and it aborts itself. With a pause longer than
+		// deadlock_timeout before the cycle closes, its check finds nothing,
+		// and the session closing the cycle aborts itself.
+		Name:   "deadlock victim",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(1, `BEGIN`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+		Pauses: []map[int]time.Duration{{5: 300 * time.Millisecond}},
 	},
 	{
 		Name:   "failed statement releases the locks",
@@ -139,19 +144,6 @@ var cases = []difftest.Case{
 			difftest.S(1, `COMMIT`),
 		},
 	},
-}
-
-func deadlockSteps(pause time.Duration) []difftest.Step {
-	return []difftest.Step{
-		difftest.S(0, `BEGIN`),
-		difftest.S(1, `BEGIN`),
-		difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
-		difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
-		difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
-		{Conn: 1, SQL: `UPDATE stock SET n = 0 WHERE sku = 'apple'`, Pause: pause},
-		difftest.S(0, `ROLLBACK`),
-		difftest.S(1, `ROLLBACK`),
-	}
 }
 
 func TestDiff(t *testing.T) {
