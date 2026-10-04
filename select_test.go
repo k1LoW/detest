@@ -687,6 +687,66 @@ func TestTextComparedWithNumber(t *testing.T) {
 	}
 }
 
+func TestBooleanAndTimestampColumnsStoreTheirValues(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, at timestamptz, ts timestamp, active bool, name text)`)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mustExec(t, db, `INSERT INTO e VALUES (1, '2024-01-01 09:00:00+09', '2024-01-01 00:00:00+09', 'true', 't')`)
+	mustExec(t, db, `INSERT INTO e VALUES (2, $1, $1, true, 'true')`, at)
+	mustExec(t, db, `INSERT INTO e VALUES (3, $1, $2, $3, 'f')`, "2023-12-31T00:00:00Z", []byte("2023-12-31"), []byte("off"))
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  []string
+	}{
+		{`SELECT id FROM e WHERE active ORDER BY id`, nil, []string{"1", "2"}},
+		{`SELECT id FROM e WHERE NOT active ORDER BY id`, nil, []string{"3"}},
+		{`SELECT id FROM e WHERE at = (SELECT at FROM e WHERE id = 2) ORDER BY id`, nil, []string{"1", "2"}},
+		{`SELECT id FROM e WHERE ts = (SELECT ts FROM e WHERE id = 2) ORDER BY id`, nil, []string{"1", "2"}},
+		{`SELECT id FROM e ORDER BY at DESC, id LIMIT 2`, nil, []string{"1", "2"}},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	// A timestamp(p) rounds what it stores to p digits, also after
+	// ALTER COLUMN TYPE.
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY, at timestamptz(0), ts timestamp)`)
+	mustExec(t, db, `INSERT INTO p VALUES (1, $1, '2024-01-01 00:00:00.6')`, at.Add(1400*time.Millisecond))
+	mustExec(t, db, `ALTER TABLE p ALTER COLUMN ts TYPE timestamp(0)`)
+	var gotAt, gotTs time.Time
+	if err := db.QueryRow(`SELECT at, ts FROM p`).Scan(&gotAt, &gotTs); err != nil {
+		t.Fatal(err)
+	}
+	if !gotAt.Equal(at.Add(time.Second)) || !gotTs.Equal(at.Add(time.Second)) {
+		t.Errorf("timestamp(0): got %v and %v, want both %v", gotAt, gotTs, at.Add(time.Second))
+	}
+	if _, err := db.Exec(`INSERT INTO e (id, active) VALUES (4, 'maybe')`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("'maybe' to a boolean column: got %v, want invalid input", err)
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		// Postgres reads it in the session's TimeZone, which is not modeled.
+		{`INSERT INTO e (id, at) VALUES (4, '2024-01-01 00:00:00')`, nil},
+		{`INSERT INTO e (id, at) VALUES (4, 'today')`, nil},
+		{`INSERT INTO e (id, ts) VALUES (4, 'Jan 1 2024')`, nil},
+		{`INSERT INTO e (id, ts) VALUES (4, $1)`, []any{int64(1)}},
+		// Postgres refuses the literal and reads the parameter as text.
+		{`INSERT INTO e (id, active) VALUES (4, 1)`, nil},
+		{`INSERT INTO e (id, active) VALUES (4, $1)`, []any{int64(1)}},
+		// Text from a column has no operator with a boolean or a time.
+		{`SELECT count(*) FROM e WHERE name = active`, nil},
+		{`SELECT count(*) FROM e WHERE at > name`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", tc.query, err)
+		}
+	}
+}
+
 // Postgres compares rows pair by pair: an ordering by the first pair that is
 // not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestRowComparison(t *testing.T) {

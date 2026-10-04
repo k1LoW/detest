@@ -695,6 +695,12 @@ func (c *pgConv) columnLimits(col *sqlir.ColumnDef, t *pg.TypeName) error {
 		if col.Scale < 0 {
 			return c.unsupported("a numeric column with a negative scale")
 		}
+	case "timestamp", "timestamptz":
+		// Postgres keeps six fractional digits, also when more are declared.
+		col.FSP = 6
+		if len(mods) == 1 && mods[0] < 6 {
+			col.FSP = mods[0]
+		}
 	}
 	return nil
 }

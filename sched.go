@@ -739,7 +739,7 @@ const outsideWaitLimit = 10 * time.Second
 func (r *run) handleEvent(p *Proc, ev procEvent) {
 	switch ev.kind {
 	case evYield:
-		p.state = stateReady // trace already recorded by the process
+		p.state = stateReady // the process records its trace line once resumed
 	case evBlocked:
 		// state set by the process
 	case evDone:
@@ -918,14 +918,25 @@ func (p *Proc) main() {
 	}
 }
 
-// yieldf hands control to the scheduler after recording the operation.
+// yieldf hands control to the scheduler, and records the operation once the
+// scheduler resumes the process to run it. Recorded when the process parks,
+// the trace would list the operation before the steps of the processes that
+// ran while it waited, an order it did not run in.
 func (p *Proc) yieldf(format string, args ...any) {
 	if p.r.over() {
 		return // cleanup after the run runs through without scheduling
 	}
-	p.r.noteAt(p, format, args...)
+	var st step
+	if p.r.tracing {
+		// Formatted at the yield point, where the arguments are those the
+		// operation was reached with.
+		st = p.r.newStep(p, format, args, callerLoc())
+	}
 	p.send(procEvent{kind: evYield, op: opHash(format)})
 	p.wait()
+	if p.r.tracing && !p.r.over() {
+		p.r.trace = append(p.r.trace, st)
+	}
 }
 
 // syncOutside hands a process that woke from a primitive detest does not
@@ -979,6 +990,10 @@ func (r *run) addStep(p *Proc, format string, args []any, loc string) {
 	if r.over() {
 		return // cleanup after the run, such as a deferred Unlock while unwinding
 	}
+	r.trace = append(r.trace, r.newStep(p, format, args, loc))
+}
+
+func (r *run) newStep(p *Proc, format string, args []any, loc string) step {
 	name := "-"
 	if p != nil {
 		name = p.name
@@ -987,7 +1002,7 @@ func (r *run) addStep(p *Proc, format string, args []any, loc string) {
 	if len(args) > 0 {
 		op = fmt.Sprintf(format, args...)
 	}
-	r.trace = append(r.trace, step{proc: name, op: op, loc: loc})
+	return step{proc: name, op: op, loc: loc}
 }
 
 // lazyString defers building an argument of note until the trace is kept.

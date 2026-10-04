@@ -301,7 +301,8 @@ type ColumnDef struct {
 	Precision int
 	Scale     int
 	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column
-	// keeps, 0 without one declared.
+	// keeps, 0 without one declared, or a Postgres timestamp or timestamptz
+	// keeps, 6 without one declared.
 	FSP int
 	// Collation is a MySQL text column's collation as declared, or the
 	// default one of the character set it declares; empty for the table's.

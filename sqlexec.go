@@ -2261,6 +2261,11 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if !lp && !rp && (isText(l) && isNumber(r) || isNumber(l) && isText(r)) {
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
+	// Boolean and timestamp columns hold their own values, so text against
+	// one comes from a text expression, which Postgres has no operator for.
+	if !lp && !rp && (isText(l) && isOther(r) || isOther(l) && isText(r)) {
+		return nil, nil, x.unsupported("a comparison of text with a boolean or a time")
+	}
 	// Postgres sorts NaN above every number, which the comparisons do not.
 	if isNaN(l) || isNaN(r) {
 		return nil, nil, x.unsupported("a comparison with NaN")
