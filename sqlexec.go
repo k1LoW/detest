@@ -3579,6 +3579,9 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 		}
 		return l + " " + strings.ToLower(v.Op) + " " + r
 	case *sqlir.UnaryExpr:
+		if _, ok := v.X.(*sqlir.BinaryExpr); ok {
+			return strings.ToLower(v.Op) + " (" + x.exprString(v.X) + ")"
+		}
 		return strings.ToLower(v.Op) + " " + x.exprString(v.X)
 	case *sqlir.IsNull:
 		if v.Not {

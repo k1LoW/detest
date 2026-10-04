@@ -77,7 +77,7 @@ func TestLoopTicksAgainAfterAChangeDuringAnIdleTick(t *testing.T) {
 // An idle tick's own commit does not wake the loop again. On MySQL an UPDATE
 // that leaves a row as it was reports no affected rows but still commits.
 func TestLoopIdleTickIsNotWokenByItsOwnCommit(t *testing.T) {
-	Explore(t, func(t *testing.T, s *Sim) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysql.New())
 		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
 		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true)`) })
@@ -91,12 +91,15 @@ func TestLoopIdleTickIsNotWokenByItsOwnCommit(t *testing.T) {
 			}
 			return nil
 		})
-	}, MaxRuns(100))
+	}, nil, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
 }
 
 // Two idle loops whose commits change nothing do not wake each other.
 func TestIdleLoopsAreNotWokenByUnchangedCommits(t *testing.T) {
-	Explore(t, func(t *testing.T, s *Sim) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysql.New())
 		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
 		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true), ('w2', true)`) })
@@ -114,7 +117,10 @@ func TestIdleLoopsAreNotWokenByUnchangedCommits(t *testing.T) {
 				return nil
 			})
 		}
-	}, MaxRuns(1000))
+	}, nil, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
 }
 
 // A loop that went idle after SKIP LOCKED passed over a row ticks again
@@ -628,15 +634,15 @@ func TestNowait(t *testing.T) {
 func TestTraceShowsComputedSetValues(t *testing.T) {
 	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
-		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL, label text)`)
-		s.Seed(func() { mustExec(t, db, `INSERT INTO counters VALUES ('c1', 0, 'x')`) })
+		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL, m int, label text)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counters (id, n, label) VALUES ('c1', 0, 'x')`) })
 		s.Manual("bump", 1, func(p *Proc) error {
-			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = (n + 1) * 2, label = $1 WHERE id = 'c1'`, "y")
+			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = (n + 1) * 2, m = -(n + 1) * 2, label = $1 WHERE id = 'c1'`, "y")
 			return err
 		})
 		s.AtQuiescence(func(*State) error { return errors.New("show the trace") })
 	}, nil, nil, 0)
-	if !strings.Contains(res.Trace, "set {label=y n=(n + 1) * 2}") {
+	if !strings.Contains(res.Trace, "set {label=y m=- (n + 1) * 2 n=(n + 1) * 2}") {
 		t.Fatalf("trace does not show the computed value:\n%s", res.Trace)
 	}
 }
@@ -872,6 +878,46 @@ func TestIdleLoopRetriesARowALockTimeoutGaveUpOn(t *testing.T) {
 		s.AtQuiescence(func(st *State) error {
 			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
 				return fmt.Errorf("w1 not done")
+			}
+			return nil
+		})
+	})
+}
+
+// A loop that went idle as a deadlock victim ticks again once the survivor
+// lets go of its locks, even without changing a row.
+func TestIdleLoopRetriesAfterADeadlockSurvivorCommitsUnchanged(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('a', false), ('b', true)`) })
+		inTx := func(p *Proc, stmts ...string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			for _, q := range stmts {
+				if _, err := tx.ExecContext(p.Context(), q); err != nil {
+					return err
+				}
+			}
+			return tx.Commit()
+		}
+		s.Manual("toucher", 1, func(p *Proc) error {
+			_ = inTx(p, `UPDATE work SET done = done WHERE id = 'b'`, `UPDATE work SET done = done WHERE id = 'a'`)
+			return nil
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			err := inTx(p, `UPDATE work SET done = true WHERE id = 'a' AND NOT done`, `UPDATE work SET done = done WHERE id = 'b'`)
+			if errors.Is(err, ErrDeadlock) {
+				return ErrIdle
+			}
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "a"); !row.Bool("done") {
+				return fmt.Errorf("a not done")
 			}
 			return nil
 		})
