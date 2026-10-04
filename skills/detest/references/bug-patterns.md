@@ -41,7 +41,7 @@ The invariant is always a business rule, checked from committed rows (`st.Rows`,
 
 ## 3. Capacity and quota checks
 
-**Look for** `SELECT count(*) ... ` or a sum compared with a limit, then an insert, as for seats, rate limits, coupon redemptions, team member limits. A row lock on existing rows cannot stop a concurrent insert of a new row (a phantom).
+**Look for** `SELECT count(*) ... ` or a sum compared with a limit, then an insert, as for seats, rate limits, coupon redemptions, team member limits. A plain read takes no lock, so a concurrent insert of a new row (a phantom) gets past the check on either server. A locking read differs by server. On PostgreSQL, `FOR UPDATE` locks only the rows it found and still lets a new row in, while on MySQL at Repeatable Read or Serializable, a locking range read takes next-key and gap locks that make a matching insert wait. Check which one the code does before calling it vulnerable.
 
 **Scenario** one more actor than the remaining capacity (capacity 1, two actors).
 

@@ -10,7 +10,7 @@ detest refuses SQL it cannot run with the server's exact semantics, instead of a
 - **In the code under test.** The flow uses a form detest does not model (system catalogs, recursive CTEs, `RIGHT`/`FULL` joins, `COPY`, `BEGIN` sent as SQL, a case-insensitive collation on MySQL, ...). Tell the user which statement and where. The options are to explore another flow, to drive a lower layer that avoids the statement if that still covers the hazard, or, with the user's agreement, to change the production code. Do not substitute a different statement in the test: the result would describe code that does not run in production.
 - **MySQL `_ci` collations.** detest compares strings exactly and refuses the statements whose outcome depends on how a case-insensitive column compares. If the production server's default collation really is a `_bin` one, pass `mysql.Collation("utf8mb4_bin")`. Otherwise do not change the collation on your own, since that runs the code under other semantics than production's. Ask the user, and change it only with their explicit agreement:
   - name the columns to declare `COLLATE utf8mb4_bin` in the test's copy of the schema, never in the production schema, and change only those;
-  - give the reason the scenario's outcome cannot differ, such as no seeded or written values that differ only in case or accents;
+  - give the reason the scenario's outcome cannot differ under every operation the flow performs on those columns, namely comparisons with stored values and with query literals and parameters, ordering, grouping and uniqueness. A seeded `Alice` queried as `alice`, or an `ORDER BY` or `LIMIT` over the column, can differ, and then the refusal stands;
   - state what this leaves unchecked, such as two owners `Alice` and `alice` colliding on the unique index in production.
 
   Without agreement the refusal stands. Say which flows cannot be checked, and offer a target that does not touch the column. In the report, list an agreed override under what the result does not cover.
@@ -39,7 +39,7 @@ Replaying the same choices produced different operations. Look for:
 
 - map iteration deciding the order or set of statements (iterate sorted keys; if this is production code, tell the user it is also nondeterministic in production, then sort in a test-only path only with agreement);
 - `math/rand` or random IDs deciding control flow (not just values);
-- caches, `sync.Once`, package-level variables surviving from one run to the next. Build them inside the declaration function or reset them in a `Seed`;
+- caches, `sync.Once`, package-level variables surviving from one run to the next. The declaration function runs once per worker, so building them there is not enough. Clear or rebuild them in a `Seed`, rebuilding the service there when its cache cannot be cleared;
 - goroutines the code starts and does not wait for;
 - Go state shared across workers (with `Workers(n)`, the declaration function runs once per worker; avoid package-level state).
 

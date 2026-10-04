@@ -109,13 +109,13 @@ The simulated schema must have the production constraints, because uniqueness, f
 
 ORM auto-migration (`gorm.AutoMigrate`, ent's `Schema.Create`) reads system catalogs, which detest refuses. Use one of the options above instead.
 
-Statements that declare nothing detest needs (functions, triggers' bodies, grants, comments, extensions) are accepted and ignored. If a migration fails to load, find the statement, and check the README's unsupported list. Plain DDL failing to load is worth reporting upstream (https://github.com/k1LoW/detest/issues).
+Statements that declare nothing detest needs (grants, comments, extensions) are accepted and ignored. Functions and triggers are accepted and ignored too, which is not harmless when a trigger fires in the flow. Its effect, such as an outbox row written on INSERT or an error raised on UPDATE, is missing from the simulation, and `failOnUnsupported` does not reveal it. Check the triggers on the tables the flow writes. When one changes rows or errors the code or the invariants observe, tell the user the flow cannot be simulated faithfully and stop, as for any blocker (see SKILL.md). If a migration fails to load, find the statement, and check the README's unsupported list. Plain DDL failing to load is worth reporting upstream (https://github.com/k1LoW/detest/issues).
 
 Tables the flow writes but no invariant reads (audit logs, event histories) can be taken out with `store.Ignore(...)`, which also shrinks the search.
 
 ## Seeding data
 
-Insert the rows the scenario needs in `s.Seed`, with SQL or with the app's own creation functions (called with `context.Background()` inside `Seed`). Keep it minimal, since every extra row can add locks and branches. Rows inserted in the declaration function before any `Seed` are restored at the start of every run too.
+Insert the rows the scenario needs in `s.Seed`, with SQL or with the app's own creation functions (called with `context.Background()` inside `Seed`). Keep it minimal, since every extra row can add locks and branches. Insert every initial row in a `Seed`, never in the declaration function itself, since each run empties the tables before the seeds run.
 
 ## Choosing the entry point
 
@@ -170,7 +170,7 @@ s.OnMessage("shipper", q, func(p *detest.Proc, m detest.Msg) error {
 
 A `sync.Mutex` held across a database call blocks outside the scheduler and stalls the exploration. If the code takes the mutex through a field or constructor, inject `s.Mutex("name")` (it implements `sync.Locker`). If the field is a value `sync.Mutex`, propose to the user changing it to a `sync.Locker` field defaulting to `&sync.Mutex{}`.
 
-In-memory caches and package-level variables persist across runs. Construct caches inside the declaration function, and reset package-level state in a `Seed`. Code between two database calls runs atomically under detest, so races on Go memory are out of scope; mention `go test -race` for those.
+In-memory caches, `sync.Once` and package-level variables persist across runs, since the declaration function runs once per worker, not once per run. Clear or rebuild them in a `Seed`, rebuilding the service there when its cache cannot be cleared. Code between two database calls runs atomically under detest, so races on Go memory are out of scope; mention `go test -race` for those.
 
 ## Background workers and goroutines
 
