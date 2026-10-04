@@ -364,6 +364,23 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// An update of an indexed column holds the old index entry
+		// implicitly, which turns explicit, a lock struct, when a search
+		// along the index waits for it.
+		Name:   "deadlock victim weighs an index entry another waits for",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE items SET k = 25 WHERE id = 20`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.Q(0, `SELECT v FROM items WHERE k BETWEEN 15 AND 22 FOR UPDATE`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		// A locking read keeps the table's intention lock even when SKIP
 		// LOCKED skips every row, and the lock struct weighs it.
 		Name:   "deadlock victim weighs the intention lock of a skipping read",
@@ -649,6 +666,24 @@ var cases = []difftest.Case{
 			difftest.S(1, `UPDATE p SET v = 1 WHERE code = 'a'`),
 			difftest.S(0, `ROLLBACK`),
 			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
+		// At Repeatable Read too, a range through an index locks its rows in
+		// the index's order, the reverse of the primary key's here.
+		Name:   "a range locks along the index it searches",
+		Schema: itemsSchema,
+		Seed:   []string{`INSERT INTO items (id, k) VALUES (10, 30), (30, 10), (50, 100), (60, 110), (70, 120), (80, 130)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(1, `UPDATE items SET v = 3 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE k BETWEEN 5 AND 40`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
 		},
 	},
 	{

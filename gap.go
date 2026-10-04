@@ -632,9 +632,17 @@ func (tx *Tx) lockingRows(table string) []Row {
 func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode, policy *sqlir.LockClause) error {
 	tx := x.tx
 	tx.noteTableLock(table, mode)
-	rows := tx.lockingRows(table)
 	sr := x.searchRange(table, alias, where)
 	cols := sr.key
+	// The rows as the search meets them, along the index it searches.
+	scanRows := func() []Row {
+		rs := tx.lockingRows(table)
+		if len(cols) > 0 {
+			slices.SortStableFunc(rs, func(a, b Row) int { return keyCompare(keyOf(a, cols), keyOf(b, cols)) })
+		}
+		return rs
+	}
+	rows := scanRows()
 	index := cmp.Or(sr.index, "PRIMARY")
 	var entry *sqlir.UniqueDef
 	if tx.db.kind.InnoDB() {
@@ -757,7 +765,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if err := lockRows(inRange); err != nil {
 				return err
 			}
-			fresh := tx.lockingRows(table)
+			fresh := scanRows()
 			if slices.Equal(rangeKeys(rows, inRange), rangeKeys(fresh, inRange)) {
 				rows = fresh
 				break
@@ -811,7 +819,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if err := lockRecord(next, false); err != nil {
 				return err
 			}
-			rows = tx.lockingRows(table)
+			rows = scanRows()
 			again, n := bounds(rows)
 			if n != nil && n.Key() == next.Key() && sameValue(again.hi, gap.hi) && again.hasLo == gap.hasLo && sameValue(again.lo, gap.lo) {
 				break

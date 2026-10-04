@@ -2045,54 +2045,35 @@ func TestMySQLTwentyFirstReviewFindings(t *testing.T) {
 	}
 }
 
-// A locking read over a LEFT JOIN keeps the left row when the joined row it
-// waited for is deleted.
-func TestMySQLLockingLeftJoinKeepsTheLeftRow(t *testing.T) {
-	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysqlBin())
-		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
-		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
-		s.Seed(func() { mustExec(t, db, "INSERT INTO a VALUES (1)") })
-		s.Seed(func() { mustExec(t, db, "INSERT INTO b VALUES (1, 1)") })
-		broke := false
-		s.Seed(func() { broke = false })
-		s.Manual("deleter", 1, func(p *Proc) error {
-			tx, err := db.BeginTx(p.Context(), nil)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tx.Rollback() }()
-			if _, err := tx.Exec("DELETE FROM b WHERE id = 1"); err != nil {
-				return err
-			}
-			p.Step("holds b's row")
-			return tx.Commit()
-		})
-		s.Manual("reader", 1, func(p *Proc) error {
-			tx, err := db.BeginTx(p.Context(), nil)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tx.Rollback() }()
-			rows, err := tx.Query("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id FOR UPDATE")
-			if err != nil {
-				return err
-			}
-			n := 0
-			for rows.Next() {
-				n++
-			}
-			_ = rows.Close()
-			broke = broke || n != 1
-			return tx.Commit()
-		})
-		s.AtQuiescence(func(*State) error {
-			if broke {
-				return fmt.Errorf("the LEFT JOIN lost a's row")
-			}
-			return nil
-		})
-	})
+// A locking read over a LEFT JOIN that would lock the nullable side is
+// refused, as the row it locks there may be none; FOR UPDATE OF the left
+// table runs.
+func TestMySQLLockingLeftJoinOnTheNullableSide(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
+	mustExec(t, db, "INSERT INTO a VALUES (1)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("FOR UPDATE over the nullable side: got %v, want ErrUnsupportedSQL", err)
+	}
+	rows, err := tx.Query("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id WHERE a.id = 1 FOR UPDATE OF a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	_ = rows.Close()
+	if n != 1 {
+		t.Errorf("FOR UPDATE OF a read %d rows, want a's one", n)
+	}
 }
 
 func TestMySQLTwentySecondReviewFindings(t *testing.T) {
