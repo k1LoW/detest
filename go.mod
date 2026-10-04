@@ -10,6 +10,7 @@ require (
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20261001035437-93a01d31f6da
 	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/testcontainers/testcontainers-go/modules/mysql v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	github.com/wasilibs/go-pgquery v0.0.0-20260915022521-81f99195012b
 	google.golang.org/protobuf v1.36.12
