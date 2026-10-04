@@ -216,6 +216,11 @@ type SchemaChange struct {
 	RenameColumn     [2]string // old and new name
 	RenameConstraint [2]string // old and new name of a constraint or index
 	RenameIndex      [2]string // old and new name of an index only, as MySQL's RENAME INDEX
+	// Collation is a MySQL table's default collation, for the text columns
+	// that declare none; ConvertCollation applies it to the table's text
+	// columns too, as CONVERT TO CHARACTER SET does.
+	Collation        string
+	ConvertCollation bool
 	// AutoIncrement is MySQL's AUTO_INCREMENT=n table option, the next
 	// value the table's AUTO_INCREMENT column generates at least.
 	AutoIncrement int64
@@ -265,6 +270,9 @@ type ColumnDef struct {
 	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column
 	// keeps, 0 without one declared.
 	FSP int
+	// Collation is a MySQL text column's collation as declared, or the
+	// default one of the character set it declares; empty for the table's.
+	Collation string
 }
 
 // IndexDef is an index that is not unique, by the columns it is on.
@@ -540,6 +548,7 @@ type Impl struct {
 	codes      func(DBErrorKind) (sqlstate string, number int)
 	convert    func(*DBError) error
 	innodb     bool
+	collation  string
 }
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
@@ -562,6 +571,9 @@ type ServerSpec struct {
 	// snapshot taken at the transaction's first read, and a failed statement
 	// rolling back only itself.
 	InnoDB bool
+	// Collation is MySQL's server default collation, which a text column
+	// that neither it nor its table declares one for takes.
+	Collation string
 }
 
 // Server is a kind of database server as the code using detest holds it,
@@ -572,7 +584,7 @@ type Server struct{ impl *Impl }
 // NewServer describes a server.
 func NewServer(spec ServerSpec) Server {
 	return Server{impl: &Impl{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
-		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB}}
+		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB, collation: spec.Collation}}
 }
 
 // ImplOf returns the description behind s, nil for the zero Server.
@@ -708,6 +720,9 @@ func (s *Impl) Name() string { return s.name }
 
 // InnoDB reports whether the server has InnoDB's semantics.
 func (s *Impl) InnoDB() bool { return s.innodb }
+
+// Collation is the server's default collation, for MySQL.
+func (s *Impl) Collation() string { return s.collation }
 
 // Parser parses the server's SQL.
 func (s *Impl) Parser() Parser { return s.parser }

@@ -152,6 +152,9 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if !tx.block && !tx.start.IsZero() {
 		x.start = tx.start // the statement is its own transaction, begun at the same instant
 	}
+	if err := x.collationCheck(s.stmt); err != nil {
+		return nil, err
+	}
 	res, err := x.execStatement(s.stmt)
 	if err != nil {
 		// Every path that evaluates an expression ends here, so an

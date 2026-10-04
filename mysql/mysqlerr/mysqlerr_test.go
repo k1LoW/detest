@@ -24,7 +24,7 @@ type user struct {
 // the generated ids from LastInsertId.
 func TestConvert(t *testing.T) {
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
-		sqlDB, _ := s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert)))
+		sqlDB, _ := s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert), mysql.Collation("utf8mb4_bin")))
 		if _, err := sqlDB.Exec("CREATE TABLE users (id BIGINT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(100) NOT NULL, UNIQUE KEY uk_email (email))"); err != nil {
 			t.Fatal(err)
 		}

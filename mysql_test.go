@@ -18,7 +18,7 @@ import (
 
 func TestMySQLStatements(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE `items` (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `sku` VARCHAR(20) NOT NULL, `qty` TINYINT UNSIGNED NOT NULL DEFAULT 0, UNIQUE KEY `uk_sku` (`sku`), KEY `idx_qty` (`qty`)) ENGINE=InnoDB")
 
 	res, err := db.Exec("INSERT INTO items (sku, qty) VALUES (?, ?), (?, ?)", "a", 1, "b", 2)
@@ -71,6 +71,13 @@ func TestMySQLStatements(t *testing.T) {
 	}
 }
 
+// mysqlBin is a MySQL server whose default collation is utf8mb4_bin, so the
+// tests of other behaviors compare strings as detest does; the collation
+// tests use mysql.New's default.
+func mysqlBin(opts ...mysql.Option) Server {
+	return mysql.New(append([]mysql.Option{mysql.Collation("utf8mb4_bin")}, opts...)...)
+}
+
 func peekRows(store *DB, table, key, col string) string {
 	var out []string
 	for _, r := range store.Peek(table) {
@@ -91,7 +98,7 @@ func sortStrs(s []string) {
 // A failed statement rolls back only itself; the transaction goes on.
 func TestMySQLStatementRollback(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	tx, err := db.Begin()
 	if err != nil {
@@ -119,7 +126,7 @@ func TestMySQLStatementRollback(t *testing.T) {
 // that fails, as a deadlock victim does, sells nothing.
 func mysqlStockModel(iso IsolationLevel, update string) func(t *testing.T, s *Sim) {
 	return func(t *testing.T, s *Sim) {
-		db, store := s.DB("shop", mysql.New(mysql.Isolation(iso)))
+		db, store := s.DB("shop", mysqlBin(mysql.Isolation(iso)))
 		mustExec(t, db, "CREATE TABLE stock (sku VARCHAR(10) PRIMARY KEY, n INT NOT NULL)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO stock VALUES ('apple', 2)") })
 		sold := 0
@@ -175,7 +182,7 @@ func TestMySQLLostUpdate(t *testing.T) {
 func TestMySQLSnapshot(t *testing.T) {
 	model := func(iso IsolationLevel) func(t *testing.T, s *Sim) {
 		return func(t *testing.T, s *Sim) {
-			db, _ := s.DB("app", mysql.New(mysql.Isolation(iso)))
+			db, _ := s.DB("app", mysqlBin(mysql.Isolation(iso)))
 			mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 			var first, second int
 			s.Seed(func() { first, second = -1, -1 })
@@ -218,7 +225,7 @@ func TestMySQLSnapshot(t *testing.T) {
 func TestMySQLGapLockDeadlock(t *testing.T) {
 	model := func(iso IsolationLevel) func(t *testing.T, s *Sim) {
 		return func(t *testing.T, s *Sim) {
-			db, _ := s.DB("app", mysql.New(mysql.Isolation(iso)))
+			db, _ := s.DB("app", mysqlBin(mysql.Isolation(iso)))
 			mustExec(t, db, "CREATE TABLE accounts (id INT PRIMARY KEY, owner VARCHAR(10))")
 			s.Seed(func() { mustExec(t, db, "INSERT INTO accounts VALUES (1, 'x'), (9, 'y')") })
 			var errs []error
@@ -268,7 +275,7 @@ func TestMySQLGapLockDeadlock(t *testing.T) {
 func TestMySQLNoPhantom(t *testing.T) {
 	model := func(iso IsolationLevel) func(t *testing.T, s *Sim) {
 		return func(t *testing.T, s *Sim) {
-			db, _ := s.DB("app", mysql.New(mysql.Isolation(iso)))
+			db, _ := s.DB("app", mysqlBin(mysql.Isolation(iso)))
 			mustExec(t, db, "CREATE TABLE events (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
 			s.Seed(func() { mustExec(t, db, "INSERT INTO events VALUES (1, 10), (2, 30)") })
 			var first, second int
@@ -310,7 +317,7 @@ func TestMySQLNoPhantom(t *testing.T) {
 // statement.
 func TestMySQLDeadlockRollsBackTheTransaction(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, store := s.DB("app", mysql.New())
+		db, store := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		mustExec(t, db, "CREATE TABLE log (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)") })
@@ -352,16 +359,16 @@ func TestMySQLDeadlockRollsBackTheTransaction(t *testing.T) {
 // The statement shapes of MySQL applications, migrations and dumps run.
 func TestMySQLStatementShapes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "/*!40101 SET NAMES utf8mb4 */;\n"+
 		"DROP TABLE IF EXISTS `orders`;\n"+
 		"CREATE TABLE `users` (\n"+
 		"  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n"+
-		"  `email` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,\n"+
+		"  `email` varchar(255) COLLATE utf8mb4_bin NOT NULL,\n"+
 		"  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n"+
 		"  PRIMARY KEY (`id`),\n"+
 		"  UNIQUE KEY `users_email_unique` (`email`)\n"+
-		") ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n"+
+		") ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;\n"+
 		"CREATE TABLE `orders` (\n"+
 		"  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n"+
 		"  `user_id` bigint unsigned NOT NULL,\n"+
@@ -410,7 +417,7 @@ func TestMySQLStatementShapes(t *testing.T) {
 // values.
 func TestMySQLTruthValues(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, flag TINYINT, CHECK (flag))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 1), (2, NULL)")
 	if _, err := db.Exec("INSERT INTO t VALUES (3, 0)"); !errors.Is(err, ErrCheckViolation) {
@@ -435,7 +442,7 @@ func TestMySQLTruthValues(t *testing.T) {
 
 func TestMySQLSchemaAndSessionState(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 
 	// A table dropped and created again does not read the old one's rows
 	// from a snapshot.
@@ -504,7 +511,7 @@ func TestMySQLSchemaAndSessionState(t *testing.T) {
 // id IN (1, 2) AND id = 2 leaves row 1 to others.
 func TestMySQLLockedRangeIntersects(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)") })
 		open, wrote := false, false
@@ -538,7 +545,7 @@ func TestMySQLLockedRangeIntersects(t *testing.T) {
 // the transaction to end.
 func TestMySQLSavepointKeepsLocks(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0)") })
 		open, broke := false, false
@@ -578,7 +585,7 @@ func TestMySQLSavepointKeepsLocks(t *testing.T) {
 func TestMySQLSessionLockTimeout(t *testing.T) {
 	timedOut := false
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0)") })
 		s.Manual("holder", 1, func(p *Proc) error {
@@ -617,7 +624,7 @@ func TestMySQLSessionLockTimeout(t *testing.T) {
 
 func TestMySQLSecondReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 
 	// AUTO_INCREMENT counters follow their table through a rename, start
 	// over for a table created again, and count apart across databases.
@@ -691,7 +698,7 @@ func TestLockingJoin(t *testing.T) {
 		name string
 		s    func() Server
 	}{
-		{"mysql", func() Server { return mysql.New() }},
+		{"mysql", func() Server { return mysqlBin() }},
 		{"postgres", func() Server { return postgres.New() }},
 	} {
 		t.Run(srv.name, func(t *testing.T) {
@@ -737,7 +744,7 @@ func TestLockingJoin(t *testing.T) {
 
 func TestMySQLThirdReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// CHANGE renames the column and gives it the new definition, leaving one
 	// column.
@@ -762,7 +769,7 @@ func TestMySQLWaitPolicyKeepsGaps(t *testing.T) {
 	for _, policy := range []string{"NOWAIT", "SKIP LOCKED"} {
 		t.Run(policy, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE events (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO events VALUES (1, 10), (2, 30)") })
 				var first, second int
@@ -803,7 +810,7 @@ func TestLockingJoinOf(t *testing.T) {
 		name string
 		s    func() Server
 	}{
-		{"mysql", func() Server { return mysql.New() }},
+		{"mysql", func() Server { return mysqlBin() }},
 		{"postgres", func() Server { return postgres.New() }},
 	} {
 		t.Run(srv.name, func(t *testing.T) {
@@ -854,7 +861,7 @@ func TestMySQLLockingAggregateWaitPolicy(t *testing.T) {
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1), (2)") })
 				open, held := false, false
@@ -897,7 +904,7 @@ func TestUpdateAssignmentOrder(t *testing.T) {
 		s    Server
 		want string
 	}{
-		{"mysql", mysql.New(), "1:1"},
+		{"mysql", mysqlBin(), "1:1"},
 		{"postgres", postgres.New(), "1:0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -929,7 +936,7 @@ func TestLockingReadRereadsAfterWait(t *testing.T) {
 	}{
 		{"postgres", func() Server { return postgres.New() }, "SELECT b.id FROM b WHERE b.v = 0 FOR UPDATE"},
 		{"postgres join", func() Server { return postgres.New() }, "SELECT b.id FROM a JOIN b ON b.a_id = a.id WHERE b.v = 0 FOR UPDATE"},
-		{"mysql join", func() Server { return mysql.New() }, "SELECT b.id FROM a JOIN b ON b.a_id = a.id WHERE b.v = 0 FOR UPDATE"},
+		{"mysql join", func() Server { return mysqlBin() }, "SELECT b.id FROM a JOIN b ON b.a_id = a.id WHERE b.v = 0 FOR UPDATE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
@@ -998,7 +1005,7 @@ func TestLockingReadRereadsAfterWait(t *testing.T) {
 
 func TestMySQLSixthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// RENAME INDEX renames the index, not a foreign key of the same name.
 	mustExec(t, db, "CREATE TABLE parents (id INT PRIMARY KEY)")
@@ -1051,7 +1058,7 @@ func TestMySQLSixthReviewFixes(t *testing.T) {
 
 func TestMySQLSeventhReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// A simple CASE compares as MySQL compares.
 	var got string
@@ -1097,7 +1104,7 @@ func TestMySQLSeventhReviewFixes(t *testing.T) {
 // range MySQL compares them as.
 func TestMySQLGapLockCoercesStrings(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE events (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO events VALUES (1, 10), (2, 30)") })
 		var first, second int
@@ -1133,7 +1140,7 @@ func TestMySQLGapLockCoercesStrings(t *testing.T) {
 
 func TestMySQLEighthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// A column rename reaches the versions a snapshot reads.
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT)")
@@ -1193,7 +1200,7 @@ func TestMySQLEighthReviewFixes(t *testing.T) {
 
 func TestMySQLNinthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// An engine other than InnoDB is refused rather than run as InnoDB.
 	for _, q := range []string{"CREATE TABLE m (id INT PRIMARY KEY) ENGINE=MyISAM", "CREATE TABLE m (id INT PRIMARY KEY) ENGINE=InnoDB; ALTER TABLE m ENGINE=MEMORY"} {
@@ -1214,7 +1221,7 @@ func TestMySQLNinthReviewFixes(t *testing.T) {
 // A locking read of an empty CTE locks nothing of the table it shadows.
 func TestMySQLEmptyCTELocksNothing(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1)") })
 		open, wrote := false, false
@@ -1246,7 +1253,7 @@ func TestMySQLEmptyCTELocksNothing(t *testing.T) {
 
 func TestMySQLEleventhReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 
 	// RowsAffected counts the rows changed, and an ON DUPLICATE KEY UPDATE
 	// that changed its row twice.
@@ -1303,7 +1310,7 @@ func TestMySQLEleventhReviewFixes(t *testing.T) {
 	}
 
 	// CheckSQL runs TRUNCATE as autocommit code would.
-	if err := CheckSQL(mysql.New(), "TRUNCATE TABLE t"); err != nil && errors.As(err, new(*ErrUnsupportedSQL)) {
+	if err := CheckSQL(mysqlBin(), "TRUNCATE TABLE t"); err != nil && errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("CheckSQL TRUNCATE: %v", err)
 	}
 }
@@ -1321,7 +1328,7 @@ func TestMySQLFunctionsStayMySQL(t *testing.T) {
 // A lock wait that times out reports MySQL's 1205, not NOWAIT's 3572.
 func TestMySQLLockWaitTimeoutCode(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0)") })
 		var got int
@@ -1366,7 +1373,7 @@ func TestMySQLLockWaitTimeoutCode(t *testing.T) {
 // Equal bounds keep the open one, so the row on it is not locked.
 func TestMySQLEqualBoundsKeepTheOpenOne(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (5, 0), (10, 0)") })
 		open, wrote := false, false
@@ -1398,7 +1405,7 @@ func TestMySQLEqualBoundsKeepTheOpenOne(t *testing.T) {
 
 func TestMySQLTwelfthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1), (2)")
 
@@ -1442,7 +1449,7 @@ func TestNegativeLimit(t *testing.T) {
 		q    []string
 		want func(error) bool
 	}{
-		{"mysql", mysql.New(), []string{"SELECT id FROM t LIMIT ?", "SELECT id FROM t LIMIT 1 OFFSET ?", "SELECT id FROM t LIMIT ? FOR UPDATE"}, func(err error) bool { return errors.Is(err, ErrInvalidParameterValue) }},
+		{"mysql", mysqlBin(), []string{"SELECT id FROM t LIMIT ?", "SELECT id FROM t LIMIT 1 OFFSET ?", "SELECT id FROM t LIMIT ? FOR UPDATE"}, func(err error) bool { return errors.Is(err, ErrInvalidParameterValue) }},
 		{"postgres", postgres.New(), []string{"SELECT id FROM t LIMIT $1", "SELECT id FROM t OFFSET $1", "SELECT id FROM t LIMIT $1 FOR UPDATE"}, func(err error) bool { return errors.As(err, new(*ErrUnsupportedSQL)) }},
 	} {
 		t.Run(srv.name, func(t *testing.T) {
@@ -1461,7 +1468,7 @@ func TestNegativeLimit(t *testing.T) {
 
 func TestFourteenthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	my, _ := s.DB("my", mysql.New())
+	my, _ := s.DB("my", mysqlBin())
 	// A generated column is refused rather than made writable.
 	if _, err := my.Exec("CREATE TABLE g (a INT, b INT AS (a + 1))"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("generated column: %v", err)
@@ -1487,7 +1494,7 @@ func TestFourteenthReviewFixes(t *testing.T) {
 // query's own.
 func TestMySQLSerializableLocksSubqueries(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New(mysql.Isolation(Serializable)))
+		db, _ := s.DB("app", mysqlBin(mysql.Isolation(Serializable)))
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0)") })
 		open, broke := false, false
@@ -1525,7 +1532,7 @@ func TestMySQLSerializableLocksSubqueries(t *testing.T) {
 // index hints are refused.
 func TestMySQLUpdateJoinLocksJoinedRows(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, v INT)")
 		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT, v INT)")
 		if _, err := db.Exec("SELECT id FROM a FORCE INDEX (PRIMARY)"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -1567,7 +1574,7 @@ func TestMySQLUpdateJoinLocksJoinedRows(t *testing.T) {
 // holder left it.
 func TestMySQLUpdateJoinRereadsJoinedRows(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, v INT)")
 		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO a VALUES (1, 0)") })
@@ -1620,7 +1627,7 @@ func TestMySQLUpdateJoinRereadsJoinedRows(t *testing.T) {
 // inserts its row instead of updating the deleted one.
 func TestMySQLUpsertRechecksTheConflictAfterWaiting(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE u (id INT PRIMARY KEY, email VARCHAR(20) NOT NULL, n INT NOT NULL, UNIQUE KEY uk_email (email))")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO u VALUES (1, 'x', 0)") })
 		broke := ""
@@ -1671,7 +1678,7 @@ func TestMySQLMovedValueWaitsForTheGap(t *testing.T) {
 	for _, write := range []string{"UPDATE events SET at = 15 WHERE id = 3", "INSERT INTO events VALUES (3, 15) ON DUPLICATE KEY UPDATE at = 15"} {
 		t.Run(write, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE events (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
 				// Row 3 is past the next record (30) the reader locks, so only
 				// the gap keeps the writer out.
@@ -1711,7 +1718,7 @@ func TestMySQLMovedValueWaitsForTheGap(t *testing.T) {
 // LOCK TABLES passes in a dump only around the rows it loads.
 func TestMySQLLockTablesOnlyAroundInserts(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE d (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "LOCK TABLES d WRITE; INSERT INTO d VALUES (1, 0); UNLOCK TABLES;")
 	// So does mysqldump's own form, which disables the keys around the rows.
@@ -1735,7 +1742,7 @@ func TestMySQLLockTablesOnlyAroundInserts(t *testing.T) {
 // unique key, as the lock on a primary key would hold the insert anyway.
 func TestMySQLPointSearchRereadsAfterWaiting(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(10) NOT NULL, UNIQUE KEY uk (email))")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 'a'), (2, 'm'), (3, 'z')") })
 		var first, second int
@@ -1782,7 +1789,7 @@ func TestMySQLPointSearchRereadsAfterWaiting(t *testing.T) {
 
 func TestMySQLNineteenthReviewFixes(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	for _, q := range []string{"SELECT 5 DIV 2", "SELECT SYSDATE()"} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -1816,7 +1823,7 @@ func TestPostgresNowIsTheTransactionTime(t *testing.T) {
 // taken while it waited covers the row too.
 func TestMySQLInsertRechecksGapsAfterItsRowLock(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1), (5), (10)") })
 		var first, second int
@@ -1863,7 +1870,7 @@ func TestMySQLInsertRechecksGapsAfterItsRowLock(t *testing.T) {
 
 func TestMySQLPreviouslyMissedFindings(t *testing.T) {
 	s := newSim(t)
-	my, _ := s.DB("my", mysql.New())
+	my, _ := s.DB("my", mysqlBin())
 	pg, _ := s.DB("pg", postgres.New())
 	for _, c := range []struct {
 		db   *sql.DB
@@ -1889,7 +1896,7 @@ func TestMySQLPreviouslyMissedFindings(t *testing.T) {
 // INSERT ... SELECT reads its source with shared locks at Repeatable Read.
 func TestMySQLInsertSelectLocksItsSource(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE src (id INT PRIMARY KEY, v INT)")
 		mustExec(t, db, "CREATE TABLE dst (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO src VALUES (1, 0)") })
@@ -1926,7 +1933,7 @@ func TestMySQLInsertSelectLocksItsSource(t *testing.T) {
 // A pooled connection brings no session state from one run into the next.
 func TestSessionStateStaysInItsRun(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		db.SetMaxOpenConns(1)
 		mustExec(t, db, "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
 		inserted, broke := false, false
@@ -1957,7 +1964,7 @@ func TestSessionStateStaysInItsRun(t *testing.T) {
 
 func TestMySQLTwentiethReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0)")
 	for _, c := range []struct {
@@ -2005,7 +2012,7 @@ func TestMySQLTwentiethReviewFindings(t *testing.T) {
 
 func TestMySQLTwentyFirstReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var same bool
 	if err := db.QueryRow("SELECT '02' <=> 2").Scan(&same); err != nil || !same {
 		t.Errorf("'02' <=> 2: %v, %v", same, err)
@@ -2042,7 +2049,7 @@ func TestMySQLTwentyFirstReviewFindings(t *testing.T) {
 // waited for is deleted.
 func TestMySQLLockingLeftJoinKeepsTheLeftRow(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
 		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO a VALUES (1)") })
@@ -2090,7 +2097,7 @@ func TestMySQLLockingLeftJoinKeepsTheLeftRow(t *testing.T) {
 
 func TestMySQLTwentySecondReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0)")
 	for _, c := range []struct {
@@ -2128,7 +2135,7 @@ func TestMySQLTwentySecondReviewFindings(t *testing.T) {
 
 func TestMySQLTwentyThirdReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE p (a INT, b INT)")
 	// A failed AFTER leaves the column where it was.
 	if _, err := db.Exec("ALTER TABLE p MODIFY b INT AFTER missing"); err == nil {
@@ -2188,7 +2195,7 @@ func TestPostgresNowIsTakenAtBegin(t *testing.T) {
 // would be, so inserting that parent waits for the checking transaction.
 func TestMySQLMissingParentKeepsAGapLock(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		// The key referenced is a unique secondary one: a primary key's
 		// lock on the missing value would hold the insert anyway.
 		mustExec(t, db, "CREATE TABLE parents (id INT PRIMARY KEY, code VARCHAR(5) NOT NULL, UNIQUE KEY uk_code (code))")
@@ -2228,7 +2235,7 @@ func TestMySQLMissingParentKeepsAGapLock(t *testing.T) {
 // through the same Tx commits on its own and a Rollback does not undo it.
 func TestMySQLDeadlockEndsTheTransaction(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, store := s.DB("app", mysql.New())
+		db, store := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		mustExec(t, db, "CREATE TABLE log (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)") })
@@ -2275,7 +2282,7 @@ func TestMySQLDeadlockEndsTheTransaction(t *testing.T) {
 // A seed sees no session state from the run before.
 func TestSeedSessionStateStaysInItsRun(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		db.SetMaxOpenConns(1)
 		mustExec(t, db, "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
 		broke := false
@@ -2303,7 +2310,7 @@ func TestSeedSessionStateStaysInItsRun(t *testing.T) {
 
 func TestMySQLTwentyFifthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)")
 	// ADD COLUMN gives the rows already there the column's default.
@@ -2343,7 +2350,7 @@ func TestMySQLRangesThroughImplicitIndexesAndNullSafeEquality(t *testing.T) {
 	} {
 		t.Run(c.query, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE parents (id INT PRIMARY KEY)")
 				mustExec(t, db, "CREATE TABLE kids (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parents (id))")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO parents VALUES (1), (3), (5)") })
@@ -2379,7 +2386,7 @@ func TestMySQLRangesThroughImplicitIndexesAndNullSafeEquality(t *testing.T) {
 
 func TestTwentySixthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	my, _ := s.DB("my", mysql.New())
+	my, _ := s.DB("my", mysqlBin())
 	pg, _ := s.DB("pg", postgres.New())
 	mustExec(t, my, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, my, "INSERT INTO t VALUES (1, 0)")
@@ -2409,7 +2416,7 @@ func TestTwentySixthReviewFindings(t *testing.T) {
 
 func TestMySQLTwentySeventhReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE p (id INT PRIMARY KEY, s VARCHAR(10), UNIQUE KEY uk (s))")
 	mustExec(t, db, "CREATE TABLE src (id INT PRIMARY KEY)")
 	for _, q := range []string{
@@ -2447,7 +2454,7 @@ func TestMySQLTwentySeventhReviewFindings(t *testing.T) {
 // it, the gap reaches the record after it, as InnoDB's purge leaves it.
 func TestMySQLGapFollowsADeletedNextRecord(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE e (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO e VALUES (1, 10), (2, 30), (3, 50)") })
 		open, broke, deleted, after := false, false, false, false
@@ -2501,7 +2508,7 @@ func TestMySQLGapFollowsADeletedNextRecord(t *testing.T) {
 
 func TestMySQLTwentyEighthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	if _, err := db.Exec("SET sql_mode = 'NO_AUTO_VALUE_ON_ZERO', innodb_lock_wait_timeout = 1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("SET of two settings: %v", err)
 	}
@@ -2547,7 +2554,7 @@ func TestMySQLTwentyEighthReviewFindings(t *testing.T) {
 
 func TestMySQLTwentyNinthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var n float64
 	if err := db.QueryRow("SELECT '1' + 2").Scan(&n); err != nil || n != 3 {
 		t.Errorf("'1' + 2: %v, %v", n, err)
@@ -2564,7 +2571,7 @@ func TestMySQLTwentyNinthReviewFindings(t *testing.T) {
 
 func TestMySQLThirtiethReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	// INSERT ... SET inserts its row: the parser turns it into columns and
 	// one row of values.
@@ -2607,7 +2614,7 @@ func TestMySQLLimitStopsTheLockingScan(t *testing.T) {
 	} {
 		t.Run(c.query, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0), (3, 0)") })
 				open, wrote := false, false
@@ -2636,7 +2643,7 @@ func TestMySQLLimitStopsTheLockingScan(t *testing.T) {
 		})
 	}
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "CREATE VIEW vt AS SELECT id FROM t")
 	if _, err := db.Exec("SELECT id FROM vt FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -2646,7 +2653,7 @@ func TestMySQLLimitStopsTheLockingScan(t *testing.T) {
 
 func TestMySQLThirtySecondReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	for _, c := range []struct {
 		q    string
 		want sql.NullString
@@ -2698,7 +2705,7 @@ func TestMySQLThirtySecondReviewFindings(t *testing.T) {
 // index's order.
 func TestMySQLOrderByAliasLocksTheRange(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0), (3, 0)") })
 		open, broke := false, false
@@ -2735,7 +2742,7 @@ func TestMySQLOrderByAliasLocksTheRange(t *testing.T) {
 // an UPDATE of the child does.
 func TestMySQLCascadeWaitsForTheGap(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE parents (id INT PRIMARY KEY)")
 		mustExec(t, db, "CREATE TABLE kids (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES parents (id) ON UPDATE CASCADE)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO parents VALUES (1), (30), (50)") })
@@ -2774,7 +2781,7 @@ func TestMySQLCascadeWaitsForTheGap(t *testing.T) {
 // one, and its gap reaches that row.
 func TestMySQLLimitScanRereadsAfterWaiting(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (10, 0), (20, 0), (30, 0)") })
 		open, broke, deleted, after := false, false, false, false
@@ -2829,7 +2836,7 @@ func TestMySQLIsNullSearchesTheNullRange(t *testing.T) {
 	for _, q := range []string{"SELECT id FROM kids WHERE pid IS NULL FOR UPDATE", "SELECT id FROM kids WHERE pid <=> NULL FOR UPDATE"} {
 		t.Run(q, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE kids (id INT PRIMARY KEY, pid INT, v INT, KEY idx_pid (pid))")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO kids VALUES (1, NULL, 0), (2, 10, 0), (3, 50, 0)") })
 				open, wrote := false, false
@@ -2861,7 +2868,7 @@ func TestMySQLIsNullSearchesTheNullRange(t *testing.T) {
 
 func TestMySQLThirtyFourthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	for _, q := range []string{"SELECT (2, 0) < (10, 0)", "SET sql_mode = 'NO_BACKSLASH_ESCAPES'", "SET sql_mode = 'ANSI_QUOTES,STRICT_TRANS_TABLES'"} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -2876,7 +2883,7 @@ func TestMySQLThirtyFourthReviewFindings(t *testing.T) {
 
 func TestMySQLThirtyFifthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 1), (2, 1), (3, 2)")
 	if _, err := db.Exec("ALTER TABLE t DROP PARTITION p0"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -2931,7 +2938,7 @@ func TestMySQLContradictionLocksNothing(t *testing.T) {
 	for _, q := range []string{"SELECT id FROM t WHERE id > 5 AND id < 3 FOR UPDATE", "SELECT id FROM t WHERE k IS NULL AND k = 1 FOR UPDATE"} {
 		t.Run(q, func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", mysql.New())
+				db, _ := s.DB("app", mysqlBin())
 				mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY idx_k (k))")
 				s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 1), (10, 10)") })
 				open, wrote := false, false
@@ -2965,7 +2972,7 @@ func TestMySQLContradictionLocksNothing(t *testing.T) {
 // search by.
 func TestMySQLRenameReachesPlainIndexes(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY idx_a (a))")
 	mustExec(t, db, "ALTER TABLE t RENAME COLUMN a TO b")
 	if def := store.defs[store.resolve("t")]; !slices.ContainsFunc(def.indexes, func(ix sqlir.IndexDef) bool { return slices.Equal(ix.Columns, []string{"b"}) }) {
@@ -2975,7 +2982,7 @@ func TestMySQLRenameReachesPlainIndexes(t *testing.T) {
 
 func TestMySQLThirtySeventhReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, flag TINYINT, body TEXT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 1, 'x'), (2, 0, 'y')")
 	// A boolean argument is 1 or 0, as go-sql-driver sends it.
@@ -2996,7 +3003,7 @@ func TestMySQLThirtySeventhReviewFindings(t *testing.T) {
 
 func TestMySQLThirtyEighthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var got string
 	if err := db.QueryRow("SELECT LEFT('abc', '2')").Scan(&got); err != nil || got != "ab" {
 		t.Errorf("LEFT('abc', '2'): %q, %v", got, err)
@@ -3015,7 +3022,7 @@ func TestMySQLThirtyEighthReviewFindings(t *testing.T) {
 // SKIP LOCKED leaves the rows others hold out before OFFSET counts.
 func TestSkipLockedBeforeOffset(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1), (2), (3)") })
 		held, got := false, 0
@@ -3062,7 +3069,7 @@ func TestSkipLockedBeforeOffset(t *testing.T) {
 // and inserts once the delete commits.
 func TestMySQLInsertIgnoreWaitsForADelete(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, store := s.DB("app", mysql.New())
+		db, store := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(5))")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 'old')") })
 		deleting, started := false, false
@@ -3096,7 +3103,7 @@ func TestMySQLInsertIgnoreWaitsForADelete(t *testing.T) {
 		s.Sometimes("the insert starts while the delete is open", func(*State) bool { return started })
 	})
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE a (v INT)")
 	mustExec(t, db, "INSERT INTO a VALUES (1)")
 	if _, err := db.Exec("ALTER TABLE a ADD COLUMN id INT AUTO_INCREMENT UNIQUE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -3109,7 +3116,7 @@ func TestMySQLInsertIgnoreWaitsForADelete(t *testing.T) {
 // BIGINT values above 2^53 compare exactly.
 func TestBigintComparesExactly(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id BIGINT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (9007199254740992), (9007199254740993)")
 	var n int
@@ -3120,7 +3127,7 @@ func TestBigintComparesExactly(t *testing.T) {
 
 func TestFortiethReviewFindings(t *testing.T) {
 	s := newSim(t)
-	my, store := s.DB("my", mysql.New())
+	my, store := s.DB("my", mysqlBin())
 	pg, _ := s.DB("pg", postgres.New())
 	// A numeric string goes into a BIGINT and the AUTO_INCREMENT counter
 	// exactly.
@@ -3157,7 +3164,7 @@ func TestFortiethReviewFindings(t *testing.T) {
 // MySQL's idiom for no limit uses one.
 func TestMySQLHugeIntegerLiterals(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1)")
 	if _, err := db.Exec("SELECT 18446744073709551615 = 18446744073709551614"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -3171,7 +3178,7 @@ func TestMySQLHugeIntegerLiterals(t *testing.T) {
 
 func TestFortySecondReviewFindings(t *testing.T) {
 	s := newSim(t)
-	my, store := s.DB("my", mysql.New())
+	my, store := s.DB("my", mysqlBin())
 	pg, _ := s.DB("pg", postgres.New())
 	if _, err := my.Exec("SELECT 9007199254740993.0"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("huge DECIMAL literal: %v", err)
@@ -3225,7 +3232,7 @@ func TestSubqueryShapes(t *testing.T) {
 	for _, srv := range []struct {
 		name string
 		s    Server
-	}{{"mysql", mysql.New()}, {"postgres", postgres.New()}} {
+	}{{"mysql", mysqlBin()}, {"postgres", postgres.New()}} {
 		t.Run(srv.name, func(t *testing.T) {
 			s := newSim(t)
 			db, _ := s.DB("app", srv.s)
@@ -3245,7 +3252,7 @@ func TestSubqueryShapes(t *testing.T) {
 
 func TestMySQLFortyFourthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO ai VALUES (?, ?)", true, true)
 	res, err := db.Exec("INSERT INTO ai (v) VALUES (0)")
@@ -3277,7 +3284,7 @@ func TestMySQLFortyFourthReviewFindings(t *testing.T) {
 
 func TestMySQLFortyFifthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var n int
 	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM foo").Scan(&n); err != nil || n != 1 {
 		t.Errorf("CTE named in another case: %d, %v", n, err)
@@ -3289,7 +3296,7 @@ func TestMySQLFortyFifthReviewFindings(t *testing.T) {
 
 func TestMySQLFortySixthReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	// A refused CREATE TABLE leaves no table behind.
 	if _, err := db.Exec("CREATE TABLE two (a INT AUTO_INCREMENT, b INT AUTO_INCREMENT, PRIMARY KEY (a), UNIQUE KEY (b))"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("two AUTO_INCREMENT columns: %v", err)
@@ -3309,7 +3316,7 @@ func TestMySQLFortySixthReviewFindings(t *testing.T) {
 
 func TestMySQLFortySeventhReviewFindings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 10), (2, 20)")
 	count := func(q string) int {
@@ -3340,7 +3347,7 @@ func TestMySQLFortySeventhReviewFindings(t *testing.T) {
 // Temporary tables are the session's own, which detest does not model.
 func TestMySQLTemporaryTablesRefused(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	for _, q := range []string{"CREATE TEMPORARY TABLE tmp (id INT)", "DROP TEMPORARY TABLE t"} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -3354,7 +3361,7 @@ func TestMySQLTemporaryTablesRefused(t *testing.T) {
 // waiter on the row is not sent to the key the rolled back statement gave it.
 func TestMySQLFailedStatementForgetsMove(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1), (2), (12)")
 	tx, err := db.Begin()
@@ -3382,7 +3389,7 @@ func TestMySQLFailedStatementForgetsMove(t *testing.T) {
 // are refused, and the others convert.
 func TestMySQLCastTargets(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(10))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, '12')")
 	for _, q := range []string{
@@ -3410,7 +3417,7 @@ func TestMySQLCastTargets(t *testing.T) {
 // take are the ones whose records and gaps they locked.
 func TestMySQLLimitFollowsTheScannedIndex(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT DEFAULT 0, KEY (k))")
 	mustExec(t, db, "INSERT INTO t (id, k) VALUES (1, 20), (2, 10)")
 	tx, err := db.Begin()
@@ -3442,7 +3449,7 @@ func TestMySQLLimitFollowsTheScannedIndex(t *testing.T) {
 // its range is checked, and an explicit AUTO_INCREMENT value moves the counter.
 func TestMySQLBytesIntoIntegerColumns(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, n TINYINT)")
 	if _, err := db.Exec("INSERT INTO t (n) VALUES (?)", []byte("300")); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("TINYINT 300: %v, want out of range", err)
@@ -3461,7 +3468,7 @@ func TestMySQLBytesIntoIntegerColumns(t *testing.T) {
 // so HAVING without either is still refused.
 func TestMySQLHavingSeesItsOwnBlock(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	for _, q := range []string{
 		"SELECT id, (SELECT COUNT(*) FROM t) AS c FROM t HAVING id > 0",
@@ -3479,7 +3486,7 @@ func TestMySQLHavingSeesItsOwnBlock(t *testing.T) {
 func TestMySQLAutoIncrementOptionInEveryRun(t *testing.T) {
 	var ids []int64
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v INT) AUTO_INCREMENT=100")
 		s.Manual("insert", 1, func(p *Proc) error {
 			res, err := db.ExecContext(p.Context(), "INSERT INTO t (v) VALUES (1)")
@@ -3507,7 +3514,7 @@ func TestMySQLAutoIncrementOptionInEveryRun(t *testing.T) {
 // string, round or compare by rules detest does not follow, and are refused.
 func TestMySQLNumericFunctionsOfStrings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(10))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, '10'), (2, '5')")
 	var abs, floor, sum, avg float64
@@ -3528,7 +3535,7 @@ func TestMySQLNumericFunctionsOfStrings(t *testing.T) {
 // as MySQL would update the joined table that has it.
 func TestMySQLJoinedUpdateOfAnotherTable(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, x INT)")
 	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, y INT)")
 	mustExec(t, db, "INSERT INTO a VALUES (1, 0)")
@@ -3546,7 +3553,7 @@ func TestMySQLJoinedUpdateOfAnotherTable(t *testing.T) {
 // SELECT is NULL, while a write refuses it in strict mode.
 func TestMySQLArithmeticOfBooleansAndZero(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	var n int64
 	var q sql.NullFloat64
@@ -3568,7 +3575,7 @@ func TestMySQLArithmeticOfBooleansAndZero(t *testing.T) {
 // id, as go-sql-driver's does.
 func TestMySQLMultiStatementLastInsertID(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE c (id INT AUTO_INCREMENT PRIMARY KEY)")
 	res, err := db.Exec("INSERT INTO c VALUES (NULL); INSERT INTO c VALUES (NULL)")
 	if err != nil {
@@ -3582,7 +3589,7 @@ func TestMySQLMultiStatementLastInsertID(t *testing.T) {
 // Comparisons take a []byte argument as the string it holds.
 func TestMySQLBytesCompareAsStrings(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(10))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 'a'), (2, 'c')")
 	var n int
@@ -3595,7 +3602,7 @@ func TestMySQLBytesCompareAsStrings(t *testing.T) {
 // prefix index serves is refused, as the gap locks do not model its prefixes.
 func TestMySQLPrefixIndexSearch(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(20), code VARCHAR(20), KEY (name(3)), UNIQUE KEY (code(4)))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 'abcdef', 'x1')")
 	for _, q := range []string{
@@ -3615,7 +3622,7 @@ func TestMySQLPrefixIndexSearch(t *testing.T) {
 // transaction locked can never proceed, which is reported as for a row lock.
 func TestMySQLGapWaitOnOwnTransaction(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", mysql.New())
+		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1)") })
 		s.Manual("handler", 1, func(p *Proc) error {
@@ -3642,7 +3649,7 @@ func TestMySQLGapWaitOnOwnTransaction(t *testing.T) {
 // error stops still used its value.
 func TestMySQLInsertValuesReservesIDs(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, store := s.DB("app", mysql.New())
+		db, store := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(1))")
 		s.Manual("batch", 1, func(p *Proc) error {
 			_, err := db.ExecContext(p.Context(), "INSERT INTO t (v) VALUES ('a'), ('b')")
@@ -3661,7 +3668,7 @@ func TestMySQLInsertValuesReservesIDs(t *testing.T) {
 	})
 
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE u (id INT AUTO_INCREMENT PRIMARY KEY, n TINYINT)")
 	if _, err := db.Exec("INSERT INTO u (n) VALUES (300), (1)"); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Fatalf("got %v, want out of range", err)
@@ -3679,7 +3686,7 @@ func TestMySQLInsertValuesReservesIDs(t *testing.T) {
 // rows that stay are kept.
 func TestMySQLFailedStatementReleasesInsertLocks(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0), (3, 0)")
 	tx, err := db.Begin()
@@ -3706,7 +3713,7 @@ func TestMySQLFailedStatementReleasesInsertLocks(t *testing.T) {
 // locking search narrows its range as MySQL does: '20' is above '5'.
 func TestMySQLStringBoundsOnNumberColumn(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (10), (30)")
 	tx, err := db.Begin()
@@ -3727,7 +3734,7 @@ func TestMySQLStringBoundsOnNumberColumn(t *testing.T) {
 // it, as an insert of it would.
 func TestMySQLSeedMovesAutoIncrement(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
 	store.SeedRow("t", Row{"id": int64(10), "v": int64(0)})
 	res, err := db.Exec("INSERT INTO t (v) VALUES (1)")
@@ -3744,7 +3751,7 @@ func TestMySQLSeedMovesAutoIncrement(t *testing.T) {
 // without that index does, gaps included.
 func TestMySQLNumberSearchOnTextIndex(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(5), UNIQUE KEY (code))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, '1'), (2, '01')")
 	tx, err := db.Begin()
@@ -3773,7 +3780,7 @@ func TestMySQLNumberSearchOnTextIndex(t *testing.T) {
 // nonnegative integer offset.
 func TestMySQLWindowArguments(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1), (2)")
 	// MySQL's grammar refuses an offset other than a literal or a parameter.
@@ -3799,7 +3806,7 @@ func TestMySQLWindowArguments(t *testing.T) {
 // A float's text and a number in a temporal column are refused.
 func TestMySQLNumberStoredInTextColumn(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(10), d DATETIME)")
 	mustExec(t, db, "INSERT INTO t (id, s) VALUES (1, 10)")
 	mustExec(t, db, "INSERT INTO t (id, s) VALUES (2, 'x')")
@@ -3819,7 +3826,7 @@ func TestMySQLNumberStoredInTextColumn(t *testing.T) {
 // row and does not set it, and NOW() has whole seconds unless asked for more.
 func TestMySQLOnUpdateCurrentTimestamp(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT, at DATETIME ON UPDATE CURRENT_TIMESTAMP, at6 DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))")
 	mustExec(t, db, "INSERT INTO t (id, v, at, at6) VALUES (1, 0, NULL, NULL), (2, 0, NULL, NULL)")
 	mustExec(t, db, "UPDATE t SET v = 1 WHERE id = 1")
@@ -3851,7 +3858,7 @@ func TestMySQLOnUpdateCurrentTimestamp(t *testing.T) {
 // string or a time, so both compare alike, also with a string literal.
 func TestMySQLTemporalValues(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, at DATETIME, d DATE, note VARCHAR(30))")
 	mustExec(t, db, "INSERT INTO t (id, at, d) VALUES (1, '2024-01-01 10:00:00', '2024-01-01 23:00:00')")
 	mustExec(t, db, "INSERT INTO t (id, at, d, note) VALUES (2, ?, ?, ?)", time.Date(2024, 1, 1, 9, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 5, 0, 0, 0, time.UTC), time.Date(2024, 1, 1, 9, 0, 0, 0, time.UTC))
@@ -3877,7 +3884,7 @@ func TestMySQLTemporalValues(t *testing.T) {
 // a lock wait may still time out.
 func TestMySQLLockWaitTimeoutValues(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	for _, q := range []string{"SET innodb_lock_wait_timeout = 'x'", "SET innodb_lock_wait_timeout = 1.5"} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v, want unsupported", q, err)
@@ -3896,7 +3903,7 @@ func TestMySQLLockWaitTimeoutValues(t *testing.T) {
 // that names no member, as MySQL's strict mode does.
 func TestMySQLStringLimits(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(3), st ENUM('NEW', 'DONE'), tags SET('a', 'b', 'c'))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 'äbc', 'new', 'c,A')")
 	if got := peekRows(store, "t", "st", "tags"); got != "NEW:a,c" {
@@ -3917,7 +3924,7 @@ func TestMySQLStringLimits(t *testing.T) {
 // still bound the search, which locks them and not the whole table.
 func TestMySQLInListWithNull(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1), (5)")
 	tx, err := db.Begin()
@@ -3937,7 +3944,7 @@ func TestMySQLInListWithNull(t *testing.T) {
 // and a TIME column, which detest does not model, refuses values.
 func TestMySQLBoolCastAndTime(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var n int64
 	if err := db.QueryRow("SELECT CAST(? AS SIGNED)", true).Scan(&n); err != nil || n != 1 {
 		t.Errorf("CAST(true AS SIGNED): %d, %v", n, err)
@@ -3953,7 +3960,7 @@ func TestMySQLBoolCastAndTime(t *testing.T) {
 // time.Time, whose text MySQL would refuse.
 func TestMySQLIntegerColumnRefusesOtherValues(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n INT)")
 	if _, err := db.Exec("INSERT INTO t VALUES (1, ?)", time.Now()); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("time.Time into INT: %v, want unsupported", err)
@@ -3963,7 +3970,7 @@ func TestMySQLIntegerColumnRefusesOtherValues(t *testing.T) {
 // MySQL has no ILIKE, which TiDB's parser takes, so it is refused.
 func TestMySQLRefusesILike(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(5))")
 	if _, err := db.Exec("SELECT id FROM t WHERE s ILIKE 'a%'"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("ILIKE: %v, want unsupported", err)
@@ -4018,7 +4025,7 @@ func TestPostgresSessionLockTimeoutFollowsTheTransaction(t *testing.T) {
 // column's value.
 func TestMySQLCompositeIndexSearch(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (tenant INT, id INT, v INT, PRIMARY KEY (tenant, id))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 1, 0), (1, 5, 0), (1, 9, 0), (2, 1, 0)")
 	table := store.resolve("t")
@@ -4070,7 +4077,7 @@ func TestMySQLCompositeIndexSearch(t *testing.T) {
 // number of them, so the search locks the gap around it.
 func TestMySQLUniqueNullKeyLocksTheGap(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code INT, UNIQUE KEY (code))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, NULL), (2, 5)")
 	tx, err := db.Begin()
@@ -4090,7 +4097,7 @@ func TestMySQLUniqueNullKeyLocksTheGap(t *testing.T) {
 // which InnoDB creates when none does.
 func TestMySQLCompositeForeignKeyIndex(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE p (a INT, b INT, PRIMARY KEY (a, b))")
 	mustExec(t, db, "CREATE TABLE c (id INT PRIMARY KEY, a INT, b INT, x INT, KEY (a, x), FOREIGN KEY (a, b) REFERENCES p (a, b))")
 	def := store.defs[store.resolve("c")]
@@ -4103,7 +4110,7 @@ func TestMySQLCompositeForeignKeyIndex(t *testing.T) {
 // lookup, is refused: MySQL's optimizer picks the index by its statistics.
 func TestMySQLAmbiguousIndexSearch(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, KEY (a), KEY (b))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 1, 1)")
 	tx, err := db.Begin()
@@ -4129,7 +4136,7 @@ func TestMySQLAmbiguousIndexSearch(t *testing.T) {
 // compares it.
 func TestMySQLTemporalPrecision(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a DATETIME, b DATETIME(3))")
 	at := time.Date(2024, 1, 1, 10, 0, 0, 123456789, time.UTC)
 	mustExec(t, db, "INSERT INTO t VALUES (1, ?, ?)", at, at)
@@ -4146,7 +4153,7 @@ func TestMySQLTemporalPrecision(t *testing.T) {
 // inside a transaction is refused.
 func TestMySQLDDLInsideTransaction(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -4163,7 +4170,7 @@ func TestMySQLDDLInsideTransaction(t *testing.T) {
 // LIMIT scan takes id 2 before id 10.
 func TestMySQLSecondaryIndexTiesByPrimaryKey(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT DEFAULT 0, KEY (k))")
 	mustExec(t, db, "INSERT INTO t (id, k) VALUES (10, 1), (2, 1)")
 	mustExec(t, db, "UPDATE t SET v = 1 WHERE k = 1 LIMIT 1")
@@ -4176,7 +4183,7 @@ func TestMySQLSecondaryIndexTiesByPrimaryKey(t *testing.T) {
 // ascending key order, and so is a descending unique key.
 func TestMySQLDescendingIndex(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k DESC))")
 	if _, err := db.Exec("SELECT id FROM t WHERE k > 1 FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("search by a descending index: %v, want unsupported", err)
@@ -4190,7 +4197,7 @@ func TestMySQLDescendingIndex(t *testing.T) {
 // errors; the mode mysqldump sets and a restore from a variable are not.
 func TestMySQLNonStrictSQLMode(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	for _, q := range []string{"SET sql_mode = ''", "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v, want unsupported", q, err)
@@ -4205,7 +4212,7 @@ func TestMySQLNonStrictSQLMode(t *testing.T) {
 // still follows the index it searches by.
 func TestMySQLReadCommittedLimitFollowsTheIndex(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New(mysql.Isolation(ReadCommitted)))
+	db, store := s.DB("app", mysqlBin(mysql.Isolation(ReadCommitted)))
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT DEFAULT 0, KEY (k))")
 	mustExec(t, db, "INSERT INTO t (id, k) VALUES (1, 20), (2, 10)")
 	mustExec(t, db, "UPDATE t SET v = 1 WHERE k >= 0 LIMIT 1")
@@ -4217,7 +4224,7 @@ func TestMySQLReadCommittedLimitFollowsTheIndex(t *testing.T) {
 // Crossed string bounds match no row, so the search locks nothing.
 func TestMySQLCrossedStringBounds(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(5), KEY (code))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 'm')")
 	tx, err := db.Begin()
@@ -4237,7 +4244,7 @@ func TestMySQLCrossedStringBounds(t *testing.T) {
 // guard fails as unsupported rather than pass unchecked.
 func TestMySQLUnconvertedCheck(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(10) CHECK (s REGEXP '^[a-z]+$'), CONSTRAINT c2 CHECK (SOUNDEX(s) <> ''))")
 	if _, err := db.Exec("INSERT INTO t VALUES (1, 'ABC')"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a write the check guards: %v, want unsupported", err)
@@ -4248,7 +4255,7 @@ func TestMySQLUnconvertedCheck(t *testing.T) {
 // insert would store it, converted to the column's type.
 func TestMySQLBackfillConvertsTheDefault(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO t VALUES (1)")
 	mustExec(t, db, "ALTER TABLE t ADD COLUMN n INT DEFAULT '5'")
@@ -4263,7 +4270,7 @@ func TestMySQLBackfillConvertsTheDefault(t *testing.T) {
 // above does not.
 func TestMySQLLimitGapIncludesThePrimaryKey(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 5), (3, 5), (5, 5)")
 	tx, err := db.Begin()
@@ -4287,7 +4294,7 @@ func TestMySQLLimitGapIncludesThePrimaryKey(t *testing.T) {
 // optimizer picks how to search it; IN is searched as points.
 func TestMySQLLockingSearchWithOr(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)")
 	if _, err := db.Exec("UPDATE t SET v = 1 WHERE id = 1 OR id = 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -4301,7 +4308,7 @@ func TestMySQLLockingSearchWithOr(t *testing.T) {
 // start and stops after LIMIT rows, so it locks those, not the whole table.
 func TestMySQLLimitScanOfTheClusteredIndex(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (2, 0), (10, 0), (20, 0)")
 	tx, err := db.Begin()
@@ -4329,7 +4336,7 @@ func TestMySQLLimitScanOfTheClusteredIndex(t *testing.T) {
 // is refused, as one by a prefix index is.
 func TestMySQLPrefixPartAfterColumns(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT, b VARCHAR(20), KEY (a, b(3)))")
 	if _, err := db.Exec("SELECT id FROM t WHERE a = 1 AND b = 'abcdef' FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a search reaching b(3): %v, want unsupported", err)
@@ -4340,7 +4347,7 @@ func TestMySQLPrefixPartAfterColumns(t *testing.T) {
 // MODIFY of a column's type converts the values the rows hold, as MySQL does.
 func TestMySQLModifyConvertsValues(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n VARCHAR(10))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, '42')")
 	mustExec(t, db, "ALTER TABLE t MODIFY n INT")
@@ -4394,7 +4401,7 @@ func TestPostgresSavepointUndoesSessionLockTimeout(t *testing.T) {
 // as a dump restores it from a variable; another zone is refused.
 func TestMySQLTimeZone(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "SET @OLD_TIME_ZONE=@@TIME_ZONE")
 	mustExec(t, db, "SET TIME_ZONE='+00:00'")
 	mustExec(t, db, "SET TIME_ZONE=@OLD_TIME_ZONE")
@@ -4409,7 +4416,7 @@ func TestMySQLTimeZone(t *testing.T) {
 // CheckSQL refuses a multi-statement query of more than one result set, as
 // running it does.
 func TestMySQLCheckSQLMultipleResultSets(t *testing.T) {
-	if err := CheckSQL(mysql.New(), "SELECT 1; SELECT 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+	if err := CheckSQL(mysqlBin(), "SELECT 1; SELECT 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("CheckSQL: %v, want unsupported", err)
 	}
 }
@@ -4450,7 +4457,7 @@ func TestPostgresSavepointRestoresLockTimeout(t *testing.T) {
 // the versions snapshots read share.
 func TestMySQLBackfillSharesVolatileDefault(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0)")
 	mustExec(t, db, "UPDATE t SET v = 1 WHERE id = 1")
@@ -4468,7 +4475,7 @@ func TestMySQLBackfillSharesVolatileDefault(t *testing.T) {
 // that converts back to the one held changes nothing.
 func TestMySQLOnUpdateComparesStoredValues(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n INT, at DATETIME ON UPDATE CURRENT_TIMESTAMP)")
 	mustExec(t, db, "INSERT INTO t (id, n) VALUES (1, 1)")
 	res, err := db.Exec("UPDATE t SET n = 1.2 WHERE id = 1")
@@ -4487,7 +4494,7 @@ func TestMySQLOnUpdateComparesStoredValues(t *testing.T) {
 // other error MySQL would turn into a warning and store coerced or skip.
 func TestMySQLInsertIgnoreDowngrades(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n TINYINT, s VARCHAR(2))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 0, 'a')")
 	mustExec(t, db, "INSERT IGNORE INTO t VALUES (1, 0, 'b')")
@@ -4508,7 +4515,7 @@ func TestMySQLInsertIgnoreDowngrades(t *testing.T) {
 // and locks them and the gap around them, not the whole table.
 func TestMySQLNullSafeEqualBoundNull(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, NULL), (2, 5), (3, 9)")
 	tx, err := db.Begin()
@@ -4529,7 +4536,7 @@ func TestMySQLNullSafeEqualBoundNull(t *testing.T) {
 // not the whole table; <>, != and NOT IN on an indexed column are refused.
 func TestMySQLLikePrefixSearch(t *testing.T) {
 	s := newSim(t)
-	db, store := s.DB("app", mysql.New())
+	db, store := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(10), KEY (code))")
 	mustExec(t, db, "INSERT INTO t VALUES (1, 'aa'), (2, 'ab'), (3, 'ba'), (4, 'ca')")
 	tx, err := db.Begin()
@@ -4560,7 +4567,7 @@ func TestMySQLLikePrefixSearch(t *testing.T) {
 // are runs.
 func TestMySQLModifyOfAPrimaryKey(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE a (id VARCHAR(5) PRIMARY KEY)")
 	mustExec(t, db, "INSERT INTO a VALUES ('01')")
 	if _, err := db.Exec("ALTER TABLE a MODIFY id INT"); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -4576,7 +4583,7 @@ func TestMySQLModifyOfAPrimaryKey(t *testing.T) {
 // it; one leading the primary key or another index loads.
 func TestMySQLAutoIncrementNeedsAnIndex(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	if _, err := db.Exec("CREATE TABLE a (id INT AUTO_INCREMENT, v INT)"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("no index: %v, want unsupported", err)
 	}
@@ -4588,7 +4595,7 @@ func TestMySQLAutoIncrementNeedsAnIndex(t *testing.T) {
 // it starts with, as MySQL does.
 func TestMySQLDoubleOfAString(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	var lt bool
 	var q float64
 	if err := db.QueryRow("SELECT CAST('2' AS DOUBLE) < '10', '10' / 4").Scan(&lt, &q); err != nil {
@@ -4603,7 +4610,7 @@ func TestMySQLDoubleOfAString(t *testing.T) {
 // refused, as MySQL refuses it or fills in a value of its own.
 func TestMySQLAlterNotNullOverRows(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", mysql.New())
+	db, _ := s.DB("app", mysqlBin())
 	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "INSERT INTO t VALUES (1, NULL)")
 	for _, q := range []string{"ALTER TABLE t ADD COLUMN w INT NOT NULL", "ALTER TABLE t MODIFY v INT NOT NULL"} {
@@ -4614,4 +4621,61 @@ func TestMySQLAlterNotNullOverRows(t *testing.T) {
 	mustExec(t, db, "ALTER TABLE t ADD COLUMN x INT NOT NULL DEFAULT 0")
 	mustExec(t, db, "CREATE TABLE e (id INT PRIMARY KEY)")
 	mustExec(t, db, "ALTER TABLE e ADD COLUMN w INT NOT NULL")
+}
+
+// A text column of a case-insensitive collation, MySQL 8's default, loads
+// with the schema, and a statement whose outcome depends on how it compares
+// is refused; reading and writing its values as they are, and columns of a
+// _bin collation or binary strings, run.
+func TestMySQLCaseInsensitiveCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE u (id INT PRIMARY KEY, email VARCHAR(50), note VARCHAR(50), code VARCHAR(10) COLLATE utf8mb4_bin, raw VARBINARY(10), UNIQUE KEY (email))")
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, name VARCHAR(10), UNIQUE KEY (name)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin")
+	mustExec(t, db, "CREATE TABLE k (name VARCHAR(10) PRIMARY KEY)")
+	mustExec(t, db, "CREATE TABLE n (id INT PRIMARY KEY, note VARCHAR(10))")
+	for _, q := range []string{
+		"INSERT INTO u (id, email) VALUES (1, 'a@x')",  // the unique index compares it
+		"SELECT id FROM u WHERE email = 'A@X'",         // a comparison
+		"SELECT id FROM u WHERE note LIKE 'a%'",        // LIKE
+		"SELECT id FROM u WHERE note IN ('a', 'b')",    // IN
+		"SELECT id FROM u ORDER BY note",               // ORDER BY
+		"SELECT note, COUNT(*) FROM u GROUP BY note",   // GROUP BY
+		"SELECT DISTINCT note FROM u",                  // DISTINCT
+		"SELECT MAX(note) FROM u",                      // MAX
+		"UPDATE u SET email = 'b@x' WHERE id = 1",      // the unique index compares it
+		"DELETE FROM k LIMIT 1",                        // a scan along a key that holds it
+		"SELECT n.id FROM n JOIN u ON u.note = n.note", // a join on it
+		"SELECT id FROM n WHERE note > 'm'",            // a range
+		"SELECT note FROM n UNION SELECT note FROM u",  // UNION's DISTINCT
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		"INSERT INTO n VALUES (1, 'Abc')",
+		"UPDATE n SET note = 'x' WHERE id = 1",
+		"SELECT note FROM n WHERE id = 1",
+		"SELECT id FROM u WHERE code = 'a' AND raw = 'b'",
+		"INSERT INTO b VALUES (1, 'a'), (2, 'A')",
+		"SELECT id FROM b WHERE name = 'a' ORDER BY name",
+		"SELECT note FROM n UNION ALL SELECT note FROM u",
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// CONVERT TO gives the columns the table's new collation.
+	mustExec(t, db, "ALTER TABLE b CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci")
+	if _, err := db.Exec("SELECT id FROM b WHERE name = 'a'"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("after CONVERT TO a _ci collation: %v, want unsupported", err)
+	}
+	// A server whose default collation is _bin gives it to the columns that
+	// declare none.
+	s2 := newSim(t)
+	db2, _ := s2.DB("app", mysql.New(mysql.Collation("utf8mb4_bin")))
+	mustExec(t, db2, "CREATE TABLE u (id INT PRIMARY KEY, email VARCHAR(50), UNIQUE KEY (email))")
+	mustExec(t, db2, "INSERT INTO u VALUES (1, 'a@x')")
+	mustExec(t, db2, "SELECT id FROM u WHERE email = 'a@x'")
 }

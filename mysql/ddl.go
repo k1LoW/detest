@@ -55,9 +55,26 @@ func (c *conv) tableOptions(ch *sqlir.SchemaChange, opts []*ast.TableOption) err
 			if !strings.EqualFold(o.StrValue, "InnoDB") {
 				return c.unsupported("ENGINE=" + o.StrValue)
 			}
+		case ast.TableOptionCharset:
+			if ch.Collation == "" {
+				ch.Collation = charsetCollation(o.StrValue)
+			}
+			ch.ConvertCollation = ch.ConvertCollation || o.UintValue == ast.TableOptionCharsetWithConvertTo
+		case ast.TableOptionCollate:
+			ch.Collation = strings.ToLower(o.StrValue)
 		}
 	}
 	return nil
+}
+
+// charsetCollation is the default collation of a character set, as far as
+// whether it tells cases apart: binary's compares bytes, and every other
+// character set's default collation is case-insensitive.
+func charsetCollation(charset string) string {
+	if strings.EqualFold(charset, "binary") {
+		return "binary"
+	}
+	return strings.ToLower(charset) + "_general_ci"
 }
 
 // place gives the column ch defined last the position of a MySQL column
@@ -97,6 +114,14 @@ func (c *conv) createTableAs(s *ast.CreateTableStmt) (sqlir.Statement, error) {
 func (c *conv) column(ch *sqlir.SchemaChange, d *ast.ColumnDef) error {
 	name := d.Name.Name.L
 	col := sqlir.ColumnDef{Name: name, Type: typeName(d.Tp)}
+	if d.Tp != nil && d.Tp.GetCharset() != "" {
+		col.Collation = charsetCollation(d.Tp.GetCharset())
+	}
+	for _, o := range d.Options {
+		if o.Tp == ast.ColumnOptionCollate {
+			col.Collation = strings.ToLower(o.StrValue)
+		}
+	}
 	if d.Tp != nil {
 		switch d.Tp.GetType() {
 		case mysql.TypeVarchar, mysql.TypeString, mysql.TypeVarString:

@@ -5,6 +5,8 @@
 package mysql
 
 import (
+	"strings"
+
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
@@ -14,7 +16,17 @@ type Option func(*config)
 type config struct {
 	isolation sqlir.IsolationLevel
 	database  string
+	collation string
 	convert   func(*sqlir.DBError) error
+}
+
+// Collation sets the server's default collation, as collation_server does
+// (default utf8mb4_0900_ai_ci, MySQL 8's), which a text column takes when
+// neither it nor its table declares one. detest compares strings exactly,
+// as a _bin collation does, and refuses the statements whose outcome
+// depends on how a column of a case-insensitive (_ci) collation compares.
+func Collation(name string) Option {
+	return func(c *config) { c.collation = strings.ToLower(name) }
 }
 
 // Database sets the current database, which unqualified table names refer
@@ -42,13 +54,13 @@ func Isolation(level sqlir.IsolationLevel) Option {
 // New describes a MySQL server with InnoDB tables. detest implements
 // Repeatable Read, Read Committed and Serializable.
 func New(opts ...Option) sqlir.Server {
-	c := &config{isolation: sqlir.RepeatableRead, database: "app"}
+	c := &config{isolation: sqlir.RepeatableRead, database: "app", collation: "utf8mb4_0900_ai_ci"}
 	for _, o := range opts {
 		o(c)
 	}
 	return sqlir.NewServer(sqlir.ServerSpec{Name: "mysql", Parser: parser{}, Isolation: c.isolation, Codes: codes, InnoDB: true,
 		Supported:  []sqlir.IsolationLevel{sqlir.ReadCommitted, sqlir.RepeatableRead, sqlir.Serializable},
-		SearchPath: []string{c.database}, Convert: c.convert})
+		SearchPath: []string{c.database}, Convert: c.convert, Collation: c.collation})
 }
 
 func codes(k sqlir.DBErrorKind) (string, int) {

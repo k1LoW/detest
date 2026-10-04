@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"database/sql"
 	"fmt"
 	"maps"
@@ -213,6 +214,11 @@ type tableDef struct {
 	// strs are MySQL's limits on what a string column holds: CHAR(n) and
 	// VARCHAR(n) lengths, and ENUM and SET members.
 	strs map[string]strLimit
+	// collation is a MySQL table's default collation, and ci the text
+	// columns whose collation is case-insensitive, which detest's exact
+	// string comparison does not follow.
+	collation string
+	ci        map[string]bool
 	// fsp is the fractional seconds each MySQL DATETIME and TIMESTAMP
 	// column keeps.
 	fsp map[string]int
@@ -489,6 +495,26 @@ func (def *tableDef) renameConstraint(old, nw string) bool {
 	return false
 }
 
+// setCaseInsensitive records whether the MySQL text column col, of the
+// collation declared for it, or else the table's or the server's default,
+// compares strings without regard to case, as every _ci collation, MySQL
+// 8's default utf8mb4_0900_ai_ci among them, does.
+func (def *tableDef) setCaseInsensitive(col, collation, server string) {
+	if !mysqlTextType(def.types[col]) {
+		delete(def.ci, col)
+		return
+	}
+	collation = cmp.Or(collation, def.collation, server)
+	if !strings.HasSuffix(collation, "_ci") {
+		delete(def.ci, col)
+		return
+	}
+	if def.ci == nil {
+		def.ci = map[string]bool{}
+	}
+	def.ci[col] = true
+}
+
 // indexedBy reports whether an index leads with cols, as the index InnoDB
 // uses for a foreign key on them must.
 func (def *tableDef) indexedBy(cols []string) bool {
@@ -536,6 +562,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.defaults, col)
 	delete(def.onUpdate, col)
 	delete(def.strs, col)
+	delete(def.ci, col)
 	delete(def.fsp, col)
 	delete(def.generated, col)
 	delete(def.types, col)
@@ -564,6 +591,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if l, ok := def.strs[old]; ok {
 		delete(def.strs, old)
 		def.strs[nw] = l
+	}
+	if def.ci[old] {
+		delete(def.ci, old)
+		def.ci[nw] = true
 	}
 	if f, ok := def.fsp[old]; ok {
 		delete(def.fsp, old)
@@ -869,6 +900,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	}
 	var added []sqlir.ColumnDef
 	redefined := false // a MySQL MODIFY or CHANGE of an existing column
+	if ch.Collation != "" {
+		def.collation = ch.Collation
+	}
 	for _, col := range ch.Columns {
 		if col.After != "" && (col.After == col.Name || !slices.Contains(def.columns, col.After)) {
 			// Checked before the column is added or moved, so a failed
@@ -905,6 +939,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				redefined = true
 			}
 			def.types[col.Name] = col.Type
+			if db.kind.InnoDB() {
+				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
+			}
 		}
 		switch {
 		case col.NotNull:
@@ -1010,6 +1047,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	}
 	if err := db.backfill(table, added, redefined, tx); err != nil {
 		return err
+	}
+	if ch.ConvertCollation && db.kind.InnoDB() {
+		for col := range def.types {
+			def.setCaseInsensitive(col, "", db.kind.Collation()) // CONVERT TO gives every text column the table's
+		}
 	}
 	for _, fk := range ch.ForeignKeys {
 		if fk.Name == "" {
