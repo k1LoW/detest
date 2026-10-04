@@ -1014,6 +1014,9 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
+		if err := x.boolCastSource(v); err != nil {
+			return nil, err
+		}
 		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	}
 	if hasAggregate(e) {
@@ -1844,6 +1847,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
+		if err := x.boolCastSource(v); err != nil {
+			return nil, err
+		}
 		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
@@ -2227,13 +2233,20 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 	if !eq && x.tx.db.kind.InnoDB() {
 		return nil, x.unsupported("ordered row comparison")
 	}
-	sawNull := false
+	// Every pair is typed before any is compared, as Postgres resolves the
+	// operators of all the pairs when it plans the statement, so a text
+	// against a number in a later pair fails whatever the first one holds.
+	ls, rs := make([]any, len(l)), make([]any, len(r))
 	for i := range l {
 		li, ri, err := x.untypedPair(le[i], l[i], re[i], r[i])
 		if err != nil {
 			return nil, err
 		}
-		li, ri = x.comparable(li, ri)
+		ls[i], rs[i] = x.comparable(li, ri)
+	}
+	sawNull := false
+	for i := range l {
+		li, ri := ls[i], rs[i]
 		if derefValue(li) == nil || derefValue(ri) == nil {
 			if !eq {
 				return nil, nil
@@ -2907,6 +2920,22 @@ func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
 		return nil
 	}
 	return x.unsupported("a cast of a bytea value to " + c.Type)
+}
+
+// boolCastSource refuses a cast to boolean of a value cast to bigint or
+// smallint, which Postgres casts to boolean from integer only; the values
+// of the three types are alike.
+func (x *sqlExec) boolCastSource(c *sqlir.Cast) error {
+	if c.Type != "bool" && c.Type != "boolean" {
+		return nil
+	}
+	if inner, ok := c.X.(*sqlir.Cast); ok {
+		switch inner.Type {
+		case "int2", "int8", "smallint", "bigint":
+			return x.unsupported("a cast of a " + inner.Type + " to boolean")
+		}
+	}
+	return nil
 }
 
 // paramBool is an integer parameter cast to boolean as the text the driver

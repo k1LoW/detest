@@ -883,6 +883,7 @@ func TestValueFormsByType(t *testing.T) {
 		`SELECT '' || now()`, `SELECT now()::text`, `SELECT CASE WHEN true THEN 1 ELSE 'x'::text END`,
 		`ALTER TABLE t ALTER COLUMN v TYPE int USING length(v)`,
 		`SELECT b || 'x' FROM t`, `SELECT id FROM t WHERE name = 'a '`, `SELECT id FROM t WHERE 'a ' IN (name)`,
+		`SELECT 1::bigint::bool`, `SELECT id FROM t WHERE (id, name) > (0, 1)`, `SELECT id FROM t WHERE (id, name) = (0, 1)`,
 		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
