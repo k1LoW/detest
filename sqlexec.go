@@ -1873,6 +1873,14 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		switch v.Op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			lr, lok := v.L.(*sqlir.RowExpr)
+			rr, rok := v.R.(*sqlir.RowExpr)
+			if lok || rok {
+				if !lok || !rok || len(lr.Items) != len(rr.Items) {
+					return nil, x.unsupported("row comparison")
+				}
+				return x.compareRows(v.Op, lr.Items, l, rr.Items, r)
+			}
 			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
 				return nil, err
 			}
@@ -1938,22 +1946,27 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				}
 			}
 		} else {
+			lr, isRow := v.X.(*sqlir.RowExpr)
 			for _, it := range v.List {
 				val, err := x.eval(it, en)
 				if err != nil {
 					return nil, err
 				}
-				if la, ok := derefValue(l).([]any); ok {
-					ra, ok := derefValue(val).([]any)
-					if !ok || len(la) != len(ra) {
-						return nil, x.unsupported("row comparison of different shapes")
+				if isRow {
+					ir, ok := it.(*sqlir.RowExpr)
+					if !ok || len(ir.Items) != len(lr.Items) {
+						return nil, x.unsupported("row comparison")
 					}
-					eq, unknown := x.rowsEqual(la, ra)
-					if eq {
+					eq, err := x.compareRows("=", lr.Items, l, ir.Items, val)
+					if err != nil {
+						return nil, err
+					}
+					if eq == nil {
+						sawNull = true
+					} else if b, _ := eq.(bool); b {
 						in = true
 						break
 					}
-					sawNull = sawNull || unknown
 					continue
 				}
 				if _, row := derefValue(val).([]any); row {
@@ -2102,6 +2115,47 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
 	return l, r, nil
+}
+
+// compareRows compares two rows as Postgres does: = and <> pair by pair in
+// three-valued logic, and an ordering by the first pair that is not equal,
+// which is NULL when that pair holds a NULL.
+func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Expr, rv any) (any, error) {
+	l, lok := lv.([]any)
+	r, rok := rv.([]any)
+	if !lok || !rok || len(l) != len(le) || len(r) != len(re) {
+		return nil, x.unsupported("row comparison")
+	}
+	eq := op == "=" || op == "<>" || op == "!="
+	if !eq && x.tx.db.kind.InnoDB() {
+		return nil, x.unsupported("ordered row comparison")
+	}
+	sawNull := false
+	for i := range l {
+		li, ri, err := x.untypedPair(le[i], l[i], re[i], r[i])
+		if err != nil {
+			return nil, err
+		}
+		li, ri = x.comparable(li, ri)
+		if derefValue(li) == nil || derefValue(ri) == nil {
+			if !eq {
+				return nil, nil
+			}
+			sawNull = true
+			continue
+		}
+		if equalValues(li, ri) {
+			continue
+		}
+		if eq {
+			return op != "=", nil
+		}
+		return x.binary(op, li, ri)
+	}
+	if sawNull {
+		return nil, nil
+	}
+	return op == "=" || op == "<=" || op == ">=", nil
 }
 
 func isText(v any) bool {

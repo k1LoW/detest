@@ -534,3 +534,37 @@ func TestTextComparedWithNumber(t *testing.T) {
 		}
 	}
 }
+
+// Postgres compares rows pair by pair: an ordering by the first pair that is
+// not equal, as keyset pagination relies on, and each pair as two scalars.
+func TestRowComparison(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`)
+	mustExec(t, db, `INSERT INTO p VALUES (9, 1, 'x'), (10, 1, 'y'), (2, 5, 'z'), (9, 3, NULL)`)
+	for _, tc := range []struct {
+		query string
+		want  []string
+	}{
+		{`SELECT a, b FROM p WHERE (a, b) > (9, 1) ORDER BY a, b`, []string{"9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) <= (9, 1) ORDER BY a, b`, []string{"2,5", "9,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) = ('09', 1)`, []string{"9,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) <> (9, 1) ORDER BY a, b`, []string{"2,5", "9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) IN ((2, 5), ('10', 1)) ORDER BY a`, []string{"2,5", "10,1"}},
+		// A NULL pair makes = unknown unless another pair differs.
+		{`SELECT a, b FROM p WHERE (a, name) = (9, NULL)`, nil},
+		{`SELECT a, b FROM p WHERE NOT ((a, name) = (10, NULL)) ORDER BY a, b`, []string{"2,5", "9,1", "9,3"}},
+	} {
+		if got := rowsOf(t, db, tc.query); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
+		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
