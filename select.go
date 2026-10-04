@@ -291,10 +291,7 @@ func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []stri
 		for j, k := range keys {
 			v, err := x.outputValue(it, k.Expr, cols)
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					continue // order by an expression detest cannot evaluate: keep the order
-				}
-				return err
+				return x.unsupportedExpr(err, "in ORDER BY")
 			}
 			vals[i][j] = v
 		}

@@ -54,6 +54,7 @@ Anything that would change the outcome if detest ran it with other semantics tha
 - Locking forms detest does not model, such as `FOR UPDATE` over a view or a subquery, where the server locks the tables behind it.
 - Settings that change which rows match or lock, such as `SET GLOBAL`, non-strict `sql_mode` and case-insensitive collations. They are out of scope under the default-settings assumption, but accepting them silently would run the application against other semantics, so they are refused rather than ignored.
 - A value detest cannot convert the way the server would, such as an `OFFSET` or `LIMIT` that is not a bigint.
+- An expression detest cannot evaluate where the application observes its value, such as an operator or function it does not know in `VALUES`, `SET` or `ORDER BY`. A placeholder would be read back as the column's value, and a dropped sort key would return other rows under `LIMIT`.
 - DDL whose result detest cannot reproduce in the schema or rows the processes see, such as adding a generated column to a table that already has rows.
 - `BEGIN`, `COMMIT` and `ROLLBACK` sent as SQL, which bypass the transaction tracking that `database/sql` gives detest.
 - Functions, clauses and syntax that applications rarely write in request handling, and the exact reproduction of rare syntax, such as type coercion in array casts. Rarity is a reason not to implement them, not a reason to approximate them. A rare clause in DML still decides which rows match or lock, so it is refused.

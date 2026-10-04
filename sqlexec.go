@@ -622,10 +622,7 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 		for j, k := range keys {
 			v, err := x.eval(k.Expr, r.env(outer))
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					continue // order by an expression detest cannot evaluate: keep key order
-				}
-				return err
+				return x.unsupportedExpr(err, "in ORDER BY")
 			}
 			vals[i][j] = v
 		}
@@ -952,11 +949,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for i, e := range exprs {
 				v, err := x.eval(e, &env{})
 				if err != nil {
-					if errors.As(err, new(errUnknownExpr)) {
-						v = sqlir.Unknown
-					} else {
-						return nil, err
-					}
+					return nil, x.unsupportedExpr(err, "in VALUES")
 				}
 				if _, isDefault := e.(*sqlir.Default); isDefault {
 					continue
@@ -1049,11 +1042,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for _, a := range ins.OnConflict.Set {
 				v, err := x.eval(a.Value, e)
 				if err != nil {
-					if errors.As(err, new(errUnknownExpr)) {
-						v = sqlir.Unknown
-					} else {
-						return nil, err
-					}
+					return nil, x.unsupportedExpr(err, "in ON CONFLICT DO UPDATE SET")
 				}
 				updated[a.Column] = v
 			}
@@ -1281,11 +1270,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		for _, a := range up.Set {
 			v, err := x.eval(a.Value, c2.env(nil))
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					v = sqlir.Unknown
-				} else {
-					return nil, err
-				}
+				return nil, x.unsupportedExpr(err, "in SET")
 			}
 			updated[a.Column] = v
 		}
@@ -1369,6 +1354,19 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 type errUnknownExpr struct{ what string }
 
 func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL expression: " + e.what }
+
+// unsupportedExpr turns an expression detest cannot evaluate, in the place
+// where of a statement, into ErrUnsupportedSQL. A written value or a sort key
+// the application observes cannot be stood in for: a placeholder value would
+// be read back as the column's, and a dropped sort key would return other
+// rows under LIMIT. Any other error passes through.
+func (x *sqlExec) unsupportedExpr(err error, where string) error {
+	var u errUnknownExpr
+	if errors.As(err, &u) {
+		return x.unsupported("an expression " + where + " detest cannot evaluate (" + u.what + ")")
+	}
+	return err
+}
 
 func (x *sqlExec) evalBool(e sqlir.Expr, en *env) (bool, error) {
 	v, err := x.eval(e, en)

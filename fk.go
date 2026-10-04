@@ -1,7 +1,6 @@
 package detest
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -304,10 +303,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			case action == "set default" && def != nil && def.defaults[c] != nil:
 				v, err := x.eval(def.defaults[c], &env{})
 				if err != nil {
-					if !errors.As(err, new(errUnknownExpr)) {
-						return err
-					}
-					v = sqlir.Unknown
+					return x.unsupportedExpr(err, "in the default ON ... SET DEFAULT writes")
 				}
 				updated[c] = v
 			default:

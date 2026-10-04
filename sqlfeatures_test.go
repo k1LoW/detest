@@ -2,6 +2,7 @@ package detest
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,5 +126,30 @@ func TestSQLExecutorFeatures(t *testing.T) {
 	// The MySQL dialect exists as an interface but has no frontend yet.
 	if err := CheckSQL(mysql.New(), "SELECT 1"); err == nil {
 		t.Fatal("mysql frontend should report not implemented")
+	}
+}
+
+// An expression detest cannot evaluate where the application observes its
+// value is refused, so that no placeholder is written in place of the value
+// and no sort key is silently dropped.
+func TestUnevaluableExpressionIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, v text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'a')`)
+	for _, q := range []string{
+		`INSERT INTO t VALUES (2, now() * 2)`,
+		`UPDATE t SET v = now() * 2 WHERE id = 1`,
+		`INSERT INTO t VALUES (1, 'b') ON CONFLICT (id) DO UPDATE SET v = now() * 2`,
+		`SELECT id FROM t ORDER BY now() * 2`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	var n int64
+	var v string
+	if err := db.QueryRow(`SELECT count(*), min(v) FROM t`).Scan(&n, &v); err != nil || n != 1 || v != "a" {
+		t.Fatalf("got %d rows, v=%q, err=%v; want the table untouched", n, v, err)
 	}
 }
