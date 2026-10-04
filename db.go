@@ -1338,11 +1338,15 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 // held until commit or rollback; a waiting writer re-reads the row after the
 // lock is granted, as Postgres does.
 type Tx struct {
-	db      *DB
-	p       *Proc
-	writes  map[lockKey]Row
-	deleted map[lockKey]bool
-	moved   map[lockKey]string // the keys this transaction changed, as DB.moved
+	db *DB
+	p  *Proc
+	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
+	// transaction holds. Letting the row go then changes what such a read
+	// finds, so an idle loop may tick again even if no row changed.
+	passedOver bool
+	writes     map[lockKey]Row
+	deleted    map[lockKey]bool
+	moved      map[lockKey]string // the keys this transaction changed, as DB.moved
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
 	start   time.Time
@@ -1952,6 +1956,9 @@ func (tx *Tx) release() {
 		// The run ended and the next one resets the simulated resources. Releasing here
 		// would race with the other cleanups running while the processes unwind.
 		return
+	}
+	if tx.passedOver && tx.p != nil {
+		tx.p.r.bump(tx.p)
 	}
 	tx.releaseLocks(tx.locks)
 	tx.releaseGaps()

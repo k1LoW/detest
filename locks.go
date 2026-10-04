@@ -283,5 +283,9 @@ func (tx *Tx) wake(keys map[lockKey]bool) {
 // heldByOther reports whether another transaction holds lk in a mode that
 // conflicts with mode, for NOWAIT and SKIP LOCKED.
 func (tx *Tx) heldByOther(lk lockKey, mode lockMode) bool {
-	return len(tx.conflicting(lk, mode)) > 0
+	holders := tx.conflicting(lk, mode)
+	for _, h := range holders {
+		h.passedOver = true
+	}
+	return len(holders) > 0
 }

@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -111,6 +112,51 @@ func TestIdleLoopsAreNotWokenByUnchangedCommits(t *testing.T) {
 			})
 		}
 	}, MaxRuns(1000))
+}
+
+// A loop that went idle after SKIP LOCKED passed over a row ticks again
+// once the transaction holding the row lets it go, even without changing it.
+func TestIdleLoopRetriesARowSkipLockedPassedOver(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = done WHERE id = 'w1'`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not done")
+			}
+			return nil
+		})
+	})
 }
 
 // When keeps a process from starting while its predicate is false.
