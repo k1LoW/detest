@@ -354,7 +354,7 @@ scan:
 		for _, r := range in {
 			lk := lockKey{table, r.Key()}
 			skipped := false
-			if policy != nil && tx.heldByOther(lk, mode) {
+			if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
 				switch {
 				case policy.SkipLocked:
 					skipped = true
@@ -440,7 +440,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	cols := sr.key
 	lockRecord := func(r Row) error {
 		lk := lockKey{table, r.Key()}
-		if policy != nil && tx.heldByOther(lk, mode) {
+		if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
 			if policy.SkipLocked {
 				return nil
 			}

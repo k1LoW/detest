@@ -349,11 +349,11 @@ func (r *run) execute() (v *violation) {
 		if r.pending != nil {
 			return r.pending
 		}
-		if r.cut {
-			return nil
-		}
 		if v := r.checkAlways(); v != nil {
 			return v
+		}
+		if r.cut {
+			return nil // only the checks at quiescence are skipped
 		}
 	}
 	for _, p := range r.procs {

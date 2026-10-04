@@ -272,7 +272,8 @@ type result struct {
 	Kind     string
 	Err      error
 	Runs     int
-	// CutRuns are the runs cut at MaxIdleTicks.
+	// CutRuns are the runs cut at MaxIdleTicks, the ones before a checkpoint
+	// included.
 	CutRuns  int
 	MaxDepth int
 	Complete bool
@@ -296,6 +297,9 @@ type result struct {
 // report formats the outcome for humans.
 func (r *result) report() string {
 	if !r.Violated && r.Replay {
+		if r.CutRuns > 0 {
+			return fmt.Sprintf("detest: replayed schedule %s without violation, but it was cut at MaxIdleTicks and its invariants at quiescence were not checked", r.Schedule)
+		}
 		return fmt.Sprintf("detest: replayed schedule %s without violation", r.Schedule)
 	}
 	if !r.Violated {
@@ -359,6 +363,9 @@ func (s *Sim) check() *result {
 		}
 		res := s.makeResult(r, v, 1, len(r.choices), true, start)
 		res.Replay = true
+		if r.cut {
+			res.CutRuns = 1
+		}
 		return res
 	}
 	f := s.frontier

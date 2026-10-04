@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -636,4 +637,111 @@ func TestTraceShowsComputedSetValues(t *testing.T) {
 	if !strings.Contains(res.Trace, "set {label=y n=n + 1}") {
 		t.Fatalf("trace does not show the computed value:\n%s", res.Trace)
 	}
+}
+
+// idleLoopModel declares a loop that goes idle at once, beside a manual
+// process, so that MaxIdleTicks(0) cuts every run the loop ticks in.
+func idleLoopModel(s *Sim, bad *bool) {
+	s.Seed(func() { *bad = false })
+	s.Manual("caller", 1, func(p *Proc) error {
+		p.Step("calls")
+		return nil
+	})
+	s.Loop("sweeper", 1, func(p *Proc) error {
+		*bad = true
+		return ErrIdle
+	})
+}
+
+// The step a run is cut at is checked as any other: only the checks at
+// quiescence are skipped.
+func TestCutRunStillChecksAlways(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		var bad bool
+		idleLoopModel(s, &bad)
+		s.Always(func(*State) error {
+			if bad {
+				return errors.New("the idle tick left bad state")
+			}
+			return nil
+		})
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if !res.Violated || !strings.Contains(res.Err.Error(), "bad state") {
+		t.Fatalf("want the Always violation of the cut step, got %s", res.report())
+	}
+}
+
+// A replayed schedule cut at MaxIdleTicks says so instead of passing.
+func TestReplayReportsACut(t *testing.T) {
+	cut := 0
+	for _, sched := range []string{"0", "1"} {
+		res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+			var bad bool
+			idleLoopModel(s, &bad)
+		}, []Option{MaxIdleTicks(0), Replay(sched)}, nil, 0)
+		if res.CutRuns > 0 {
+			cut++
+			if !strings.Contains(res.report(), "cut at MaxIdleTicks") {
+				t.Fatalf("a cut replay reports %q", res.report())
+			}
+		}
+	}
+	if cut == 0 {
+		t.Fatal("no replayed schedule was cut")
+	}
+}
+
+// Runs cut before a checkpoint are counted after it is resumed.
+func TestCheckpointKeepsCutRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ckpt")
+	f := newFrontier(1, 10)
+	f.cut()
+	if err := f.save(path); err != nil {
+		t.Fatal(err)
+	}
+	g := newFrontier(1, 10)
+	if err := g.load(path); err != nil {
+		t.Fatal(err)
+	}
+	if res := g.merge(nil, 1); res.CutRuns != 1 || !strings.Contains(res.report(), "1 runs cut at MaxIdleTicks") {
+		t.Fatalf("resumed exploration reports %q", res.report())
+	}
+}
+
+// A MySQL locking read that waits rather than skips marks no holder, so an
+// idle loop is not woken when the holder lets go of a row it did not change.
+func TestBlockingLockingReadWakesNoIdleLoop(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true)`) })
+		ticks := 0
+		s.Seed(func() { ticks = 0 })
+		for _, name := range []string{"a", "b"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				rows, err := tx.QueryContext(p.Context(), `SELECT id FROM work WHERE id >= 'w1' FOR UPDATE`)
+				if err != nil {
+					return err
+				}
+				_ = rows.Close()
+				return tx.Commit()
+			})
+		}
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			ticks++
+			p.Step("finds nothing")
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error {
+			if ticks > 1 {
+				return fmt.Errorf("the idle sweeper ticked %d times with no row changed", ticks)
+			}
+			return nil
+		})
+	})
 }
