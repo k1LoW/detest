@@ -481,8 +481,24 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT id FROM t WHERE id = '06'`); !reflect.DeepEqual(got, []string{"6"}) {
 		t.Errorf("whole float: got %v", got)
 	}
+	// A whole numeric has one key however it was written.
+	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
+	mustExec(t, db, `INSERT INTO u VALUES ('9007199254740993')`)
+	mustExec(t, db, `INSERT INTO u VALUES ($1)`, 1e6)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO u VALUES (9007199254740993)`, nil},
+		{`INSERT INTO u VALUES ('1000000')`, nil},
+		{`INSERT INTO u VALUES ($1)`, []any{1e6}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrUniqueViolation) {
+			t.Errorf("%s: got %v, want a unique violation", tc.query, err)
+		}
+	}
 	// A numeric a float cannot keep exactly would collapse into another value.
-	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '9007199254740993')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '0.12345678901234567890')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("numeric beyond a float: got %v, want unsupported", err)
 	}
 	mustExec(t, db, `INSERT INTO t (id, amount) VALUES (7, '1.10')`)

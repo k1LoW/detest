@@ -691,6 +691,9 @@ func exactAsFloat(v any) bool {
 		return true
 	}
 	s = strings.TrimSpace(s)
+	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return true // kept as an integer, without a float
+	}
 	want, ok := new(big.Rat).SetString(s)
 	if !ok {
 		return true
@@ -737,6 +740,13 @@ func columnNumber(v any, t string) (any, bool) {
 		s = b
 	case []byte:
 		s = string(b)
+	case float64:
+		// A whole numeric is kept as an integer however it was written, so
+		// equal values have one key.
+		if t == "numeric" {
+			return numeric(b), true
+		}
+		return v, true
 	default:
 		return v, true
 	}
@@ -748,6 +758,9 @@ func columnNumber(v any, t string) (any, bool) {
 	case "float4", "float8":
 		f, err := strconv.ParseFloat(s, 64)
 		return f, err == nil
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n, true
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	return numeric(f), err == nil
