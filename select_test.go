@@ -804,7 +804,8 @@ func TestCastToNumber(t *testing.T) {
 		}
 	}
 	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
-		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`} {
+		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`,
+		`SELECT true::bigint`, `SELECT true::smallint`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}

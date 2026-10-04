@@ -2558,6 +2558,11 @@ func castValue(v any, typ string) (any, error) {
 	}
 	switch typ {
 	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
+		// Postgres casts a boolean to integer only, not to bigint or
+		// smallint.
+		if _, ok := v.(bool); ok && typ != "int" && typ != "int4" && typ != "integer" {
+			return nil, errUnknownExpr{"a cast of a boolean to " + typ}
+		}
 		n, err := castInteger(v)
 		if err != nil {
 			return nil, err
