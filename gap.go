@@ -307,7 +307,7 @@ scan:
 		lk := lockKey{table, r.Key()}
 		keys := []lockKey{x.indexEntry(table, sr, r), lk}
 		structs := []lockStruct{structKey(table, sr.index, mode, "record"), structKey(table, "PRIMARY", mode, "record")}
-		if policy != nil && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
+		if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
 			if policy.SkipLocked {
 				x.skip(lk)
 				continue scan
