@@ -423,6 +423,8 @@ CREATE SCHEMA billing;
 CREATE SEQUENCE public.s START 5;
 CREATE SEQUENCE billing.s START 50;
 CREATE SEQUENCE only_public START 7;
+CREATE SEQUENCE public.p START 3;
+CREATE SEQUENCE p START 30;
 `)
 	for _, c := range []struct {
 		q    string
@@ -432,6 +434,9 @@ CREATE SEQUENCE only_public START 7;
 		{`SELECT nextval('public.s')`, 5},
 		{`SELECT nextval('billing.s')`, 51},
 		{`SELECT nextval('only_public')`, 7},
+		// An unqualified CREATE SEQUENCE puts it in billing, leaving public.p.
+		{`SELECT nextval('public.p')`, 3},
+		{`SELECT nextval('p')`, 30},
 	} {
 		q, want := c.q, c.want
 		var n int64
