@@ -1008,3 +1008,40 @@ func TestIdleLoopSpawningWorkIsCut(t *testing.T) {
 		t.Fatalf("want a complete exploration with runs cut, got %s", res.report())
 	}
 }
+
+// A tick that did work starts the loop's count of idle ticks again, even
+// when nothing but the loop and what it spawned made changes around it.
+func TestLoopWorkStartsTheIdleCountAgain(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE jobs (id text PRIMARY KEY, done bool NOT NULL); CREATE TABLE marks (id text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO marks VALUES ('m', 0)`) })
+		spawned := false
+		s.Seed(func() { spawned = false })
+		s.Loop("worker", 2, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE jobs SET done = true WHERE NOT done`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				return nil
+			}
+			if !spawned {
+				spawned = true
+				// Changes by a process a loop spawned are no progress, so
+				// only the worker's own tick can start the count again.
+				p.Spawn("feeder", func(c *Proc) error {
+					if _, err := db.ExecContext(c.Context(), `INSERT INTO jobs VALUES ('j1', false)`); err != nil {
+						return err
+					}
+					_, err := db.ExecContext(c.Context(), `UPDATE marks SET n = n + 1 WHERE id = 'm'`)
+					return err
+				})
+			}
+			return ErrIdle
+		})
+	}, []Option{MaxIdleTicks(2)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
+}
