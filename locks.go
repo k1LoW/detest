@@ -79,6 +79,17 @@ func (tx *Tx) lock(lk lockKey) error { return tx.lockMode(lk, lockUpdate) }
 // a deadlock error, as Postgres's detector does; a cycle through a mutex or
 // another transaction of this process hangs in Postgres and is reported.
 func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
+	key := ""
+	if !strings.HasPrefix(lk.table, "\x00") {
+		key = structKey(lk.table, "PRIMARY", mode, "record")
+	}
+	return tx.lockModeAs(lk, mode, key)
+}
+
+// lockModeAs is lockMode for a lock InnoDB keeps in the lock struct named
+// key, which a wait for it weighs.
+func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key string) error {
+	var cancelWait func()
 	for {
 		conflict := tx.conflicting(lk, mode)
 		if len(conflict) == 0 {
@@ -99,9 +110,13 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 		if err := tx.selfWait(conflict, what, "a row lock"); err != nil {
 			return err
 		}
+		if cancelWait == nil {
+			cancelWait = tx.noteWait(key)
+		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
+			cancelWait()
 			tx.aborted = true
 			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
 			markPassedOver(conflict) // gave up on the lock, as NOWAIT does
@@ -193,12 +208,16 @@ func innodbVictim(members []*Tx) *Tx {
 // it: the undo records it wrote and the lock structs it holds. InnoDB keeps a
 // lock struct per table and table lock mode, and per index page, mode and
 // kind of record lock (the record alone, the gap alone, or next-key with the
-// gap before it). The searches record theirs as they lock (noteLockStruct);
-// a row locked otherwise, by a write or a foreign key or duplicate check,
+// gap before it), and a lock that waited keeps a struct of its own. The
+// statements record theirs as they lock (noteTableLock, noteLockStruct,
+// noteWait); a row locked otherwise, by a write or a foreign key or duplicate check,
 // holds a record lock on the primary key. detest has no pages, so an index's
 // records count as one page, and a row the transaction inserted holds an
 // implicit lock, no struct.
-func innodbWeight(t *Tx) int {
+func innodbWeight(t *Tx) int { return t.undo + len(t.heldStructs()) }
+
+// heldStructs is the set of lock structs innodbWeight counts.
+func (t *Tx) heldStructs() map[string]bool {
 	structs := maps.Clone(t.lockStructs)
 	if structs == nil {
 		structs = map[string]bool{}
@@ -207,8 +226,9 @@ func innodbWeight(t *Tx) int {
 	// that took shared and exclusive locks on a table holds both IS and IX.
 	note := func(table, mode string) { structs["T|"+table+"|I"+mode] = true }
 	for k := range t.lockStructs {
-		parts := strings.SplitN(k, "|", 5) // R|table|index|mode|kind
-		note(parts[1], parts[3])
+		if parts := strings.SplitN(k, "|", 5); parts[0] == "R" { // R|table|index|mode|kind
+			note(parts[1], parts[3])
+		}
 	}
 	for _, lk := range t.locks {
 		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
@@ -238,7 +258,7 @@ func innodbWeight(t *Tx) int {
 	for lk := range t.deleted {
 		note(lk.table, "X")
 	}
-	return t.undo + len(structs)
+	return structs
 }
 
 // lockClass is the InnoDB lock mode a row lock of detest's strength is: S
@@ -260,7 +280,48 @@ func (tx *Tx) noteLockStruct(table, index string, mode lockMode, kind string) {
 	if tx.lockStructs == nil {
 		tx.lockStructs = map[string]bool{}
 	}
-	tx.lockStructs["R|"+table+"|"+index+"|"+lockClass(mode)+"|"+kind] = true
+	tx.lockStructs[structKey(table, index, mode, kind)] = true
+}
+
+// structKey names the lock struct of record locks of a kind and mode on an
+// index of table.
+func structKey(table, index string, mode lockMode, kind string) string {
+	return "R|" + table + "|" + index + "|" + lockClass(mode) + "|" + kind
+}
+
+// noteTableLock records the intention lock InnoDB takes on table when a
+// statement that locks rows of it starts, which it keeps even when the
+// statement locks no row, as when SKIP LOCKED skips them all.
+func (tx *Tx) noteTableLock(table string, mode lockMode) {
+	if !tx.db.kind.InnoDB() {
+		return
+	}
+	if tx.lockStructs == nil {
+		tx.lockStructs = map[string]bool{}
+	}
+	tx.lockStructs["T|"+table+"|I"+lockClass(mode)] = true
+}
+
+// noteWait records the lock struct InnoDB creates for a lock that has to
+// wait, of the struct named key ("" when the lock has none of its own). A
+// waiting lock never joins a struct the transaction holds, and it stays once
+// the lock is granted, so a wait for a kind of lock already held adds a
+// struct, and one for a new kind is that kind's struct. It returns a
+// function to drop the struct again when the wait ends in a timeout, which
+// removes the waiting lock.
+func (tx *Tx) noteWait(key string) (cancel func()) {
+	if !tx.db.kind.InnoDB() {
+		return func() {}
+	}
+	if key == "" || tx.heldStructs()[key] {
+		tx.waits++
+		key = fmt.Sprintf("W|%d", tx.waits)
+	}
+	if tx.lockStructs == nil {
+		tx.lockStructs = map[string]bool{}
+	}
+	tx.lockStructs[key] = true
+	return func() { delete(tx.lockStructs, key) }
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

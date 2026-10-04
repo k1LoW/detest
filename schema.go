@@ -182,7 +182,7 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 			return nil, err
 		}
 		if dup != nil {
-			if err := x.tx.lockMode(uniqueLock(table, u, vals), lockShare); err != nil {
+			if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockShare, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 				return nil, err
 			}
 			x.tx.noteLockStruct(table, uniqueIndex(u), lockShare, "next-key")

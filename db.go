@@ -1395,10 +1395,12 @@ type Tx struct {
 	block          bool // begun with BeginTx, so SAVEPOINT may be used
 	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
 	// undo counts the undo records of the transaction's row changes, and
-	// lockStructs the record lock structs its searches took, which InnoDB
-	// weighs a deadlock victim by.
+	// lockStructs the lock structs its statements and waits took, which
+	// InnoDB weighs a deadlock victim by.
 	undo        int
 	lockStructs map[string]bool
+	// waits counts the lock waits, each a lock struct of its own.
+	waits int
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.

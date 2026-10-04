@@ -163,6 +163,7 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 		return nil
 	}
 	lk := lockKey{table, gapWaitKey}
+	var cancelWait func()
 	for {
 		holders := tx.gapHolders(table, row, old)
 		if len(holders) == 0 {
@@ -175,7 +176,11 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 		if err := tx.selfWait(holders, what, "a gap lock"); err != nil {
 			return err
 		}
+		if cancelWait == nil {
+			cancelWait = tx.noteWait(structKey(table, "insert intention", lockUpdate, "gap"))
+		}
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+table, 2) == 1 {
+			cancelWait()
 			tx.p.r.note(tx.p, "lock timeout waiting for a gap in %s", table)
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "lock wait timeout exceeded", relname(table), "", "")
 		}
@@ -217,7 +222,11 @@ func (tx *Tx) releaseGaps() {
 // lock never waits, so it is taken all the same.
 func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockMode, policy *sqlir.LockClause, stop *scanStop) error {
 	tx := x.tx
-	if !tx.db.kind.InnoDB() || (tx.iso != RepeatableRead && tx.iso != Serializable) || tx.db.ignored[table] {
+	if !tx.db.kind.InnoDB() || tx.db.ignored[table] {
+		return nil
+	}
+	tx.noteTableLock(table, mode)
+	if tx.iso != RepeatableRead && tx.iso != Serializable {
 		return nil
 	}
 	if err := x.prefixSearch(table, alias, where); err != nil {
@@ -370,7 +379,11 @@ scan:
 				}
 			}
 			if !skipped {
-				if err := tx.lockMode(lk, mode); err != nil {
+				key := structKey(table, "PRIMARY", mode, "record")
+				if scanIndex == "PRIMARY" {
+					key = structKey(table, scanIndex, mode, "next-key")
+				}
+				if err := tx.lockModeAs(lk, mode, key); err != nil {
 					return false, err
 				}
 				tx.noteLockStruct(table, scanIndex, mode, "next-key")
@@ -419,7 +432,7 @@ scan:
 		}
 		if next != nil {
 			gap.hi, gap.hasHi, gap.hiOpen = keyOf(next, cols), true, true
-			if err := tx.lockMode(lockKey{table, next.Key()}, mode); err != nil {
+			if err := tx.lockModeAs(lockKey{table, next.Key()}, mode, structKey(table, scanIndex, mode, "next-key")); err != nil {
 				return false, err
 			}
 			tx.noteLockStruct(table, scanIndex, mode, "next-key")
@@ -474,7 +487,12 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		// duplicate check locks, so a search on that index locks it too,
 		// before the row, as InnoDB goes from the secondary record to the
 		// primary one.
+		k := kind
+		if !matched {
+			k = "next-key"
+		}
 		var keys []lockKey
+		var structs []string
 		if entry != nil {
 			vals, ok, err := x.uniqueValues(table, entry, r)
 			if err != nil {
@@ -482,9 +500,15 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			}
 			if ok {
 				keys = append(keys, uniqueLock(table, entry, vals))
+				structs = append(structs, structKey(table, index, mode, k))
 			}
 		}
 		keys = append(keys, lockKey{table, r.Key()})
+		if index == "PRIMARY" {
+			structs = append(structs, structKey(table, index, mode, k))
+		} else {
+			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
+		}
 		if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(lk lockKey) bool { return tx.heldByOther(lk, mode) }) {
 			if policy.SkipLocked {
 				return nil
@@ -493,14 +517,10 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 				return tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
 			}
 		}
-		for _, lk := range keys {
-			if err := tx.lockMode(lk, mode); err != nil {
+		for i, lk := range keys {
+			if err := tx.lockModeAs(lk, mode, structs[i]); err != nil {
 				return err
 			}
-		}
-		k := kind
-		if !matched {
-			k = "next-key"
 		}
 		tx.noteLockStruct(table, index, mode, k)
 		if matched && index != "PRIMARY" {

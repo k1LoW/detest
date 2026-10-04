@@ -299,6 +299,44 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A locking read keeps the table's intention lock even when SKIP
+		// LOCKED skips every row, and the lock struct weighs it.
+		Name:   "deadlock victim weighs the intention lock of a skipping read",
+		Schema: stockSchema, Seed: []string{`INSERT INTO stock VALUES ('apple', 1), ('pear', 1), ('plum', 1)`}, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.Q(1, `SELECT sku FROM stock WHERE sku = 'apple' FOR SHARE SKIP LOCKED`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// A lock that waited keeps a lock struct of its own once granted,
+		// so the transaction that waited earlier weighs more.
+		Name:   "deadlock victim weighs an earlier wait",
+		Schema: stockSchema, Seed: []string{`INSERT INTO stock VALUES ('apple', 1), ('pear', 1), ('plum', 1)`}, Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(2, rr),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(2, `UPDATE stock SET n = 2 WHERE sku = 'plum'`),
+			difftest.S(2, `UPDATE stock SET n = 3 WHERE sku = 'plum'`),
+			difftest.S(2, `UPDATE stock SET n = 2 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'plum'`),
+			difftest.S(1, `ROLLBACK`),
+			difftest.S(2, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
