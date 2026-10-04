@@ -182,11 +182,12 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE UNIQUE)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE, u text GENERATED ALWAYS AS (upper(d)) STORED)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d text NOT NULL DEFAULT CURRENT_DATE)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d uuid DEFAULT CURRENT_USER::uuid)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
 	} {
 		mustExec(t, db, ddl)
 		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s: insert leaving out a default a key, constraint or generated column reads: got %v", ddl, err)
+			t.Errorf("%s: insert leaving out a default that a key, constraint or generated column reads: got %v", ddl, err)
 		}
 		mustExec(t, db, `DROP TABLE e`)
 	}
