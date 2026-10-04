@@ -65,7 +65,7 @@ The invariant is always a business rule, checked from committed rows (`st.Rows`,
 
 **Scenario** two actors editing the same record.
 
-**Invariant** a caller told "saved" has its change in the final row; or the version increments once per reported success.
+**Invariant** the version advanced exactly once per reported success, and every conditional update that matched no row was reported to its caller as a conflict, not as a success. A caller's change need not survive in the final row, since a later edit made on the newer version overwrites it legitimately.
 
 **Fixes** check the affected-row count and return a conflict.
 
