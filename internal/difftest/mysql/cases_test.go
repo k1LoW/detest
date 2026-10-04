@@ -889,6 +889,34 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A delete by a unique key that finds its row locks the row alone,
+		// as the row stays in the index, marked deleted, until it commits.
+		Name:   "a delete by its key locks the row alone",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `DELETE FROM items WHERE id = 10`),
+			difftest.S(1, `INSERT INTO items (id, k) VALUES (15, 15)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id FROM items ORDER BY id`),
+		},
+	},
+	{
+		// A failed update takes out the primary keys it moved rows to, and
+		// leaves a gap lock where each was.
+		Name:   "a failed update keeps the gaps of the keys it moved rows to",
+		Schema: []string{`CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary},
+		Seed:   []string{`INSERT INTO t (id) VALUES (1), (2), (50), (102)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `UPDATE t SET id = id + 100 WHERE id <= 2`),
+			difftest.S(1, `INSERT INTO t (id) VALUES (60)`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id FROM t ORDER BY id`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

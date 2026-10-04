@@ -113,12 +113,14 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 				continue
 			}
 		}
+		// An insert checks the key as it reaches the index over it, so a
+		// failure or a timeout there leaves the entries before it written.
+		x.tx.putReached(def.fkIndex(fk))
 		found, err := x.lockParent(fk, vals)
 		if err != nil {
 			return err
 		}
 		if !found {
-			x.tx.putReached(def.fkIndex(fk))
 			return x.tx.childViolation(table, fk)
 		}
 	}

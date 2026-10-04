@@ -241,6 +241,7 @@ func (tx *Tx) claimEntries(table string, row Row) error {
 	}
 	for _, ix := range def.indexOrder(true) {
 		if ix.unique == nil && ix.key != nil {
+			tx.putReached(ix.name) // as far as a wait here gets
 			if err := tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
 				return err
 			}

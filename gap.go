@@ -604,6 +604,16 @@ scan:
 func (tx *Tx) lockingRows(table string) []Row {
 	rows := tx.selectNoYield(table, nil)
 	var pending []Row
+	// A row tx deleted stays in the indexes, marked deleted, until it
+	// commits, and still bounds the gaps a search locks.
+	for lk := range tx.deleted {
+		if lk.table != table {
+			continue
+		}
+		if r, ok := tx.db.committed[table][lk.key]; ok {
+			pending = append(pending, r)
+		}
+	}
 	for lk, holders := range tx.db.locks {
 		if lk.table != table {
 			continue

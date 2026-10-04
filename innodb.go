@@ -167,10 +167,20 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 			tx.put[i].reached = -1
 		}
 	}
+	// A row the statement moved to a new primary key went into every index
+	// there, and comes out again, as one it inserted does.
+	var moved []putRow
+	if m.inserts < len(tx.inserts) {
+		for _, p := range tx.inserts[m.inserts:] {
+			if !slices.ContainsFunc(tx.put, func(q putRow) bool { return q.table == p.table && q.row.Key() == p.row.Key() }) {
+				moved = append(moved, putRow{p.table, p.row, -1})
+			}
+		}
+	}
 	tx.writes, tx.deleted, tx.moved, tx.deferred, tx.undo = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred], m.undo
 	tx.inserts = tx.inserts[:min(m.inserts, len(tx.inserts))]
 	tx.releaseInsertLocks(m.locks)
-	for _, p := range tx.put {
+	for _, p := range append(tx.put, moved...) {
 		tx.inheritGap(p.table, p.row, p.reached)
 	}
 	tx.put = nil
