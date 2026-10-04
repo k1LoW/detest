@@ -3,6 +3,7 @@ package detest
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -183,6 +184,7 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE, u text GENERATED ALWAYS AS (upper(d)) STORED)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d text NOT NULL DEFAULT CURRENT_DATE)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d uuid DEFAULT CURRENT_USER::uuid)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d smallint DEFAULT length(CURRENT_USER))`,
 		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
 	} {
 		mustExec(t, db, ddl)
@@ -332,6 +334,26 @@ func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
 // An equal row a unique index takes waits for the transaction writing the
 // other one, as Postgres waits on the index entry, and then fails as a
 // unique violation once that transaction commits.
+// In a table without a primary key whose rows detest keys by an id column,
+// a row another transaction is writing with the same id but other unique
+// values is refused rather than waited on, as Postgres would not wait.
+func TestEqualIDWithoutPrimaryKeyDoesNotWait(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE nki (id int, u int UNIQUE)`)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO nki VALUES (1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nki VALUES (1, 2)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("same id, other unique value, another transaction writing: got %v", err)
+	}
+}
+
 func TestEqualRowUnderUniqueWaits(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
@@ -353,10 +375,11 @@ func TestEqualRowUnderUniqueWaits(t *testing.T) {
 		s.Manual("x", 1, insert)
 		s.Manual("y", 1, insert)
 		s.AtQuiescence(func(*State) error {
-			for _, err := range errs {
-				if !errors.Is(err, ErrUniqueViolation) {
-					return err
-				}
+			if len(errs) != 1 {
+				return fmt.Errorf("%d inserts failed, want 1: %v", len(errs), errs)
+			}
+			if !errors.Is(errs[0], ErrUniqueViolation) {
+				return errs[0]
 			}
 			return nil
 		})

@@ -1103,8 +1103,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		// Waiting on a key made from the row's values would block where
 		// Postgres, with no key to wait on, takes both rows. A row a unique
 		// index takes is waited on there too, on the same transaction, so
-		// it waits here as Postgres does.
-		if noPK && x.tx.heldByOther(lk, lockUpdate) && !x.inUniqueIndex(table, row) {
+		// it waits here as Postgres does, but only when the key is made
+		// from every value: a key made from an id column alone can match a
+		// row with other unique values, which Postgres would not wait on.
+		_, keyedByID := row["id"]
+		if noPK && x.tx.heldByOther(lk, lockUpdate) && (keyedByID || !x.inUniqueIndex(table, row)) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
 		if err := x.tx.lock(lk); err != nil {
