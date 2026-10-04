@@ -797,6 +797,9 @@ func numericValue(v any) any {
 	if n, ok := integer(v); ok && n > -1<<53 && n < 1<<53 {
 		return float64(n)
 	}
+	if f, ok := v.(float64); ok && f == 0 {
+		return float64(0) // a numeric has no negative zero
+	}
 	// A whole float beyond 2^53 becomes the integer it is, so it has the
 	// key of the same value written as an integer.
 	if f, ok := v.(float64); ok && f == math.Trunc(f) && math.Abs(f) >= 1<<53 && math.Abs(f) < 1<<63 {

@@ -780,4 +780,9 @@ func TestNumberKeysByValue(t *testing.T) {
 	if keyString(1.5) == keyString(int64(1)) || keyString(1.5) != "1.5" {
 		t.Errorf("keyString(1.5) = %q", keyString(1.5))
 	}
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if got := rowsOf(t, db, `SELECT '-0.0'::numeric`); !reflect.DeepEqual(got, []string{"0"}) {
+		t.Errorf("'-0.0'::numeric: got %v", got)
+	}
 }
