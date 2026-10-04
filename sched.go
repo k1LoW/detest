@@ -739,7 +739,7 @@ const outsideWaitLimit = 10 * time.Second
 func (r *run) handleEvent(p *Proc, ev procEvent) {
 	switch ev.kind {
 	case evYield:
-		p.state = stateReady // trace already recorded by the process
+		p.state = stateReady // the process records its trace line once resumed
 	case evBlocked:
 		// state set by the process
 	case evDone:
