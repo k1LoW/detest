@@ -487,6 +487,11 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
 		t.Errorf("numeric division: got %v", got)
 	}
+	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, r float8)`)
+	mustExec(t, db, `INSERT INTO f VALUES (1, 1), (2, $1)`, int64(1))
+	if got := rowsOf(t, db, `SELECT r / 2 FROM f ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5"}) {
+		t.Errorf("float division: got %v", got)
+	}
 	// A whole numeric has one key however it was written.
 	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
 	mustExec(t, db, `INSERT INTO u VALUES ('9007199254740993')`)

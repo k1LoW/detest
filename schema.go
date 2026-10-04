@@ -753,8 +753,15 @@ func columnNumber(v any, t string) (any, bool) {
 	case []byte:
 		s = string(b)
 	default:
-		if t == "numeric" {
+		switch t {
+		case "numeric":
 			return numericValue(v), true
+		case "float4", "float8":
+			// An integer is stored as the float it becomes, so arithmetic
+			// on the column is float arithmetic (1 / 2 is 0.5).
+			if n, ok := integer(v); ok {
+				return float64(n), true
+			}
 		}
 		return v, true
 	}
