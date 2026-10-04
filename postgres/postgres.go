@@ -104,6 +104,24 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "3B001", 0
 	case sqlir.CheckViolation:
 		return "23514", 0
+	case sqlir.InvalidParameterValue:
+		return "22023", 0
+	case sqlir.InvalidRowCountInLimit:
+		return "2201W", 0
+	case sqlir.InvalidRowCountInOffset:
+		return "2201X", 0
+	case sqlir.CardinalityViolation:
+		return "21000", 0
+	case sqlir.ForeignKeyParentViolation:
+		return "23503", 0
+	case sqlir.ArithmeticOutOfRange:
+		return "22003", 0
+	case sqlir.LockWaitTimeout:
+		return "55P03", 0 // lock_timeout reports lock_not_available, as NOWAIT does
+	case sqlir.StringDataRightTruncation:
+		return "22001", 0
+	case sqlir.DataTruncated:
+		return "22P02", 0 // invalid input value for enum
 	}
 	return "", 0
 }

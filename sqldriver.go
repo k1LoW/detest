@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -32,7 +31,8 @@ func CheckSQL(d Server, query string) error {
 	}
 	pdb := &DB{name: "probe", kind: kind}
 	pdb.reset()
-	probe := &Tx{db: pdb, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: true, block: true}
+	probe := pdb.newTx(nil)
+	probe.atomic, probe.block, probe.checking = true, true, true
 	args := make([]driver.Value, 65536) // more than any statement binds
 	_, err = s.exec(probe, args)
 	return err
@@ -55,6 +55,22 @@ func (sqlDriver) Open(string) (driver.Conn, error) {
 type sqlConn struct {
 	db *DB
 	tx *Tx
+	// lastInsertID is MySQL's LAST_INSERT_ID() of the connection: the first
+	// AUTO_INCREMENT value its latest insert that generated one generated.
+	lastInsertID int64
+	// lockTimeout is a lock timeout set for the session (SET lock_timeout,
+	// SET innodb_lock_wait_timeout), which every later transaction of the
+	// connection starts with.
+	lockTimeout bool
+	// pendingLockTimeout is a Postgres SET lock_timeout run inside a
+	// transaction, which the session keeps only if the transaction commits.
+	pendingLockTimeout *bool
+	// noAutoZero is the session's NO_AUTO_VALUE_ON_ZERO, and noFKChecks its
+	// FOREIGN_KEY_CHECKS=0.
+	noAutoZero, noFKChecks bool
+	// lastRun is the run that used the connection last, whose session state
+	// lastInsertID and lockTimeout are.
+	lastRun *run
 }
 
 func (c *sqlConn) Prepare(query string) (driver.Stmt, error) {
@@ -85,15 +101,20 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	}
 	// Refuse a level detest does not implement for the kind rather than run the
 	// transaction with other semantics than production's.
-	if _, err := txIsolation(c.db.kind, sql.IsolationLevel(opts.Isolation)); err != nil {
+	iso, err := txIsolation(c.db.kind, sql.IsolationLevel(opts.Isolation))
+	if err != nil {
 		return nil, err
 	}
 	p := c.current()
+	tx := c.db.newTx(p)
+	// The session's settings hold for a transaction it begins, inside a
+	// process or not.
+	tx.block, tx.iso, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = true, iso, c.lockTimeout, c.noAutoZero, c.noFKChecks
 	if p == nil {
-		c.tx = &Tx{db: c.db, p: nil, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: true, block: true}
+		tx.atomic = true
+		c.tx = tx
 		return &sqlTx{c: c}, nil
 	}
-	tx := &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), block: true}
 	p.txs = append(p.txs, tx)
 	c.tx = tx
 	p.yieldf("%s: begin", c.db.name)
@@ -108,7 +129,9 @@ func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.N
 	if err != nil {
 		return nil, c.db.kind.Convert(err)
 	}
-	_ = rows
+	if c.db.kind.InnoDB() {
+		return innodbResult{affected: affected, lastID: rows.lastID}, nil
+	}
 	return driver.RowsAffected(affected), nil
 }
 
@@ -118,6 +141,8 @@ func (t *sqlTx) Commit() (err error) {
 	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
+	pending := t.c.pendingLockTimeout
+	t.c.pendingLockTimeout = nil
 	if tx == nil {
 		return nil
 	}
@@ -140,6 +165,9 @@ func (t *sqlTx) Commit() (err error) {
 		return t.c.db.kind.Convert(err)
 	}
 	tx.commit()
+	if pending != nil {
+		t.c.lockTimeout = *pending
+	}
 	return nil
 }
 
@@ -147,6 +175,7 @@ func (t *sqlTx) Rollback() (err error) {
 	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
+	t.c.pendingLockTimeout = nil // Postgres rolls a session SET back with the transaction
 	if tx == nil {
 		return nil
 	}
@@ -216,6 +245,15 @@ func (c *sqlConn) dropStaleTx() {
 	if c.tx != nil && c.tx.p != nil && c.tx.p.r.over() {
 		c.tx = nil
 	}
+	// The session's state is the run's too: a pooled connection a later run
+	// reuses must not bring a generated id or a lock timeout from another
+	// schedule into it.
+	// The run is the Sim's, so a seed, which runs before any process is
+	// current, sees the change of run as well.
+	if r := c.db.s.run; r != nil && r != c.lastRun {
+		c.lastRun, c.lastInsertID, c.lockTimeout, c.noAutoZero, c.noFKChecks = r, 0, false, false, false
+		c.pendingLockTimeout = nil
+	}
 }
 
 func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
@@ -224,7 +262,8 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 		return c.tx, false
 	}
 	p := c.current()
-	tx = &Tx{db: c.db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now(), atomic: p == nil}
+	tx = c.db.newTx(p)
+	tx.atomic, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = p == nil, c.lockTimeout, c.noAutoZero, c.noFKChecks
 	return tx, true
 }
 
@@ -240,8 +279,8 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 	if err != nil {
 		if pe, ok := errors.AsType[*sqlir.ParseError](err); ok {
 			err = c.db.kind.Error(sqlir.SyntaxError, pe.Err.Error(), "", "", "")
-			if c.tx != nil {
-				c.tx.abort() // as any failed statement does
+			if c.tx != nil && !c.db.kind.InnoDB() {
+				c.tx.abort() // as any failed statement does in Postgres
 			}
 		}
 		if c.db.s.sqlObserver != nil {
@@ -249,12 +288,93 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		}
 		return nil, 0, err
 	}
+	if script, ok := stmt.stmt.(*sqlir.Script); ok && c.db.kind.InnoDB() {
+		// MySQL runs each statement of a multi-statement query as its own:
+		// committed on its own under autocommit, rolled back alone when it
+		// fails. A failing one stops the rest.
+		results := 0
+		for _, st := range script.Stmts {
+			if _, ok := st.(*sqlir.SelectStmt); ok {
+				results++
+			}
+		}
+		if results > 1 {
+			// database/sql would see the last result set only, where the
+			// driver hands the first and moves on with NextResultSet.
+			return nil, 0, sqlir.Unsupported("a multi-statement query of more than one result set", query)
+		}
+		var rows *sqlRows
+		var affected, lastID int64
+		for _, st := range script.Stmts {
+			r, n, err := c.exec(&parsedStatement{query: query, stmt: st}, args)
+			if err != nil {
+				return nil, 0, err
+			}
+			// go-sql-driver's result reports the last statement's.
+			affected, lastID = n, r.lastID
+			if _, ok := st.(*sqlir.SelectStmt); ok {
+				rows = r // the one result set, which the statements after it do not replace
+			}
+		}
+		if rows == nil {
+			rows = &sqlRows{}
+		}
+		rows.lastID = lastID
+		return rows, affected, nil
+	}
+	return c.exec(stmt, args)
+}
+
+// exec runs one parsed statement on the connection.
+func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, int64, error) {
+	query := stmt.query
 	tx, auto := c.statementTx()
+	tx.lastInsertID = &c.lastInsertID
+	innodb := c.db.kind.InnoDB() && !auto
+	var mark stmtMark
+	if innodb {
+		mark = tx.markStatement()
+	}
 	res, err := stmt.exec(tx, args)
 	if c.db.s.sqlObserver != nil {
 		c.db.s.sqlObserver(query, err)
 	}
-	if auto {
+	if err == nil && res.hasLastID {
+		c.lastInsertID = res.lastID
+	}
+	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && set.Name == "lock_timeout" && !set.Local {
+		// A session setting outlives the statement's transaction. MySQL's
+		// takes effect at once; Postgres's, run in a transaction, only
+		// when the transaction commits.
+		if c.db.kind.InnoDB() || auto {
+			c.lockTimeout = tx.lockTimeout
+		} else {
+			v := tx.lockTimeout
+			c.pendingLockTimeout = &v
+		}
+	}
+	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
+		switch set.Name {
+		case "no_auto_value_on_zero":
+			c.noAutoZero = tx.noAutoZero
+		case "foreign_key_checks":
+			c.noFKChecks = tx.noFKChecks
+		}
+	}
+	switch {
+	case innodb && err != nil:
+		deadlock := errors.Is(err, sqlir.ErrDeadlock)
+		tx.failStatement(mark, deadlock)
+		if deadlock {
+			// MySQL has ended the transaction: later statements through the
+			// same database/sql Tx run in autocommit, and its Commit or
+			// Rollback has nothing left to end.
+			c.tx, tx.closed = nil, true
+			if tx.p != nil {
+				tx.p.forgetTxUnlessOver(tx)
+			}
+		}
+	case auto:
 		if err == nil && !tx.aborted {
 			err = tx.checkCommit()
 		}
@@ -263,14 +383,14 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		} else {
 			tx.commit()
 		}
-	} else if err != nil {
+	case err != nil:
 		// A failed statement aborts the Postgres transaction.
 		tx.abort()
 	}
 	if err != nil {
 		return nil, 0, err
 	}
-	return &sqlRows{cols: res.cols, rows: res.rows}, res.affected, nil
+	return &sqlRows{cols: res.cols, rows: res.rows, lastID: res.lastID}, res.affected, nil
 }
 
 type sqlStmt struct {
@@ -305,7 +425,18 @@ type sqlRows struct {
 	cols []string
 	rows [][]driver.Value
 	i    int
+	// lastID is the AUTO_INCREMENT value the statement generated first, 0
+	// when it generated none.
+	lastID int64
 }
+
+// innodbResult is the result of a statement on MySQL, which reports the
+// AUTO_INCREMENT value an insert generated. Other servers answer
+// LastInsertId with an error, as their drivers do.
+type innodbResult struct{ affected, lastID int64 }
+
+func (r innodbResult) LastInsertId() (int64, error) { return r.lastID, nil }
+func (r innodbResult) RowsAffected() (int64, error) { return r.affected, nil }
 
 func (r *sqlRows) Columns() []string {
 	cols := make([]string, len(r.cols))

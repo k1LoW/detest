@@ -1,9 +1,11 @@
 package detest
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"sort"
@@ -27,6 +29,19 @@ type selItem struct {
 // and LIMIT. A query with FOR UPDATE takes the locking path instead, which
 // PostgreSQL allows only without grouping, DISTINCT and windows.
 func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row, error) {
+	if x.inSelect && x.blocks > 0 && x.tx.db.kind.InnoDB() {
+		// A nested query block reads by its own locking clause: a plain
+		// subquery of a locking read is a consistent read at Repeatable
+		// Read, as InnoDB's locking clause covers its own block only.
+		defer func(c bool) { x.consistent = c }(x.consistent)
+		x.consistent = sel.Lock == nil && x.tx.consistent()
+	}
+	x.blocks++
+	if len(sel.With) > 0 {
+		// The CTEs a query block declares shadow outer ones of the same
+		// name inside it only.
+		defer func(ctes map[string][]Row) { x.ctes = ctes }(maps.Clone(x.ctes))
+	}
 	var locking lockPlan
 	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
 		return nil, nil, x.unsupported("an aggregate only in ORDER BY")
@@ -69,6 +84,16 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 		return x.evalValues(sel, outer)
 	case sel.Lock != nil:
 		return x.evalLocking(sel, locking, outer)
+	case x.tx.db.kind.InnoDB() && x.tx.iso == Serializable && x.tx.block:
+		// InnoDB's Serializable turns every plain read of a transaction
+		// block into a locking read in share mode, subqueries and CTEs too.
+		locked := *sel
+		locked.Lock = &sqlir.LockClause{Strength: "share"}
+		plan, err := x.planLocking(&locked)
+		if err != nil {
+			return nil, nil, err
+		}
+		return x.evalLocking(&locked, plan, outer)
 	}
 	rows, err := x.scan(sel, outer)
 	if err != nil {
@@ -77,7 +102,14 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if rows, err = x.where(sel, rows, outer); err != nil {
 		return nil, nil, err
 	}
+	return x.compute(sel, rows, outer)
+}
+
+// compute is the rest of a query over the rows its FROM and WHERE found:
+// grouping, window functions, the select list, ORDER BY, DISTINCT, LIMIT.
+func (x *sqlExec) compute(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {
 	var items []*selItem
+	var err error
 	if isAggregate(sel) {
 		if items, err = x.groups(sel, rows, outer); err != nil {
 			return nil, nil, err
@@ -379,6 +411,68 @@ func (x *sqlExec) slice(sel *sqlir.SelectStmt, rows []Row, outer *env) ([]Row, e
 	return rows, nil
 }
 
+// ordersByAlias reports whether ORDER BY names a select alias, which may
+// order by another expression than the column of the same name.
+func ordersByAlias(sel *sqlir.SelectStmt) bool {
+	for _, k := range sel.OrderBy {
+		c, ok := k.Expr.(*sqlir.ColumnRef)
+		if !ok || c.Table != "" {
+			continue
+		}
+		for _, t := range sel.Targets {
+			if t.Alias != "" && strings.EqualFold(t.Alias, c.Column) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stopAt is where a scan with LIMIT stops: after the rows LIMIT and OFFSET
+// take together. It is nil without a LIMIT.
+func (x *sqlExec) stopAt(order []sqlir.OrderKey, limit, offset sqlir.Expr) (*scanStop, error) {
+	n, err := x.count(limit, "LIMIT", nil)
+	if err != nil || n < 0 {
+		return nil, err
+	}
+	off, err := x.count(offset, "OFFSET", nil)
+	if err != nil {
+		return nil, err
+	}
+	return &scanStop{order: order, n: n + max(off, 0)}, nil
+}
+
+// count evaluates a LIMIT or OFFSET, -1 when there is none or it is NULL. A
+// value bound to a parameter may be anything, so what is not a count is an
+// error rather than a slice out of range.
+func (x *sqlExec) count(e sqlir.Expr, what string, outer *env) (int, error) {
+	if e == nil {
+		return -1, nil
+	}
+	v, err := x.eval(e, &env{outer: outer})
+	if err != nil {
+		return 0, err
+	}
+	if derefValue(v) == nil {
+		if x.tx.db.kind.InnoDB() {
+			return 0, nil // MySQL reads a NULL count bound to a parameter as 0
+		}
+		return -1, nil // Postgres's LIMIT NULL is no limit
+	}
+	f, ok := toFloat(derefValue(v))
+	if !ok || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		kind := sqlir.InvalidRowCountInLimit
+		if what == "OFFSET" {
+			kind = sqlir.InvalidRowCountInOffset
+		}
+		return 0, x.tx.db.kind.Error(kind, what+" must be a non-negative integer", "", "", "")
+	}
+	if f > math.MaxInt32 {
+		return math.MaxInt32, nil // more than any table here holds, and an int cannot overflow
+	}
+	return int(f), nil
+}
+
 // finish orders, then slices, rows that are already output rows: those of a
 // set operation or a VALUES list.
 func (x *sqlExec) finish(sel *sqlir.SelectStmt, cols []string, rows []Row, outer *env) ([]string, []Row, error) {
@@ -502,15 +596,39 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 // evalLocking runs a query with FOR UPDATE or FOR SHARE: ORDER BY before
 // locking, and OFFSET and LIMIT after, so they count the rows actually locked
 // (FOR UPDATE SKIP LOCKED skips rows held by others) and the rows OFFSET
-// skips are locked as well.
+// skips are locked as well. On InnoDB the first table's search takes its
+// next-key locks first, and an aggregate is computed over the rows locked.
 func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) ([]string, []Row, error) {
-	from, targets := plan.from, plan.targets
+	var stop *scanStop // where the range locks stopped, which the rows follow
+	var err error
+	if x.tx.db.kind.InnoDB() {
+		// A locking read reads the latest rows, also as a subquery of a
+		// plain read that reads a snapshot.
+		defer func(c bool) { x.consistent = c }(x.consistent)
+		x.consistent = false
+		if stop, err = x.rangeLocks(sel, plan); err != nil {
+			return nil, nil, err
+		}
+	}
 	rows, err := x.scan(sel, outer)
 	if err != nil {
 		return nil, nil, err
 	}
 	if rows, err = x.where(sel, rows, outer); err != nil {
 		return nil, nil, err
+	}
+	if stop != nil {
+		f := sel.From
+		x.inScanOrder(x.tx.db.resolve(f.Name), cmp.Or(f.Alias, relname(f.Name)), sel.Where, stop, rows)
+	}
+	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+		// planLocking lets these through on InnoDB only, which locks the
+		// rows the query reads and computes the rest over them.
+		locked, err := x.lockRows(sel, plan, rows, 0, -1, outer)
+		if err != nil {
+			return nil, nil, err
+		}
+		return x.compute(sel, locked, outer)
 	}
 	if err := x.order(sel.OrderBy, rows, outer); err != nil {
 		return nil, nil, err
@@ -519,6 +637,18 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) 
 	if err != nil {
 		return nil, nil, err
 	}
+	locked, err := x.lockRows(sel, plan, rows, offset, limit, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	return x.project(sel, locked, outer)
+}
+
+// lockRows locks the rows a locking read found, in order, with the locking
+// clause's wait policy, and returns those it locked as they are now, past
+// offset and up to limit (-1 for none).
+func (x *sqlExec) lockRows(sel *sqlir.SelectStmt, plan lockPlan, rows []jrow, offset, limit int, outer *env) ([]jrow, error) {
+	from, targets := plan.from, plan.targets
 	mode := lockModeOf(sel.Lock)
 	var locked []jrow
 	skipped := 0 // rows locked for OFFSET, which Postgres locks too
@@ -546,7 +676,7 @@ rows:
 				continue rows
 			}
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if !ok {
 				continue rows // deleted while waited for
@@ -560,7 +690,7 @@ rows:
 			var ok bool
 			var err error
 			if r, ok, err = x.recheck(sel, r, latest, from, outer); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if !ok {
 				continue
@@ -572,7 +702,40 @@ rows:
 		}
 		locked = append(locked, r)
 	}
-	return x.project(sel, locked, outer)
+	return locked, nil
+}
+
+// rangeLocks takes InnoDB's next-key locks of the first table's search. A
+// joined table keeps the locks on the rows the join read: InnoDB also locks
+// around each lookup into it, which only a join plan would tell, and locking
+// it whole instead would explore deadlocks MySQL does not have.
+func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, error) {
+	f := sel.From
+	if f == nil || f.Name == "" || x.isCTE(f.Name) {
+		return nil, nil
+	}
+	alias := f.Alias
+	if alias == "" {
+		alias = relname(f.Name)
+	}
+	if !slices.Contains(plan.targets, alias) {
+		return nil, nil // FOR UPDATE OF names other tables
+	}
+	var stop *scanStop
+	if len(sel.Joins) == 0 && len(sel.GroupBy) == 0 && !isAggregate(sel) && !sel.Distinct && len(windowsOf(sel)) == 0 && !ordersByAlias(sel) {
+		var err error
+		if stop, err = x.stopAt(sel.OrderBy, sel.Limit, sel.Offset); err != nil {
+			return nil, err
+		}
+	}
+	return stop, x.nextKeyLocks(x.tx.db.resolve(f.Name), alias, sel.Where, lockModeOf(sel.Lock), sel.Lock, stop)
+}
+
+// isCTE reports whether name is a CTE of the statement, which shadows a table
+// of the same name. An empty CTE has no rows, so its presence is the key's.
+func (x *sqlExec) isCTE(name string) bool {
+	_, ok := x.ctes[name]
+	return ok
 }
 
 // lockPlan is what a locking read locks, worked out before it runs.
@@ -584,7 +747,8 @@ type lockPlan struct {
 // planLocking checks a locking read and works out the FROM items it locks,
 // from the statement alone.
 func (x *sqlExec) planLocking(sel *sqlir.SelectStmt) (lockPlan, error) {
-	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+	// InnoDB locks the rows such a query reads; Postgres refuses it.
+	if (isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0) && !x.tx.db.kind.InnoDB() {
 		return lockPlan{}, x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 	}
 	// Postgres allows neither in WHERE or ON at all.
@@ -860,7 +1024,7 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 					return err
 				}
 				if derefValue(a) != nil {
-					vals = append(vals, a)
+					vals = append(vals, x.aggOperand(name, a))
 				}
 			}
 			v = foldAggregate(name, w.Func.Star, vals, n)
@@ -880,7 +1044,11 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				if err != nil {
 					return err
 				}
-				if n, ok := toInt64(derefValue(o)); ok {
+				n, ok := toInt64(derefValue(o))
+				if x.tx.db.kind.InnoDB() && (!ok || n < 0) {
+					return x.unsupported(name + " with an offset other than a nonnegative integer")
+				}
+				if ok {
 					off = n
 				}
 			}
@@ -903,6 +1071,15 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 		it.ctx.win[w] = v
 	}
 	return nil
+}
+
+// aggOperand is a value SUM or AVG adds up: on MySQL, a string as the
+// number it converts to, which foldAggregate would otherwise count as 0.
+func (x *sqlExec) aggOperand(name string, v any) any {
+	if (name == "sum" || name == "avg") && x.tx.db.kind.InnoDB() {
+		return mysqlArithOperand(v)
+	}
+	return v
 }
 
 // foldAggregate folds the non-NULL values of an aggregate's argument; n is

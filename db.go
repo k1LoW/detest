@@ -135,6 +135,12 @@ type DB struct {
 	seqs     map[string]int64                    // sequence values of the run, for nextval
 	uuids    int64                               // gen_random_uuid values handed out in the run
 	ignored  map[string]bool                     // tables Ignore took out of the simulation
+
+	// InnoDB's state of a run: the commit sequence number, the versions
+	// commits left for snapshots to read, and the gap locks held.
+	seq     int64
+	history map[string]map[string][]version
+	gaps    []*gapLock
 }
 
 // tableCheck is a CHECK constraint of a table. alias maps a column name its
@@ -201,7 +207,19 @@ type tableDef struct {
 	types    map[string]string // column types, for the checks Postgres makes on write
 	notNull  map[string]bool   // NOT NULL columns besides the primary key's
 	checks   []tableCheck
-	defaults map[string]sqlir.Expr
+	indexes  []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
+	autoInc  map[string]bool       // MySQL's AUTO_INCREMENT columns
+	onUpdate map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
+	// strs are MySQL's limits on what a string column holds: CHAR(n) and
+	// VARCHAR(n) lengths, and ENUM and SET members.
+	strs map[string]strLimit
+	// fsp is the fractional seconds each MySQL DATETIME and TIMESTAMP
+	// column keeps.
+	fsp map[string]int
+	// autoIncFloor is the counter AUTO_INCREMENT=n leaves, n - 1, which
+	// every run starts from: the schema outlives the runs, the counters not.
+	autoIncFloor int64
+	defaults     map[string]sqlir.Expr
 	// generated are the expressions of generated columns, kept as written
 	// with the renames since in alias, as a CHECK's are.
 	generated map[string]*tableCheck
@@ -242,6 +260,15 @@ func (db *DB) SeedRow(table string, row Row) {
 	}
 	t[row.Key()] = row.clone()
 	db.touched[table] = true
+	if def := db.defs[table]; def != nil {
+		for col := range def.autoInc {
+			// An explicit value moves the counter past it, as an insert's
+			// does, so the next generated id does not collide with it.
+			if n, ok := autoIncValue(derefValue(row[col])); ok && n > db.seqs[autoIncKey(table, col)] {
+				db.seqs[autoIncKey(table, col)] = n
+			}
+		}
+	}
 }
 
 // encodeKey is the identity of a row with these primary key values. One value
@@ -262,7 +289,7 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
-	tx := &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, start: time.Now()}
+	tx := db.newTx(p)
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
 	err := fn(tx)
@@ -392,6 +419,18 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 
 // dropConstraint removes a unique constraint or index, or the primary key.
 // The rows keep the identity the primary key gave them.
+// dropIndex drops the index named name: the primary key, a unique index or
+// another index, never a foreign key or a check of the same name.
+func (def *tableDef) dropIndex(name string) {
+	if def.pkName == name {
+		def.pk, def.pkName = nil, ""
+	}
+	def.uniques = slices.DeleteFunc(def.uniques, func(u sqlir.UniqueDef) bool { return u.Name == name })
+	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return ix.Name == name })
+}
+
+// dropConstraint drops the constraint of the name. A plain index is no
+// constraint, so one of the same name stays.
 func (def *tableDef) dropConstraint(name string) bool {
 	for i, c := range def.checks {
 		if c.Name == name {
@@ -419,6 +458,12 @@ func (def *tableDef) dropConstraint(name string) bool {
 }
 
 func (def *tableDef) renameConstraint(old, nw string) bool {
+	for i := range def.indexes {
+		if def.indexes[i].Name == old {
+			def.indexes[i].Name = nw
+			return true
+		}
+	}
 	for i := range def.checks {
 		if def.checks[i].Name == old {
 			def.checks[i].Name = nw
@@ -444,14 +489,59 @@ func (def *tableDef) renameConstraint(old, nw string) bool {
 	return false
 }
 
+// indexedBy reports whether an index leads with cols, as the index InnoDB
+// uses for a foreign key on them must.
+func (def *tableDef) indexedBy(cols []string) bool {
+	leads := func(ix []string) bool { return len(ix) >= len(cols) && slices.Equal(ix[:len(cols)], cols) }
+	if leads(def.pk) {
+		return true
+	}
+	for _, u := range def.uniques {
+		var ix []string
+		for _, e := range u.Elems {
+			c, ok := e.(*sqlir.ColumnRef)
+			if !ok {
+				break
+			}
+			ix = append(ix, c.Column)
+		}
+		if leads(ix) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(def.indexes, func(ix sqlir.IndexDef) bool { return leads(ix.Columns) })
+}
+
+// renameIndex renames an index, leaving a foreign key or a check of the same
+// name alone.
+func (def *tableDef) renameIndex(old, nw string) {
+	for i := range def.indexes {
+		if def.indexes[i].Name == old {
+			def.indexes[i].Name = nw
+			return
+		}
+	}
+	for i := range def.uniques {
+		if def.uniques[i].Name == old {
+			def.uniques[i].Name = nw
+			return
+		}
+	}
+}
+
 // dropColumn forgets a column's default and, as Postgres does, the unique
 // indexes over it.
 func (def *tableDef) dropColumn(col string) {
 	def.columns = slices.DeleteFunc(def.columns, func(c string) bool { return c == col })
 	delete(def.defaults, col)
+	delete(def.onUpdate, col)
+	delete(def.strs, col)
+	delete(def.fsp, col)
 	delete(def.generated, col)
 	delete(def.types, col)
 	delete(def.notNull, col)
+	delete(def.autoInc, col)
+	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return slices.Contains(ix.Columns, col) || ix.Prefix == col })
 	def.checks = slices.DeleteFunc(def.checks, func(c tableCheck) bool { return slices.Contains(c.columns(), col) })
 	def.uniques = slices.DeleteFunc(def.uniques, func(u sqlir.UniqueDef) bool { return refersTo(u, col) })
 	def.fks = slices.DeleteFunc(def.fks, func(fk sqlir.ForeignKey) bool { return slices.Contains(fk.Columns, col) })
@@ -467,6 +557,18 @@ func (def *tableDef) renameColumn(old, nw string) {
 		delete(def.defaults, old)
 		def.defaults[nw] = d
 	}
+	if e, ok := def.onUpdate[old]; ok {
+		delete(def.onUpdate, old)
+		def.onUpdate[nw] = e
+	}
+	if l, ok := def.strs[old]; ok {
+		delete(def.strs, old)
+		def.strs[nw] = l
+	}
+	if f, ok := def.fsp[old]; ok {
+		delete(def.fsp, old)
+		def.fsp[nw] = f
+	}
 	if g, ok := def.generated[old]; ok {
 		delete(def.generated, old)
 		def.generated[nw] = g
@@ -481,6 +583,20 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if def.notNull[old] {
 		delete(def.notNull, old)
 		def.notNull[nw] = true
+	}
+	if def.autoInc[old] {
+		delete(def.autoInc, old)
+		def.autoInc[nw] = true
+	}
+	for i := range def.indexes {
+		for j, c := range def.indexes[i].Columns {
+			if c == old {
+				def.indexes[i].Columns[j] = nw
+			}
+		}
+		if def.indexes[i].Prefix == old {
+			def.indexes[i].Prefix = nw
+		}
 	}
 	for i := range def.checks {
 		def.checks[i].renameColumn(old, nw)
@@ -574,7 +690,33 @@ func (def *tableDef) reads(col string) bool {
 
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
-func (db *DB) SeedRowNow(table string, row Row) { db.SeedRow(table, row) }
+func (db *DB) SeedRowNow(table string, row Row) {
+	if !db.kind.InnoDB() {
+		db.SeedRow(table, row)
+		return
+	}
+	// A change in the middle of a run is a commit, which a snapshot taken
+	// before it does not see.
+	resolved := db.resolve(table)
+	before := maps.Clone(db.committed[resolved])
+	db.SeedRow(table, row)
+	db.seq++
+	for k, r := range db.committed[resolved] {
+		old, existed := before[k]
+		if existed && sameRow(old, r) {
+			continue
+		}
+		t := db.history[resolved]
+		if t == nil {
+			t = map[string][]version{}
+			db.history[resolved] = t
+		}
+		if len(t[k]) == 0 {
+			t[k] = append(t[k], version{seq: 0, row: old}) // nil when it is new
+		}
+		t[k] = append(t[k], version{seq: db.seq, row: r})
+	}
+}
 
 // resolve returns the schema-qualified name of a table as written. An
 // unqualified name is looked up along the search path, as Postgres does: the
@@ -699,6 +841,8 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		delete(db.defs, table)
 		delete(db.committed, table)
+		delete(db.history, table) // a table created again under the name starts with no versions
+		db.moveAutoInc(table, "")
 		delete(db.matviews, table)
 		delete(db.views, table)
 		tx.pending(table, func(lk lockKey, _ Row) { delete(tx.writes, lk) })
@@ -723,9 +867,31 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 	}
+	var added []sqlir.ColumnDef
 	for _, col := range ch.Columns {
+		if col.After != "" && (col.After == col.Name || !slices.Contains(def.columns, col.After)) {
+			// Checked before the column is added or moved, so a failed
+			// ALTER leaves the column as it was.
+			return fmt.Errorf("detest: column %q of relation %q does not exist", col.After, relname(table))
+		}
 		if !slices.Contains(def.columns, col.Name) {
+			if !ch.Create && col.AutoIncrement && db.holdsRows(table, tx) {
+				// MySQL numbers the rows already there, which would rekey
+				// them; a schema the test sets up rarely needs it.
+				return unsupported("adding an AUTO_INCREMENT column to a table that holds rows", "")
+			}
 			def.columns = append(def.columns, col.Name)
+			if !ch.Create && col.Default != nil {
+				added = append(added, col)
+			}
+		}
+		if col.First || col.After != "" {
+			def.columns = slices.DeleteFunc(def.columns, func(c string) bool { return c == col.Name })
+			at := 0
+			if col.After != "" {
+				at = slices.Index(def.columns, col.After) + 1
+			}
+			def.columns = slices.Insert(def.columns, at, col.Name)
 		}
 		if col.Type != "" {
 			if def.types == nil {
@@ -742,8 +908,51 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		case col.DropNotNull:
 			delete(def.notNull, col.Name)
 		}
+		switch {
+		case col.AutoIncrement:
+			for other := range def.autoInc {
+				if other != col.Name {
+					// One column per table, which the counter and replays
+					// depend on; MySQL refuses a second.
+					return unsupported("more than one AUTO_INCREMENT column", "")
+				}
+			}
+			if def.autoInc == nil {
+				def.autoInc = map[string]bool{}
+			}
+			if !def.autoInc[col.Name] {
+				db.raiseAutoInc(table, col.Name, tx)
+			}
+			def.autoInc[col.Name] = true
+		case col.DropAutoIncrement:
+			delete(def.autoInc, col.Name)
+		}
 		if col.TypeOnly {
 			continue
+		}
+		if col.Type != "" {
+			if def.fsp == nil {
+				def.fsp = map[string]int{}
+			}
+			def.fsp[col.Name] = col.FSP
+			if col.MaxLen > 0 || col.Members != nil {
+				if def.strs == nil {
+					def.strs = map[string]strLimit{}
+				}
+				def.strs[col.Name] = strLimit{maxLen: col.MaxLen, members: col.Members, set: col.Set}
+			} else {
+				delete(def.strs, col.Name)
+			}
+			// A whole column definition, which says ON UPDATE again or drops
+			// it, as MySQL's MODIFY and CHANGE do; ALTER COLUMN leaves it.
+			if col.OnUpdate != nil {
+				if def.onUpdate == nil {
+					def.onUpdate = map[string]sqlir.Expr{}
+				}
+				def.onUpdate[col.Name] = col.OnUpdate
+			} else {
+				delete(def.onUpdate, col.Name)
+			}
 		}
 		if col.Generated != nil {
 			if def.generated == nil {
@@ -757,11 +966,24 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			delete(def.defaults, col.Name)
 		}
 	}
+	if ch.AutoIncrement > 0 {
+		// The counter holds the last value generated. MySQL sets it to the
+		// value asked for, or past the largest value the column holds, so
+		// a table emptied may start over.
+		for col := range def.autoInc {
+			k := autoIncKey(table, col)
+			db.seqs[k] = 0
+			db.raiseAutoInc(table, col, tx)
+			db.seqs[k] = max(db.seqs[k], ch.AutoIncrement-1)
+		}
+		def.autoIncFloor = ch.AutoIncrement - 1
+	}
 	for _, u := range ch.Constraints {
 		if err := def.addConstraint(db.kind, table, u); err != nil {
 			return err
 		}
 	}
+	def.indexes = append(def.indexes, ch.Indexes...)
 	for _, c := range ch.Checks {
 		if c.Name == "" {
 			// Postgres names it after the first column it refers to.
@@ -772,21 +994,43 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		def.checks = append(def.checks, tableCheck{CheckDef: c})
 	}
+	if err := db.backfill(table, added, tx); err != nil {
+		return err
+	}
 	for _, fk := range ch.ForeignKeys {
 		if fk.Name == "" {
 			fk.Name = relname(table) + "_" + strings.Join(fk.Columns, "_") + "_fkey"
 		}
 		fk.RefTable = db.resolve(fk.RefTable)
 		def.fks = append(def.fks, fk)
+		if db.kind.InnoDB() && !def.indexedBy(fk.Columns) {
+			// InnoDB creates an index for a foreign key that has none, which
+			// the next-key locks search by.
+			def.indexes = append(def.indexes, sqlir.IndexDef{Name: fk.Name, Columns: fk.Columns})
+		}
 	}
 	for _, name := range ch.DropConstraints {
 		def.dropConstraint(name)
 	}
+	for _, name := range ch.DropIndexes {
+		def.dropIndex(name)
+	}
+	for _, name := range ch.DropForeignKeys {
+		def.fks = slices.DeleteFunc(def.fks, func(fk sqlir.ForeignKey) bool { return fk.Name == name })
+	}
+	for _, name := range ch.DropChecks {
+		def.checks = slices.DeleteFunc(def.checks, func(c tableCheck) bool { return c.Name == name })
+	}
 	for _, col := range ch.DropColumns {
 		def.dropColumn(col)
+		db.dropColumnInRows(table, col, tx)
 	}
 	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
 		def.renameColumn(old, nw)
+		if v, ok := db.seqs[autoIncKey(table, old)]; ok {
+			delete(db.seqs, autoIncKey(table, old))
+			db.seqs[autoIncKey(table, nw)] = v
+		}
 		db.renameColumnInRows(table, old, nw)
 		for _, other := range db.defs { // foreign keys elsewhere that reference the column
 			for i := range other.fks {
@@ -809,7 +1053,135 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	if old, nw := ch.RenameConstraint[0], ch.RenameConstraint[1]; old != "" {
 		def.renameConstraint(old, nw)
 	}
+	if old, nw := ch.RenameIndex[0], ch.RenameIndex[1]; old != "" {
+		def.renameIndex(old, nw)
+	}
 	return nil
+}
+
+// raiseAutoInc moves the AUTO_INCREMENT counter of a column that becomes
+// AUTO_INCREMENT past the values it already holds, as MySQL starts it.
+func (db *DB) raiseAutoInc(table, col string, tx *Tx) {
+	k := autoIncKey(table, col)
+	raise := func(r Row) {
+		if n, ok := integer(derefValue(r[col])); ok && n > db.seqs[k] {
+			db.seqs[k] = n
+		}
+	}
+	for _, r := range db.committed[table] {
+		raise(r)
+	}
+	if tx != nil {
+		for lk, r := range tx.writes {
+			if lk.table == table {
+				raise(r)
+			}
+		}
+	}
+}
+
+// backfill gives the rows a table already holds the defaults of the columns
+// ADD COLUMN added, as an existing row reads a new column's default.
+func (db *DB) backfill(table string, cols []sqlir.ColumnDef, tx *Tx) error {
+	if len(cols) == 0 {
+		return nil
+	}
+	if tx == nil {
+		tx = db.newTx(nil)
+	}
+	x := tx.evaluator()
+	fill := func(r Row) (Row, error) {
+		n := r.clone()
+		for _, c := range cols {
+			if _, ok := n[c.Name]; ok {
+				continue
+			}
+			v, err := x.eval(c.Default, &env{})
+			if err != nil {
+				return nil, err
+			}
+			n[c.Name] = v
+		}
+		return n, nil
+	}
+	for k, r := range db.committed[table] {
+		n, err := fill(r)
+		if err != nil {
+			return err
+		}
+		db.committed[table][k] = n
+		db.touched[table] = true
+	}
+	// The versions consistent reads see are rows of the table too.
+	for _, vs := range db.history[table] {
+		for i, v := range vs {
+			if v.row == nil {
+				continue
+			}
+			n, err := fill(v.row)
+			if err != nil {
+				return err
+			}
+			vs[i].row = n
+		}
+	}
+	for lk, r := range tx.writes {
+		if lk.table == table {
+			n, err := fill(r)
+			if err != nil {
+				return err
+			}
+			tx.writes[lk] = n
+		}
+	}
+	return nil
+}
+
+// dropColumnInRows removes a dropped column's values from the rows, the
+// versions snapshots read and the transaction's writes, so a column added
+// later under the name starts from its default.
+func (db *DB) dropColumnInRows(table, col string, tx *Tx) {
+	drop := func(r Row) Row {
+		if _, ok := r[col]; !ok {
+			return r
+		}
+		n := r.clone()
+		delete(n, col)
+		return n
+	}
+	for k, r := range db.committed[table] {
+		db.committed[table][k] = drop(r)
+		db.touched[table] = true
+	}
+	for _, vs := range db.history[table] {
+		for i := range vs {
+			if vs[i].row != nil {
+				vs[i].row = drop(vs[i].row)
+			}
+		}
+	}
+	if tx != nil {
+		for lk, r := range tx.writes {
+			if lk.table == table {
+				tx.writes[lk] = drop(r)
+			}
+		}
+	}
+}
+
+// holdsRows reports whether a table holds rows, committed or written by tx.
+func (db *DB) holdsRows(table string, tx *Tx) bool {
+	if len(db.committed[table]) > 0 {
+		return true
+	}
+	if tx != nil {
+		for lk := range tx.writes {
+			if lk.table == table {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // renameColumnInRows renames the column in the committed rows, which a commit
@@ -824,6 +1196,17 @@ func (db *DB) renameColumnInRows(table, old, nw string) {
 			db.touched[table] = true
 		}
 	}
+	// The versions consistent reads see are rows of the table too.
+	for _, vs := range db.history[table] {
+		for i, v := range vs {
+			if val, ok := v.row[old]; ok {
+				n := v.row.clone()
+				delete(n, old)
+				n[nw] = val
+				vs[i].row = n
+			}
+		}
+	}
 }
 
 // indexChange drops or renames an index, which lives in the schema of the
@@ -835,8 +1218,14 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 		if !strings.HasPrefix(t, schema+".") {
 			continue
 		}
-		if ch.Drop && def.dropConstraint(idx) {
-			return nil
+		if ch.Drop {
+			if i := slices.IndexFunc(def.indexes, func(ix sqlir.IndexDef) bool { return ix.Name == idx }); i >= 0 {
+				def.indexes = slices.Delete(def.indexes, i, i+1)
+				return nil
+			}
+			if def.dropConstraint(idx) {
+				return nil
+			}
 		}
 		if !ch.Drop && def.renameConstraint(ch.RenameConstraint[0], ch.RenameConstraint[1]) {
 			return nil
@@ -867,14 +1256,34 @@ type Tx struct {
 	deferred       []func()
 	atomic         bool
 	block          bool // begun with BeginTx, so SAVEPOINT may be used
+	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
 	// lockTimeout is set by SET LOCAL lock_timeout: a lock wait may then fail
 	// with 55P03 instead of waiting on, which the explorer chooses.
 	lockTimeout bool
-	saves       []savepoint
+	// noAutoZero is MySQL's NO_AUTO_VALUE_ON_ZERO, set for the session as a
+	// dump sets it: an explicit 0 in an AUTO_INCREMENT column is kept.
+	noAutoZero bool
+	// noFKChecks is MySQL's FOREIGN_KEY_CHECKS=0, set for the session as a
+	// dump sets it: foreign keys are neither checked nor acted on.
+	noFKChecks bool
+	saves      []savepoint
 	// deferAll and deferNamed are what SET CONSTRAINTS set, for ALL and by
 	// constraint name; nil when it was not run.
 	deferAll   *bool
 	deferNamed map[string]bool
+	// iso is the level the transaction runs at. snap is the commit sequence
+	// number its InnoDB consistent reads see, -1 until its first one.
+	iso  IsolationLevel
+	snap int64
+	// lastInsertID is where an InnoDB insert leaves the AUTO_INCREMENT value
+	// it generated first, for LastInsertId and LAST_INSERT_ID(); nil when the
+	// statement does not come through a connection.
+	lastInsertID *int64
+}
+
+// newTx begins a transaction of p at the server's default level.
+func (db *DB) newTx(p *Proc) *Tx {
+	return &Tx{db: db, p: p, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, iso: db.kind.Isolation(), snap: -1, start: time.Now()}
 }
 
 // savepoint is what ROLLBACK TO restores: the transaction's writes and the
@@ -972,6 +1381,15 @@ func (tx *Tx) CAS(table, key, field string, from, to any) (bool, error) {
 // schema.
 func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 	to := table[:strings.LastIndex(table, ".")+1] + ch.RenameTo
+	if i := strings.LastIndex(ch.RenameTo, "."); i >= 0 {
+		if !strings.EqualFold(ch.RenameTo[:i], table[:strings.LastIndex(table, ".")]) {
+			// Moving a table between databases is left out: applications
+			// do not do it at run time, and refusing it keeps detest from
+			// renaming the table within its own database instead.
+			return unsupported("renaming a table into another database", "")
+		}
+		to = table[:strings.LastIndex(table, ".")+1] + ch.RenameTo[i+1:]
+	}
 	moved := false
 	tx.pending(table, func(lk lockKey, r Row) {
 		delete(tx.writes, lk)
@@ -993,6 +1411,11 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 			}
 		}
 	}
+	if versions, ok := db.history[table]; ok {
+		delete(db.history, table)
+		db.history[to] = versions
+	}
+	db.moveAutoInc(table, to)
 	if rows, ok := db.committed[table]; ok {
 		delete(db.committed, table)
 		db.committed[to] = rows
@@ -1020,7 +1443,15 @@ func (db *DB) reset() {
 	db.touched = map[string]bool{}
 	db.moved = map[lockKey]string{}
 	db.seqs = map[string]int64{}
+	for table, def := range db.defs {
+		for col := range def.autoInc {
+			if def.autoIncFloor > 0 {
+				db.seqs[autoIncKey(table, col)] = def.autoIncFloor
+			}
+		}
+	}
 	db.uuids = 0
+	db.seq, db.history, db.gaps = 0, map[string]map[string][]version{}, nil
 }
 
 func (db *DB) selectCommitted(table string, pred func(Row) bool) []Row {
@@ -1138,7 +1569,11 @@ func (tx *Tx) savepoint(op, name string) error {
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
 	tx.deferred = tx.deferred[:sp.deferred]
-	tx.rollbackLocks(sp)
+	if tx.db.kind.InnoDB() {
+		tx.releaseInsertLocks(sp.locks)
+	} else {
+		tx.rollbackLocks(sp)
+	}
 	tx.aborted = false
 	return nil
 }
@@ -1157,6 +1592,25 @@ func (tx *Tx) abort() {
 	}
 	tx.releaseLocks(tx.locks)
 	tx.locks = nil
+}
+
+// releaseInsertLocks undoes the locks taken since the first from locks as
+// InnoDB undoes them with the writes they came with: it keeps them, except
+// those of rows inserted since, which go with the rows.
+func (tx *Tx) releaseInsertLocks(from int) {
+	since := tx.locks[from:]
+	tx.locks = tx.locks[:from:from]
+	var gone []lockKey
+	for _, lk := range since {
+		_, written := tx.writes[lk]
+		_, committed := tx.db.committed[lk.table][lk.key]
+		if lk.key == gapWaitKey || written || committed {
+			tx.locks = append(tx.locks, lk)
+		} else {
+			gone = append(gone, lk)
+		}
+	}
+	tx.releaseLocks(gone)
 }
 
 func (tx *Tx) yieldf(format string, args ...any) {
@@ -1346,6 +1800,7 @@ func (tx *Tx) commit() {
 		delete(tx.db.moved, lk) // a row moved here before is not this one
 	}
 	maps.Copy(tx.db.moved, tx.moved)
+	tx.recordVersions()
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {
@@ -1378,6 +1833,7 @@ func (tx *Tx) release() {
 		return
 	}
 	tx.releaseLocks(tx.locks)
+	tx.releaseGaps()
 }
 
 // checkTable reports a table that does not exist. A database with a declared
@@ -1396,6 +1852,9 @@ func (db *DB) isIgnored(table string) bool { return db.ignored[db.resolve(table)
 // unique index a foreign key could reference. A table without a declared
 // schema is keyed by id.
 func (db *DB) updateLock(table string, cols []string) lockMode {
+	if db.kind.InnoDB() {
+		return lockUpdate // InnoDB has no lock weaker than exclusive for writes
+	}
 	def := db.defs[table]
 	if def != nil {
 		// A generated column changes with the columns it is computed from,

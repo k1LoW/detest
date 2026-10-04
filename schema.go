@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -344,6 +347,22 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 	return nil
 }
 
+// intRange is the range of an integer column type, by width in bytes: int2
+// (smallint) and int4 (integer) in Postgres, and MySQL's tinyint (int1)
+// through int, with u for unsigned. An unsigned bigint (uint8) is checked
+// only for being negative.
+func intRange(t string) (lo, hi int64) {
+	unsigned := t[0] == 'u'
+	bits := map[byte]uint{'1': 8, '2': 16, '3': 24, '4': 32, '8': 64}[t[len(t)-1]]
+	if unsigned {
+		if bits == 64 {
+			return 0, math.MaxInt64
+		}
+		return 0, 1<<bits - 1
+	}
+	return -(1 << (bits - 1)), 1<<(bits-1) - 1
+}
+
 func (x *sqlExec) checkTypes(table string, row Row) error {
 	def := x.tx.db.defs[table]
 	if def == nil || len(def.types) == 0 {
@@ -354,26 +373,192 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if v == nil {
 			continue
 		}
+		if t := def.types[col]; x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
+			if l, ok := def.strs[col]; ok && l.members != nil {
+				stored, err := x.mysqlMember(table, col, l, v)
+				if err != nil {
+					return err
+				}
+				row[col] = stored
+				continue
+			}
+			stored, err := x.mysqlStoredText(t, v, def.fsp[col])
+			if err != nil {
+				return err
+			}
+			if s, isStr := stored.(string); isStr && def.strs[col].maxLen > 0 && utf8.RuneCountInString(s) > def.strs[col].maxLen {
+				return x.tx.db.kind.Error(sqlir.StringDataRightTruncation, fmt.Sprintf("Data too long for column '%s'", col), relname(table), col, "")
+			}
+			row[col] = stored
+			continue
+		}
 		switch t := def.types[col]; t {
 		case "uuid":
 			if s, ok := v.(string); ok && !validUUID(s) {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")
 			}
-		case "int2", "int4":
+		case "int1", "int2", "int3", "int4", "int8", "uint1", "uint2", "uint3", "uint4", "uint8":
+			if x.tx.db.kind.InnoDB() {
+				// go-sql-driver sends a boolean as 1 or 0.
+				if b, ok := v.(bool); ok {
+					v = boolAsInt(b)
+					row[col] = v
+				}
+				// database/sql may bind a string as []byte, which MySQL
+				// converts as the string.
+				if b, ok := v.([]byte); ok {
+					v = string(b)
+				}
+				// MySQL stores a fraction or a numeric string in an integer
+				// column rounded, and checks the range of what it stores.
+				f, ok := toFloat(v)
+				if s, isStr := v.(string); isStr {
+					// Parsed exactly, as a float64 would lose BIGINTs above
+					// 2^53.
+					n, parsed, fits := mysqlIntegerString(s)
+					switch {
+					case !parsed:
+						// Strict mode refuses what is not a number rather than store it.
+						return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("Incorrect integer value: '%s' for column '%s'", s, col), relname(table), col, "")
+					case !fits:
+						return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, fmt.Sprintf("Out of range value for column '%s'", col), relname(table), col, "")
+					}
+					v, ok = n, false
+					row[col] = v
+				}
+				if _, isInt := integer(v); ok && !isInt {
+					v = int64(math.Round(f))
+					row[col] = v
+				}
+			}
 			n, ok := integer(v)
 			if !ok {
+				if x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
+					// What is left is a value the conversions above do not
+					// know, such as a bound time.Time, whose text MySQL
+					// would refuse.
+					return x.unsupported(fmt.Sprintf("a %T stored in an integer column", v))
+				}
 				continue
 			}
-			lim, name := int64(math.MaxInt32), "integer"
-			if t == "int2" {
-				lim, name = math.MaxInt16, "smallint"
-			}
-			if n > lim || n < -lim-1 {
-				return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, name+" out of range", relname(table), col, "")
+			lo, hi := intRange(t)
+			if n < lo || n > hi {
+				msg := map[string]string{"int2": "smallint out of range", "int4": "integer out of range"}[t]
+				if x.tx.db.kind.InnoDB() {
+					msg = fmt.Sprintf("Out of range value for column '%s'", col)
+				}
+				return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, msg, relname(table), col, "")
 			}
 		}
 	}
 	return nil
+}
+
+// mysqlStoredText is v as a MySQL text or temporal column stores it. A text
+// column stores a number or a boolean as its decimal text, which later
+// compares as text: '10' < '2'; a time as go-sql-driver sends one. A DATE,
+// DATETIME or TIMESTAMP column holds a time, in UTC as go-sql-driver sends
+// one by default, so a value written as a string and one written as a time
+// compare alike; a DATE drops the time of day, and a DATETIME or TIMESTAMP
+// rounds to the fractional seconds it keeps. A float's text, a number in
+// a temporal column, which MySQL reads as a date, a temporal string detest
+// does not parse, and a TIME value are refused.
+func (x *sqlExec) mysqlStoredText(t string, v any, fsp int) (any, error) {
+	if b, ok := v.([]byte); ok {
+		v = string(b)
+	}
+	if t == "time" {
+		// A duration of its own syntax and range, which detest does not
+		// model.
+		return nil, x.unsupported("a value stored in a TIME column")
+	}
+	if mysqlTemporalType(t) {
+		var tm time.Time
+		switch v := v.(type) {
+		case time.Time:
+			tm = v.UTC()
+		case string:
+			parsed, ok := mysqlParseTime(v)
+			if !ok {
+				return nil, x.unsupported(fmt.Sprintf("the %s value %q, in a format detest does not parse", t, v))
+			}
+			tm = parsed
+		default:
+			return nil, x.unsupported(fmt.Sprintf("a %T stored in a %s column", v, t))
+		}
+		if t == "date" {
+			tm = time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, time.UTC)
+		}
+		// MySQL rounds fractional seconds to the column's precision, none
+		// without one declared.
+		return tm.Round(time.Duration(math.Pow10(9 - fsp))), nil
+	}
+	switch v := boolAsInt(v).(type) {
+	case string:
+		return v, nil
+	case time.Time:
+		return v.UTC().Format("2006-01-02 15:04:05.999999"), nil
+	case float64:
+		return nil, x.unsupported("a float stored in a " + t + " column")
+	}
+	if n, ok := integer(boolAsInt(v)); ok {
+		if mysqlTemporalType(t) {
+			return nil, x.unsupported("a number stored in a " + t + " column")
+		}
+		return strconv.FormatInt(n, 10), nil
+	}
+	return v, nil
+}
+
+// strLimit is what a MySQL string column holds: at most maxLen characters,
+// or, with members, one of them (ENUM) or a set of them (SET).
+type strLimit struct {
+	maxLen  int
+	members []string
+	set     bool
+}
+
+// mysqlMember is v as an ENUM or a SET column stores it: the members it
+// names, matched without regard to case as MySQL's default collation does,
+// spelled as declared, a SET's in declaration order. A number, which MySQL
+// reads as an index or a bitmask, is refused, and a value that names no
+// member fails as strict mode fails it.
+func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error) {
+	if b, ok := v.([]byte); ok {
+		v = string(b)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil, x.unsupported(fmt.Sprintf("a %T stored in an ENUM or a SET column", v))
+	}
+	truncated := x.tx.db.kind.Error(sqlir.DataTruncated, fmt.Sprintf("Data truncated for column '%s' at row 1", col), relname(table), col, "")
+	find := func(name string) int {
+		return slices.IndexFunc(l.members, func(m string) bool { return strings.EqualFold(m, strings.TrimRight(name, " ")) })
+	}
+	if !l.set {
+		i := find(s)
+		if i < 0 {
+			return nil, truncated
+		}
+		return l.members[i], nil
+	}
+	in := make([]bool, len(l.members))
+	if s != "" {
+		for name := range strings.SplitSeq(s, ",") {
+			i := find(name)
+			if i < 0 {
+				return nil, truncated
+			}
+			in[i] = true
+		}
+	}
+	var out []string
+	for i, m := range l.members {
+		if in[i] {
+			out = append(out, m)
+		}
+	}
+	return strings.Join(out, ","), nil
 }
 
 // validUUID accepts what Postgres's uuid input does: 32 hex digits, with or

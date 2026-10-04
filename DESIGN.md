@@ -93,7 +93,7 @@ The fingerprint leaves argument values out. Real code puts generated ids and wal
 
 The database is an in-memory `database/sql` driver. The code under test, including ORMs such as GORM, sqlx and sqlc, runs on the `*sql.DB` it returns.
 
-Each kind of server has a package of its own. It parses the server's dialect with the server's real grammar into an internal representation shared by all of them, which one executor runs, and it describes what differs between servers, such as the isolation levels and the error codes. PostgreSQL (`postgres`, with pg_query) is implemented. MySQL (`mysql`) is in progress. The internal representation already covers MySQL's statement shapes, such as `INSERT IGNORE` and `ON DUPLICATE KEY UPDATE`, while InnoDB's Repeatable Read, with snapshot reads and next-key locks, needs semantics of its own.
+Each kind of server has a package of its own. It parses the server's dialect with the server's real grammar into an internal representation shared by all of them, which one executor runs, and it describes what differs between servers, such as the isolation levels and the error codes. PostgreSQL (`postgres`, with pg_query) and MySQL (`mysql`, with TiDB's parser) are implemented. Statement shapes particular to one server, such as MySQL's `INSERT IGNORE`, `ON DUPLICATE KEY UPDATE` and `UPDATE ... ORDER BY ... LIMIT`, map onto the shared representation, and the semantics that differ, InnoDB's in particular, are switched on by the server's description.
 
 For PostgreSQL, detest follows Read Committed, because the interleavings that matter come from its locking rather than from its query planner. It covers the following.
 
@@ -103,13 +103,21 @@ For PostgreSQL, detest follows Read Committed, because the interleavings that ma
 - foreign keys, with `FOR KEY SHARE` on the parent, every referential action, `MATCH FULL` and deferred constraints checked at commit;
 - `CHECK` and `NOT NULL`, savepoints, sequences, views and the DDL of real migrations and schema dumps.
 
-Errors are `*DBError` values with the server's SQLSTATE, and MySQL's error number for MySQL. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`.
+For MySQL, detest follows InnoDB, whose concurrency differs from PostgreSQL's in ways that change which interleavings break an application.
+
+- Row locks are shared or exclusive. A foreign key check takes a shared lock on the parent.
+- At Repeatable Read, a plain read comes from a snapshot taken at the transaction's first read. Commits keep the versions they replace, numbered by a commit sequence, so a snapshot reads the version current at its number. Locking reads, `UPDATE` and `DELETE` read the latest version, which is how InnoDB lets a value read from the snapshot and written back lose an update.
+- At Repeatable Read and Serializable, locking reads, `UPDATE` and `DELETE` take next-key locks. detest models them from the table's indexes rather than from a B-tree. It finds the index the WHERE searches by, from equalities on the index's leading columns and a range on the next one it can evaluate before the scan, compares keys over all of the index's columns in key order, locks every row whose key falls in the searched range, and locks the gap from the nearest key below the range to the nearest above, with that next record. An equality search on every column of a unique index that finds its row locks only the row, and a WHERE no index serves locks every row and the whole table. Gap locks do not conflict with each other, only with inserts into them, which is what makes two transactions that check for a missing row and then insert it deadlock.
+- At Serializable, plain reads in a transaction become shared locking reads.
+- A failed statement rolls back only its own writes, keeping its locks, and the transaction goes on. A deadlock rolls back the whole transaction.
+
+Errors are `*DBError` values with the server's SQLSTATE, and MySQL's error number for MySQL. Production code branches on its driver's error type, so `postgres.Errors` and `mysql.Errors` convert them, for example into `*pgconn.PgError` with `pgxerr.Convert` or `*mysql.MySQLError` with `mysqlerr.Convert`.
 
 The database is not a reimplementation of the server, and it is held to one standard. A difference from the server matters when it can change an outcome the application observes under concurrency, such as which rows a statement reads or locks, whether it blocks, which error it gets or how many rows it affects. Every behavior gets one of three answers by that standard.
 
 - **Exact.** The difference can change an outcome, and detest implements the behavior. It matches the server, down to the error code and the affected-row count.
 - **Unsupported.** The difference can change an outcome, and detest does not implement the behavior exactly. The statement fails with `ErrUnsupportedSQL`. `CheckSQL` reports the cases a statement decides on its own, without a schema; a case that depends on the schema, such as a generated column detest cannot compute, fails when the write runs. Approximating is never the answer here, because a result computed from the wrong semantics looks like any other result, and it would make detest report a bug the application does not have or pass a schedule that breaks production.
-- **Approximate.** The difference cannot change an outcome, under the way the databases are used (the schema is built before the processes run, the processes run DML on default settings, and values are the ones applications hold). detest does the simplest deterministic thing, which may ignore the statement or the clause, or skip a check the server makes. Plain indexes, for example, are parsed and dropped, since detest has no planner for them to steer.
+- **Approximate.** The difference cannot change an outcome, under the way the databases are used (the schema is built before the processes run, the processes run DML on default settings, and values are the ones applications hold). detest does the simplest deterministic thing, which may ignore the statement or the clause, or skip a check the server makes. Plain indexes, for example, are parsed and dropped for PostgreSQL, since detest has no planner for them to steer; InnoDB's gap locks follow them, so MySQL keeps them.
 
 AGENTS.md draws this line in detail, with the forms on each side.
 

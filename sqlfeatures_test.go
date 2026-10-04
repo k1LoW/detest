@@ -124,9 +124,8 @@ func TestSQLExecutorFeatures(t *testing.T) {
 	if got := queryStrings(`UPDATE "customers" SET name = $1 WHERE id = $2 RETURNING name`, "ALPHA", "w1"); len(got) != 1 || got[0] != "ALPHA" {
 		t.Fatalf("returning: %v", got)
 	}
-	// The MySQL dialect exists as an interface but has no frontend yet.
-	if err := CheckSQL(mysql.New(), "SELECT 1"); err == nil {
-		t.Fatal("mysql frontend should report not implemented")
+	if err := CheckSQL(mysql.New(), "SELECT 1"); err != nil {
+		t.Fatalf("mysql: %v", err)
 	}
 }
 

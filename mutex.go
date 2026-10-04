@@ -283,7 +283,7 @@ func (p *Proc) blockers() []*Proc {
 	}
 	if p.waitRow != nil {
 		var out []*Proc
-		for _, o := range p.waitRow.tx.conflicting(p.waitRow.key, p.waitRow.mode) {
+		for _, o := range p.waitRow.blockers() {
 			out = append(out, o.p)
 		}
 		return out

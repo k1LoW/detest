@@ -43,6 +43,18 @@ type rowWait struct {
 	key  lockKey
 	mode lockMode
 	tx   *Tx
+	// insert is the row an InnoDB insert waits to put into a gap another
+	// transaction locked, and old the row it updates, if it is an update
+	// moving an index value.
+	insert, old Row
+}
+
+// blockers returns the transactions w waits for.
+func (w *rowWait) blockers() []*Tx {
+	if w.insert != nil {
+		return w.tx.gapHolders(w.key.table, w.insert, w.old)
+	}
+	return w.tx.conflicting(w.key, w.mode)
 }
 
 // conflicting returns the transactions other than tx whose hold on lk
@@ -81,58 +93,86 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 			}
 			return nil
 		}
-		for _, o := range conflict {
-			// A lock held by another transaction of the same process can never
-			// be released while this process waits for it: the typical shape is
-			// an RPC issued inside a transaction whose callee writes the same
-			// row on the same database. Postgres does not detect it (the holder
-			// is idle in transaction), so the statement hangs until a timeout.
-			if o.p == tx.p {
-				tx.aborted = true
-				tx.p.r.note(tx.p, "waits for a lock on %s/%s held by its own open transaction", lk.table, lk.key)
-				tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for a row lock held by its own open transaction (RPC inside a transaction writing the same row?)", tx.p.name)}
-				return ErrSelfWait
-			}
+		what := fmt.Sprintf("a lock on %s/%s", lk.table, lk.key)
+		if err := tx.selfWait(conflict, what, "a row lock"); err != nil {
+			return err
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
 			tx.aborted = true
 			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
-			return tx.db.kind.Error(sqlir.LockNotAvailable, "canceling statement due to lock timeout", relname(lk.table), "", "")
+			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
-		cycle := tx.rowWaitCycle(conflict)
-		if cycle != nil {
-			// Each waiter checks for a deadlock once deadlock_timeout passes in
-			// its own wait, and the one that finds the cycle aborts itself. Which
-			// one that is depends on timing, so every member may be the victim.
-			members := append([]*Tx{tx}, cycle...)
-			v := members[tx.p.Choose("deadlock victim", len(members))]
-			if v == tx {
-				tx.aborted = true
-				tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
-				return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
-			}
-			v.deadlockVictim = true
-			v.p.state = stateReady
-			v.p.waitRow = nil
-		}
-		// A cycle left after another victim was picked is one the database
-		// detects too, once that victim's abort wakes this wait.
-		for _, o := range conflict {
-			if cycle == nil && tx.p.r.waitsFor(o.p, tx.p) {
-				tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for a lock on %s/%s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, lk.table, lk.key, o.p.name)}
-				break
-			}
+		if err := tx.breakCycle(conflict, what); err != nil {
+			return err
 		}
 		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
-		if tx.deadlockVictim {
-			tx.deadlockVictim = false
+		if err := tx.victim(); err != nil {
+			return err
+		}
+	}
+}
+
+// selfWait fails a wait of tx for another transaction of the same process,
+// on a lock the trace calls what and a report calls kind. Such a lock can
+// never be released while this process waits for it: the typical shape is
+// an RPC issued inside a transaction whose callee writes the same row on the
+// same database. Postgres does not detect it (the holder is idle in
+// transaction), so the statement hangs until a timeout.
+func (tx *Tx) selfWait(conflict []*Tx, what, kind string) error {
+	for _, o := range conflict {
+		if o.p == tx.p {
+			tx.aborted = true
+			tx.p.r.note(tx.p, "waits for %s held by its own open transaction", what)
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", tx.p.name, kind)}
+			return ErrSelfWait
+		}
+	}
+	return nil
+}
+
+// breakCycle settles a wait of tx for conflict that closes a cycle of lock
+// waits, row and gap waits alike: it picks the victim, which may be tx, and
+// reports a cycle through other waits, which the database cannot detect.
+func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
+	cycle := tx.rowWaitCycle(conflict)
+	if cycle != nil {
+		// Each waiter checks for a deadlock once deadlock_timeout passes in
+		// its own wait, and the one that finds the cycle aborts itself. Which
+		// one that is depends on timing, so every member may be the victim.
+		members := append([]*Tx{tx}, cycle...)
+		v := members[tx.p.Choose("deadlock victim", len(members))]
+		if v == tx {
 			tx.aborted = true
 			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
+		v.deadlockVictim = true
+		v.p.state = stateReady
+		v.p.waitRow = nil
 	}
+	// A cycle left after another victim was picked is one the database
+	// detects too, once that victim's abort wakes this wait.
+	for _, o := range conflict {
+		if cycle == nil && tx.p.r.waitsFor(o.p, tx.p) {
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, what, o.p.name)}
+			break
+		}
+	}
+	return nil
+}
+
+// victim ends a wait that another transaction's deadlock check broke by
+// picking tx as the victim.
+func (tx *Tx) victim() error {
+	if !tx.deadlockVictim {
+		return nil
+	}
+	tx.deadlockVictim = false
+	tx.aborted = true
+	tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+	return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 }
 
 // rowWaitCycle returns the waiting transactions that are on a cycle of row
@@ -147,8 +187,7 @@ func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
 		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil || w.p.waitRow.tx != w {
 			return nil
 		}
-		wr := w.p.waitRow
-		return wr.tx.conflicting(wr.key, wr.mode)
+		return w.p.waitRow.blockers()
 	}
 	// The transactions tx would wait for, directly or through their waits,
 	// and for each one the transactions waiting for it among them.

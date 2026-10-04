@@ -26,6 +26,9 @@ type sqlResult struct {
 	cols     []string
 	rows     [][]driver.Value
 	affected int64
+	// lastID is the AUTO_INCREMENT value an InnoDB insert generated first.
+	lastID    int64
+	hasLastID bool
 }
 
 // sqlExec is the per-statement executor state.
@@ -38,6 +41,16 @@ type sqlExec struct {
 	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
 	// before each query runs anything.
 	bounds map[*sqlir.SelectStmt][2]int
+	// consistent makes the statement's table reads InnoDB consistent reads,
+	// from the transaction's snapshot: a plain SELECT at Repeatable Read.
+	consistent bool
+	// blocks counts the query blocks a SELECT statement has begun, so that
+	// a nested one reads by its own locking clause.
+	blocks   int
+	inSelect bool
+	// selectStmt is set for a SELECT statement, as opposed to the query of
+	// an INSERT ... SELECT or a CREATE TABLE ... SELECT.
+	selectStmt bool
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -150,6 +163,17 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	return res, nil
 }
 
+// ddlInTransaction refuses MySQL DDL inside a transaction block: MySQL
+// commits the transaction before it, which detest does not do, so a later
+// rollback would undo the transaction's writes while the schema change
+// stays.
+func (x *sqlExec) ddlInTransaction() error {
+	if x.tx.db.kind.InnoDB() && x.tx.block && !x.tx.checking {
+		return x.unsupported("DDL inside a transaction")
+	}
+	return nil
+}
+
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
 	switch st := stmt.(type) {
@@ -165,6 +189,9 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		}
 		return res, nil
 	case *sqlir.CreateTableAsStmt:
+		if err := x.ddlInTransaction(); err != nil {
+			return nil, err
+		}
 		return x.execCreateTableAs(st)
 	case *sqlir.RefreshStmt:
 		return x.execRefresh(st)
@@ -174,6 +201,18 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// choice between waiting and timing out; the duration does not
 			// matter, as detest's waits have no length.
 			x.tx.lockTimeout = st.Value != "" && st.Value != "0" && st.Value != "0ms" && st.Value != "0s"
+		}
+		if st.Name == "no_auto_value_on_zero" {
+			x.tx.noAutoZero = st.Value == "true"
+		}
+		if st.Name == "foreign_key_checks" {
+			x.tx.noFKChecks = st.Value == "false"
+		}
+		if st.Name == "database" && !strings.EqualFold(st.Value, x.tx.db.kind.SearchPath()[0]) {
+			// The current database is the server's, not the connection's,
+			// so a script that switches to another would run against the
+			// wrong one.
+			return nil, x.unsupported("USE of a database other than " + x.tx.db.kind.SearchPath()[0])
 		}
 		return &sqlResult{}, nil
 	case *sqlir.SetConstraintsStmt:
@@ -185,8 +224,24 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.UpdateStmt:
 		return x.execUpdate(st)
 	case *sqlir.DeleteStmt:
-		return x.execDelete(st)
+		if !st.Truncate {
+			return x.execDelete(st)
+		}
+		if x.tx.block && !x.tx.checking {
+			// MySQL's TRUNCATE commits the transaction first, which detest
+			// does not do, so running it as a DELETE would let a rollback
+			// undo it.
+			return nil, x.unsupported("TRUNCATE inside a transaction")
+		}
+		res, err := x.execDelete(st)
+		if err == nil {
+			x.tx.db.moveAutoInc(x.tx.db.resolve(st.Table), "")
+		}
+		return res, err
 	case *sqlir.SchemaStmt:
+		if err := x.ddlInTransaction(); err != nil {
+			return nil, err
+		}
 		for _, ch := range st.Changes {
 			// Postgres refuses to drop a column a generated column depends
 			// on, or drops both with CASCADE. The generated columns are the
@@ -414,6 +469,17 @@ func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
 // --- SELECT ---
 
 func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
+	if x.tx.db.kind.InnoDB() {
+		if sel.Lock == nil && x.tx.iso == Serializable && x.tx.block {
+			// InnoDB's Serializable turns the plain reads of a transaction
+			// block into locking reads in share mode.
+			locked := *sel
+			locked.Lock = &sqlir.LockClause{Strength: "share"}
+			sel = &locked
+		}
+		x.consistent = sel.Lock == nil && x.tx.consistent()
+	}
+	x.inSelect, x.selectStmt = true, true
 	x.tx.yieldf("%s: %s", x.tx.db.name, lazyString(func() string { return x.summarize(sel) }))
 	cols, rows, err := x.evalSelect(sel, nil)
 	if err != nil {
@@ -499,6 +565,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 			rows = renameColumns(rows, cols, v.ViewColumns)
 		}
 		return alias, rows, false, err
+	}
+	if x.consistent {
+		return alias, x.tx.snapshotRows(t.Name), true, nil
 	}
 	return alias, x.tx.selectNoYield(t.Name, nil), true, nil
 }
@@ -680,6 +749,9 @@ func (x *sqlExec) evalBounds(sel *sqlir.SelectStmt, outer *env) (offset, limit i
 // -1 is NULL, which is no LIMIT. An integer stays one: a float cannot hold
 // the largest bigint.
 func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) {
+	if x.tx.db.kind.InnoDB() {
+		return x.count(e, what, outer) // MySQL's rules for a count, NULL as 0
+	}
 	v, err := x.eval(e, &env{outer: outer})
 	if err != nil {
 		return 0, err
@@ -861,7 +933,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 					}
 					seen[k] = true
 				}
-				vals = append(vals, val)
+				vals = append(vals, x.aggOperand(v.Name, val))
 			}
 			return foldAggregate(v.Name, false, vals, len(g.rows)), nil
 		}
@@ -943,7 +1015,23 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	var rows []Row
 	switch {
 	case ins.Select != nil:
-		scols, srows, err := x.evalSelect(ins.Select, nil)
+		src := ins.Select
+		if x.tx.db.kind.InnoDB() && src.Lock == nil && (x.tx.iso == RepeatableRead || x.tx.iso == Serializable) {
+			if src.SetOp != "" || len(src.With) > 0 {
+				// The shared locks would cover the top query block only.
+				return nil, x.unsupported("INSERT ... SELECT from a set operation or a CTE")
+			}
+			// InnoDB's INSERT ... SELECT reads its source with shared
+			// next-key locks, so a concurrent write to the rows it copies
+			// waits.
+			locked := *src
+			locked.Lock = &sqlir.LockClause{Strength: "share"}
+			src = &locked
+		}
+		// Its nested query blocks read by their own locking clauses, as a
+		// SELECT's do.
+		x.inSelect = true
+		scols, srows, err := x.evalSelect(src, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -988,7 +1076,33 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		all = def.columns
 	}
 	out := &sqlResult{cols: x.returningCols(ins.Returning, all)}
-	for _, row := range rows {
+	type autoID struct {
+		id        int64
+		generated bool
+	}
+	ids := make([]autoID, len(rows))
+	// InnoDB reserves the values of an INSERT ... VALUES, whose rows it
+	// knows, before inserting any, so they are consecutive however other
+	// inserts interleave, and a row an error stops still used its value. An
+	// INSERT ... SELECT takes one at a time.
+	reserved := x.tx.db.kind.InnoDB() && ins.Select == nil
+	if reserved {
+		for i, row := range rows {
+			ids[i].id, ids[i].generated = x.autoIncrement(table, row)
+		}
+	}
+	for i, row := range rows {
+		// The counter moves even when the row then collides and is not
+		// inserted, as MySQL's does; only an inserted row's value is reported.
+		if !reserved {
+			ids[i].id, ids[i].generated = x.autoIncrement(table, row)
+		}
+		generatedID, generated := ids[i].id, ids[i].generated
+		inserted := func() {
+			if generated && !out.hasLastID {
+				out.lastID, out.hasLastID = generatedID, true
+			}
+		}
 		if err := x.applyDefaults(table, row); err != nil {
 			return nil, err
 		}
@@ -1000,6 +1114,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		if x.tx.db.ignored[table] {
 			out.affected++
+			inserted()
 			if err := x.appendReturning(out, ins.Returning, row); err != nil {
 				return nil, err
 			}
@@ -1013,13 +1128,20 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if existing, err = x.findConflict(table, ins.OnConflict.Columns, row); err != nil {
 				return nil, err
 			}
-			if existing == nil || ins.OnConflict.DoNothing {
+			if existing == nil {
 				break
 			}
-			// DO UPDATE locks the existing row and re-reads it, following
-			// it if it moved. If it went meanwhile, the insert is tried
-			// again, as Postgres does.
+			// The existing row is locked and re-read, following it if it
+			// moved. If it went meanwhile, the insert is tried again, as
+			// Postgres does. DO NOTHING and INSERT IGNORE wait as well, with
+			// the weakest lock that waits for a writer.
 			mode := x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))
+			if ins.OnConflict.DoNothing {
+				mode = lockKeyShare
+				if x.tx.db.kind.InnoDB() {
+					mode = lockShare // InnoDB's duplicate check takes a shared lock
+				}
+			}
 			key, c, ok, err := x.tx.lockLatest(table, existing.Key(), func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
 			if err != nil {
 				return nil, err
@@ -1061,12 +1183,20 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				}
 			}
 			updated := cur.clone()
+			if x.tx.db.kind.InnoDB() {
+				// ON DUPLICATE KEY UPDATE assigns left to right, as MySQL's
+				// UPDATE does.
+				e = &env{tables: map[string]Row{alias: updated}, merged: updated, excluded: row}
+			}
 			for _, a := range ins.OnConflict.Set {
 				v, err := x.assignedValue(table, a, e, "in ON CONFLICT DO UPDATE SET")
 				if err != nil {
 					return nil, err
 				}
 				updated[a.Column] = v
+			}
+			if err := x.touchOnUpdate(table, cur, updated, ins.OnConflict.Set); err != nil {
+				return nil, err
 			}
 
 			if err := x.checkRow(table, updated); err != nil {
@@ -1085,15 +1215,30 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if err != nil {
 				return nil, err
 			}
+			// Last before the write, as the checks above may wait while
+			// another transaction takes a gap lock the new value falls into.
+			if err := x.tx.moveIntention(table, updated, cur); err != nil {
+				return nil, err
+			}
 			x.tx.writes[lk] = updated
 			if x.tx.p != nil {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
-			out.affected++
+			switch {
+			case !x.tx.db.kind.InnoDB():
+				out.affected++
+			case !sameRow(cur, updated):
+				// MySQL counts an ON DUPLICATE KEY UPDATE that changed the
+				// row twice, and one that did not as none.
+				out.affected += 2
+			}
 			if err := x.appendReturning(out, ins.Returning, updated); err != nil {
 				return nil, err
 			}
 			continue
+		}
+		if err := x.tx.insertIntention(table, row); err != nil {
+			return nil, err
 		}
 		lk = lockKey{table, row.Key()}
 		noPK := false
@@ -1111,6 +1256,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
 		if err := x.tx.lock(lk); err != nil {
+			return nil, err
+		}
+		// The row lock may have waited, and a gap lock taken meanwhile
+		// covers the row as much as one taken before.
+		if err := x.tx.insertIntention(table, row); err != nil {
 			return nil, err
 		}
 		if _, exists := x.tx.view(table, row.Key()); exists {
@@ -1136,6 +1286,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		out.affected++
+		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {
 			return nil, err
 		}
@@ -1260,6 +1411,54 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 	return kept, nil
 }
 
+// lockJoinedReads takes the shared locks InnoDB's multi-table UPDATE takes on
+// the rows it reads from the tables joined to the target, for one row it
+// updates, and returns the row with the joined rows as the locks left them.
+// ok is false when one of them is gone. As for a locking read over a join,
+// the joined tables get row locks only. Postgres's UPDATE ... FROM reads them
+// without locks.
+func (x *sqlExec) lockJoinedReads(from []sqlir.TableRef, c jrow) (jrow, bool, error) {
+	if !x.tx.db.kind.InnoDB() {
+		return c, true, nil
+	}
+	by := maps.Clone(c.by)
+	for _, t := range from {
+		if t.Name == "" || x.isCTE(t.Name) || x.tx.db.views[x.tx.db.resolve(t.Name)] != nil {
+			continue
+		}
+		alias := t.Alias
+		if alias == "" {
+			alias = relname(t.Name)
+		}
+		if row := c.by[alias]; row != nil {
+			table := x.tx.db.resolve(t.Name)
+			if err := x.tx.lockMode(lockKey{table, row.Key()}, lockShare); err != nil {
+				return c, false, err
+			}
+			cur, ok := x.tx.view(table, row.Key())
+			if !ok {
+				return c, false, nil
+			}
+			by[alias] = cur
+		}
+	}
+	// The target's rebind rebuilds the merged columns from these.
+	return jrow{by: by, merged: c.merged, base: c.base}, true, nil
+}
+
+// writeLimit orders the candidates of an UPDATE or DELETE by MySQL's ORDER BY
+// and returns its LIMIT, or -1 without one. The limit counts the rows written,
+// which a candidate re-checked after a lock wait may no longer be.
+func (x *sqlExec) writeLimit(cands []jrow, order []sqlir.OrderKey, limit sqlir.Expr) (int, error) {
+	if err := x.order(order, cands, nil); err != nil {
+		return 0, err
+	}
+	if limit == nil {
+		return -1, nil
+	}
+	return x.count(limit, "LIMIT", nil)
+}
+
 func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(up.Table)
 	if x.tx.db.ignored[table] {
@@ -1268,6 +1467,15 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	alias := up.Alias
 	if alias == "" {
 		alias = relname(up.Table)
+	}
+	if def := x.tx.db.defs[table]; def != nil && len(up.From) > 0 && x.tx.db.kind.InnoDB() {
+		for _, a := range up.Set {
+			if !slices.Contains(def.columns, a.Column) {
+				// MySQL updates the joined table that has the column, where
+				// detest writes the first table only.
+				return nil, x.unsupported("UPDATE of a column of another table than the first")
+			}
+		}
 	}
 	// Validate the predicate and preview SET for the trace.
 	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set)); err != nil {
@@ -1288,16 +1496,46 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		return row.String()
 	})
 	x.tx.yieldf("%s: update %s set %s where %s", x.tx.db.name, up.Table, preview, lazyString(func() string { return x.exprString(up.Where) }))
+	var stop *scanStop
+	if len(up.From) == 0 {
+		var err error
+		if stop, err = x.stopAt(up.OrderBy, up.Limit, nil); err != nil {
+			return nil, err
+		}
+	}
+	if err := x.nextKeyLocks(table, alias, up.Where, lockUpdate, nil, stop); err != nil {
+		return nil, err
+	}
 	cands, err := x.writeCandidates(up.Table, up.Alias, up.From, up.Where)
 	if err != nil {
 		return nil, err
 	}
+	x.inScanOrder(table, alias, up.Where, stop, cands)
+	limit, err := x.writeLimit(cands, up.OrderBy, up.Limit)
+	if err != nil {
+		return nil, err
+	}
 	out := &sqlResult{cols: x.returningCols(up.Returning, nil)}
+	// MySQL's single-table UPDATE assigns left to right, each assignment
+	// seeing the ones before it, where Postgres evaluates them all against the
+	// old row.
+	sequential := x.tx.db.kind.InnoDB() && len(up.From) == 0
 	done := map[string]bool{}
+	var matched int64 // LIMIT counts the rows matched, changed or not
 	for _, c := range cands {
 		key := c.base.Key()
 		if done[key] {
 			continue
+		}
+		if limit >= 0 && matched >= int64(limit) {
+			break
+		}
+		c, joined, err := x.lockJoinedReads(up.From, c)
+		if err != nil {
+			return nil, err
+		}
+		if !joined {
+			continue // a joined row it waited for is gone
 		}
 		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
 		key, cur, ok, err := x.tx.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
@@ -1328,6 +1566,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			updated[a.Column] = v
+			if sequential {
+				c2 = c2.rebind(alias, updated)
+			}
+		}
+		if err := x.touchOnUpdate(table, cur, updated, up.Set); err != nil {
+			return nil, err
 		}
 
 		if err := x.checkRow(table, updated); err != nil {
@@ -1346,8 +1590,18 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Last before the write, as the checks above may wait while another
+		// transaction takes a gap lock the new value falls into.
+		if err := x.tx.moveIntention(table, updated, cur); err != nil {
+			return nil, err
+		}
 		x.tx.writes[lk] = updated
-		out.affected++
+		matched++
+		if !x.tx.db.kind.InnoDB() || !sameRow(cur, updated) {
+			// MySQL counts the rows an UPDATE changed, as go-sql-driver
+			// reports them without clientFoundRows.
+			out.affected++
+		}
 		if err := x.appendReturning(out, up.Returning, updated); err != nil {
 			return nil, err
 		}
@@ -1355,12 +1609,51 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	return out, nil
 }
 
+// touchOnUpdate sets the ON UPDATE CURRENT_TIMESTAMP columns of an update
+// of cur to updated that changes the row and does not set them itself.
+func (x *sqlExec) touchOnUpdate(table string, cur, updated Row, set []sqlir.Assignment) error {
+	def := x.tx.db.defs[table]
+	if def == nil || len(def.onUpdate) == 0 || sameRow(cur, updated) {
+		return nil
+	}
+	for col, e := range def.onUpdate {
+		if slices.ContainsFunc(set, func(a sqlir.Assignment) bool { return a.Column == col }) {
+			continue
+		}
+		v, err := x.eval(e, &env{})
+		if err != nil {
+			return err
+		}
+		updated[col] = v
+	}
+	return nil
+}
+
 func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	if x.tx.db.isIgnored(del.Table) {
 		return &sqlResult{cols: x.returningCols(del.Returning, nil)}, nil // nothing to delete
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
+	delAlias := del.Alias
+	if delAlias == "" {
+		delAlias = relname(del.Table)
+	}
+	var stop *scanStop
+	if len(del.Using) == 0 {
+		var err error
+		if stop, err = x.stopAt(del.OrderBy, del.Limit, nil); err != nil {
+			return nil, err
+		}
+	}
+	if err := x.nextKeyLocks(x.tx.db.resolve(del.Table), delAlias, del.Where, lockUpdate, nil, stop); err != nil {
+		return nil, err
+	}
 	cands, err := x.writeCandidates(del.Table, del.Alias, del.Using, del.Where)
+	if err != nil {
+		return nil, err
+	}
+	x.inScanOrder(x.tx.db.resolve(del.Table), delAlias, del.Where, stop, cands)
+	limit, err := x.writeLimit(cands, del.OrderBy, del.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1375,6 +1668,9 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		key := c.base.Key()
 		if done[key] {
 			continue
+		}
+		if limit >= 0 && out.affected >= int64(limit) {
+			break
 		}
 		key, cur, ok, err := x.tx.lockLatest(table, key, x.tx.lock)
 		if err != nil {
@@ -1572,20 +1868,32 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			} else {
 				lhs = []any{l}
 			}
+			if len(cols) != len(lhs) {
+				return nil, x.unsupported("IN with a subquery of another number of columns")
+			}
 			for _, r := range rows {
-				match := len(cols) == len(lhs)
+				// SQL equality per column: a NULL on either side makes the
+				// row's comparison unknown unless another column differs.
+				match, unknown := len(cols) == len(lhs), false
 				for i := 0; match && i < len(cols); i++ {
 					li, err := x.untyped(lhsExprs[i], lhs[i], r[cols[i]])
 					if err != nil {
 						return nil, err
 					}
-					if !equalValues(li, r[cols[i]]) {
+					a, b := x.comparable(li, r[cols[i]])
+					switch {
+					case derefValue(a) == nil || derefValue(b) == nil:
+						unknown = true
+					case !equalValues(a, b):
 						match = false
 					}
 				}
-				if match {
+				if match && !unknown {
 					in = true
 					break
+				}
+				if match {
+					sawNull = true
 				}
 			}
 		} else {
@@ -1594,14 +1902,31 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				if derefValue(val) == nil {
-					sawNull = true
+				if la, ok := derefValue(l).([]any); ok {
+					ra, ok := derefValue(val).([]any)
+					if !ok || len(la) != len(ra) {
+						return nil, x.unsupported("row comparison of different shapes")
+					}
+					eq, unknown := x.rowsEqual(la, ra)
+					if eq {
+						in = true
+						break
+					}
+					sawNull = sawNull || unknown
+					continue
 				}
-				l, val, err := x.untypedPair(v.X, l, it, val)
+				if _, row := derefValue(val).([]any); row {
+					return nil, x.unsupported("IN of a value among rows")
+				}
+				if derefValue(val) == nil || derefValue(l) == nil {
+					sawNull = true
+					continue // NULL equals nothing, itself included
+				}
+				lt, vt, err := x.untypedPair(v.X, l, it, val)
 				if err != nil {
 					return nil, err
 				}
-				if equalValues(l, val) {
+				if equalValues(x.comparable(lt, vt)) {
 					in = true
 					break
 				}
@@ -1630,7 +1955,13 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(rows) == 0 || len(cols) == 0 {
+		if len(cols) != 1 {
+			return nil, x.unsupported("a scalar subquery of other than one column")
+		}
+		if len(rows) > 1 {
+			return nil, x.tx.db.kind.Error(sqlir.CardinalityViolation, "more than one row returned by a subquery used as an expression", "", "", "")
+		}
+		if len(rows) == 0 {
 			return nil, nil
 		}
 		return rows[0][cols[0]], nil
@@ -1660,11 +1991,12 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			hit := false
 			if v.Arg != nil {
-				arg, cond, err := x.untypedPair(v.Arg, arg, w.When, cond)
+				// SQL equality, where NULL matches nothing.
+				at, ct, err := x.untypedPair(v.Arg, arg, w.When, cond)
 				if err != nil {
 					return nil, err
 				}
-				hit = equalValues(arg, cond)
+				hit = derefValue(at) != nil && derefValue(ct) != nil && equalValues(x.comparable(at, ct))
 			} else {
 				hit, _ = derefValue(cond).(bool)
 			}
@@ -1718,6 +2050,9 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 }
 
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
+	if x.tx.db.kind.InnoDB() {
+		return v, nil // MySQL compares a string with a number as the number (mysqlOperands)
+	}
 	k, ok := e.(*sqlir.Const)
 	if !ok {
 		return v, nil
@@ -1755,6 +2090,50 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		}
 	}
 	switch op {
+	case "=", "<>", "!=", "<", "<=", ">", ">=", "<=>":
+		l, r = x.comparable(l, r)
+	}
+	if _, ok := derefValue(l).([]any); ok && (op == "<" || op == "<=" || op == ">" || op == ">=") {
+		return nil, x.unsupported("ordered row comparison")
+	}
+	_, lRow := derefValue(l).([]any)
+	if _, rRow := derefValue(r).([]any); rRow && !lRow {
+		return nil, x.unsupported("comparison of a value with a row")
+	}
+	if la, ok := derefValue(l).([]any); ok && op == "<=>" {
+		ra, ok := derefValue(r).([]any)
+		if !ok || len(la) != len(ra) {
+			return nil, x.unsupported("row comparison of different shapes")
+		}
+		for i := range la {
+			eq, err := x.binary("<=>", la[i], ra[i])
+			if err != nil {
+				return nil, err
+			}
+			if eq != true {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	if la, ok := derefValue(l).([]any); ok && (op == "=" || op == "<>" || op == "!=") {
+		ra, ok := derefValue(r).([]any)
+		if !ok || len(la) != len(ra) {
+			return nil, x.unsupported("row comparison of different shapes")
+		}
+		eq, unknown := x.rowsEqual(la, ra)
+		if unknown {
+			return nil, nil
+		}
+		return eq == (op == "="), nil
+	}
+	switch op {
+	case "<=>":
+		// MySQL's null-safe equality, each operand evaluated once.
+		if derefValue(l) == nil || derefValue(r) == nil {
+			return derefValue(l) == nil && derefValue(r) == nil, nil
+		}
+		return equalValues(l, r), nil
 	case "=":
 		return equalValues(l, r), nil
 	case "<>", "!=":
@@ -1775,13 +2154,25 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 			return c >= 0, nil
 		}
 	case "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
-		m := likeMatch(l, r, strings.HasSuffix(op, "ILIKE"))
+		m, dangling := likeMatch(l, r, strings.HasSuffix(op, "ILIKE"))
+		if dangling && !x.tx.db.kind.InnoDB() {
+			return nil, x.unsupported("LIKE pattern ending with an escape, which Postgres refuses")
+		}
 		if strings.HasPrefix(op, "NOT") {
 			return !m, nil
 		}
 		return m, nil
 	case "+", "-", "*", "/", "%":
+		if x.tx.db.kind.InnoDB() {
+			// MySQL's arithmetic takes a string as the number it starts with.
+			l, r = mysqlArithOperand(l), mysqlArithOperand(r)
+		}
 		v, err := arith(op, l, r)
+		if ke := (kindError{}); errors.As(err, &ke) && ke.kind == sqlir.DivisionByZero && x.selectStmt && x.tx.db.kind.InnoDB() {
+			// MySQL's strict mode refuses a division by zero in a write
+			// only; a SELECT gets NULL and a warning.
+			return nil, nil
+		}
 		if ke := (kindError{}); errors.As(err, &ke) {
 			return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
 		}
@@ -1907,6 +2298,21 @@ func castValue(v any, typ string) any {
 	return v
 }
 
+// rowsEqual compares two rows of values with SQL equality: unequal if any
+// pair differs, unknown if none does but a NULL is among them.
+func (x *sqlExec) rowsEqual(a, b []any) (eq, unknown bool) {
+	for i := range a {
+		l, r := x.comparable(a[i], b[i])
+		switch {
+		case derefValue(l) == nil || derefValue(r) == nil:
+			unknown = true
+		case !equalValues(l, r):
+			return false, false
+		}
+	}
+	return !unknown, unknown
+}
+
 // callFunc evaluates the scalar functions that appear on control paths.
 // pg_try_advisory_xact_lock is a non-blocking lock held until the end of the
 // transaction, modeled in the DB's lock table.
@@ -1917,7 +2323,12 @@ var strictFuncs = map[string][]int{
 	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
+	"octet_length": {1}, "left": {2}, "mysql_signed": {1},
 }
+
+// mysqlNullIfAnyNull are MySQL's functions of any number of arguments that
+// are NULL when one is, where the executor's Postgres ones skip NULLs.
+var mysqlNullIfAnyNull = map[string]bool{"mysql_concat": true, "mysql_greatest": true, "mysql_least": true}
 
 // roundDecimal is round(x, n) on the decimal x was written as, half away from
 // zero as Postgres's numeric rounds: on the float, f*10^n is off by a
@@ -1994,14 +2405,67 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 }
 
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
+	// database/sql lets a string argument come as []byte, which the
+	// functions would otherwise print as a list of numbers.
+	for i, a := range args {
+		if b, ok := derefValue(a).([]byte); ok {
+			args[i] = string(b)
+		}
+	}
+	if _, strict := strictFuncs[name]; (strict || mysqlNullIfAnyNull[name]) && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
+		return nil, nil // a strict function of NULL is NULL
+	}
+	if x.tx.db.kind.InnoDB() {
+		switch name {
+		case "mysql_greatest", "mysql_least":
+			// MySQL compares a mix of numbers and strings as strings, in
+			// its own formatting of the numbers, which the executor's
+			// pairwise comparison does not follow.
+			str := slices.ContainsFunc(args, func(a any) bool { _, ok := derefValue(a).(string); return ok })
+			num := slices.ContainsFunc(args, func(a any) bool { _, ok := toFloat(derefValue(a)); return ok })
+			if str && num {
+				return nil, x.unsupported(strings.ToUpper(strings.TrimPrefix(name, "mysql_")) + " of numbers and strings")
+			}
+			return x.callFunc(strings.TrimPrefix(name, "mysql_"), args)
+		case "mysql_concat":
+			// MySQL's, NULL when an argument is (strictFuncs), and
+			// otherwise the executor's.
+			return x.callFunc(strings.TrimPrefix(name, "mysql_"), args)
+		case "abs", "floor", "ceil", "power":
+			for i, a := range args {
+				args[i] = mysqlArithOperand(a) // a string as the number it converts to
+			}
+		case "round":
+			if _, ok := derefValue(args[0]).(string); ok {
+				// The string converts to a DOUBLE, which MySQL rounds half
+				// to even, where the executor rounds half away from zero.
+				return nil, x.unsupported("ROUND of a string")
+			}
+		case "mysql_nullif":
+			// NULLIF compares as MySQL's = does.
+			if derefValue(args[0]) == nil || derefValue(args[1]) == nil {
+				return args[0], nil
+			}
+			if equalValues(x.comparable(args[0], args[1])) {
+				return nil, nil
+			}
+			return args[0], nil
+		case "mysql_signed":
+			return mysqlSigned(derefValue(args[0])), nil
+		case "mysql_truth":
+			return mysqlTruth(derefValue(args[0])), nil
+		case "last_insert_id":
+			if x.tx.lastInsertID == nil {
+				return int64(0), nil
+			}
+			return *x.tx.lastInsertID, nil
+		}
+	}
 	d := func(i int) any {
 		if i < len(args) {
 			return derefValue(args[i])
 		}
 		return nil
-	}
-	if _, strict := strictFuncs[name]; strict && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
-		return nil, nil // a strict function of NULL is NULL
 	}
 	switch name {
 	case "coalesce":
@@ -2033,12 +2497,33 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			}
 		}
 		return best, nil
+	case "left":
+		if d(0) == nil || d(1) == nil {
+			return nil, nil
+		}
+		n, ok := integer(d(1))
+		if !ok {
+			if !x.tx.db.kind.InnoDB() {
+				return nil, x.unsupported("left with a length other than an integer")
+			}
+			n, _ = integer(mysqlSigned(d(1))) // MySQL converts the length
+		}
+		r := []rune(fmt.Sprint(d(0)))
+		if n < 0 && !x.tx.db.kind.InnoDB() {
+			n += int64(len(r)) // Postgres: all but the last -n characters
+		}
+		if int(n) < len(r) {
+			r = r[:max(n, 0)]
+		}
+		return string(r), nil
 	case "lower":
 		return strings.ToLower(fmt.Sprint(d(0))), nil
 	case "upper":
 		return strings.ToUpper(fmt.Sprint(d(0))), nil
 	case "length", "char_length":
 		return int64(len([]rune(fmt.Sprint(d(0))))), nil
+	case "octet_length":
+		return int64(len(fmt.Sprint(d(0)))), nil
 	case "concat":
 		var b strings.Builder
 		for i := range args {
@@ -2078,6 +2563,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		// Postgres fixes now() at the start of the transaction, which a
 		// transaction that starts early and commits late depends on.
 		ts := x.tx.start
+		if x.tx.db.kind.InnoDB() {
+			ts = x.start // MySQL's NOW() is the statement's time
+		}
 		switch name {
 		case "clock_timestamp":
 			ts = time.Now()
@@ -2088,6 +2576,18 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			ts = time.Now()
 		}
 		ts = ts.Truncate(time.Microsecond) // a Postgres timestamp has six fractional digits
+		if x.tx.db.kind.InnoDB() {
+			// MySQL's NOW(fsp) keeps fsp fractional digits, none without one.
+			p := 0.0
+			if len(args) > 0 {
+				f, ok := toFloat(d(0))
+				if !ok || f < 0 || f > 6 || f != math.Trunc(f) {
+					return nil, x.unsupported(name + " with a precision other than 0 to 6")
+				}
+				p = f
+			}
+			return ts.Truncate(time.Duration(math.Pow10(9 - int(p)))), nil
+		}
 		if len(args) == 0 {
 			return ts, nil
 		}
@@ -2346,7 +2846,7 @@ func integer(v any) (int64, bool) {
 // intArith is integer arithmetic as Postgres does it on bigint: overflow is an
 // error rather than a wrap, and division truncates toward zero.
 func intArith(op string, l, r int64) (any, error) {
-	overflow := kindError{sqlir.NumericValueOutOfRange, "bigint out of range"}
+	overflow := kindError{sqlir.ArithmeticOutOfRange, "bigint out of range"}
 	switch op {
 	case "+":
 		v := l + r
