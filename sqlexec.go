@@ -1071,6 +1071,13 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		return nil, err
 	}
 	x.freeze(ins)
+	if ins.OnConflict != nil && x.tx.db.defs[table] != nil {
+		// Postgres settles the arbiters when it plans the statement, so a
+		// target that names none fails before any row or default is made.
+		if _, err := x.conflictTargets(table, ins.OnConflict); err != nil {
+			return nil, err
+		}
+	}
 	cols := ins.Columns
 	for _, exprs := range ins.Rows {
 		// Postgres refuses VALUES lists of different lengths before any of

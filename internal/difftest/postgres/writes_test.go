@@ -327,6 +327,8 @@ var writeCases = []difftest.Case{
 			difftest.S(0, `INSERT INTO u VALUES (1, 'a') ON CONFLICT ON CONSTRAINT u_email_key DO NOTHING`),
 			difftest.S(0, `INSERT INTO u VALUES (3, 'a') ON CONFLICT (email, id) DO NOTHING`),
 			difftest.S(0, `INSERT INTO u VALUES (3, 'a') ON CONFLICT DO UPDATE SET email = 'z'`),
+			difftest.S(0, `INSERT INTO u SELECT id, email FROM u WHERE false ON CONFLICT DO UPDATE SET email = 'z'`),
+			difftest.S(0, `INSERT INTO u SELECT id, email FROM u WHERE false ON CONFLICT (email, id) DO NOTHING`),
 		},
 	},
 	{
