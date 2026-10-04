@@ -192,8 +192,9 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 				// The shared lock is next-key, at Read Committed too, so it
 				// holds the gap before the duplicate's entry.
 				if def := x.tx.db.defs[table]; dup != nil && def != nil {
-					if ix := slices.IndexFunc(def.indexOrder(true), func(ix secIndex) bool { return ix.unique == u }); ix >= 0 && def.indexOrder(true)[ix].key != nil {
-						x.tx.gapAround(table, def.indexOrder(true)[ix].key, dup, false)
+					order := def.indexOrder(true)
+					if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
+						x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
 					}
 				}
 				return dup, err
@@ -259,6 +260,9 @@ func (x *sqlExec) insertEntries(table string, row Row) error {
 			}
 			if ex != nil {
 				return x.tx.db.duplicateKey(table, ix.unique.Name)
+			}
+			if err := x.claimNullEntry(table, ix, row); err != nil {
+				return err
 			}
 		case ix.key != nil:
 			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
@@ -332,27 +336,70 @@ func (x *sqlExec) moveEntry(table string, ix secIndex, old, row Row) (bool, erro
 		return true, nil
 	}
 	u := ix.unique
-	ov, ook, err := x.uniqueValues(table, u, old)
-	if err != nil {
-		return false, err
-	}
-	if row != nil {
+	if !x.tx.db.kind.InnoDB() {
+		// Postgres checks the value its uniqueness compares, which a
+		// partial index's predicate decides is there at all.
+		ov, ook, err := x.uniqueValues(table, u, old)
+		if err != nil || row == nil {
+			return ook, err
+		}
 		nv, nok, err := x.uniqueValues(table, u, row)
-		if err != nil {
-			return false, err
-		}
-		if nok == ook && (!nok || sameValues(nv, ov)) {
-			return false, nil
-		}
-	} else if !ook {
+		return err == nil && (nok != ook || nok && !sameValues(nv, ov)), err
+	}
+	// The entry moves when its physical key does, the primary key's columns
+	// included, also for a key with a NULL, which uniqueness ignores.
+	key := x.tx.indexKey(table, ix)
+	if row != nil && keyCompare(key(old), key(row)) == 0 {
 		return false, nil
 	}
-	if ook && x.tx.db.kind.InnoDB() {
-		if err := x.tx.lockImplicit(uniqueLock(table, u, ov), lockStruct{}); err != nil {
-			return true, err
-		}
+	ov, ook, err := x.uniqueValues(table, u, old)
+	if err != nil {
+		return true, err
 	}
-	return true, nil
+	entry := entryLock(table, ix.name, key(old))
+	if ook {
+		entry = uniqueLock(table, u, ov)
+	}
+	return true, x.tx.lockImplicit(entry, lockStruct{})
+}
+
+// claimNullEntry takes the entry row writes into the unique index ix when
+// its key holds a NULL, which no uniqueness claims, as the record is in the
+// index all the same, held implicitly by the writer.
+func (x *sqlExec) claimNullEntry(table string, ix secIndex, row Row) error {
+	if !x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if _, ok, err := x.uniqueValues(table, ix.unique, row); err != nil || ok {
+		return err
+	}
+	return x.tx.lockImplicit(entryLock(table, ix.name, x.tx.indexKey(table, ix)(row)), lockStruct{})
+}
+
+// indexKey orders the secondary index ix of table: by its key's columns,
+// or for an index over an expression by the values it computes, with the
+// primary key's columns after them.
+func (tx *Tx) indexKey(table string, ix secIndex) func(Row) ixKey {
+	if ix.key != nil {
+		return func(r Row) ixKey { return keyOf(r, ix.key) }
+	}
+	def := tx.db.defs[table]
+	x := tx.evaluator()
+	return func(r Row) ixKey {
+		e := rowEnv(table, r)
+		var k ixKey
+		for _, el := range ix.unique.Elems {
+			v, err := x.eval(el, e)
+			if err != nil {
+				v = nil
+			}
+			k = append(k, derefValue(v))
+		}
+		if def != nil {
+			k = append(k, keyOf(r, def.pk)...)
+		}
+		return k
+	}
 }
 
 // sharedDuplicate is, on InnoDB, the row under key that an insert duplicates,
@@ -407,6 +454,9 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 		}
 		if ex != nil {
 			return x.tx.db.duplicateKey(table, u.Name)
+		}
+		if err := x.claimNullEntry(table, ix, row); err != nil {
+			return err
 		}
 		if old != nil {
 			x.tx.wroteEntry(table, ix, row)

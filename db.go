@@ -3,6 +3,7 @@ package detest
 import (
 	"cmp"
 	"database/sql"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -1424,6 +1425,9 @@ type Tx struct {
 	// entries is the secondary index entries the transaction's updates
 	// wrote, whose rollback leaves a gap lock where each was.
 	entries []entryWrite
+	// started is set once the transaction has run a statement in InnoDB,
+	// other than a savepoint's.
+	started bool
 	// updating is the rows the transaction is updating, by their key, with
 	// their new values, while the checks of their secondary indexes run.
 	updating map[lockKey]Row
@@ -1475,8 +1479,11 @@ type savepoint struct {
 	// before the savepoint may be strengthened after it.
 	modes    map[lockKey]lockMode
 	deferred int
-	inserts  int // the length of the transaction's inserts
-	entries  int // and of its entries
+	// unstarted is a savepoint taken before the transaction ran anything
+	// in InnoDB.
+	unstarted bool
+	inserts   int // the length of the transaction's inserts
+	entries   int // and of its entries
 }
 
 // Get reads one row.
@@ -1505,50 +1512,7 @@ func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
 
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
 func (tx *Tx) Insert(table string, row Row) error {
-	table = tx.db.resolve(table)
-	if err := tx.check(); err != nil {
-		return err
-	}
-	if err := tx.givesGenerated(table, row, "Tx.Insert"); err != nil {
-		return err
-	}
-	row = row.clone()
-	x := tx.evaluator()
-	if err := x.applyDefaults(table, row); err != nil {
-		return err
-	}
-	if err := x.checkRow(table, row); err != nil {
-		return err
-	}
-	if err := tx.db.assignKey(table, row); err != nil {
-		return err
-	}
-	lk := lockKey{table, row.Key()}
-	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
-	tx.noteTableLock(table, lockUpdate)
-	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
-		return err
-	}
-	if _, exists := tx.view(table, row.Key()); exists {
-		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
-	}
-	tx.undo++ // written as the row goes into the primary key, before the checks
-	if tx.db.kind.InnoDB() {
-		// The row is in the primary key while its checks run, where
-		// another transaction's locking search meets it.
-		tx.put, tx.putting = []putRow{{table: table, row: row}}, true
-		defer func() { tx.put, tx.putting = nil, false }()
-	}
-	if err := x.insertEntries(table, row); err != nil {
-		tx.undo-- // the failed insert's, rolled back
-		return err
-	}
-	delete(tx.deleted, lk)
-	tx.writes[lk] = row.clone()
-	if tx.db.kind.InnoDB() {
-		tx.inserts = append(tx.inserts, putRow{table: table, row: row.clone()})
-	}
-	return nil
+	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
 
 // Update sets columns of one row. Returns false when the row does not exist.
@@ -1674,6 +1638,83 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 
 // Delete removes one row. Returns whether it existed.
 func (tx *Tx) Delete(table, key string) (bool, error) {
+	var found bool
+	err := tx.asStatement(func() error {
+		var err error
+		found, err = tx.delete(table, key)
+		return err
+	})
+	return found, err
+}
+
+// Enqueue publishes a message when the transaction commits (outbox pattern).
+func (tx *Tx) Enqueue(q *Queue, msg Msg) {
+	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
+}
+
+// asStatement runs a write of the transaction API as InnoDB runs a
+// statement: one that fails rolls back alone, with the bookkeeping a failed
+// SQL statement gets, and a deadlock rolls back the transaction.
+func (tx *Tx) asStatement(f func() error) error {
+	if !tx.db.kind.InnoDB() {
+		return f()
+	}
+	m := tx.markStatement()
+	tx.started = true
+	err := f()
+	if err != nil {
+		tx.failStatement(m, errors.Is(err, sqlir.ErrDeadlock))
+	}
+	return err
+}
+
+func (tx *Tx) insert(table string, row Row) error {
+	table = tx.db.resolve(table)
+	if err := tx.check(); err != nil {
+		return err
+	}
+	if err := tx.givesGenerated(table, row, "Tx.Insert"); err != nil {
+		return err
+	}
+	row = row.clone()
+	x := tx.evaluator()
+	if err := x.applyDefaults(table, row); err != nil {
+		return err
+	}
+	if err := x.checkRow(table, row); err != nil {
+		return err
+	}
+	if err := tx.db.assignKey(table, row); err != nil {
+		return err
+	}
+	lk := lockKey{table, row.Key()}
+	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
+	tx.noteTableLock(table, lockUpdate)
+	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
+		return err
+	}
+	if _, exists := tx.view(table, row.Key()); exists {
+		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
+	}
+	tx.undo++ // written as the row goes into the primary key, before the checks
+	if tx.db.kind.InnoDB() {
+		// The row is in the primary key while its checks run, where
+		// another transaction's locking search meets it.
+		tx.put, tx.putting = []putRow{{table: table, row: row}}, true
+		defer func() { tx.put, tx.putting = nil, false }()
+	}
+	if err := x.insertEntries(table, row); err != nil {
+		return err
+	}
+	delete(tx.deleted, lk)
+	tx.writes[lk] = row.clone()
+	if tx.db.kind.InnoDB() {
+		tx.inserts = append(tx.inserts, putRow{table: table, row: row.clone()})
+	}
+	return nil
+}
+
+func (tx *Tx) delete(table, key string) (bool, error) {
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return false, err
@@ -1689,7 +1730,6 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 	}
 	tx.undo++ // written before the secondary entries, which may wait
 	if err := tx.evaluator().releaseEntries(table, cur, nil); err != nil {
-		tx.undo-- // the failed delete's, rolled back
 		return false, err
 	}
 	delete(tx.writes, lk)
@@ -1698,11 +1738,6 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
-}
-
-// Enqueue publishes a message when the transaction commits (outbox pattern).
-func (tx *Tx) Enqueue(q *Queue, msg Msg) {
-	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
 // pending applies f to the rows tx has written to table and not committed.
@@ -1738,6 +1773,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
 		sp.pending, sp.timeout, sp.undo, sp.inserts, sp.entries = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts), len(tx.entries)
+		sp.unstarted = !tx.started
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1776,13 +1812,24 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.lockTimeout = sp.timeout // MySQL's setting is the session's, which no rollback undoes
 	}
 	tx.deferred = tx.deferred[:sp.deferred]
-	if tx.db.kind.InnoDB() {
+	switch {
+	case tx.db.kind.InnoDB() && sp.unstarted:
+		// InnoDB had not started the transaction when the savepoint was
+		// taken, so rolling back to it rolls back all InnoDB holds of it,
+		// every lock and gap included, as measured on MySQL 8.4.
+		tx.releaseLocks(tx.locks)
+		tx.locks = nil
+		tx.releaseGaps()
+		tx.lockStructs, tx.grants, tx.explicit, tx.implicit = nil, nil, nil, nil
+		tx.entries = nil
+		tx.started = false
+	case tx.db.kind.InnoDB():
 		tx.releaseInsertLocks(sp.locks)
 		for _, p := range inserted {
 			tx.inheritGap(p.table, p.row, -1)
 		}
 		tx.rollEntries(sp.entries)
-	} else {
+	default:
 		tx.rollbackLocks(sp)
 	}
 	tx.aborted = false
@@ -1925,6 +1972,16 @@ func (tx *Tx) abortedError() error {
 }
 
 func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc any) (int, error) {
+	var n int
+	err := tx.asStatement(func() error {
+		var err error
+		n, err = tx.update(table, pred, fields, desc)
+		return err
+	})
+	return n, err
+}
+
+func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (int, error) {
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return 0, err
@@ -1957,26 +2014,21 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if err := x.checkRow(table, cur); err != nil {
 			return n, err
 		}
-		undo := tx.undo
 		if !sameRow(old, cur) {
 			tx.undo++ // written before the secondary indexes' checks, which may wait
 		}
 		tx.beginUpdate(lk, cur)
 		defer tx.endUpdate(lk)
 		if err := x.checkUniques(table, cur, key, old); err != nil {
-			tx.undo = undo // the failed update's, rolled back
 			return n, err
 		}
 		if err := x.checkParents(table, cur, old); err != nil {
-			tx.undo = undo
 			return n, err
 		}
 		if err := x.onParentUpdate(table, old, cur); err != nil {
-			tx.undo = undo
 			return n, err
 		}
 		if lk, err = x.rekey(table, lk, cur); err != nil {
-			tx.undo = undo
 			return n, err
 		}
 		tx.writes[lk] = cur

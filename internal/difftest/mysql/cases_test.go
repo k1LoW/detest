@@ -1010,6 +1010,42 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A savepoint taken before the transaction ran anything in InnoDB
+		// rolls back all of it, every lock and gap included.
+		Name:   "rollback to a savepoint taken first releases every lock",
+		Schema: []string{`CREATE TABLE n (id INT PRIMARY KEY, a INT NULL, b INT, UNIQUE KEY (a, b))` + binary},
+		Seed:   []string{`INSERT INTO n VALUES (1, NULL, 1), (2, NULL, 9)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `UPDATE n SET b = 5 WHERE id = 1`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `INSERT INTO n VALUES (3, NULL, 7)`),
+			difftest.S(1, `UPDATE n SET b = 2 WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, a, b FROM n ORDER BY id`),
+		},
+	},
+	{
+		// A unique key with a NULL is in the index all the same: an update
+		// moving it writes a new entry, whose rollback leaves its gap.
+		Name:   "rollback leaves the gap of a moved unique key with a NULL",
+		Schema: []string{`CREATE TABLE n (id INT PRIMARY KEY, a INT NULL, b INT, UNIQUE KEY (a, b))` + binary},
+		Seed:   []string{`INSERT INTO n VALUES (1, NULL, 1), (2, NULL, 9)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT id FROM n ORDER BY id`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `UPDATE n SET b = 5 WHERE id = 1`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `INSERT INTO n VALUES (3, NULL, 7)`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, a, b FROM n ORDER BY id`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

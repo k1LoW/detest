@@ -326,6 +326,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 		mark = tx.markStatement()
 	}
 	res, err := stmt.exec(tx, args)
+	if _, sp := stmt.stmt.(*sqlir.SavepointStmt); !sp {
+		tx.started = true
+	}
 	if c.db.s.sqlObserver != nil {
 		c.db.s.sqlObserver(query, err)
 	}

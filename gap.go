@@ -116,13 +116,19 @@ type gapLock struct {
 	table  string
 	cols   []string
 	ranges []valRange
+	// key, when set, orders the index the gap is of in place of cols, as
+	// for an index over an expression.
+	key func(Row) ixKey
 }
 
 func (g *gapLock) covers(row Row) bool {
-	if len(g.cols) == 0 {
+	if len(g.cols) == 0 && g.key == nil {
 		return true
 	}
 	k := keyOf(row, g.cols)
+	if g.key != nil {
+		k = g.key(row)
+	}
 	// NULL sorts first in an InnoDB index, so a key with one falls in a gap
 	// that reaches down to the start of the index.
 	return slices.ContainsFunc(g.ranges, func(r valRange) bool { return r.contains(k) })
@@ -353,7 +359,13 @@ func (x *sqlExec) indexEntry(table string, sr indexSearch, r Row) lockKey {
 // plainEntry is the lock key of r's record in the plain index named index,
 // ordered by key, which a writer of the record holds implicitly.
 func plainEntry(table, index string, key []string, r Row) lockKey {
-	return lockKey{table: "\x00index\x00" + table + "\x00" + index, key: encodeKey(keyOf(r, key))}
+	return entryLock(table, index, keyOf(r, key))
+}
+
+// entryLock is the lock key of the record with key k in the index named
+// index, for an entry no unique value names.
+func entryLock(table, index string, k ixKey) lockKey {
+	return lockKey{table: "\x00index\x00" + table + "\x00" + index, key: encodeKey(k)}
 }
 
 // checkSearch refuses a locking search whose locks depend on a choice of

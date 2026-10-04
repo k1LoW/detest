@@ -231,10 +231,7 @@ func (tx *Tx) rollEntries(from int) {
 	}
 	if tx.iso == RepeatableRead || tx.iso == Serializable {
 		for _, e := range tx.entries[from:] {
-			if e.index.key == nil {
-				continue
-			}
-			tx.gapAround(e.table, e.index.key, e.row, true)
+			tx.gapAround(e.table, tx.indexKey(e.table, e.index), e.row, true)
 			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "record")
 			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "gap")
 		}
@@ -287,10 +284,7 @@ func (tx *Tx) inheritGap(table string, row Row, reached int) {
 	}
 	indexes := append([]secIndex{{name: "PRIMARY", key: def.pk}}, order[:reached]...)
 	for _, ix := range indexes {
-		if ix.key == nil {
-			continue // an index over an expression, whose gaps detest does not order
-		}
-		tx.gapAround(table, ix.key, row, true)
+		tx.gapAround(table, tx.indexKey(table, ix), row, true)
 		tx.noteLockStruct(table, ix.name, lockUpdate, "record")
 		tx.noteLockStruct(table, ix.name, lockUpdate, "gap")
 	}
@@ -299,11 +293,11 @@ func (tx *Tx) inheritGap(table string, row Row, reached int) {
 // gapAround gives tx a gap lock on the index of table ordered by key: the
 // gap before row's entry, or with through, the one it falls in among the
 // other entries, which row is not one of.
-func (tx *Tx) gapAround(table string, key []string, row Row, through bool) {
-	k := keyOf(row, key)
+func (tx *Tx) gapAround(table string, key func(Row) ixKey, row Row, through bool) {
+	k := key(row)
 	var lo, hi ixKey
 	for _, r := range tx.lockingRows(table) {
-		v := keyOf(r, key)
+		v := key(r)
 		switch c := keyCompare(v, k); {
 		case c < 0 && (lo == nil || keyCompare(v, lo) > 0):
 			lo = v
@@ -315,7 +309,7 @@ func (tx *Tx) gapAround(table string, key []string, row Row, through bool) {
 		hi = k
 	}
 	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
-	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: key, ranges: []valRange{gap}})
+	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, key: key, ranges: []valRange{gap}})
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or
