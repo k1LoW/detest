@@ -54,6 +54,7 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `WITH c AS (SELECT sku FROM stock) SELECT n FROM c`),
 			difftest.Q(0, `SELECT typo.sku FROM stock`),
 			difftest.Q(0, `SELECT typo FROM (SELECT 1, 2) s(a)`),
+			difftest.Q(0, `SELECT * FROM (SELECT 1) s(a, b)`),
 			difftest.Q(0, `SELECT sku FROM stock a, stock b`),
 			difftest.Q(0, `SELECT 1 UNION SELECT 2 ORDER BY 2`),
 			difftest.Q(0, `SELECT a.sku AS sku, count(*) FROM stock a JOIN stock b ON b.sku = a.sku GROUP BY sku`),

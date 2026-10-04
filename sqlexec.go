@@ -669,6 +669,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 			return "", nil, false, x.unsupported(fmt.Sprintf("column alias %q given twice", dup))
 		}
 		cols, rows, err := x.evalSelect(t.Sub, outer)
+		if err == nil && len(t.Columns) > len(cols) {
+			return "", nil, false, x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", alias, len(cols), len(t.Columns)), alias, "", "")
+		}
 		if err == nil && len(t.Columns) > 0 {
 			rows = renameColumns(rows, cols, t.Columns) // AS alias(a, b)
 			cols = renamedCols(cols, t.Columns)
