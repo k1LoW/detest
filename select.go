@@ -802,8 +802,12 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 	// outer is the const row MySQL reads first, if it is there and passes
 	// the conditions on the first table alone; without one, MySQL reads
 	// nothing of the joined table.
+	conds := splitAnd(sel.Where)
+	if j.Kind != sqlir.LeftJoin {
+		conds = append(conds, splitAnd(j.On)...) // an inner join's ON filters the first table's rows as WHERE does
+	}
 	var own []sqlir.Expr
-	for _, c := range splitAnd(sel.Where) {
+	for _, c := range conds {
 		if !slices.ContainsFunc(sqlir.ColumnRefs(c), func(c *sqlir.ColumnRef) bool { return x.searchedColumn(c, jtable, jalias) }) {
 			own = append(own, c)
 		}

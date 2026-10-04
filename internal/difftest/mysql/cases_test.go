@@ -405,6 +405,7 @@ var cases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.S(0, rr),
 			difftest.Q(0, `SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 AND a.v = 5 FOR UPDATE`),
+			difftest.Q(0, `SELECT a.id, b.id FROM a JOIN b ON a.v = 5 AND b.a_id = a.id WHERE a.id = 1 FOR UPDATE`),
 			difftest.S(1, `INSERT INTO b VALUES (2, 1)`),
 			difftest.S(1, `UPDATE b SET a_id = 1 WHERE id = 1`),
 			difftest.S(0, `COMMIT`),
