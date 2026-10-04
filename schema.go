@@ -59,7 +59,7 @@ func (x *sqlExec) applyDefaults(table string, row Row) error {
 		// leaves the column out unsupported, while dumps routinely hold
 		// such defaults (ARRAY[]::text[]). One a process does read comes
 		// back as a value the server never produces, where NULL would pass
-		// for a real one. The table's own key, constraints and generated
+		// for a real one. The table's own key, NOT NULL, constraints and generated
 		// columns are readers too, and would be decided from the marker, so
 		// a column one of them reads is refused instead.
 		v, err := x.eval(d, &env{})

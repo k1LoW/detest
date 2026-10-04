@@ -515,11 +515,11 @@ func refersTo(u sqlir.UniqueDef, col string) bool {
 	return false
 }
 
-// reads reports whether the table's own primary key, a unique constraint or
-// index, a foreign key, a CHECK or a generated column reads col, so that a
-// value stood in for the column would decide one of them.
+// reads reports whether the table's own primary key, NOT NULL, a unique
+// constraint or index, a foreign key, a CHECK or a generated column reads
+// col, so that a value stood in for the column would decide one of them.
 func (def *tableDef) reads(col string) bool {
-	if slices.Contains(def.pk, col) {
+	if slices.Contains(def.pk, col) || def.notNull[col] {
 		return true
 	}
 	for _, u := range def.uniques {
