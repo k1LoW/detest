@@ -4445,3 +4445,21 @@ func TestPostgresSavepointRestoresLockTimeout(t *testing.T) {
 		t.Error("the lock timeout set after the savepoint holds after ROLLBACK TO")
 	}
 }
+
+// A column added with a volatile default gives each row one value, which
+// the versions snapshots read share.
+func TestMySQLBackfillSharesVolatileDefault(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 0)")
+	mustExec(t, db, "UPDATE t SET v = 1 WHERE id = 1")
+	mustExec(t, db, "ALTER TABLE t ADD COLUMN u VARCHAR(36) DEFAULT (UUID())")
+	table := store.resolve("t")
+	cur := store.committed[table]["1"]["u"]
+	for _, v := range store.history[table]["1"] {
+		if v.row != nil && v.row["u"] != cur {
+			t.Errorf("a version holds %v, the row %v", v.row["u"], cur)
+		}
+	}
+}

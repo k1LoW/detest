@@ -1096,15 +1096,28 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 		tx = db.newTx(nil)
 	}
 	x := tx.evaluator()
+	// A row gets one value of each default, which its versions and pending
+	// write share, so a volatile default such as UUID() reads the same from
+	// a snapshot as from the latest row.
+	filled := map[string]map[string]any{}
 	fill := func(r Row) (Row, error) {
 		n := r.clone()
+		vals := filled[r.Key()]
+		if vals == nil {
+			vals = map[string]any{}
+			filled[r.Key()] = vals
+		}
 		for _, c := range cols {
 			if _, ok := n[c.Name]; ok {
 				continue
 			}
-			v, err := x.eval(c.Default, &env{})
-			if err != nil {
-				return nil, err
+			v, seen := vals[c.Name]
+			if !seen {
+				var err error
+				if v, err = x.eval(c.Default, &env{}); err != nil {
+					return nil, err
+				}
+				vals[c.Name] = v
 			}
 			n[c.Name] = v
 		}
@@ -1115,7 +1128,10 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 		}
 		return n, nil
 	}
-	for k, r := range db.committed[table] {
+	// In key order, so that a volatile default numbers the rows the same in
+	// every run.
+	for _, k := range slices.Sorted(maps.Keys(db.committed[table])) {
+		r := db.committed[table][k]
 		n, err := fill(r)
 		if err != nil {
 			return err
