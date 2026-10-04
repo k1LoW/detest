@@ -700,6 +700,9 @@ const (
 	RestrictViolation
 	// UndefinedColumn is a column reference no table in scope has.
 	UndefinedColumn
+	// AmbiguousColumn is an unqualified column reference more than one
+	// table in scope has.
+	AmbiguousColumn
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -728,6 +731,7 @@ var (
 	ErrStringDataRightTruncation = errors.New("detest: value too long for the column")
 	ErrDataTruncated             = errors.New("detest: data truncated for the column")
 	ErrUndefinedColumn           = errors.New("detest: column does not exist")
+	ErrAmbiguousColumn           = errors.New("detest: column reference is ambiguous")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -736,7 +740,8 @@ var (
 		InvalidRowCountInLimit: ErrInvalidParameterValue, InvalidRowCountInOffset: ErrInvalidParameterValue,
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
-		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn}
+		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
+		AmbiguousColumn: ErrAmbiguousColumn}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers

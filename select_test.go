@@ -951,3 +951,12 @@ func TestDuplicateColumnAliasIsUnsupported(t *testing.T) {
 		t.Errorf("got %v", err)
 	}
 }
+
+func TestWholeRowValueIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	if _, err := db.Query(`SELECT t FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v", err)
+	}
+}

@@ -53,6 +53,8 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `SELECT sku FROM (SELECT sku AS s FROM stock) t`),
 			difftest.Q(0, `WITH c AS (SELECT sku FROM stock) SELECT n FROM c`),
 			difftest.Q(0, `SELECT typo.sku FROM stock`),
+			difftest.Q(0, `SELECT sku FROM stock a, stock b`),
+			difftest.Q(0, `SELECT a.sku FROM stock a WHERE EXISTS (SELECT 1 FROM stock b WHERE sku = a.sku)`),
 			difftest.Q(0, `SELECT s.sku FROM stock s JOIN stock a ON a.sku = b.sku JOIN stock b ON b.sku = s.sku`),
 			difftest.Q(0, `UPDATE stock SET n = 2 WHERE sku = 'apple' RETURNING nope`),
 			difftest.Q(0, `SELECT n FROM stock WHERE sku = 'apple'`),

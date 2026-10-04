@@ -320,12 +320,28 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		}
 		return c.undefined(r.Table + "." + r.Column)
 	}
+	// The innermost scope with the name decides it; an item whose columns
+	// are unknown may have it, so it decides nothing.
 	for s := sc; s != nil; s = s.outer {
+		found, wholeRow := 0, false
 		for alias, cols := range s.items {
-			// A table's name is a whole-row value of it.
-			if cols == nil || cols[r.Column] || alias == r.Column {
+			if cols == nil {
 				return nil
 			}
+			if cols[r.Column] {
+				found++
+			}
+			wholeRow = wholeRow || alias == r.Column
+		}
+		switch {
+		case found > 1:
+			return c.x.tx.db.kind.Error(sqlir.AmbiguousColumn, fmt.Sprintf("column reference %q is ambiguous", r.Column), "", r.Column, "")
+		case found == 1:
+			return nil
+		case wholeRow:
+			// A table's name is a whole-row value of it, which detest
+			// would read as NULL.
+			return c.x.unsupported(fmt.Sprintf("the whole-row value %q of a table", r.Column))
 		}
 	}
 	return c.undefined(r.Column)

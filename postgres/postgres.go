@@ -118,6 +118,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "23001", 0
 	case sqlir.UndefinedColumn:
 		return "42703", 0
+	case sqlir.AmbiguousColumn:
+		return "42702", 0
 	case sqlir.ArithmeticOutOfRange:
 		return "22003", 0
 	case sqlir.LockWaitTimeout:
