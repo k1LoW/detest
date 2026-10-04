@@ -261,12 +261,16 @@ type ColumnDef struct {
 	// OnUpdate is MySQL's ON UPDATE CURRENT_TIMESTAMP: an update that
 	// changes the row and does not set the column sets it to this.
 	OnUpdate Expr
-	// MaxLen is the most characters a MySQL CHAR(n) or VARCHAR(n) column
-	// holds, 0 for no limit detest checks. Members are an ENUM's or a SET's
+	// MaxLen is the most characters a CHAR(n) or VARCHAR(n) column holds,
+	// 0 for no limit detest checks. Members are a MySQL ENUM's or SET's
 	// values, Set telling the two apart.
 	MaxLen  int
 	Members []string
 	Set     bool
+	// Precision and Scale are a Postgres NUMERIC(p, s) column's, which
+	// rounds what it stores to s places; 0 for an unconstrained numeric.
+	Precision int
+	Scale     int
 	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column
 	// keeps, 0 without one declared.
 	FSP int

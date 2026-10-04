@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -437,5 +438,508 @@ func TestUntypedLiteralComparedWithNumber(t *testing.T) {
 		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input syntax", q, err)
 		}
+	}
+}
+
+// Postgres converts a string written to a number column to the column's
+// type, so the stored value compares as the number it reads as.
+func TestNumberColumnStoresNumbers(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, amount numeric, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES ('1', '0.5', '99.00', 'a')`)
+	mustExec(t, db, `INSERT INTO t VALUES ($1, $2, $3, $4)`, "2", "1.5", "100.50", "b")
+	mustExec(t, db, `UPDATE t SET amount = ' 7 ' WHERE id = 2`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  []string
+	}{
+		{`SELECT id FROM t WHERE id = '01'`, nil, []string{"1"}},
+		{`SELECT id FROM t WHERE id = $1`, []any{"02"}, []string{"2"}},
+		{`SELECT id FROM t WHERE id = $1`, []any{[]byte("02")}, []string{"2"}},
+		{`SELECT id FROM t WHERE ratio > 1 ORDER BY id`, nil, []string{"2"}},
+		{`SELECT id FROM t WHERE amount < 100 ORDER BY id`, nil, []string{"1", "2"}},
+		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99"}},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	// The key is the converted value, so '01' conflicts with the row of 1.
+	if _, err := db.Exec(`INSERT INTO t (id) VALUES ('01')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("got %v, want a unique violation", err)
+	}
+	// Postgres rounds a numeric literal and refuses a float parameter with a
+	// fraction, which detest cannot tell apart; a whole float is an integer.
+	for _, q := range []string{`INSERT INTO t (id) VALUES (1.5)`, `UPDATE t SET id = 2.5 WHERE id = 1`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	mustExec(t, db, `INSERT INTO t (id) VALUES ($1)`, 6.0)
+	if got := rowsOf(t, db, `SELECT id FROM t WHERE id = '06'`); !reflect.DeepEqual(got, []string{"6"}) {
+		t.Errorf("whole float: got %v", got)
+	}
+	// A numeric is not divided as an integer, however it was written.
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, n numeric)`)
+	mustExec(t, db, `INSERT INTO d VALUES (1, '1'), (2, $1), (3, $2)`, 1.0, int64(1))
+	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
+		t.Errorf("numeric division: got %v", got)
+	}
+	// A numeric is kept as a float, so an integer a float cannot keep
+	// exactly is refused rather than kept as one with integer arithmetic.
+	mustExec(t, db, `CREATE TABLE k (n numeric PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO k VALUES ($1)`, float64(9007199254740994))
+	if _, err := db.Exec(`INSERT INTO k VALUES ('9007199254740994.0')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric key beyond 2^53 with a decimal point: got %v, want a unique violation", err)
+	}
+	// An integer a float keeps exactly is taken, even beyond 2^53.
+	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, int64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric integer a float keeps: got %v, want a unique violation", err)
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO k VALUES ($1)`, []any{int64(9007199254740993)}},
+		{`INSERT INTO k VALUES ('9007199254740993')`, nil},
+		{`INSERT INTO k VALUES (9007199254740993)`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", tc.query, err)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE z (n numeric PRIMARY KEY, r float8)`)
+	mustExec(t, db, `INSERT INTO z (n) VALUES ('-0')`)
+	if _, err := db.Exec(`INSERT INTO z (n) VALUES (0)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric -0 and 0: got %v, want a unique violation", err)
+	}
+	if _, err := db.Exec(`INSERT INTO z VALUES (1, '-0')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("float -0: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `CREATE TABLE s (id int PRIMARY KEY, n numeric)`)
+	mustExec(t, db, `INSERT INTO s VALUES (1, '1.5'), (2, '0.5')`)
+	// Arithmetic on a numeric stays float arithmetic, even through a whole
+	// intermediate result.
+	for _, tc := range []struct{ query, want string }{
+		{`SELECT (n * 2) / 2 FROM s WHERE id = 1`, "1.5"},
+		{`SELECT sum(n) / 4 FROM s`, "0.5"},
+	} {
+		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, r float8)`)
+	mustExec(t, db, `INSERT INTO f VALUES (1, 1), (2, $1)`, int64(1))
+	if got := rowsOf(t, db, `SELECT r / 2 FROM f ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5"}) {
+		t.Errorf("float division: got %v", got)
+	}
+	// A whole numeric has one key however it was written.
+	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
+	mustExec(t, db, `INSERT INTO u VALUES ($1)`, 1e6)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO u VALUES ('1000000')`, nil},
+		{`INSERT INTO u VALUES ($1)`, []any{1e6}},
+		{`INSERT INTO u VALUES ($1)`, []any{int64(1000000)}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrUniqueViolation) {
+			t.Errorf("%s: got %v, want a unique violation", tc.query, err)
+		}
+	}
+	// A numeric a float cannot keep exactly would collapse into another value.
+	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '0.12345678901234567890')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric beyond a float: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '1e400')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric beyond a float's range: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `INSERT INTO t (id, amount) VALUES (7, '1.10')`)
+	// Postgres sorts NaN above every number, which detest does not.
+	for _, v := range []any{"NaN", math.NaN()} {
+		if _, err := db.Exec(`INSERT INTO t (id, ratio) VALUES (8, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%v: got %v, want unsupported", v, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT id FROM t WHERE ratio < $1`, math.NaN()); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("comparison with NaN: got %v, want unsupported", err)
+	}
+	// A value of another type is not converted, where Postgres refuses it.
+	for _, v := range []any{true, time.Unix(0, 0)} {
+		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%T: got %v, want unsupported", v, err)
+		}
+	}
+	// Postgres reads 0x10, 0x1p2 or 1_000 for some number types and not
+	// others, which detest does not model.
+	for _, q := range []string{
+		`INSERT INTO t (id, ratio) VALUES (9, '0x1p2')`,
+		`INSERT INTO t (id, amount) VALUES (9, '1_000')`,
+		`INSERT INTO t (id) VALUES ('0x10')`,
+		`SELECT '0x1p2'::numeric`,
+		`SELECT '0x10'::int`,
+		`SELECT count(*) FROM t WHERE ratio = '0x1p2'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id) VALUES ('abc')`,
+		`INSERT INTO t (id) VALUES ('1.5')`,
+		`INSERT INTO t (id, ratio) VALUES (3, 'abc')`,
+		`INSERT INTO t (id, amount) VALUES (3, 'abc')`,
+		`UPDATE t SET id = 'x' WHERE id = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
+	}
+}
+
+// Postgres has no operator comparing text with a number, and resolves only an
+// untyped literal or a parameter to the other side's type.
+func TestTextComparedWithNumber(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, '1')`)
+	// A number written to a text column is stored as its text.
+	mustExec(t, db, `INSERT INTO t VALUES (2, $1)`, int64(2))
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name = '02'`); len(got) != 1 || got[0] != "0" {
+		t.Errorf("name = '02': got %v, want 0", got)
+	}
+	for _, v := range []any{true, time.Unix(0, 0), 1.2} {
+		if _, err := db.Exec(`INSERT INTO t VALUES (3, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%T to a text column: got %v, want unsupported", v, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO t VALUES (3, 1.20)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric literal to a text column: got %v, want unsupported", err)
+	}
+	// A parameter holding a boolean or a time cannot be sent as a number.
+	for _, v := range []any{true, time.Unix(0, 0)} {
+		if _, err := db.Exec(`SELECT count(*) FROM t WHERE id = $1`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%T: got %v, want unsupported", v, err)
+		}
+	}
+	// The text a driver sends for a float parameter is not modeled.
+	for _, v := range []any{1.5, true, time.Unix(0, 0)} {
+		for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`,
+			`SELECT count(*) FROM t WHERE name = ANY (ARRAY['x', $1])`} {
+			if _, err := db.Exec(q, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s with %v: got %v, want unsupported", q, v, err)
+			}
+		}
+	}
+	// Bytes written to a text column order as the text they hold.
+	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, s text)`)
+	mustExec(t, db, `INSERT INTO b VALUES (1, $1), (2, '2')`, []byte("10"))
+	if got := rowsOf(t, db, `SELECT id FROM b ORDER BY s LIMIT 1`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("bytes in a text column: got %v, want [1]", got)
+	}
+	// A byte slice parameter compared with text orders as the text it is.
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name < $1`, []byte("10")); len(got) != 1 || got[0] != "1" {
+		t.Errorf("name < []byte: got %v, want 1", got)
+	}
+	// A parameter compared with a text cast takes the text type too.
+	for _, q := range []string{`SELECT '1'::text = $1`, `SELECT $1 = ANY (ARRAY['1'])`} {
+		if got := rowsOf(t, db, q, int64(1)); !reflect.DeepEqual(got, []string{"true"}) {
+			t.Errorf("%s with 1: got %v, want true", q, got)
+		}
+	}
+	// A parameter compared with an untyped literal is text, as both are.
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE $1 = '01'`, int64(1)); len(got) != 1 || got[0] != "0" {
+		t.Errorf("$1 = '01': got %v, want 0", got)
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE id = 2 AND name = 2`,
+		`SELECT count(*) FROM t WHERE name = 1`,
+		`SELECT count(*) FROM t WHERE id = name`,
+		`SELECT count(*) FROM t WHERE name::text < 2`,
+		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
+		`SELECT count(*) FROM t WHERE id = true`,
+		`SELECT count(*) FROM t WHERE now() > '2024-01-01'`,
+		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', '2'])`,
+		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', NULL::text])`,
+		`SELECT count(*) FROM t WHERE id = ANY (ARRAY[NULL])`,
+		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1'::varchar, '2'])`,
+		`SELECT count(*) FROM t WHERE 1000000000 = '1 second'::interval`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`SELECT count(*) FROM t WHERE name = $1`, []any{int64(1)}},
+		{`SELECT count(*) FROM t WHERE id = $1`, []any{"1"}},
+		{`SELECT count(*) FROM t WHERE name = '1'`, nil},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != "1" {
+			t.Errorf("%s: got %v, want 1", tc.query, got)
+		}
+	}
+}
+
+// Postgres compares rows pair by pair: an ordering by the first pair that is
+// not equal, as keyset pagination relies on, and each pair as two scalars.
+func TestRowComparison(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`)
+	mustExec(t, db, `INSERT INTO p VALUES (9, 1, 'x'), (10, 1, 'y'), (2, 5, 'z'), (9, 3, NULL)`)
+	for _, tc := range []struct {
+		query string
+		want  []string
+	}{
+		{`SELECT a, b FROM p WHERE (a, b) > (9, 1) ORDER BY a, b`, []string{"9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) <= (9, 1) ORDER BY a, b`, []string{"2,5", "9,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) = ('09', 1)`, []string{"9,1"}},
+		// Numbers are equal by value, so the first pair ties and the next decides.
+		{`SELECT a, b FROM p WHERE (a * 1000000, b) > (9000000.0, 2) ORDER BY a, b`, []string{"9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE a * 1000000 = 9000000.0 ORDER BY b`, []string{"9,1", "9,3"}},
+		{`SELECT a, b FROM p WHERE (a, b) <> (9, 1) ORDER BY a, b`, []string{"2,5", "9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE (a, b) IN ((2, 5), ('10', 1)) ORDER BY a`, []string{"2,5", "10,1"}},
+		// A NULL pair makes = unknown unless another pair differs.
+		{`SELECT a, b FROM p WHERE (a, name) = (9, NULL)`, nil},
+		{`SELECT a, b FROM p WHERE NOT ((a, name) = (10, NULL)) ORDER BY a, b`, []string{"2,5", "9,1", "9,3"}},
+	} {
+		if got := rowsOf(t, db, tc.query); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	// Each subquery row is compared in three-valued logic, so a NULL pair
+	// makes NOT IN unknown, while a subquery with no rows is false for NULL.
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{`SELECT count(*) FROM p WHERE (a, name) NOT IN (SELECT 9, NULL)`, "2"},
+		{`SELECT count(*) FROM p WHERE a NOT IN (SELECT NULL::int)`, "0"},
+		{`SELECT count(*) FROM p WHERE NULL::int NOT IN (SELECT a FROM p WHERE a < 0)`, "4"},
+	} {
+		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM p WHERE 1 IN ((1, 2))`,
+		`SELECT count(*) FROM p HAVING (count(*), 1) > (3, 1)`,
+		`SELECT count(*) FROM p WHERE CASE (a, b) WHEN (9, 1) THEN true ELSE false END`,
+		`SELECT count(*) FROM p WHERE NULLIF((a, b), (9, 1)) IS NULL`,
+		`SELECT count(*) FROM p WHERE a IN (SELECT a, b FROM p)`,
+		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
+		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
+// Integers above 2^53, such as snowflake IDs, are ordered exactly, as a float
+// would round adjacent ones to one value.
+func TestLargeIntegersCompareExactly(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int8 PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES ($1), ($2)`, int64(1<<53), int64(1<<53+1))
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`SELECT id FROM t WHERE id > $1`, []any{int64(1 << 53)}},
+		{`SELECT id FROM t ORDER BY id DESC LIMIT 1`, nil},
+		// An integer and a float compare exactly, even above 2^53.
+		{`SELECT id FROM t WHERE id > $1`, []any{float64(1 << 53)}},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, []string{"9007199254740993"}) {
+			t.Errorf("%s: got %v", tc.query, got)
+		}
+	}
+}
+
+// A cast to a number reads text as Postgres's input function does and rounds
+// a fraction, so cast values compare as numbers.
+func TestCastToNumber(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  string
+	}{
+		{`SELECT $1::int > $2::int`, []any{"10", "9"}, "true"},
+		{`SELECT ' 01 '::int = 1`, nil, "true"},
+		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
+		{`SELECT 1.6::int`, nil, "2"},
+		{`SELECT (-1.4)::smallint`, nil, "-1"},
+		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
+		{`SELECT true::int + false::int`, nil, "1"},
+		{`SELECT floor(1.5) / 2`, nil, "0.5"},
+		{`SELECT floor(3) / 2`, nil, "1.5"},
+		{`SELECT round(3) / 2`, nil, "1.5"},
+		{`SELECT abs(-3) / 2`, nil, "1"},
+		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	for _, q := range []string{`SELECT 'abc'::int`, `SELECT 'not_a_number'::int`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
+	}
+	var b any
+	if err := db.QueryRow(`SELECT $1::bytea`, []byte("ab")).Scan(&b); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.([]byte); !ok {
+		t.Errorf("$1::bytea: got %T, want []byte", b)
+	}
+	for _, q := range []string{`SELECT '40000'::smallint`, `SELECT 3000000000::int`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrNumericValueOutOfRange) {
+			t.Errorf("%s: got %v, want out of range", q, err)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE bin (id int PRIMARY KEY, b bytea)`)
+	mustExec(t, db, `INSERT INTO bin VALUES (1, $1)`, []byte("10"))
+	for _, q := range []string{`SELECT b::int FROM bin`, `SELECT b::text FROM bin`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	if got := rowsOf(t, db, `SELECT $1::int`, []byte("10")); !reflect.DeepEqual(got, []string{"10"}) {
+		t.Errorf("$1::int with bytes: got %v", got)
+	}
+	for _, q := range []string{`SELECT $1::numeric`, `SELECT $1::float8`} {
+		if _, err := db.Exec(q, math.NaN()); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with NaN: got %v, want unsupported", q, err)
+		}
+	}
+	// A numeric rounds half away from zero and a float half to even, told
+	// apart by the expression's form; a parameter's is unknown.
+	if got := rowsOf(t, db, `SELECT 2.5::int, (-2.5)::int, 2.5::float8::int, (0.5 * 5)::int, round(2.5), round(2.5::float8)`); !reflect.DeepEqual(got, []string{"3,-3,2,3,3,2"}) {
+		t.Errorf("casts and round of halves: got %v", got)
+	}
+	for _, q := range []string{`SELECT $1::int`, `SELECT round($1)`} {
+		if _, err := db.Exec(q, 2.5); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with 2.5: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{`SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
+		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`,
+		`SELECT true::bigint`, `SELECT true::smallint`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
+// Equal numbers have one key, so a unique index or a row lock on a value
+// written once as an integer and once as a float is one entry.
+func TestNumberKeysByValue(t *testing.T) {
+	for _, tc := range []struct{ a, b any }{
+		{int64(1000000), float64(1e6)},
+		{int64(0), math.Copysign(0, -1)},
+		{int64(9007199254740994), float64(9007199254740994)},
+		{int64(math.MinInt64), float64(math.MinInt64)},
+	} {
+		if ka, kb := keyString(tc.a), keyString(tc.b); ka != kb {
+			t.Errorf("keyString(%v) = %q, keyString(%v) = %q", tc.a, ka, tc.b, kb)
+		}
+	}
+	if keyString(1.5) == keyString(int64(1)) || keyString(1.5) != "1.5" {
+		t.Errorf("keyString(1.5) = %q", keyString(1.5))
+	}
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if got := rowsOf(t, db, `SELECT '-0.0'::numeric`); !reflect.DeepEqual(got, []string{"0"}) {
+		t.Errorf("'-0.0'::numeric: got %v", got)
+	}
+}
+
+// Values Postgres converts by a type detest does not keep are refused, and
+// the ones the statement or the schema tells are converted as Postgres does.
+func TestValueFormsByType(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1), b bytea, active bool)`)
+	mustExec(t, db, `INSERT INTO t (id, ratio, name, b, active) VALUES (1, 0.5, 'a', $1, true)`, []byte("10"))
+	for _, q := range []string{
+		`SELECT 1 || 2`, `SELECT 'a' || 1.5`, `SELECT 1.5::text`, `SELECT ratio::text FROM t`,
+		`SELECT coalesce(name, 1) FROM t`, `SELECT CASE WHEN id = 1 THEN name ELSE 2 END FROM t`, `SELECT greatest(name, 1) FROM t`,
+		`SELECT id FROM t UNION SELECT '1'`, `SELECT id FROM t INTERSECT SELECT '1'`,
+		`SELECT round(ratio) FROM t`, `INSERT INTO t (id, c) VALUES (2, 'ab')`, `INSERT INTO t (id, c) VALUES (2, 'a  ')`,
+		`SELECT true UNION SELECT 1`, `SELECT id FROM t UNION SELECT NULL UNION SELECT now()`,
+		`SELECT true || false`, `SELECT 1 || true`, `SELECT CASE WHEN true THEN '2'::text ELSE 1 END`,
+		`SELECT '' || now()`, `SELECT now()::text`, `SELECT CASE WHEN true THEN 1 ELSE 'x'::text END`,
+		`ALTER TABLE t ALTER COLUMN v TYPE int USING length(v)`,
+		`SELECT b || 'x' FROM t`, `SELECT id FROM t WHERE name = 'a '`, `SELECT id FROM t WHERE 'a ' IN (name)`,
+		`SELECT 1::bigint::bool`, `SELECT id FROM t WHERE (id, name) > (0, 1)`, `SELECT id FROM t WHERE (id, name) = (0, 1)`,
+		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, tc := range []struct {
+		q    string
+		want error
+	}{
+		{`INSERT INTO t (id, v) VALUES (2, 'abcd')`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, c) VALUES (2, 'abcd')`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, v) VALUES (2, 1234)`, ErrStringDataRightTruncation},
+		{`INSERT INTO t (id, price) VALUES (2, 999.95)`, ErrNumericValueOutOfRange},
+		{`SELECT 'o'::bool`, ErrInvalidTextRepresentation},
+		{`SELECT CASE WHEN false THEN 1 ELSE '1.5' END`, ErrInvalidTextRepresentation},
+		{`SELECT CASE WHEN true THEN 1 ELSE 'x' END`, ErrInvalidTextRepresentation},
+	} {
+		if _, err := db.Exec(tc.q); !errors.Is(err, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, err, tc.want)
+		}
+	}
+	mustExec(t, db, `INSERT INTO t (id, v, c, price) VALUES (2, 'abc ', 'abc  ', 1.05)`)
+	got := rowsOf(t, db, `SELECT v, c, price = 1.1, 'yes'::bool, 2::bool, CASE WHEN id = 2 THEN 1 ELSE '2' END = 1 FROM t WHERE id = 2`)
+	if want := []string{"abc,abc,true,true,true,true"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("converted values: got %v, want %v", got, want)
+	}
+	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5, $1::bool, $2::bool, 'a' || $3`, int64(1), int64(0), []byte("b")); !reflect.DeepEqual(got, []string{"true,true,false,ab"}) {
+		t.Errorf("random branch, boolean parameters and bytes concatenated: got %v", got)
+	}
+	// A column's type shows in its value, so a float there types the
+	// integer of another branch.
+	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE ratio END) / 2 = 0.5, COALESCE(1, ratio) / 2 = 0.5, (CASE WHEN true THEN 1 ELSE id END) / 2 FROM t WHERE id = 1`); !reflect.DeepEqual(got, []string{"true,true,0"}) {
+		t.Errorf("branches typed by a column's value: got %v", got)
+	}
+	if _, err := db.Exec(`SELECT $1::bool`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("$1::bool with 2: got %v, want invalid input", err)
+	}
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE active = $1`, int64(1)); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("active = $1 with 1: got %v", got)
+	}
+	if _, err := db.Exec(`SELECT count(*) FROM t WHERE active = $1`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("active = $1 with 2: got %v, want invalid input", err)
+	}
+	// ALTER COLUMN TYPE applies the new limits to the rows and the writes
+	// after it.
+	mustExec(t, db, `ALTER TABLE t ALTER COLUMN price TYPE numeric(4,2)`)
+	mustExec(t, db, `ALTER TABLE t ALTER COLUMN v TYPE varchar(4)`)
+	mustExec(t, db, `INSERT INTO t (id, price, v) VALUES (3, 1.005, 'abcd')`)
+	if got := rowsOf(t, db, `SELECT price = 1.01 FROM t WHERE id = 3`); !reflect.DeepEqual(got, []string{"true"}) {
+		t.Errorf("after ALTER TYPE: got %v", got)
+	}
+	if _, err := db.Exec(`INSERT INTO t (id, v) VALUES (4, 'abcde')`); !errors.Is(err, ErrStringDataRightTruncation) {
+		t.Errorf("varchar(4) after ALTER TYPE: got %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN v TYPE varchar(3)`); !errors.Is(err, ErrStringDataRightTruncation) {
+		t.Errorf("ALTER TYPE over a longer row: got %v", err)
 	}
 }

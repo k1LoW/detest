@@ -941,7 +941,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 					continue
 				}
 				if v.Distinct {
-					k := fmt.Sprint(derefValue(val))
+					k := valueKey(val)
 					if seen[k] {
 						continue
 					}
@@ -971,7 +971,19 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
-		return x.callFunc(v.Name, args)
+		if v.Name == "round" && len(args) == 1 {
+			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
+				return out, err
+			}
+		}
+		out, err := x.callFunc(v.Name, args)
+		switch v.Name {
+		case "coalesce", "greatest", "least", "nullif":
+			if err == nil {
+				out, err = x.branchValue(v.Args, args, out)
+			}
+		}
+		return out, err
 	case *sqlir.BinaryExpr:
 		l, err := x.evalAgg(v.L, g)
 		if err != nil {
@@ -987,13 +999,25 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
+		if v.Op == "||" {
+			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {
 			return nil, err
 		}
-		return castValue(val, v.Type), nil
+		if err := x.byteaCast(v, val); err != nil {
+			return nil, err
+		}
+		if err := x.paramTextCast(v, val); err != nil {
+			return nil, err
+		}
+		if err := x.boolCastSource(v); err != nil {
+			return nil, err
+		}
+		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -1817,7 +1841,16 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return castValue(val, v.Type), nil
+		if err := x.byteaCast(v, val); err != nil {
+			return nil, err
+		}
+		if err := x.paramTextCast(v, val); err != nil {
+			return nil, err
+		}
+		if err := x.boolCastSource(v); err != nil {
+			return nil, err
+		}
+		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -1831,8 +1864,14 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			return !b, nil
 		case "-":
+			if n, ok := integer(derefValue(val)); ok {
+				if n == math.MinInt64 {
+					return nil, x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, "bigint out of range", "", "", "")
+				}
+				return -n, nil
+			}
 			if f, ok := toFloat(derefValue(val)); ok {
-				return numeric(-f), nil
+				return -f, nil
 			}
 		}
 		return nil, errUnknownExpr{"unary " + v.Op}
@@ -1873,9 +1912,20 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		switch v.Op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			lr, lok := v.L.(*sqlir.RowExpr)
+			rr, rok := v.R.(*sqlir.RowExpr)
+			if lok || rok {
+				if !lok || !rok || len(lr.Items) != len(rr.Items) {
+					return nil, x.unsupported("row comparison")
+				}
+				return x.compareRows(v.Op, lr.Items, l, rr.Items, r)
+			}
 			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
 				return nil, err
 			}
+		}
+		if v.Op == "||" {
+			l, r = paramText(v.L, l), paramText(v.R, r)
 		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.IsNull:
@@ -1910,62 +1960,63 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				lhs = []any{l}
 			}
 			if len(cols) != len(lhs) {
-				return nil, x.unsupported("IN with a subquery of another number of columns")
+				return nil, x.unsupported("IN (subquery) whose columns do not match the left side")
 			}
 			for _, r := range rows {
-				// SQL equality per column: a NULL on either side makes the
-				// row's comparison unknown unless another column differs.
-				match, unknown := len(cols) == len(lhs), false
-				for i := 0; match && i < len(cols); i++ {
-					li, err := x.untyped(lhsExprs[i], lhs[i], r[cols[i]])
-					if err != nil {
-						return nil, err
-					}
-					a, b := x.comparable(li, r[cols[i]])
-					switch {
-					case derefValue(a) == nil || derefValue(b) == nil:
-						unknown = true
-					case !equalValues(a, b):
-						match = false
-					}
+				vals := make([]any, len(cols))
+				for i, c := range cols {
+					vals[i] = r[c]
 				}
-				if match && !unknown {
+				eq, err := x.compareRows("=", lhsExprs, lhs, make([]sqlir.Expr, len(cols)), vals)
+				if err != nil {
+					return nil, err
+				}
+				if eq == nil {
+					sawNull = true
+				} else if b, _ := eq.(bool); b {
 					in = true
 					break
 				}
-				if match {
-					sawNull = true
-				}
 			}
 		} else {
+			lr, isRow := v.X.(*sqlir.RowExpr)
 			for _, it := range v.List {
 				val, err := x.eval(it, en)
 				if err != nil {
 					return nil, err
 				}
-				if la, ok := derefValue(l).([]any); ok {
-					ra, ok := derefValue(val).([]any)
-					if !ok || len(la) != len(ra) {
-						return nil, x.unsupported("row comparison of different shapes")
+				if isRow {
+					ir, ok := it.(*sqlir.RowExpr)
+					if !ok || len(ir.Items) != len(lr.Items) {
+						return nil, x.unsupported("row comparison")
 					}
-					eq, unknown := x.rowsEqual(la, ra)
-					if eq {
+					eq, err := x.compareRows("=", lr.Items, l, ir.Items, val)
+					if err != nil {
+						return nil, err
+					}
+					if eq == nil {
+						sawNull = true
+					} else if b, _ := eq.(bool); b {
 						in = true
 						break
 					}
-					sawNull = sawNull || unknown
 					continue
+				}
+				if _, ok := it.(*sqlir.RowExpr); ok {
+					return nil, x.unsupported("row comparison")
 				}
 				if _, row := derefValue(val).([]any); row {
 					return nil, x.unsupported("IN of a value among rows")
 				}
-				if derefValue(val) == nil || derefValue(l) == nil {
-					sawNull = true
-					continue // NULL equals nothing, itself included
-				}
+				// Typed first, as a NULL of text compared with a number is
+				// refused before any value is seen.
 				lt, vt, err := x.untypedPair(v.X, l, it, val)
 				if err != nil {
 					return nil, err
+				}
+				if derefValue(val) == nil || derefValue(l) == nil {
+					sawNull = true
+					continue // NULL equals nothing, itself included
 				}
 				if equalValues(x.comparable(lt, vt)) {
 					in = true
@@ -1974,8 +2025,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 		}
 		// x IN (...) is NULL for a NULL x, or when it matches nothing and
-		// the list holds a NULL; NOT IN negates only a known answer.
-		if !in && (sawNull || derefValue(l) == nil) {
+		// the list holds a NULL; NOT IN negates only a known answer. A
+		// subquery with no rows is false whatever x is.
+		if !in && (sawNull || v.Sub == nil && derefValue(l) == nil) {
 			return nil, nil
 		}
 		if v.Not {
@@ -2042,11 +2094,19 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				hit, _ = derefValue(cond).(bool)
 			}
 			if hit {
-				return x.eval(w.Then, en)
+				out, err := x.eval(w.Then, en)
+				if err != nil {
+					return nil, err
+				}
+				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 			}
 		}
 		if v.Else != nil {
-			return x.eval(v.Else, en)
+			out, err := x.eval(v.Else, en)
+			if err != nil {
+				return nil, err
+			}
+			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -2072,18 +2132,67 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
-		return x.callFunc(v.Name, args)
+		if v.Name == "round" && len(args) == 1 {
+			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
+				return out, err
+			}
+		}
+		out, err := x.callFunc(v.Name, args)
+		switch v.Name {
+		case "coalesce", "greatest", "least", "nullif":
+			if err == nil {
+				out, err = x.branchValue(v.Args, args, out)
+			}
+		}
+		return out, err
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
 }
 
 // untypedPair resolves the operands of a comparison as Postgres resolves an
-// untyped string literal: to the type of the other operand when that is a
-// number, so '01' = 1 holds. Only a literal is resolved, as Postgres
-// coerces nothing else. A text column or a cast compared with a number is an
-// error there, which detest does not raise, since a value does not carry its
-// column's type.
+// untyped string literal or a parameter: to the type of the other operand
+// when that is a number, so '01' = 1 holds. Any other text compared with a
+// number is unsupported, as Postgres has no operator for it and fails the
+// statement, which detest cannot do before it reaches a row.
 func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, any, error) {
+	if x.tx.db.kind.InnoDB() {
+		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
+	}
+	l, r = paramText(le, l), paramText(re, r)
+	// Rows are compared pair by pair in compareRows; one reaching here comes
+	// from a context that does not, such as HAVING, CASE or NULLIF.
+	if _, ok := l.([]any); ok {
+		return nil, nil, x.unsupported("row comparison")
+	}
+	if _, ok := r.([]any); ok {
+		return nil, nil, x.unsupported("row comparison")
+	}
+	// A cast to text is text by its type even when its value is NULL, which
+	// Postgres refuses to compare with a number before any value is seen.
+	// A parameter there takes the text type, as it does against any text.
+	_, lParam := le.(*sqlir.Param)
+	_, rParam := re.(*sqlir.Param)
+	if textCast(le) && isNumber(r) && !rParam || isNumber(l) && !lParam && textCast(re) {
+		return nil, nil, x.unsupported("a comparison of text with a number")
+	}
+	// A parameter compared with text is sent as text, and the text a driver
+	// formats a float, a boolean or a time as is not modeled, unlike an
+	// integer's.
+	if unmodeledTextParam(le, l, r) || unmodeledTextParam(re, r, l) {
+		return nil, nil, x.unsupported("a parameter other than text or an integer compared with text")
+	}
+	// A char(n) compares without its padding, so 'abc ' equals the 'abc' a
+	// char(3) holds, where text compares the space. The value does not tell
+	// the two columns apart, so a literal ending in a space is refused
+	// against text.
+	if trailingSpaceLiteral(le) && isText(r) || trailingSpaceLiteral(re) && isText(l) {
+		return nil, nil, x.unsupported("a string literal ending in a space compared with text, which a char(n) column compares without it")
+	}
+	// With neither side typed, as in $1 = '01', Postgres compares text, so a
+	// number the parameter holds is compared as the text it is sent as.
+	if untypedExpr(le) && untypedExpr(re) {
+		return asText(l), asText(r), nil
+	}
 	l, err := x.untyped(le, l, r)
 	if err != nil {
 		return nil, nil, err
@@ -2092,37 +2201,248 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if err != nil {
 		return nil, nil, err
 	}
+	_, lp := le.(*sqlir.Param)
+	_, rp := re.(*sqlir.Param)
+	// A parameter compared with text takes the text type, so only a value of
+	// another expression makes the comparison an error.
+	if !lp && !rp && (isText(l) && isNumber(r) || isNumber(l) && isText(r)) {
+		return nil, nil, x.unsupported("a comparison of text with a number")
+	}
+	// Postgres sorts NaN above every number, which the comparisons do not.
+	if isNaN(l) || isNaN(r) {
+		return nil, nil, x.unsupported("a comparison with NaN")
+	}
+	// Postgres has no operator comparing a number with a boolean or a time
+	// either, and a parameter holding one fails to be sent as a number.
+	if isNumber(l) && isOther(r) || isOther(l) && isNumber(r) {
+		return nil, nil, x.unsupported("a comparison of a number with a value of another type")
+	}
 	return l, r, nil
+}
+
+// compareRows compares two rows as Postgres does: = and <> pair by pair in
+// three-valued logic, and an ordering by the first pair that is not equal,
+// which is NULL when that pair holds a NULL.
+func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Expr, rv any) (any, error) {
+	l, lok := lv.([]any)
+	r, rok := rv.([]any)
+	if !lok || !rok || len(l) != len(le) || len(r) != len(re) {
+		return nil, x.unsupported("row comparison")
+	}
+	eq := op == "=" || op == "<>" || op == "!="
+	if !eq && x.tx.db.kind.InnoDB() {
+		return nil, x.unsupported("ordered row comparison")
+	}
+	// Every pair is typed before any is compared, as Postgres resolves the
+	// operators of all the pairs when it plans the statement, so a text
+	// against a number in a later pair fails whatever the first one holds.
+	ls, rs := make([]any, len(l)), make([]any, len(r))
+	for i := range l {
+		li, ri, err := x.untypedPair(le[i], l[i], re[i], r[i])
+		if err != nil {
+			return nil, err
+		}
+		ls[i], rs[i] = x.comparable(li, ri)
+	}
+	sawNull := false
+	for i := range l {
+		li, ri := ls[i], rs[i]
+		if derefValue(li) == nil || derefValue(ri) == nil {
+			if !eq {
+				return nil, nil
+			}
+			sawNull = true
+			continue
+		}
+		if equalValues(li, ri) {
+			continue
+		}
+		if eq {
+			return op != "=", nil
+		}
+		return x.binary(op, li, ri)
+	}
+	if sawNull {
+		return nil, nil
+	}
+	return op == "=" || op == "<=" || op == ">=", nil
+}
+
+// parseBool reads text as Postgres's boolean input does: true, yes, on or 1,
+// false, no, off or 0, or a prefix of a word that tells it apart, in any
+// case and with surrounding spaces.
+func parseBool(s string) (bool, bool) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	switch {
+	case t == "":
+		return false, false
+	case strings.HasPrefix("true", t), strings.HasPrefix("yes", t), t == "on", t == "1":
+		return true, true
+	case strings.HasPrefix("false", t), strings.HasPrefix("no", t), len(t) >= 2 && strings.HasPrefix("off", t), t == "0":
+		return false, true
+	}
+	return false, false
+}
+
+// paramText returns a parameter's bytes as the text they are, so they compare
+// and order as text rather than as a byte slice.
+func paramText(e sqlir.Expr, v any) any {
+	if _, ok := e.(*sqlir.Param); ok {
+		if b, ok := derefValue(v).([]byte); ok {
+			return string(b)
+		}
+	}
+	return v
+}
+
+func textCast(e sqlir.Expr) bool {
+	c, ok := e.(*sqlir.Cast)
+	return ok && (c.Type == "text" || c.Type == "varchar" || c.Type == "bpchar")
+}
+
+func unmodeledTextParam(e sqlir.Expr, v, other any) bool {
+	if _, ok := e.(*sqlir.Param); !ok || derefValue(v) == nil || isText(v) || !isText(other) {
+		return false
+	}
+	_, isInt := integer(derefValue(v))
+	return !isInt
+}
+
+func untypedExpr(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.Param:
+		return true
+	case *sqlir.Const:
+		_, ok := e.Value.(string)
+		return ok
+	}
+	return false
+}
+
+func asText(v any) any {
+	if isNumber(v) {
+		return fmt.Sprint(derefValue(v))
+	}
+	return v
+}
+
+func isNaN(v any) bool {
+	f, ok := toFloat(derefValue(v))
+	return ok && math.IsNaN(f)
+}
+
+// isOther reports whether v is a value that is neither NULL, text nor a
+// number, such as a boolean or a time.
+func isOther(v any) bool {
+	return derefValue(v) != nil && !isText(v) && !isNumber(v)
+}
+
+func isText(v any) bool {
+	switch derefValue(v).(type) {
+	case string, []byte:
+		return true
+	}
+	return false
+}
+
+func trailingSpaceLiteral(e sqlir.Expr) bool {
+	k, ok := e.(*sqlir.Const)
+	if !ok {
+		return false
+	}
+	s, ok := k.Value.(string)
+	return ok && strings.HasSuffix(s, " ")
+}
+
+func isTemporal(v any) bool {
+	switch derefValue(v).(type) {
+	case time.Time, time.Duration:
+		return true
+	}
+	return false
+}
+
+func isFloat(v any) bool {
+	switch derefValue(v).(type) {
+	case float64, float32:
+		return true
+	}
+	return false
+}
+
+func isNumber(v any) bool {
+	v = derefValue(v)
+	if _, ok := v.(time.Duration); ok {
+		return false // an interval, though its kind is an integer
+	}
+	_, ok := toFloat(v)
+	return ok
 }
 
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if x.tx.db.kind.InnoDB() {
 		return v, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
-	k, ok := e.(*sqlir.Const)
-	if !ok {
+	var s string
+	switch e := e.(type) {
+	case *sqlir.Const:
+		k, ok := e.Value.(string)
+		if !ok {
+			return v, nil
+		}
+		s = k
+	case *sqlir.Param:
+		switch k := derefValue(v).(type) {
+		case string:
+			s = k
+		case []byte:
+			s = string(k)
+		case int64:
+			// An integer bound to a parameter Postgres infers as boolean
+			// reaches it as the text the driver sends, so active = $1
+			// with 1 is true and with 2 fails as boolean input does.
+			if _, isBool := derefValue(other).(bool); !isBool {
+				return v, nil
+			}
+			s = strconv.FormatInt(k, 10)
+		default:
+			return v, nil
+		}
+	default:
 		return v, nil
 	}
-	s, ok := k.Value.(string)
-	if !ok {
+	switch derefValue(other).(type) {
+	case bool:
+		b, ok := parseBool(s)
+		if !ok {
+			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", s), "", "", "")
+		}
+		return b, nil
+	case time.Time:
+		// Postgres reads the text as the other side's timestamp type, in
+		// the session's time zone when it has none, and a value does not
+		// tell timestamp from timestamptz.
+		return nil, x.unsupported("a string literal or parameter compared with a timestamp")
+	}
+	if !isNumber(other) {
 		return v, nil
 	}
-	other = derefValue(other)
-	if _, ok := toFloat(other); !ok {
-		return v, nil
+	if isOtherNumberText(s) {
+		return nil, x.unsupported("number text in a form detest does not model, compared with a number")
 	}
 	t := strings.TrimSpace(s)
 	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
 		return n, nil
 	}
-	if _, err := strconv.ParseFloat(t, 64); err == nil {
+	if _, err := parseNumber(t); err == nil {
 		// Postgres refuses '1.5' for an integer and compares it with a
 		// float8 or numeric, but values do not carry their column's type,
-		// and a float8 column keeps a whole number as an integer.
-		return nil, x.unsupported("a string literal with a fraction compared with a number")
+		// and a float8 column keeps a whole number written as one as an
+		// integer.
+		return nil, x.unsupported("a string literal or parameter with a fraction compared with a number")
 	}
 	typ := "integer"
-	if _, ok := other.(float64); ok {
+	if _, ok := derefValue(other).(float64); ok {
 		typ = "double precision"
 	}
 	return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s), "", "", "")
@@ -2227,6 +2547,29 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if derefValue(l) == nil || derefValue(r) == nil {
 			return nil, nil // NULL || x is NULL
 		}
+		// text || anything concatenates, but Postgres has no || without a
+		// text operand, as for two numbers or two booleans, and fails the
+		// statement.
+		if !isText(l) && !isText(r) {
+			return nil, errUnknownExpr{"|| without a text operand"}
+		}
+		// As a cast to text, a timestamp or an interval is written by
+		// Postgres's own rules, not Go's, and bytes are a bytea, which ||
+		// concatenates as bytes.
+		if isTemporal(l) || isTemporal(r) {
+			return nil, errUnknownExpr{"|| of a timestamp or an interval"}
+		}
+		if _, ok := derefValue(l).([]byte); ok {
+			return nil, errUnknownExpr{"|| of a bytea"}
+		}
+		if _, ok := derefValue(r).([]byte); ok {
+			return nil, errUnknownExpr{"|| of a bytea"}
+		}
+		// As a cast to text, the text of a numeric or a float is not the
+		// float's.
+		if isFloat(l) || isFloat(r) {
+			return nil, errUnknownExpr{"|| of a numeric or a float"}
+		}
 		return fmt.Sprint(derefValue(l)) + fmt.Sprint(derefValue(r)), nil
 	}
 	return nil, errUnknownExpr{"operator " + op}
@@ -2303,7 +2646,259 @@ func arith(op string, l, r any) (any, error) {
 		}
 		v = math.Mod(fl, fr)
 	}
-	return numeric(v), nil
+	// A float or numeric operand makes a float result even when it is whole,
+	// so a later division is not integer division ((1.5 * 2) / 2 is 1.5).
+	return v, nil
+}
+
+// commonNumber returns v, the result of one of exprs, as the type Postgres
+// gives all of them: a float when one of them is a float, as CASE WHEN ...
+// THEN 1 ELSE 1.5 END is a numeric, so a later division is not integer
+// division. Only literals and casts show their type before they run.
+// branchValue is the value one branch of CASE, COALESCE, GREATEST, LEAST or
+// NULLIF gives, as the common type of all the branches: a number as
+// commonNumber gives it, and text as a number when another branch is typed as
+// one, which is how Postgres reads an untyped literal or a parameter there,
+// such as the '2' of CASE WHEN ... THEN 1 ELSE '2' END. The number's type is
+// the branches' common one, an integer unless one is a numeric or a float by
+// its form or, in vals, by the value it holds in this row, and text that
+// reads as no value of it fails as its input does. Text of a branch typed as
+// text, a column or a cast, has no common type with a number in Postgres,
+// which fails the statement whatever row it reads, so it is refused. MySQL
+// converts between the two instead.
+func (x *sqlExec) branchValue(exprs []sqlir.Expr, vals []any, v any) (any, error) {
+	if x.tx.db.kind.InnoDB() {
+		return commonNumber(exprs, v), nil
+	}
+	// A column's type shows only in its value, so a float there makes the
+	// integer of another branch a float, as 1 ELSE amount is a numeric; a
+	// row where the column is NULL leaves the integer, as the type is not
+	// kept.
+	if n, ok := integer(derefValue(v)); ok && slices.ContainsFunc(vals, isFloat) {
+		return float64(n), nil
+	}
+	if !slices.ContainsFunc(exprs, numberTyped) {
+		return commonNumber(exprs, v), nil
+	}
+	refuse := x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
+	float := slices.ContainsFunc(exprs, floatTyped) || slices.ContainsFunc(vals, isFloat)
+	// The branches' types are resolved before any is evaluated, so a
+	// branch typed as text, or a literal that reads as no number, fails
+	// the statement whichever branch a row takes.
+	for _, e := range exprs {
+		if textCast(e) {
+			return nil, refuse
+		}
+		if k, ok := e.(*sqlir.Const); ok {
+			if s, ok := k.Value.(string); ok {
+				if _, err := x.branchNumber(s, float); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	s, ok := derefValue(v).(string)
+	if !ok {
+		return commonNumber(exprs, v), nil
+	}
+	for _, e := range exprs {
+		switch e.(type) {
+		case *sqlir.Const, *sqlir.Param:
+		default:
+			if !numberTyped(e) {
+				return nil, refuse
+			}
+		}
+	}
+	n, err := x.branchNumber(s, float)
+	if err != nil {
+		return nil, err
+	}
+	return commonNumber(exprs, n), nil
+}
+
+// columnBranches evaluates the branches of a CASE that are column references,
+// whose values tell their columns' types, in the row en; the other branches,
+// which Postgres does not evaluate either, are left nil.
+func (x *sqlExec) columnBranches(exprs []sqlir.Expr, en *env) []any {
+	vals := make([]any, len(exprs))
+	for i, e := range exprs {
+		if _, ok := e.(*sqlir.ColumnRef); ok {
+			vals[i], _ = x.eval(e, en)
+		}
+	}
+	return vals
+}
+
+// branchNumber reads a string literal among number branches as the branches'
+// type does: an integer, or a numeric when float.
+func (x *sqlExec) branchNumber(s string, float bool) (any, error) {
+	if isOtherNumberText(s) {
+		return nil, x.unsupported("number text in a form detest does not model among the branches of CASE or COALESCE")
+	}
+	if !float {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
+		}
+		return n, nil
+	}
+	f, err := parseNumber(s)
+	if err != nil {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", s), "", "", "")
+	}
+	return numericValue(f), nil
+}
+
+// numberTyped reports whether e is a number by its own form, before any value
+// is seen: a number literal, or an expression floatTyped knows.
+func numberTyped(e sqlir.Expr) bool {
+	if k, ok := e.(*sqlir.Const); ok && isNumber(k.Value) {
+		return true
+	}
+	return floatTyped(e)
+}
+
+func commonNumber(exprs []sqlir.Expr, v any) any {
+	n, ok := integer(derefValue(v))
+	if !ok || !slices.ContainsFunc(exprs, floatTyped) {
+		return v
+	}
+	return float64(n)
+}
+
+func floatTyped(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		_, ok := e.Value.(float64)
+		return ok
+	case *sqlir.Cast:
+		switch e.Type {
+		case "numeric", "float8", "float4", "double precision", "real":
+			return true
+		}
+	case *sqlir.UnaryExpr:
+		return e.Op == "-" && floatTyped(e.X)
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			return floatTyped(e.L) || floatTyped(e.R)
+		}
+	case *sqlir.CaseExpr:
+		return slices.ContainsFunc(caseBranches(e), floatTyped)
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "floor", "ceil", "ceiling", "round", "avg", "power", "pow", "random":
+			return true
+		case "coalesce", "greatest", "least", "nullif", "abs", "sum", "min", "max":
+			return slices.ContainsFunc(e.Args, floatTyped)
+		}
+	}
+	return false
+}
+
+func caseBranches(c *sqlir.CaseExpr) []sqlir.Expr {
+	out := make([]sqlir.Expr, 0, len(c.Whens)+1)
+	for _, w := range c.Whens {
+		out = append(out, w.Then)
+	}
+	if c.Else != nil {
+		out = append(out, c.Else)
+	}
+	return out
+}
+
+// numberKind is the number type an expression has by its own form: a
+// literal with a point is a numeric, a cast says its type, and arithmetic is
+// a float when one operand is. Nothing is known of a column or a function.
+type numberKind int
+
+const (
+	unknownKind numberKind = iota
+	numericKind
+	floatKind
+)
+
+func exprNumberKind(e sqlir.Expr) numberKind {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		if isNumber(e.Value) {
+			return numericKind
+		}
+	case *sqlir.Cast:
+		switch e.Type {
+		case "numeric":
+			return numericKind
+		case "float8", "float4", "double precision", "real":
+			return floatKind
+		}
+	case *sqlir.UnaryExpr:
+		if e.Op == "-" {
+			return exprNumberKind(e.X)
+		}
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			l, r := exprNumberKind(e.L), exprNumberKind(e.R)
+			switch {
+			case l == floatKind || r == floatKind:
+				return floatKind
+			case l == numericKind && r == numericKind:
+				return numericKind
+			}
+		}
+	}
+	return unknownKind
+}
+
+// roundHalf is round(v) when v ends in .5, which Postgres rounds away from
+// zero for a numeric and to even for a float: round(2.5) is 3 and
+// round(2.5::float8) is 2. The value does not tell the two apart, so one of
+// a form exprNumberKind does not know is refused. ok is false for any other
+// value, which callFunc rounds.
+func (x *sqlExec) roundHalf(e sqlir.Expr, v any) (any, bool, error) {
+	f, isNum := toFloat(derefValue(v))
+	if x.tx.db.kind.InnoDB() || !isNum || math.Abs(f-math.Trunc(f)) != 0.5 {
+		return nil, false, nil
+	}
+	switch exprNumberKind(e) {
+	case numericKind:
+		return math.Round(f), true, nil
+	case floatKind:
+		return math.RoundToEven(f), true, nil
+	}
+	return nil, true, x.unsupported("round of a number ending in .5 whose type detest does not know")
+}
+
+// halfToInteger rounds a value ending in .5 before a cast to an integer, by
+// the form of the expression cast, as roundHalf does; castInteger refuses the
+// value when the form tells nothing.
+func (x *sqlExec) halfToInteger(c *sqlir.Cast, v any) any {
+	switch c.Type {
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
+	default:
+		return v
+	}
+	f, isNum := toFloat(derefValue(v))
+	if x.tx.db.kind.InnoDB() || !isNum || !isNumber(derefValue(v)) || math.Abs(f-math.Trunc(f)) != 0.5 {
+		return v
+	}
+	switch exprNumberKind(c.X) {
+	case numericKind:
+		return math.Round(f)
+	case floatKind:
+		return math.RoundToEven(f)
+	}
+	return v
+}
+
+// asKindOf returns f as an integer when v is one and as a float otherwise, so
+// a function of a float or numeric keeps float arithmetic after it.
+func asKindOf(v any, f float64) any {
+	if _, ok := integer(derefValue(v)); ok {
+		return numeric(f)
+	}
+	return f
 }
 
 func numeric(v float64) any {
@@ -2313,35 +2908,234 @@ func numeric(v float64) any {
 	return v
 }
 
-func castValue(v any, typ string) any {
-	v = derefValue(v)
-	if v == nil {
+// byteaCast refuses a cast of a bytea value to a type other than bytea:
+// Postgres has no cast from bytea to a number and writes it as hex text,
+// while detest would read its bytes as text. A parameter's bytes are text
+// the driver sent, which Postgres reads as the target type.
+func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
+	if _, ok := derefValue(v).([]byte); !ok || c.Type == "bytea" {
 		return nil
 	}
+	if _, ok := c.X.(*sqlir.Param); ok {
+		return nil
+	}
+	return x.unsupported("a cast of a bytea value to " + c.Type)
+}
+
+// boolCastSource refuses a cast to boolean of a value cast to bigint or
+// smallint, which Postgres casts to boolean from integer only; the values
+// of the three types are alike.
+func (x *sqlExec) boolCastSource(c *sqlir.Cast) error {
+	if c.Type != "bool" && c.Type != "boolean" {
+		return nil
+	}
+	if inner, ok := c.X.(*sqlir.Cast); ok {
+		switch inner.Type {
+		case "int2", "int8", "smallint", "bigint":
+			return x.unsupported("a cast of a " + inner.Type + " to boolean")
+		}
+	}
+	return nil
+}
+
+// paramBool is an integer parameter cast to boolean as the text the driver
+// sends it as, so that $1::bool with 2 fails as boolean input does, where
+// 2::bool is true through the integer cast.
+func paramBool(c *sqlir.Cast, v any) any {
+	if _, ok := c.X.(*sqlir.Param); !ok || (c.Type != "bool" && c.Type != "boolean") {
+		return v
+	}
+	if n, ok := integer(derefValue(v)); ok {
+		return strconv.FormatInt(n, 10)
+	}
+	return v
+}
+
+// paramTextCast refuses a cast to text of a parameter holding a value other
+// than text or an integer, such as one ANY (ARRAY['x', $1]) makes: the text
+// a driver sends for a float, a boolean or a time is not modeled.
+func (x *sqlExec) paramTextCast(c *sqlir.Cast, v any) error {
+	if _, ok := c.X.(*sqlir.Param); !ok || !textCast(c) || derefValue(v) == nil || isText(v) {
+		return nil
+	}
+	if _, ok := integer(derefValue(v)); ok {
+		return nil
+	}
+	return x.unsupported("a cast to text of a parameter other than text or an integer")
+}
+
+// cast is castValue with the error a cast of text that does not read as the
+// type raises.
+func (x *sqlExec) cast(v any, typ string) (any, error) {
+	out, err := castValue(v, typ)
+	if ke := (kindError{}); errors.As(err, &ke) {
+		return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
+	}
+	return out, err
+}
+
+// castInteger casts v to an integer before the target type's width is
+// checked: text as the integer input function reads it, and a fraction
+// rounded. nil is a value castValue leaves as it is.
+func castInteger(v any) (any, error) {
+	if s, ok := v.(string); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if errors.Is(err, strconv.ErrRange) {
+			return nil, kindError{sqlir.NumericValueOutOfRange, fmt.Sprintf("value %q is out of range for type bigint", s)}
+		}
+		if err != nil {
+			return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s)}
+		}
+		return n, nil
+	}
+	if n, ok := integer(v); ok {
+		return n, nil
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	}
+	// Postgres rounds a numeric half away from zero but a float8 half to
+	// even, which the value does not tell apart, so a half is refused.
+	if f, ok := toFloat(v); ok && isNumber(v) {
+		if math.Abs(f-math.Trunc(f)) == 0.5 {
+			return nil, errUnknownExpr{"a cast to an integer of a number ending in .5"}
+		}
+		if math.IsNaN(f) || math.Abs(f) >= 1<<63 {
+			return nil, kindError{sqlir.NumericValueOutOfRange, "bigint out of range"}
+		}
+		return int64(math.Round(f)), nil
+	}
+	return nil, nil
+}
+
+func castValue(v any, typ string) (any, error) {
+	v = derefValue(v)
+	if v == nil {
+		return nil, nil
+	}
+	// Bytes are read as text only by the casts whose input reads text, so
+	// $1::bytea keeps its byte slice.
+	if b, ok := v.([]byte); ok && typ != "bytea" {
+		v = string(b)
+	}
 	switch typ {
-	case "int", "int4", "int8", "bigint", "integer", "smallint":
-		if f, ok := toFloat(v); ok {
-			return int64(f)
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint", "numeric", "float8", "float4", "double precision", "real":
+		if isOtherNumberText(v) {
+			return nil, errUnknownExpr{"a cast of number text in a form detest does not model"}
 		}
-	case "float8", "float4", "double precision", "numeric", "real":
-		if f, ok := toFloat(v); ok {
-			return f
+	}
+	switch typ {
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
+		// Postgres casts a boolean to integer only, not to bigint or
+		// smallint.
+		if _, ok := v.(bool); ok && typ != "int" && typ != "int4" && typ != "integer" {
+			return nil, errUnknownExpr{"a cast of a boolean to " + typ}
 		}
+		n, err := castInteger(v)
+		if err != nil {
+			return nil, err
+		}
+		if n == nil {
+			return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to an integer", v)}
+		}
+		lim, name := int64(math.MaxInt64), "bigint"
+		switch typ {
+		case "int2", "smallint":
+			lim, name = math.MaxInt16, "smallint"
+		case "int", "int4", "integer":
+			lim, name = math.MaxInt32, "integer"
+		}
+		if i, _ := n.(int64); i > lim || i < -lim-1 {
+			return nil, kindError{sqlir.NumericValueOutOfRange, name + " out of range"}
+		}
+		return n, nil
+	case "numeric":
+		// As a value written to a numeric column: refused when a float
+		// cannot keep it, and in the one representation numerics have.
+		if isText(v) {
+			if !exactAsFloat(v) {
+				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
+			}
+			n, err := columnNumber(v, "numeric")
+			if err != nil {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", v)}
+			}
+			if isNaN(n) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
+			return n, nil
+		}
+		if isNumber(v) {
+			if !exactAsFloat(v) {
+				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
+			}
+			if isNaN(v) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
+			return numericValue(v), nil
+		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to numeric", v)}
+	case "float8", "float4", "double precision", "real":
+		if s, ok := v.(string); ok {
+			f, err := parseNumber(s)
+			if errors.Is(err, strconv.ErrRange) {
+				return nil, kindError{sqlir.NumericValueOutOfRange, fmt.Sprintf("%q is out of range for type %s", s, typ)}
+			}
+			if err != nil {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s)}
+			}
+			// Postgres sorts NaN above every number, which the
+			// comparisons and ORDER BY do not.
+			if math.IsNaN(f) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
+			return f, nil
+		}
+		if f, ok := toFloat(v); ok && isNumber(v) {
+			if math.IsNaN(f) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
+			return f, nil
+		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to %s", v, typ)}
 	case "text", "varchar", "bpchar":
-		return fmt.Sprint(v)
-	case "bool", "boolean":
-		if b, ok := v.(bool); ok {
-			return b
+		// A numeric's text keeps the digits it was written or computed
+		// with (1.50, 3.0) and a float's is formatted by Postgres's own
+		// rules, neither of which the float detest keeps gives.
+		switch v.(type) {
+		case float64, float32:
+			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
+		case time.Time, time.Duration:
+			return nil, errUnknownExpr{"a cast of a timestamp or an interval to text"}
 		}
-		return fmt.Sprint(v) == "true"
+		return fmt.Sprint(v), nil
+	case "bool", "boolean":
+		// Text reads as boolean input does, and an integer is true unless
+		// zero; Postgres has no cast from a numeric or a float.
+		switch b := v.(type) {
+		case bool:
+			return b, nil
+		case string:
+			out, ok := parseBool(b)
+			if !ok {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", b)}
+			}
+			return out, nil
+		case int64:
+			return b != 0, nil
+		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to boolean", v)}
 	case "interval":
 		if s, ok := v.(string); ok {
 			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {
-				return d
+				return d, nil
 			}
 		}
 	}
-	return v
+	return v, nil
 }
 
 // rowsEqual compares two rows of values with SQL equality: unequal if any
@@ -2654,23 +3448,25 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		return 0.5, nil
 	case "abs":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Abs(f)), nil
+			return asKindOf(d(0), math.Abs(f)), nil
 		}
 	case "floor":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Floor(f)), nil
+			return math.Floor(f), nil
 		}
 	case "ceil", "ceiling":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Ceil(f)), nil
+			return math.Ceil(f), nil
 		}
 	case "round":
 		f, ok := toFloat(d(0))
 		if !ok {
 			break
 		}
+		// floor, ceil and round have no integer form in Postgres, so even
+		// floor(3) is a numeric, and floor(3) / 2 is 1.5.
 		if len(args) == 1 {
-			return numeric(math.Round(f)), nil
+			return math.Round(f), nil
 		}
 		places, ok := toFloat(d(1))
 		if !ok {
@@ -2697,7 +3493,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "pg_try_advisory_xact_lock", "pg_advisory_xact_lock":
 		var kb strings.Builder
 		for i := range args {
-			fmt.Fprintf(&kb, "%v|", d(i))
+			valuesKey(&kb, d(i))
 		}
 		lk := lockKey{"__advisory__", kb.String()}
 		if x.tx.heldByOther(lk, lockUpdate) && name == "pg_try_advisory_xact_lock" {
