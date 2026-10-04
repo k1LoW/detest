@@ -46,35 +46,66 @@ func (x *sqlExec) applyDefaults(table string, row Row) error {
 		return nil
 	}
 	for _, col := range def.columns {
-		d, ok := def.defaults[col]
-		if !ok {
+		if _, ok := def.defaults[col]; !ok {
 			continue
 		}
 		if _, set := row[col]; set {
 			continue
 		}
-		// A default detest cannot compute is written as the Unknown marker,
-		// not refused and not NULL. A default no process reads cannot
-		// change the outcome, and refusing it would make every INSERT that
-		// leaves the column out unsupported, while dumps routinely hold
-		// such defaults (ARRAY[]::text[]). One a process does read comes
-		// back as a value the server never produces, where NULL would pass
-		// for a real one. The table's own key, NOT NULL, constraints and generated
-		// columns are readers too, and would be decided from the marker, so
-		// a column one of them reads is refused instead.
-		v, err := x.eval(d, &env{})
-		if err != nil && !errors.As(err, new(errUnknownExpr)) {
+		v, err := x.columnDefault(table, col)
+		if err != nil {
 			return err
-		}
-		if err != nil || unconverted(d) {
-			if def.reads(col) {
-				return x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint or generated column reads", col))
-			}
-			v = sqlir.Unknown
 		}
 		row[col] = v
 	}
 	return nil
+}
+
+// columnDefault computes the default of a column, for a row that leaves it
+// out or a SET col = DEFAULT. A column without one, or a generated column,
+// which is computed from the row afterwards, takes NULL.
+func (x *sqlExec) columnDefault(table, col string) (any, error) {
+	def := x.tx.db.defs[table]
+	if def == nil || def.generated[col] != nil {
+		return nil, nil
+	}
+	d, ok := def.defaults[col]
+	if !ok {
+		return nil, nil
+	}
+	// A default detest cannot compute is written as the Unknown marker,
+	// not refused and not NULL. A default no process reads cannot change
+	// the outcome, and refusing it would make every INSERT that leaves the
+	// column out unsupported, while dumps routinely hold such defaults
+	// (ARRAY[]::text[]). One a process does read comes back as a value the
+	// server never produces, where NULL would pass for a real one. The
+	// table's own key, NOT NULL, constraints and generated columns are
+	// readers too, and would be decided from the marker, so a column one
+	// of them reads is refused instead.
+	v, err := x.eval(d, &env{})
+	if err != nil && !errors.As(err, new(errUnknownExpr)) {
+		return nil, err
+	}
+	if err != nil || unconverted(d) {
+		if def.reads(col) {
+			return nil, x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint or generated column reads", col))
+		}
+		v = sqlir.Unknown
+	}
+	return v, nil
+}
+
+// assignedValue evaluates the value a SET assigns, computing the column's
+// default for SET col = DEFAULT, which the evaluator alone takes as NULL.
+func (x *sqlExec) assignedValue(table string, a sqlir.Assignment, en *env, where string) (any, error) {
+	if _, ok := a.Value.(*sqlir.Default); ok {
+		return x.columnDefault(table, a.Column)
+	}
+	v, err := x.eval(a.Value, en)
+	if err != nil {
+		return nil, x.unsupportedExpr(err, where)
+	}
+	return v, nil
 }
 
 // uniqueValues returns the values row takes in the unique index u. ok is false

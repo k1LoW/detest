@@ -1062,9 +1062,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			updated := cur.clone()
 			for _, a := range ins.OnConflict.Set {
-				v, err := x.eval(a.Value, e)
+				v, err := x.assignedValue(table, a, e, "in ON CONFLICT DO UPDATE SET")
 				if err != nil {
-					return nil, x.unsupportedExpr(err, "in ON CONFLICT DO UPDATE SET")
+					return nil, err
 				}
 				updated[a.Column] = v
 			}
@@ -1298,9 +1298,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		done[key] = true
 		updated := cur.clone()
 		for _, a := range up.Set {
-			v, err := x.eval(a.Value, c2.env(nil))
+			v, err := x.assignedValue(table, a, c2.env(nil), "in SET")
 			if err != nil {
-				return nil, x.unsupportedExpr(err, "in SET")
+				return nil, err
 			}
 			updated[a.Column] = v
 		}

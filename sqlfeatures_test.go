@@ -251,3 +251,32 @@ func TestRenameColumnLeavesOtherDatabases(t *testing.T) {
 		}
 	}
 }
+
+// SET col = DEFAULT writes the column's default, in UPDATE and in ON
+// CONFLICT DO UPDATE, and refuses one detest cannot compute that the
+// table's schema reads, as an INSERT that leaves the column out does.
+func TestSetDefault(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE sd (id int PRIMARY KEY, n int DEFAULT 7, m int, d text DEFAULT CURRENT_DATE UNIQUE)`)
+	mustExec(t, db, `INSERT INTO sd VALUES (1, 1, 1, 'x')`)
+	mustExec(t, db, `UPDATE sd SET n = DEFAULT, m = DEFAULT WHERE id = 1`)
+	var n int64
+	var m sql.NullInt64
+	if err := db.QueryRow(`SELECT n, m FROM sd WHERE id = 1`).Scan(&n, &m); err != nil || n != 7 || m.Valid {
+		t.Errorf("UPDATE SET DEFAULT: n=%d m=%v err=%v; want 7 and NULL", n, m, err)
+	}
+	mustExec(t, db, `UPDATE sd SET n = 1 WHERE id = 1`)
+	mustExec(t, db, `INSERT INTO sd VALUES (1, 2, 2, 'y') ON CONFLICT (id) DO UPDATE SET n = DEFAULT`)
+	if err := db.QueryRow(`SELECT n FROM sd WHERE id = 1`).Scan(&n); err != nil || n != 7 {
+		t.Errorf("ON CONFLICT DO UPDATE SET DEFAULT: n=%d err=%v; want 7", n, err)
+	}
+	for _, q := range []string{
+		`UPDATE sd SET d = DEFAULT WHERE id = 1`,
+		`INSERT INTO sd VALUES (1, 2, 2, 'y') ON CONFLICT (id) DO UPDATE SET d = DEFAULT`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+}
