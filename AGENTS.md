@@ -56,6 +56,7 @@ Anything that would change the outcome if detest ran it with other semantics tha
 - A value detest cannot convert the way the server would, such as an `OFFSET` or `LIMIT` that is not a bigint.
 - DDL whose result detest cannot reproduce in the schema or rows the processes see, such as adding a generated column to a table that already has rows.
 - `BEGIN`, `COMMIT` and `ROLLBACK` sent as SQL, which bypass the transaction tracking that `database/sql` gives detest.
+- Functions, clauses and syntax that applications rarely write in request handling, and the exact reproduction of rare syntax, such as type coercion in array casts. Rarity is a reason not to implement them, not a reason to approximate them. A rare clause in DML still decides which rows match or lock, so it is refused.
 - Changes that need a large rework of the engine, such as row version IDs. Until the rework is done, the forms that need it are refused.
 
 ### Approximate
@@ -68,7 +69,6 @@ Anything that cannot change the outcome under the assumptions above. Prefer the 
 - Types detest does not check accept any value. The checks it does make, such as a uuid parsing or an integer fitting its width, are the ones that decide an application's error path.
 - A function detest does not know in a generation expression is let through when the schema loads, and a write that needs it fails then.
 - Values at the edges of a type's range, such as integers near 2^63, precision lost in float conversion, and temporal strings in formats other than the ISO forms. Leave them unchecked, or refuse them, whichever is less code.
-- Functions, clauses and syntax that applications rarely write in request handling, and exact reproduction of rare syntax, such as type coercion in array casts.
 
 An approximation still has two obligations. It must be deterministic, because a replay that takes a different path is reported as a nondeterministic simulation. And it must not add a yield point or a choice, because those enlarge the search for every test.
 
