@@ -135,6 +135,21 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A search by a leading column of a unique key is no unique search:
+		// it locks the gaps between its entries.
+		Name:   "a search by a unique key's prefix locks its gaps",
+		Schema: []string{`CREATE TABLE c (id INT PRIMARY KEY, a INT, b INT, v INT NOT NULL DEFAULT 0, UNIQUE KEY (a, b))` + binary},
+		Seed:   []string{`INSERT INTO c (id, a, b) VALUES (1, 1, 1), (2, 1, 5), (3, 2, 1), (4, 3, 1), (5, 4, 1)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT v FROM c WHERE a = 1 FOR UPDATE`),
+			difftest.S(1, `INSERT INTO c (id, a, b) VALUES (6, 1, 3)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id FROM c ORDER BY id`),
+		},
+	},
+	{
 		Name:   "read committed takes no gap lock",
 		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
 		Steps: []difftest.Step{

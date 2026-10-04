@@ -1016,7 +1016,10 @@ func (x *sqlExec) searchRange(table, alias string, where sqlir.Expr) indexSearch
 		// one is no point lookup.
 		nullKey := slices.ContainsFunc(prefixes, func(p ixKey) bool { return p.hasNull() })
 		key := withPK(ix.cols, def.pk)
-		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc, index: ix.name, def: ix.def, uniqueIndex: ix.unique}
+		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc, index: ix.name, def: ix.def,
+			// The search bounds the whole unique key, with no NULL, which
+			// InnoDB holds any number of entries for.
+			uniqueIndex: ix.unique && !nullKey && (eq == len(ix.cols) || eq == len(ix.cols)-1 && last != nil)}
 		for _, p := range prefixes {
 			if last == nil {
 				sr.ranges = append(sr.ranges, valRange{lo: p, hi: p, hasLo: true, hasHi: true})
