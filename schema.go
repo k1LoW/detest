@@ -705,7 +705,9 @@ func exactAsFloat(v any) bool {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return true
+		// A number beyond a float's range, such as 1e400, is valid input
+		// that the float cannot keep, not a syntax error.
+		return !errors.Is(err, strconv.ErrRange)
 	}
 	got, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
 	return ok && got.Cmp(want) == 0

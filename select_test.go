@@ -501,6 +501,9 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '0.12345678901234567890')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("numeric beyond a float: got %v, want unsupported", err)
 	}
+	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '1e400')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric beyond a float's range: got %v, want unsupported", err)
+	}
 	mustExec(t, db, `INSERT INTO t (id, amount) VALUES (7, '1.10')`)
 	// Postgres sorts NaN above every number, which detest does not.
 	for _, v := range []any{"NaN", math.NaN()} {
