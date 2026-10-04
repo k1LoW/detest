@@ -439,3 +439,43 @@ func TestUntypedLiteralComparedWithNumber(t *testing.T) {
 		}
 	}
 }
+
+// Postgres converts a string written to a number column to the column's
+// type, so the stored value compares as the number it reads as.
+func TestNumberColumnStoresNumbers(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, amount numeric, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES ('1', '0.5', '99.00', 'a')`)
+	mustExec(t, db, `INSERT INTO t VALUES ($1, $2, $3, $4)`, "2", "1.5", "100.50", "b")
+	mustExec(t, db, `UPDATE t SET amount = ' 7 ' WHERE id = 2`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  []string
+	}{
+		{`SELECT id FROM t WHERE id = '01'`, nil, []string{"1"}},
+		{`SELECT id FROM t WHERE ratio > 1 ORDER BY id`, nil, []string{"2"}},
+		{`SELECT id FROM t WHERE amount < 100 ORDER BY id`, nil, []string{"1", "2"}},
+		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99"}},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	// The key is the converted value, so '01' conflicts with the row of 1.
+	if _, err := db.Exec(`INSERT INTO t (id) VALUES ('01')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("got %v, want a unique violation", err)
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id) VALUES ('abc')`,
+		`INSERT INTO t (id) VALUES ('1.5')`,
+		`INSERT INTO t (id, ratio) VALUES (3, 'abc')`,
+		`INSERT INTO t (id, amount) VALUES (3, 'abc')`,
+		`UPDATE t SET id = 'x' WHERE id = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
+	}
+}

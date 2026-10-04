@@ -448,6 +448,15 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			row[col] = stored
 			continue
 		}
+		// Unknown stands for a value detest could not compute, not one the
+		// statement wrote, so it is kept to be reported where it is read.
+		if name, ok := numberTypes[def.types[col]]; ok && !x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
+			n, ok := columnNumber(v, def.types[col])
+			if !ok {
+				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
+			}
+			row[col], v = n, n
+		}
 		switch t := def.types[col]; t {
 		case "double", "float", "decimal":
 			if !x.tx.db.kind.InnoDB() {
@@ -640,6 +649,36 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 		}
 	}
 	return strings.Join(out, ","), nil
+}
+
+// numberTypes are the number types by the name Postgres gives them in errors.
+var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
+
+// columnNumber converts a string written to a column of the number type t to
+// a number, as the type's input function does. A numeric becomes a float,
+// whole numbers an integer, so it compares and sorts as a number; the digits
+// as written, such as the 0 of 1.50, are not kept.
+func columnNumber(v any, t string) (any, bool) {
+	var s string
+	switch b := v.(type) {
+	case string:
+		s = b
+	case []byte:
+		s = string(b)
+	default:
+		return v, true
+	}
+	s = strings.TrimSpace(s)
+	switch t {
+	case "int2", "int4", "int8":
+		n, err := strconv.ParseInt(s, 10, 64)
+		return n, err == nil
+	case "float4", "float8":
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return numeric(f), err == nil
 }
 
 // validUUID accepts what Postgres's uuid input does: 32 hex digits, with or
