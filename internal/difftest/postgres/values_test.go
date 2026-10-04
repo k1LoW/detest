@@ -391,7 +391,6 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN id = 1 THEN name ELSE '2' END FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT greatest(name, 'b'), greatest(id, 1.5) = 1.5, least(id, '5') FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT name LIKE 'a%', name LIKE '_', name ILIKE 'X', id::text LIKE '1%' FROM t ORDER BY id`),
-			difftest.Q(0, `SELECT id FROM t WHERE name = 'a '`),
 		},
 	},
 	{

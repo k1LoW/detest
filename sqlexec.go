@@ -999,6 +999,9 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
+		if v.Op == "||" {
+			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
@@ -1915,6 +1918,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
+		if v.Op == "||" {
+			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.IsNull:
 		val, err := x.eval(v.X, en)
@@ -2169,6 +2175,13 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if unmodeledTextParam(le, l, r) || unmodeledTextParam(re, r, l) {
 		return nil, nil, x.unsupported("a parameter other than text or an integer compared with text")
 	}
+	// A char(n) compares without its padding, so 'abc ' equals the 'abc' a
+	// char(3) holds, where text compares the space. The value does not tell
+	// the two columns apart, so a literal ending in a space is refused
+	// against text.
+	if trailingSpaceLiteral(le) && isText(r) || trailingSpaceLiteral(re) && isText(l) {
+		return nil, nil, x.unsupported("a string literal ending in a space compared with text, which a char(n) column compares without it")
+	}
 	// With neither side typed, as in $1 = '01', Postgres compares text, so a
 	// number the parameter holds is compared as the text it is sent as.
 	if untypedExpr(le) && untypedExpr(re) {
@@ -2317,6 +2330,15 @@ func isText(v any) bool {
 		return true
 	}
 	return false
+}
+
+func trailingSpaceLiteral(e sqlir.Expr) bool {
+	k, ok := e.(*sqlir.Const)
+	if !ok {
+		return false
+	}
+	s, ok := k.Value.(string)
+	return ok && strings.HasSuffix(s, " ")
 }
 
 func isTemporal(v any) bool {
@@ -2511,9 +2533,16 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 			return nil, errUnknownExpr{"|| without a text operand"}
 		}
 		// As a cast to text, a timestamp or an interval is written by
-		// Postgres's own rules, not Go's.
+		// Postgres's own rules, not Go's, and bytes are a bytea, which ||
+		// concatenates as bytes.
 		if isTemporal(l) || isTemporal(r) {
 			return nil, errUnknownExpr{"|| of a timestamp or an interval"}
+		}
+		if _, ok := derefValue(l).([]byte); ok {
+			return nil, errUnknownExpr{"|| of a bytea"}
+		}
+		if _, ok := derefValue(r).([]byte); ok {
+			return nil, errUnknownExpr{"|| of a bytea"}
 		}
 		// As a cast to text, the text of a numeric or a float is not the
 		// float's.

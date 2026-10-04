@@ -871,8 +871,8 @@ func TestNumberKeysByValue(t *testing.T) {
 func TestValueFormsByType(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1))`)
-	mustExec(t, db, `INSERT INTO t (id, ratio, name) VALUES (1, 0.5, 'a')`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1), b bytea)`)
+	mustExec(t, db, `INSERT INTO t (id, ratio, name, b) VALUES (1, 0.5, 'a', $1)`, []byte("10"))
 	for _, q := range []string{
 		`SELECT 1 || 2`, `SELECT 'a' || 1.5`, `SELECT 1.5::text`, `SELECT ratio::text FROM t`,
 		`SELECT coalesce(name, 1) FROM t`, `SELECT CASE WHEN id = 1 THEN name ELSE 2 END FROM t`, `SELECT greatest(name, 1) FROM t`,
@@ -882,6 +882,7 @@ func TestValueFormsByType(t *testing.T) {
 		`SELECT true || false`, `SELECT 1 || true`, `SELECT CASE WHEN true THEN '2'::text ELSE 1 END`,
 		`SELECT '' || now()`, `SELECT now()::text`, `SELECT CASE WHEN true THEN 1 ELSE 'x'::text END`,
 		`ALTER TABLE t ALTER COLUMN v TYPE int USING length(v)`,
+		`SELECT b || 'x' FROM t`, `SELECT id FROM t WHERE name = 'a '`, `SELECT id FROM t WHERE 'a ' IN (name)`,
 		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -909,8 +910,8 @@ func TestValueFormsByType(t *testing.T) {
 	if want := []string{"abc,abc,true,true,true,true"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("converted values: got %v, want %v", got, want)
 	}
-	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5, $1::bool, $2::bool`, int64(1), int64(0)); !reflect.DeepEqual(got, []string{"true,true,false"}) {
-		t.Errorf("random branch and boolean parameters: got %v", got)
+	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5, $1::bool, $2::bool, 'a' || $3`, int64(1), int64(0), []byte("b")); !reflect.DeepEqual(got, []string{"true,true,false,ab"}) {
+		t.Errorf("random branch, boolean parameters and bytes concatenated: got %v", got)
 	}
 	if _, err := db.Exec(`SELECT $1::bool`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("$1::bool with 2: got %v, want invalid input", err)
