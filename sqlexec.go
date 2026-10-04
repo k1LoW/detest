@@ -1327,6 +1327,13 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 		}
+		// InnoDB writes the undo record as it puts the row into the primary
+		// key, before it checks the other unique indexes and the foreign
+		// keys, so a wait in those checks weighs it already.
+		x.tx.undo++
+		if x.tx.db.kind.InnoDB() {
+			x.tx.put = append(x.tx.put, putRow{table, row})
+		}
 		if err := x.checkUniques(table, row, "", nil); err != nil {
 			return nil, err
 		}
@@ -1340,7 +1347,6 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
-		x.tx.undo++
 		out.affected++
 		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {

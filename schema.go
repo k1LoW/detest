@@ -191,7 +191,9 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 			}
 		}
 	}
-	if err := x.tx.lock(uniqueLock(table, u, vals)); err != nil {
+	// A writer of the same value that has not finished holds the record
+	// implicitly, and InnoDB's duplicate check waits for it in share mode.
+	if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockUpdate, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 		return nil, err
 	}
 	return x.uniqueHolder(table, u, vals, self)

@@ -1401,6 +1401,9 @@ type Tx struct {
 	lockStructs map[string]bool
 	// waits counts the lock waits, each a lock struct of its own.
 	waits int
+	// put is the rows the running statement put into a primary key, which
+	// leave a gap lock if the statement fails.
+	put []putRow
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1714,6 +1717,19 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	sp := &tx.saves[i]
 	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
+	var inserted []putRow
+	if tx.db.kind.InnoDB() {
+		for lk, r := range tx.writes {
+			_, before := sp.writes[lk]
+			_, committed := tx.db.committed[lk.table][lk.key]
+			if !before && !committed {
+				inserted = append(inserted, putRow{lk.table, r})
+			}
+		}
+		slices.SortFunc(inserted, func(a, b putRow) int {
+			return cmp.Or(strings.Compare(a.table, b.table), strings.Compare(a.row.Key(), b.row.Key()))
+		})
+	}
 	tx.writes, tx.deleted = map[lockKey]Row{}, map[lockKey]bool{}
 	for k, v := range sp.writes {
 		tx.writes[k] = v.clone()
@@ -1727,6 +1743,9 @@ func (tx *Tx) savepoint(op, name string) error {
 	tx.deferred = tx.deferred[:sp.deferred]
 	if tx.db.kind.InnoDB() {
 		tx.releaseInsertLocks(sp.locks)
+		for _, p := range inserted {
+			tx.inheritGap(p.table, p.row, true)
+		}
 	} else {
 		tx.rollbackLocks(sp)
 	}

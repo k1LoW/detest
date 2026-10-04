@@ -5,10 +5,13 @@ import (
 	"math"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // InnoDB's semantics where they differ from PostgreSQL's: consistent reads
@@ -131,6 +134,7 @@ type stmtMark struct {
 }
 
 func (tx *Tx) markStatement() stmtMark {
+	tx.put = nil
 	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks), undo: tx.undo}
 	for k, v := range tx.writes {
 		m.writes[k] = v.clone()
@@ -155,8 +159,80 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.locks = nil
 		return
 	}
+	// A row the statement wrote went into every index; the one it failed
+	// on, only into the primary key so far.
+	whole := make([]bool, len(tx.put))
+	for i, p := range tx.put {
+		_, whole[i] = tx.writes[lockKey{p.table, p.row.Key()}]
+	}
 	tx.writes, tx.deleted, tx.moved, tx.deferred, tx.undo = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred], m.undo
 	tx.releaseInsertLocks(m.locks)
+	for i, p := range tx.put {
+		tx.inheritGap(p.table, p.row, whole[i])
+	}
+	tx.put = nil
+}
+
+// putRow is a row a statement put into a table's primary key.
+type putRow struct {
+	table string
+	row   Row
+}
+
+// inheritGap leaves the locks InnoDB leaves when it rolls back a row put
+// into table, into its primary key alone or, with whole, into every index:
+// the row's records go, the lock on each turns into a gap lock on the gap
+// the record was in, which the next record inherits, and the record lock's
+// struct stays, empty. Another transaction inserting into one of those gaps
+// waits for tx to finish.
+func (tx *Tx) inheritGap(table string, row Row, whole bool) {
+	def := tx.db.defs[table]
+	if def == nil || len(def.pk) == 0 || tx.db.ignored[table] {
+		return
+	}
+	type index struct {
+		name string
+		key  []string
+	}
+	indexes := []index{{"PRIMARY", def.pk}}
+	if whole {
+		secondary := func(cols []string) {
+			indexes = append(indexes, index{strings.Join(cols, ","), append(slices.Clone(cols), def.pk...)})
+		}
+		for _, u := range def.uniques {
+			var cols []string
+			for _, e := range u.Elems {
+				if c, ok := e.(*sqlir.ColumnRef); ok {
+					cols = append(cols, c.Column)
+				}
+			}
+			if len(cols) == len(u.Elems) {
+				secondary(cols)
+			}
+		}
+		for _, ix := range def.indexes {
+			if len(ix.Columns) > 0 {
+				secondary(ix.Columns)
+			}
+		}
+	}
+	rows := tx.lockingRows(table)
+	for _, ix := range indexes {
+		k := keyOf(row, ix.key)
+		var gap valRange
+		for _, r := range rows {
+			v := keyOf(r, ix.key)
+			switch c := keyCompare(v, k); {
+			case c < 0 && (!gap.hasLo || keyCompare(v, gap.lo.(ixKey)) > 0):
+				gap.lo, gap.hasLo, gap.loOpen = v, true, true
+			case c > 0 && (!gap.hasHi || keyCompare(v, gap.hi.(ixKey)) < 0):
+				gap.hi, gap.hasHi, gap.hiOpen = v, true, true
+			}
+		}
+		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: ix.key, ranges: []valRange{gap}})
+		tx.noteLockStruct(table, ix.name, lockUpdate, "record")
+		tx.noteLockStruct(table, ix.name, lockUpdate, "gap")
+	}
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or

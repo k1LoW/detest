@@ -352,7 +352,7 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	// locks it took.
 scan:
 	for {
-		rows = tx.selectNoYield(table, nil)
+		rows = tx.lockingRows(table)
 		var in []Row
 		for _, r := range rows {
 			if rg.contains(keyOf(r, cols)) {
@@ -455,12 +455,46 @@ scan:
 	return true, nil
 }
 
+// lockingRows is the rows of table a locking search of InnoDB meets: the
+// latest ones tx sees, and the rows other transactions inserted and have not
+// committed, whose records are in the index already, so that locking one
+// waits for its inserter. Once the inserter finishes, the row is committed
+// or gone.
+func (tx *Tx) lockingRows(table string) []Row {
+	rows := tx.selectNoYield(table, nil)
+	var pending []Row
+	for lk, holders := range tx.db.locks {
+		if lk.table != table {
+			continue
+		}
+		if _, committed := tx.db.committed[table][lk.key]; committed {
+			continue
+		}
+		if _, own := tx.writes[lk]; own {
+			continue
+		}
+		for o := range holders {
+			if r, ok := o.writes[lk]; ok && o != tx {
+				pending = append(pending, r)
+				break
+			}
+		}
+	}
+	if len(pending) == 0 {
+		return rows
+	}
+	rows = append(rows, pending...)
+	slices.SortFunc(rows, func(a, b Row) int { return strings.Compare(a.Key(), b.Key()) })
+	return rows
+}
+
 // lockRange takes the record and gap locks of a search of table by where,
 // at any isolation level: InnoDB's foreign key checks take them even at
 // Read Committed.
 func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode, policy *sqlir.LockClause) error {
 	tx := x.tx
-	rows := tx.selectNoYield(table, nil)
+	tx.noteTableLock(table, mode)
+	rows := tx.lockingRows(table)
 	sr := x.searchRange(table, alias, where)
 	cols := sr.key
 	index := "PRIMARY"
@@ -557,7 +591,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if err := lockRows(inRange); err != nil {
 				return err
 			}
-			fresh := tx.selectNoYield(table, nil)
+			fresh := tx.lockingRows(table)
 			if slices.Equal(rangeKeys(rows, inRange), rangeKeys(fresh, inRange)) {
 				rows = fresh
 				break
@@ -602,7 +636,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if err := lockRecord(next, false); err != nil {
 				return err
 			}
-			rows = tx.selectNoYield(table, nil)
+			rows = tx.lockingRows(table)
 			again, n := bounds(rows)
 			if n != nil && n.Key() == next.Key() && sameValue(again.hi, gap.hi) && again.hasLo == gap.hasLo && sameValue(again.lo, gap.lo) {
 				break

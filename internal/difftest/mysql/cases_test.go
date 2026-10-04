@@ -337,6 +337,42 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A row inserted holds no lock struct until another transaction
+		// waits for it, when its implicit lock turns explicit and weighs the
+		// inserter.
+		Name:   "deadlock victim weighs an inserted row another waits for",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `INSERT INTO stock VALUES ('kiwi', 1)`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'kiwi'`),
+			difftest.Q(0, `SELECT sku FROM stock WHERE sku = 'pear' FOR SHARE`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// An insert puts the row into the primary key, with its undo record,
+		// before it checks a unique secondary index, so a wait in that check
+		// weighs the row already.
+		Name:   "deadlock victim weighs an insert waiting on a unique index",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'c'), (5, 'e')`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (4, 'c')`),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
@@ -346,6 +382,41 @@ var cases = []difftest.Case{
 			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
 			difftest.S(0, `COMMIT`),
 			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
+		},
+	},
+	{
+		// A failed insert rolls back the row it put into the primary key, and
+		// the row's lock stays as a gap lock where the row was.
+		Name:   "a failed insert leaves a gap lock",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'a')`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (0, 'y')`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (4, 'z')`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code FROM u ORDER BY id`),
+		},
+	},
+	{
+		// Rolling back to a savepoint takes the rows inserted since out of
+		// every index, and their locks stay as gap locks there.
+		Name:   "rollback to a savepoint leaves gap locks where the rows were",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'c')`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (0, '0')`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (4, '1')`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code FROM u ORDER BY id`),
 		},
 	},
 	{

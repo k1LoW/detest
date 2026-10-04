@@ -89,6 +89,11 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 // lockModeAs is lockMode for a lock InnoDB keeps in the lock struct named
 // key, which a wait for it weighs.
 func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key string) error {
+	table := lk.table
+	if name, ok := strings.CutPrefix(table, "\x00unique\x00"); ok {
+		table, _, _ = strings.Cut(name, "\x00")
+	}
+	tx.noteTableLock(table, mode)
 	var cancelWait func()
 	for {
 		conflict := tx.conflicting(lk, mode)
@@ -112,6 +117,9 @@ func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key string) error {
 		}
 		if cancelWait == nil {
 			cancelWait = tx.noteWait(key)
+			for _, o := range conflict {
+				o.convertImplicit(lk)
+			}
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
@@ -222,14 +230,10 @@ func (t *Tx) heldStructs() map[string]bool {
 	if structs == nil {
 		structs = map[string]bool{}
 	}
-	// InnoDB keeps an intention lock per table and mode, so a transaction
-	// that took shared and exclusive locks on a table holds both IS and IX.
-	note := func(table, mode string) { structs["T|"+table+"|I"+mode] = true }
-	for k := range t.lockStructs {
-		if parts := strings.SplitN(k, "|", 5); parts[0] == "R" { // R|table|index|mode|kind
-			note(parts[1], parts[3])
-		}
-	}
+	// A table's intention locks are recorded as they are taken
+	// (noteTableLock), as which ones InnoDB keeps depends on their order; a
+	// write holds IX all the same.
+	note := func(table string) { structs["T|"+table+"|IX"] = true }
 	for _, lk := range t.locks {
 		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
 			continue
@@ -240,7 +244,6 @@ func (t *Tx) heldStructs() map[string]bool {
 			}
 		}
 		mode := lockClass(t.db.locks[lk][t])
-		note(lk.table, mode)
 		searched := false
 		for k := range t.lockStructs {
 			if strings.HasPrefix(k, "R|"+lk.table+"|PRIMARY|"+mode+"|") {
@@ -253,10 +256,10 @@ func (t *Tx) heldStructs() map[string]bool {
 		}
 	}
 	for lk := range t.writes {
-		note(lk.table, "X")
+		note(lk.table)
 	}
 	for lk := range t.deleted {
-		note(lk.table, "X")
+		note(lk.table)
 	}
 	return structs
 }
@@ -289,17 +292,22 @@ func structKey(table, index string, mode lockMode, kind string) string {
 	return "R|" + table + "|" + index + "|" + lockClass(mode) + "|" + kind
 }
 
-// noteTableLock records the intention lock InnoDB takes on table when a
-// statement that locks rows of it starts, which it keeps even when the
-// statement locks no row, as when SKIP LOCKED skips them all.
+// noteTableLock records the intention lock InnoDB takes on table before it
+// locks rows of it, which a statement keeps even when it locks no row, as
+// when SKIP LOCKED skips them all. IX covers IS, so IS taken after IX is no
+// lock of its own, while IX taken after IS is.
 func (tx *Tx) noteTableLock(table string, mode lockMode) {
-	if !tx.db.kind.InnoDB() {
+	if !tx.db.kind.InnoDB() || strings.HasPrefix(table, "\x00") {
 		return
 	}
 	if tx.lockStructs == nil {
 		tx.lockStructs = map[string]bool{}
 	}
-	tx.lockStructs["T|"+table+"|I"+lockClass(mode)] = true
+	k := "T|" + table + "|I" + lockClass(mode)
+	if lockClass(mode) == "S" && tx.lockStructs["T|"+table+"|IX"] {
+		return
+	}
+	tx.lockStructs[k] = true
 }
 
 // noteWait records the lock struct InnoDB creates for a lock that has to
@@ -322,6 +330,47 @@ func (tx *Tx) noteWait(key string) (cancel func()) {
 	}
 	tx.lockStructs[key] = true
 	return func() { delete(tx.lockStructs, key) }
+}
+
+// convertImplicit records the lock struct InnoDB creates for tx when another
+// transaction waits for a record tx holds implicitly: a row it inserted, or
+// an entry of a unique secondary index it wrote. The lock turns explicit,
+// joining a struct of its kind tx already holds.
+func (tx *Tx) convertImplicit(lk lockKey) {
+	if !tx.db.kind.InnoDB() {
+		return
+	}
+	var key string
+	if name, ok := strings.CutPrefix(lk.table, "\x00unique\x00"); ok {
+		table, uname, _ := strings.Cut(name, "\x00")
+		def := tx.db.defs[table]
+		if def == nil {
+			return
+		}
+		i := slices.IndexFunc(def.uniques, func(u sqlir.UniqueDef) bool { return u.Name == uname })
+		if i < 0 {
+			return
+		}
+		index := uniqueIndex(&def.uniques[i])
+		for k := range tx.lockStructs {
+			if strings.HasPrefix(k, "R|"+table+"|"+index+"|X|") {
+				return // a search on the index locked it explicitly
+			}
+		}
+		key = structKey(table, index, lockUpdate, "record")
+	} else {
+		if _, written := tx.writes[lk]; !written {
+			return
+		}
+		if _, committed := tx.db.committed[lk.table][lk.key]; committed {
+			return
+		}
+		key = structKey(lk.table, "PRIMARY", lockUpdate, "record")
+	}
+	if tx.lockStructs == nil {
+		tx.lockStructs = map[string]bool{}
+	}
+	tx.lockStructs[key] = true
 }
 
 // victim ends a wait that another transaction's deadlock check broke by
