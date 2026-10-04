@@ -346,8 +346,10 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	// reads through a secondary index is locked on the primary key too;
 	// each lock's struct is recorded as it is taken.
 	scanIndex := "PRIMARY"
+	var entry *sqlir.UniqueDef
 	if def := tx.db.defs[table]; def == nil || !slices.Equal(sr.cols, def.pk) {
 		scanIndex = secondaryIndex(sr.cols)
+		entry = tx.db.uniqueOn(table, sr.cols)
 	}
 	desc := false
 	if len(stop.order) == 1 {
@@ -383,22 +385,36 @@ scan:
 		count, last = 0, nil
 		for _, r := range in {
 			lk := lockKey{table, r.Key()}
+			// A unique secondary index's record is locked before the row,
+			// as lockRange locks it.
+			keys, structs := []lockKey{lk}, []lockStruct{structKey(table, "PRIMARY", mode, "record")}
+			if scanIndex == "PRIMARY" {
+				structs[0] = structKey(table, scanIndex, mode, "next-key")
+			} else if entry != nil {
+				vals, ok, err := x.uniqueValues(table, entry, r)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					keys = append([]lockKey{uniqueLock(table, entry, vals)}, keys...)
+					structs = append([]lockStruct{structKey(table, scanIndex, mode, "next-key")}, structs...)
+				}
+			}
 			skipped := false
-			if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
+			if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
 				switch {
 				case policy.SkipLocked:
 					skipped = true
+					x.skip(lk)
 				case policy.NoWait:
 					return false, tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
 				}
 			}
 			if !skipped {
-				key := structKey(table, "PRIMARY", mode, "record")
-				if scanIndex == "PRIMARY" {
-					key = structKey(table, scanIndex, mode, "next-key")
-				}
-				if err := tx.lockModeAs(lk, mode, key); err != nil {
-					return false, err
+				for i, k := range keys {
+					if err := tx.lockModeAs(k, mode, structs[i]); err != nil {
+						return false, err
+					}
 				}
 				tx.noteLockStruct(table, scanIndex, mode, "next-key")
 				if scanIndex != "PRIMARY" {
@@ -470,18 +486,15 @@ scan:
 }
 
 // lockingRows is the rows of table a locking search of InnoDB meets: the
-// latest ones tx sees, and the rows other transactions inserted and have not
-// committed, whose records are in the index already, so that locking one
-// waits for its inserter. Once the inserter finishes, the row is committed
-// or gone.
+// latest ones tx sees, and the versions other transactions wrote and have
+// not committed, rows they inserted or updated, whose index records are in
+// the indexes already beside the old ones, so that locking one waits for its
+// writer. Once the writer finishes, the version is committed or gone.
 func (tx *Tx) lockingRows(table string) []Row {
 	rows := tx.selectNoYield(table, nil)
 	var pending []Row
 	for lk, holders := range tx.db.locks {
 		if lk.table != table {
-			continue
-		}
-		if _, committed := tx.db.committed[table][lk.key]; committed {
 			continue
 		}
 		if _, own := tx.writes[lk]; own {
@@ -498,7 +511,7 @@ func (tx *Tx) lockingRows(table string) []Row {
 		return rows
 	}
 	rows = append(rows, pending...)
-	slices.SortFunc(rows, func(a, b Row) int { return strings.Compare(a.Key(), b.Key()) })
+	slices.SortStableFunc(rows, func(a, b Row) int { return strings.Compare(a.Key(), b.Key()) })
 	return rows
 }
 
@@ -560,6 +573,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		}
 		if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(lk lockKey) bool { return tx.heldByOther(lk, mode) }) {
 			if policy.SkipLocked {
+				x.skip(lockKey{table, r.Key()})
 				return nil
 			}
 			if policy.NoWait {

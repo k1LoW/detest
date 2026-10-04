@@ -1404,6 +1404,10 @@ type Tx struct {
 	// explicit is the unique index entries the transaction locked
 	// explicitly, by a search or a check, as opposed to the ones it wrote.
 	explicit map[lockKey]bool
+	// implicit is the records the transaction holds implicitly, as their
+	// writer: rows it put into a primary key and index entries it wrote or
+	// removed, which turn explicit when another transaction waits for one.
+	implicit map[lockKey]bool
 	// put is the rows the running statement put into a primary key, which
 	// leave a gap lock if the statement fails.
 	put []putRow

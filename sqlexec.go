@@ -54,6 +54,17 @@ type sqlExec struct {
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
+	// skipped is the rows a locking search's SKIP LOCKED passed over, on an
+	// index record another transaction holds, which the rows the statement
+	// then locks leave out too.
+	skipped map[lockKey]bool
+}
+
+func (x *sqlExec) skip(lk lockKey) {
+	if x.skipped == nil {
+		x.skipped = map[lockKey]bool{}
+	}
+	x.skipped[lk] = true
 }
 
 // searchOuter is the outer row of a joined table's search: the columns of

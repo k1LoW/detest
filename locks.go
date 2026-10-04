@@ -123,6 +123,12 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 			} else if mode > cur {
 				holders[tx] = mode
 			}
+			if grant == (lockStruct{}) && tx.db.kind.InnoDB() {
+				if tx.implicit == nil {
+					tx.implicit = map[lockKey]bool{}
+				}
+				tx.implicit[lk] = true
+			}
 			if grant != (lockStruct{}) && tx.db.kind.InnoDB() {
 				tx.addStruct(grant)
 				if strings.HasPrefix(lk.table, "\x00") {
@@ -347,7 +353,7 @@ func (tx *Tx) noteWait(key lockStruct) (cancel func()) {
 // an entry of a unique secondary index it wrote. The lock turns explicit,
 // joining a struct of its kind tx already holds.
 func (tx *Tx) convertImplicit(lk lockKey) {
-	if !tx.db.kind.InnoDB() {
+	if !tx.db.kind.InnoDB() || !tx.implicit[lk] || tx.explicit[lk] {
 		return
 	}
 	var key lockStruct
@@ -361,17 +367,8 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 		if i < 0 {
 			return
 		}
-		if tx.explicit[lk] {
-			return // a search or a check on the index locked it explicitly
-		}
 		key = structKey(table, uniqueIndex(&def.uniques[i]), lockUpdate, "record")
 	} else {
-		if _, written := tx.writes[lk]; !written {
-			return
-		}
-		if _, committed := tx.db.committed[lk.table][lk.key]; committed {
-			return
-		}
 		key = structKey(lk.table, "PRIMARY", lockUpdate, "record")
 	}
 	tx.addStruct(key)

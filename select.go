@@ -699,6 +699,9 @@ rows:
 		for _, a := range targets {
 			table := from.tables[a]
 			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
+				if x.skipped[lk] && sel.Lock.SkipLocked {
+					return errSkipLocked
+				}
 				if (sel.Lock.SkipLocked || sel.Lock.NoWait) && x.tx.heldByOther(lk, mode) {
 					if sel.Lock.SkipLocked {
 						return errSkipLocked

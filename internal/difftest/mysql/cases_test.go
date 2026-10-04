@@ -513,6 +513,59 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A locking search meets the index entry another transaction's
+		// uncommitted update moved into its range, waits for it, and reads
+		// the row once the update commits.
+		Name:   "a locking search waits for an update moving a row into its range",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE items SET k = 15 WHERE id = 30`),
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT id FROM items WHERE k BETWEEN 11 AND 19 FOR UPDATE`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
+		// SKIP LOCKED passes over a row whose unique index record a foreign
+		// key check holds.
+		Name: "skip locked passes over a unique index record a check holds",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a')`),
+			difftest.S(1, rr),
+			difftest.Q(1, `SELECT id FROM p WHERE code = 'a' FOR UPDATE SKIP LOCKED`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		// A limited scan along a unique secondary index locks its records,
+		// so it waits for a foreign key check holding one.
+		Name: "a limited scan on a unique index waits for a check's lock",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a')`),
+			difftest.S(1, rr),
+			difftest.Q(1, `SELECT id FROM p WHERE code >= 'a' ORDER BY code LIMIT 1 FOR UPDATE`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
