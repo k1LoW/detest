@@ -409,6 +409,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT COALESCE('5', 1) / 2`),
 			difftest.Q(0, `SELECT COALESCE(NULL, '5', 1) / 2`),
 			difftest.Q(0, `SELECT CASE WHEN true THEN '5' ELSE 1.0 END / 2 = 2.5`),
+			difftest.Q(0, `SELECT (CASE WHEN id = 1 THEN 1 ELSE ratio END) / 2 = 0.5, COALESCE(1, amount) / 2 = 0.5, (CASE WHEN id = 1 THEN 1 ELSE id END) / 2 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT (CASE WHEN id = 1 THEN 1 ELSE '3' END) / 2, (CASE WHEN id = 1 THEN 1 ELSE amount END) / 2 = 0.5 FROM t WHERE id = 1`),
 		},
 	},
 	{

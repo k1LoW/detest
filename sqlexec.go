@@ -980,7 +980,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
-				out, err = x.branchValue(v.Args, out)
+				out, err = x.branchValue(v.Args, args, out)
 			}
 		}
 		return out, err
@@ -2092,7 +2092,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				return x.branchValue(caseBranches(v), out)
+				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 			}
 		}
 		if v.Else != nil {
@@ -2100,7 +2100,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return x.branchValue(caseBranches(v), out)
+			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -2135,7 +2135,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
-				out, err = x.branchValue(v.Args, out)
+				out, err = x.branchValue(v.Args, args, out)
 			}
 		}
 		return out, err
@@ -2639,17 +2639,28 @@ func arith(op string, l, r any) (any, error) {
 // commonNumber gives it, and text as a number when another branch is typed as
 // one, which is how Postgres reads an untyped literal or a parameter there,
 // such as the '2' of CASE WHEN ... THEN 1 ELSE '2' END. The number's type is
-// the branches' common one, an integer unless one is a numeric or a float,
-// and text that reads as no value of it fails as its input does. Text of a
-// branch typed as text, a column or a cast, has no common type with a number
-// in Postgres, which fails the statement whatever row it reads, so it is
-// refused. MySQL converts between the two instead.
-func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
-	if x.tx.db.kind.InnoDB() || !slices.ContainsFunc(exprs, numberTyped) {
+// the branches' common one, an integer unless one is a numeric or a float by
+// its form or, in vals, by the value it holds in this row, and text that
+// reads as no value of it fails as its input does. Text of a branch typed as
+// text, a column or a cast, has no common type with a number in Postgres,
+// which fails the statement whatever row it reads, so it is refused. MySQL
+// converts between the two instead.
+func (x *sqlExec) branchValue(exprs []sqlir.Expr, vals []any, v any) (any, error) {
+	if x.tx.db.kind.InnoDB() {
+		return commonNumber(exprs, v), nil
+	}
+	// A column's type shows only in its value, so a float there makes the
+	// integer of another branch a float, as 1 ELSE amount is a numeric; a
+	// row where the column is NULL leaves the integer, as the type is not
+	// kept.
+	if n, ok := integer(derefValue(v)); ok && slices.ContainsFunc(vals, isFloat) {
+		return float64(n), nil
+	}
+	if !slices.ContainsFunc(exprs, numberTyped) {
 		return commonNumber(exprs, v), nil
 	}
 	refuse := x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
-	float := slices.ContainsFunc(exprs, floatTyped)
+	float := slices.ContainsFunc(exprs, floatTyped) || slices.ContainsFunc(vals, isFloat)
 	// The branches' types are resolved before any is evaluated, so a
 	// branch typed as text, or a literal that reads as no number, fails
 	// the statement whichever branch a row takes.
@@ -2683,6 +2694,19 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 		return nil, err
 	}
 	return commonNumber(exprs, n), nil
+}
+
+// columnBranches evaluates the branches of a CASE that are column references,
+// whose values tell their columns' types, in the row en; the other branches,
+// which Postgres does not evaluate either, are left nil.
+func (x *sqlExec) columnBranches(exprs []sqlir.Expr, en *env) []any {
+	vals := make([]any, len(exprs))
+	for i, e := range exprs {
+		if _, ok := e.(*sqlir.ColumnRef); ok {
+			vals[i], _ = x.eval(e, en)
+		}
+	}
+	return vals
 }
 
 // branchNumber reads a string literal among number branches as the branches'

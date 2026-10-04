@@ -913,6 +913,11 @@ func TestValueFormsByType(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5, $1::bool, $2::bool, 'a' || $3`, int64(1), int64(0), []byte("b")); !reflect.DeepEqual(got, []string{"true,true,false,ab"}) {
 		t.Errorf("random branch, boolean parameters and bytes concatenated: got %v", got)
 	}
+	// A column's type shows in its value, so a float there types the
+	// integer of another branch.
+	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE ratio END) / 2 = 0.5, COALESCE(1, ratio) / 2 = 0.5, (CASE WHEN true THEN 1 ELSE id END) / 2 FROM t WHERE id = 1`); !reflect.DeepEqual(got, []string{"true,true,0"}) {
+		t.Errorf("branches typed by a column's value: got %v", got)
+	}
 	if _, err := db.Exec(`SELECT $1::bool`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("$1::bool with 2: got %v, want invalid input", err)
 	}
