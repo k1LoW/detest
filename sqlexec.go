@@ -2343,7 +2343,7 @@ var strictFuncs = map[string][]int{
 	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
-	"octet_length": {1}, "left": {2}, "mysql_signed": {1},
+	"octet_length": {1}, "left": {2}, "mysql_signed": {1}, "mysql_double": {1},
 }
 
 // mysqlNullIfAnyNull are MySQL's functions of any number of arguments that
@@ -2472,6 +2472,11 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return args[0], nil
 		case "mysql_signed":
 			return mysqlSigned(derefValue(args[0])), nil
+		case "mysql_double":
+			if f, ok := toFloat(derefValue(mysqlArithOperand(args[0]))); ok {
+				return f, nil
+			}
+			return nil, x.unsupported("CAST to DOUBLE of a " + fmt.Sprintf("%T", derefValue(args[0])))
 		case "mysql_truth":
 			return mysqlTruth(derefValue(args[0])), nil
 		case "last_insert_id":

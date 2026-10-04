@@ -4583,3 +4583,18 @@ func TestMySQLAutoIncrementNeedsAnIndex(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE b (id INT AUTO_INCREMENT, v INT, KEY (id))")
 	mustExec(t, db, "CREATE TABLE c (v INT, id INT AUTO_INCREMENT, PRIMARY KEY (id, v))")
 }
+
+// CAST(... AS DOUBLE) and the dividend of / convert a string to the number
+// it starts with, as MySQL does.
+func TestMySQLDoubleOfAString(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	var lt bool
+	var q float64
+	if err := db.QueryRow("SELECT CAST('2' AS DOUBLE) < '10', '10' / 4").Scan(&lt, &q); err != nil {
+		t.Fatal(err)
+	}
+	if !lt || q != 2.5 {
+		t.Errorf("got %v, %v", lt, q)
+	}
+}

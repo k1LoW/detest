@@ -67,7 +67,7 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			return &sqlir.BinaryExpr{Op: binaryOps[e.Op], L: truthy(l), R: truthy(r)}, nil
 		case opcode.Div:
 			// MySQL's / divides exactly, where Postgres's divides integers.
-			return &sqlir.BinaryExpr{Op: "/", L: &sqlir.Cast{X: l, Type: "float8"}, R: r}, nil
+			return &sqlir.BinaryExpr{Op: "/", L: &sqlir.FuncCall{Name: "mysql_double", Args: []sqlir.Expr{l}}, R: r}, nil
 		case opcode.NullEQ:
 			return nullSafeEqual(l, r), nil
 		case opcode.LogicXor:
@@ -258,6 +258,11 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			// MySQL's SIGNED converts strings and fractions its own way,
 			// not as the executor's Postgres casts do.
 			return &sqlir.FuncCall{Name: "mysql_signed", Args: []sqlir.Expr{x}}, nil
+		}
+		if t == "float8" {
+			// A string converts to the number it starts with, as MySQL's
+			// arithmetic converts it, not as the executor's casts do.
+			return &sqlir.FuncCall{Name: "mysql_double", Args: []sqlir.Expr{x}}, nil
 		}
 		return &sqlir.Cast{X: x, Type: t}, nil
 	case *ast.AggregateFuncExpr:
