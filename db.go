@@ -998,6 +998,13 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		def.checks = append(def.checks, tableCheck{CheckDef: c})
 	}
+	for col := range def.autoInc {
+		// MySQL refuses an AUTO_INCREMENT column that leads no index, so no
+		// schema built on it has one.
+		if !def.indexedBy([]string{col}) {
+			return unsupported("an AUTO_INCREMENT column that leads no index", "")
+		}
+	}
 	if err := db.backfill(table, added, redefined, tx); err != nil {
 		return err
 	}

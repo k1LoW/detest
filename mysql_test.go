@@ -4571,3 +4571,15 @@ func TestMySQLModifyOfAPrimaryKey(t *testing.T) {
 	mustExec(t, db, "ALTER TABLE b MODIFY id BIGINT")
 	mustExec(t, db, "ALTER TABLE b MODIFY n VARCHAR(5)")
 }
+
+// An AUTO_INCREMENT column that leads no index is refused, as MySQL refuses
+// it; one leading the primary key or another index loads.
+func TestMySQLAutoIncrementNeedsAnIndex(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	if _, err := db.Exec("CREATE TABLE a (id INT AUTO_INCREMENT, v INT)"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("no index: %v, want unsupported", err)
+	}
+	mustExec(t, db, "CREATE TABLE b (id INT AUTO_INCREMENT, v INT, KEY (id))")
+	mustExec(t, db, "CREATE TABLE c (v INT, id INT AUTO_INCREMENT, PRIMARY KEY (id, v))")
+}
