@@ -74,6 +74,10 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT (1.5 * 2) / 2 = 1.5, -(1.5 * 2) / 2 = -1.5`),
 			difftest.Q(0, `SELECT id FROM t WHERE id * 1000000 = 9000000.0`),
 			difftest.Q(0, `SELECT id FROM t ORDER BY CASE WHEN id = 2 THEN 'inf'::float8 - 'inf'::float8 ELSE ratio END DESC NULLS LAST, id LIMIT 2`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT DISTINCT CASE WHEN id = 1 THEN 1000000 ELSE 1000000.0 END FROM t) s`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT 1 FROM t GROUP BY CASE WHEN id = 1 THEN 1000000 ELSE 1000000.0 END) s`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT 1000000 UNION SELECT 1000000.0) s`),
+			difftest.Q(0, `SELECT count(DISTINCT CASE WHEN id = 1 THEN 1000000 ELSE 1000000.0 END) FROM t`),
 		},
 	},
 	{

@@ -181,6 +181,46 @@ func parseNumber(s string) (float64, error) {
 	return strconv.ParseFloat(s, 64)
 }
 
+// valueKey is a key equal values share, for grouping, DISTINCT, set
+// operations and window partitions: numbers by value whatever their Go type,
+// as sameValue compares them, and values of different kinds apart.
+func valueKey(v any) string {
+	v = derefValue(v)
+	switch t := v.(type) {
+	case nil:
+		return "N"
+	case string:
+		return "s" + strconv.Quote(t)
+	case []byte:
+		return "s" + strconv.Quote(string(t))
+	case bool:
+		if t {
+			return "b1"
+		}
+		return "b0"
+	case time.Time:
+		return "t" + t.UTC().Format(time.RFC3339Nano)
+	}
+	if isNumber(v) {
+		if n, ok := integer(v); ok {
+			return "n" + strconv.FormatInt(n, 10)
+		}
+		if f, ok := toFloat(v); ok {
+			if math.IsNaN(f) {
+				return "nNaN"
+			}
+			return "n" + keyString(f)
+		}
+	}
+	return fmt.Sprintf("%T%#v", v, v)
+}
+
+// valuesKey is valueKey of several values.
+func valuesKey(b *strings.Builder, v any) {
+	b.WriteString(valueKey(v))
+	b.WriteByte(0x1f)
+}
+
 func isNaNValue(v any) bool {
 	f, ok := toFloat(v)
 	return ok && math.IsNaN(f)

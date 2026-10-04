@@ -941,7 +941,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 					continue
 				}
 				if v.Distinct {
-					k := fmt.Sprint(derefValue(val))
+					k := valueKey(val)
 					if seen[k] {
 						continue
 					}
@@ -3070,7 +3070,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 	case "pg_try_advisory_xact_lock", "pg_advisory_xact_lock":
 		var kb strings.Builder
 		for i := range args {
-			fmt.Fprintf(&kb, "%v|", d(i))
+			valuesKey(&kb, d(i))
 		}
 		lk := lockKey{"__advisory__", kb.String()}
 		if x.tx.heldByOther(lk, lockUpdate) && name == "pg_try_advisory_xact_lock" {

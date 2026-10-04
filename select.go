@@ -192,7 +192,7 @@ func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*sel
 			if err != nil {
 				return nil, err
 			}
-			fmt.Fprintf(&kb, "%v|", derefValue(v))
+			valuesKey(&kb, v)
 		}
 		k := kb.String()
 		g, ok := index[k]
@@ -383,11 +383,11 @@ func (x *sqlExec) distinct(sel *sqlir.SelectStmt, items []*selItem, cols []strin
 				if err != nil {
 					return nil, err
 				}
-				fmt.Fprintf(&kb, "%#v|", derefValue(v))
+				valuesKey(&kb, v)
 			}
 		} else {
 			for _, c := range cols {
-				fmt.Fprintf(&kb, "%#v|", derefValue(it.out[c]))
+				valuesKey(&kb, it.out[c])
 			}
 		}
 		if k := kb.String(); !seen[k] {
@@ -543,7 +543,7 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 	key := func(r Row) string {
 		var kb strings.Builder
 		for _, c := range lcols {
-			fmt.Fprintf(&kb, "%#v|", derefValue(r[c]))
+			valuesKey(&kb, r[c])
 		}
 		return kb.String()
 	}
@@ -936,7 +936,7 @@ func (x *sqlExec) computeWindows(wins []*sqlir.WindowFunc, items []*selItem) err
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(&kb, "%#v|", derefValue(v))
+				valuesKey(&kb, v)
 			}
 			k := kb.String()
 			i, ok := index[k]
