@@ -329,7 +329,10 @@ func (r *run) execute() (v *violation) {
 			return r.pending
 		}
 		if r.cut {
-			return nil // a loop cut while the clock advanced or a process outside settled
+			// A loop cut while the clock advanced or a process outside
+			// settled: its tick is checked as any step, and only the checks
+			// at quiescence are skipped.
+			return r.checkAlways()
 		}
 		opts := r.enabled()
 		if len(opts) == 0 {

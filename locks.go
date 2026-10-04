@@ -102,6 +102,9 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
 			tx.aborted = true
 			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
+			for _, h := range conflict {
+				h.passedOver = true // gave up on the lock, as NOWAIT does
+			}
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		if err := tx.breakCycle(conflict, what); err != nil {

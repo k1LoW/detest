@@ -807,4 +807,70 @@ func TestLoopIdleAfterASleepIsCut(t *testing.T) {
 	if res.Violated || res.CutRuns == 0 {
 		t.Fatalf("want the run cut, got %s", res.report())
 	}
+	res, _ = exploreBubble(t, func(t *testing.T, s *Sim) {
+		bad := false
+		s.Seed(func() { bad = false })
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			time.Sleep(time.Second)
+			bad = true
+			return ErrIdle
+		})
+		s.Always(func(*State) error {
+			if bad {
+				return errors.New("the idle tick left bad state")
+			}
+			return nil
+		})
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if !res.Violated || !strings.Contains(res.Err.Error(), "bad state") {
+		t.Fatalf("want the Always violation of the cut tick, got %s", res.report())
+	}
+}
+
+// A loop that went idle after a lock timeout gave up on a row ticks again
+// once the holder lets it go, even without changing it.
+func TestIdleLoopRetriesARowALockTimeoutGaveUpOn(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SELECT id FROM work WHERE id = 'w1' FOR UPDATE`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SET LOCAL lock_timeout = '1s'`); err != nil {
+				return err
+			}
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE`).Scan(&id)
+			if errors.Is(err, ErrLockNotAvailable) {
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not done")
+			}
+			return nil
+		})
+	})
 }
