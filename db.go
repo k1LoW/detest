@@ -1306,6 +1306,7 @@ func (db *DB) newTx(p *Proc) *Tx {
 type savepoint struct {
 	name    string
 	pending *bool // the transaction's pendingLockTimeout
+	timeout bool  // and its lockTimeout
 	writes  map[lockKey]Row
 	deleted map[lockKey]bool
 	moved   map[lockKey]string
@@ -1560,7 +1561,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
-		sp.pending = tx.pendingLockTimeout
+		sp.pending, sp.timeout = tx.pendingLockTimeout, tx.lockTimeout
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1586,6 +1587,9 @@ func (tx *Tx) savepoint(op, name string) error {
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
 	tx.pendingLockTimeout = sp.pending
+	if !tx.db.kind.InnoDB() {
+		tx.lockTimeout = sp.timeout // MySQL's setting is the session's, which no rollback undoes
+	}
 	tx.deferred = tx.deferred[:sp.deferred]
 	if tx.db.kind.InnoDB() {
 		tx.releaseInsertLocks(sp.locks)

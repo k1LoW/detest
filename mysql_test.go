@@ -4389,3 +4389,35 @@ func TestPostgresSavepointUndoesSessionLockTimeout(t *testing.T) {
 		t.Error("the rolled back SET lock_timeout holds for the session")
 	}
 }
+
+// ROLLBACK TO a savepoint restores the transaction's Postgres lock timeout
+// as it was there.
+func TestPostgresSavepointRestoresLockTimeout(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, q := range []string{"SAVEPOINT s", "SET LOCAL lock_timeout = '1s'", "ROLLBACK TO SAVEPOINT s"} {
+		if _, err := tx.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	on := true
+	_ = conn.Raw(func(dc any) error {
+		if c, ok := dc.(*sqlConn); ok && c.tx != nil {
+			on = c.tx.lockTimeout
+		}
+		return nil
+	})
+	if on {
+		t.Error("the lock timeout set after the savepoint holds after ROLLBACK TO")
+	}
+}
