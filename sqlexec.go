@@ -2094,6 +2094,7 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if x.tx.db.kind.InnoDB() {
 		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
+	l, r = paramText(le, l), paramText(re, r)
 	// Rows are compared pair by pair in compareRows; one reaching here comes
 	// from a context that does not, such as HAVING, CASE or NULLIF.
 	if _, ok := l.([]any); ok {
@@ -2173,6 +2174,17 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 		return nil, nil
 	}
 	return op == "=" || op == "<=" || op == ">=", nil
+}
+
+// paramText returns a parameter's bytes as the text they are, so they compare
+// and order as text rather than as a byte slice.
+func paramText(e sqlir.Expr, v any) any {
+	if _, ok := e.(*sqlir.Param); ok {
+		if b, ok := derefValue(v).([]byte); ok {
+			return string(b)
+		}
+	}
+	return v
 }
 
 func untypedExpr(e sqlir.Expr) bool {

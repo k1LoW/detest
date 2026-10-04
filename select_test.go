@@ -592,6 +592,10 @@ func TestTextComparedWithNumber(t *testing.T) {
 			t.Errorf("%T: got %v, want unsupported", v, err)
 		}
 	}
+	// A byte slice parameter compared with text orders as the text it is.
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name < $1`, []byte("10")); len(got) != 1 || got[0] != "1" {
+		t.Errorf("name < []byte: got %v, want 1", got)
+	}
 	// A parameter compared with an untyped literal is text, as both are.
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE $1 = '01'`, int64(1)); len(got) != 1 || got[0] != "0" {
 		t.Errorf("$1 = '01': got %v, want 0", got)
