@@ -139,7 +139,15 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if !tx.block && !tx.start.IsZero() {
 		x.start = tx.start // the statement is its own transaction, begun at the same instant
 	}
-	return x.execStatement(s.stmt)
+	res, err := x.execStatement(s.stmt)
+	if err != nil {
+		// Every path that evaluates an expression ends here, so an
+		// expression detest cannot evaluate that no path named on its own
+		// still leaves as ErrUnsupportedSQL, which callers and CheckSQL
+		// branch on.
+		return nil, x.unsupportedExpr(err, "in the statement")
+	}
+	return res, nil
 }
 
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {

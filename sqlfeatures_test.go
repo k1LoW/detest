@@ -144,6 +144,8 @@ func TestUnevaluableExpressionIsUnsupported(t *testing.T) {
 		`SELECT id FROM t ORDER BY now() * 2`,
 		`SELECT id, now() * 2 FROM t`,
 		`INSERT INTO t VALUES (2, 'b') RETURNING now() * 2`,
+		`SELECT id FROM t WHERE now() * 2 IS NULL`,
+		`SELECT id FROM t WHERE id = 1 AND now() * 2 IS NULL FOR UPDATE`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
