@@ -62,9 +62,6 @@ type sqlConn struct {
 	// SET innodb_lock_wait_timeout), which every later transaction of the
 	// connection starts with.
 	lockTimeout bool
-	// pendingLockTimeout is a Postgres SET lock_timeout run inside a
-	// transaction, which the session keeps only if the transaction commits.
-	pendingLockTimeout *bool
 	// noAutoZero is the session's NO_AUTO_VALUE_ON_ZERO, and noFKChecks its
 	// FOREIGN_KEY_CHECKS=0.
 	noAutoZero, noFKChecks bool
@@ -141,8 +138,6 @@ func (t *sqlTx) Commit() (err error) {
 	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
-	pending := t.c.pendingLockTimeout
-	t.c.pendingLockTimeout = nil
 	if tx == nil {
 		return nil
 	}
@@ -165,8 +160,8 @@ func (t *sqlTx) Commit() (err error) {
 		return t.c.db.kind.Convert(err)
 	}
 	tx.commit()
-	if pending != nil {
-		t.c.lockTimeout = *pending
+	if tx.pendingLockTimeout != nil {
+		t.c.lockTimeout = *tx.pendingLockTimeout
 	}
 	return nil
 }
@@ -175,7 +170,6 @@ func (t *sqlTx) Rollback() (err error) {
 	defer recoverRunOver(&err)
 	tx := t.c.tx
 	t.c.tx = nil
-	t.c.pendingLockTimeout = nil // Postgres rolls a session SET back with the transaction
 	if tx == nil {
 		return nil
 	}
@@ -252,7 +246,6 @@ func (c *sqlConn) dropStaleTx() {
 	// current, sees the change of run as well.
 	if r := c.db.s.run; r != nil && r != c.lastRun {
 		c.lastRun, c.lastInsertID, c.lockTimeout, c.noAutoZero, c.noFKChecks = r, 0, false, false, false
-		c.pendingLockTimeout = nil
 	}
 }
 
@@ -350,7 +343,7 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 			c.lockTimeout = tx.lockTimeout
 		} else {
 			v := tx.lockTimeout
-			c.pendingLockTimeout = &v
+			tx.pendingLockTimeout = &v
 		}
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {

@@ -868,6 +868,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 	}
 	var added []sqlir.ColumnDef
+	redefined := false // a MySQL MODIFY or CHANGE of an existing column
 	for _, col := range ch.Columns {
 		if col.After != "" && (col.After == col.Name || !slices.Contains(def.columns, col.After)) {
 			// Checked before the column is added or moved, so a failed
@@ -896,6 +897,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if col.Type != "" {
 			if def.types == nil {
 				def.types = map[string]string{}
+			}
+			if _, had := def.types[col.Name]; had && db.kind.InnoDB() {
+				redefined = true
 			}
 			def.types[col.Name] = col.Type
 		}
@@ -994,7 +998,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		def.checks = append(def.checks, tableCheck{CheckDef: c})
 	}
-	if err := db.backfill(table, added, tx); err != nil {
+	if err := db.backfill(table, added, redefined, tx); err != nil {
 		return err
 	}
 	for _, fk := range ch.ForeignKeys {
@@ -1081,9 +1085,11 @@ func (db *DB) raiseAutoInc(table, col string, tx *Tx) {
 }
 
 // backfill gives the rows a table already holds the defaults of the columns
-// ADD COLUMN added, as an existing row reads a new column's default.
-func (db *DB) backfill(table string, cols []sqlir.ColumnDef, tx *Tx) error {
-	if len(cols) == 0 {
+// ADD COLUMN added, as an existing row reads a new column's default, and
+// converts its values to the column types, as MySQL converts the rows when
+// MODIFY or CHANGE redefines a column (redefined).
+func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx *Tx) error {
+	if len(cols) == 0 && !redefined {
 		return nil
 	}
 	if tx == nil {
@@ -1262,6 +1268,10 @@ type Tx struct {
 	atomic         bool
 	block          bool // begun with BeginTx, so SAVEPOINT may be used
 	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
+	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
+	// transaction, which the session keeps only once the transaction
+	// commits, and which ROLLBACK TO a savepoint before it undoes.
+	pendingLockTimeout *bool
 	// lockTimeout is set by SET LOCAL lock_timeout: a lock wait may then fail
 	// with 55P03 instead of waiting on, which the explorer chooses.
 	lockTimeout bool
@@ -1295,6 +1305,7 @@ func (db *DB) newTx(p *Proc) *Tx {
 // locks it held when the savepoint was set.
 type savepoint struct {
 	name    string
+	pending *bool // the transaction's pendingLockTimeout
 	writes  map[lockKey]Row
 	deleted map[lockKey]bool
 	moved   map[lockKey]string
@@ -1549,6 +1560,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
+		sp.pending = tx.pendingLockTimeout
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1573,6 +1585,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
+	tx.pendingLockTimeout = sp.pending
 	tx.deferred = tx.deferred[:sp.deferred]
 	if tx.db.kind.InnoDB() {
 		tx.releaseInsertLocks(sp.locks)

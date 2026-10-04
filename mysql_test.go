@@ -4296,3 +4296,96 @@ func TestMySQLLockingSearchWithOr(t *testing.T) {
 	mustExec(t, db, "UPDATE t SET v = 1 WHERE id IN (1, 2)")
 	mustExec(t, db, "UPDATE t SET v = 2 WHERE id = 1 AND (v = 1 OR v = 3)")
 }
+
+// A LIMIT scan the WHERE bounds by no index follows the primary key from its
+// start and stops after LIMIT rows, so it locks those, not the whole table.
+func TestMySQLLimitScanOfTheClusteredIndex(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO t VALUES (2, 0), (10, 0), (20, 0)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("UPDATE t SET v = 1 WHERE v = 0 LIMIT 1"); err != nil {
+		t.Fatal(err)
+	}
+	table := store.resolve("t")
+	if len(store.locks[lockKey{table, "2"}]) == 0 || len(store.locks[lockKey{table, "10"}]) > 0 {
+		t.Error("the scan should lock id 2, the first in the primary key, and stop")
+	}
+	covered := func(id int64) bool {
+		r := Row{"id": id, "v": int64(0)}
+		return slices.ContainsFunc(store.gaps, func(g *gapLock) bool { return g.covers(r) })
+	}
+	if !covered(1) || covered(5) {
+		t.Errorf("covers 1: %v, want true; 5: %v, want false", covered(1), covered(5))
+	}
+}
+
+// A locking search that reaches a prefix part after an index's whole columns
+// is refused, as one by a prefix index is.
+func TestMySQLPrefixPartAfterColumns(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT, b VARCHAR(20), KEY (a, b(3)))")
+	if _, err := db.Exec("SELECT id FROM t WHERE a = 1 AND b = 'abcdef' FOR UPDATE"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a search reaching b(3): %v, want unsupported", err)
+	}
+	mustExec(t, db, "SELECT id FROM t WHERE a = 1 FOR UPDATE")
+}
+
+// MODIFY of a column's type converts the values the rows hold, as MySQL does.
+func TestMySQLModifyConvertsValues(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n VARCHAR(10))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, '42')")
+	mustExec(t, db, "ALTER TABLE t MODIFY n INT")
+	if got := derefValue(store.Peek("t")[0]["n"]); got != int64(42) {
+		t.Errorf("n is %#v, want int64 42", got)
+	}
+	mustExec(t, db, "INSERT INTO t VALUES (2, '0')")
+	if _, err := db.Exec("ALTER TABLE t MODIFY n VARCHAR(10)"); err != nil {
+		t.Fatal(err)
+	}
+	if got := peekRows(store, "t", "id", "n"); got != "1:42 2:0" {
+		t.Errorf("rows %s", got)
+	}
+}
+
+// A Postgres SET lock_timeout after a savepoint is undone by ROLLBACK TO it,
+// so the commit leaves the session as before.
+func TestPostgresSavepointUndoesSessionLockTimeout(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"SAVEPOINT s", "SET lock_timeout = '1s'", "ROLLBACK TO SAVEPOINT s"} {
+		if _, err := tx.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	on := false
+	_ = conn.Raw(func(dc any) error {
+		if c, ok := dc.(*sqlConn); ok {
+			on = c.lockTimeout
+		}
+		return nil
+	})
+	if on {
+		t.Error("the rolled back SET lock_timeout holds for the session")
+	}
+}
