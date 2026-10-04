@@ -61,9 +61,10 @@ type sqlExec struct {
 	// when it began, which its queries read instead of the latest.
 	frozen map[string][]Row
 	// queryCols are the output columns of the queries the statement ran,
-	// in order, by the query (a *sqlir.SelectStmt) or by CTE name, for a *
-	// over them.
+	// in order, by the query (a *sqlir.SelectStmt), for a * over them, and
+	// cteCols those of the CTEs in scope, by name, scoped as ctes is.
 	queryCols map[any][]string
+	cteCols   map[string][]string
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -214,7 +215,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
-			x.ctes, x.frozen = map[string][]Row{}, nil
+			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
@@ -576,7 +577,10 @@ func (x *sqlExec) withCTEs(ctes []sqlir.CTE, outer *env) error {
 		if err != nil {
 			return err
 		}
-		x.noteCols(cte.Name, cols)
+		if x.cteCols == nil {
+			x.cteCols = map[string][]string{}
+		}
+		x.cteCols[cte.Name] = cols
 		x.ctes[cte.Name] = rows
 	}
 	return nil

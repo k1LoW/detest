@@ -40,7 +40,9 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if len(sel.With) > 0 {
 		// The CTEs a query block declares shadow outer ones of the same
 		// name inside it only.
-		defer func(ctes map[string][]Row) { x.ctes = ctes }(maps.Clone(x.ctes))
+		defer func(ctes map[string][]Row, cols map[string][]string) {
+			x.ctes, x.cteCols = ctes, cols
+		}(maps.Clone(x.ctes), maps.Clone(x.cteCols))
 	}
 	var locking lockPlan
 	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
@@ -1276,7 +1278,7 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 	case t.Func != nil:
 	default:
 		if _, isCTE := x.ctes[t.Name]; isCTE {
-			if cols, ok := x.queryCols[t.Name]; ok {
+			if cols, ok := x.cteCols[t.Name]; ok {
 				return cols
 			}
 			break
