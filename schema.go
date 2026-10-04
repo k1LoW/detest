@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -429,7 +430,8 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if v == nil {
 			continue
 		}
-		if t := def.types[col]; x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
+		t := def.types[col]
+		if x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
 			if l, ok := def.strs[col]; ok && l.members != nil {
 				stored, err := x.mysqlMember(table, col, l, v)
 				if err != nil {
@@ -448,7 +450,85 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			row[col] = stored
 			continue
 		}
-		switch t := def.types[col]; t {
+		// Unknown stands for a value detest could not compute, not one the
+		// statement wrote, so it is kept to be reported where it is read.
+		if name, ok := numberTypes[t]; ok && !x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
+			if !isNumber(v) && !isText(v) {
+				return x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, name, col))
+			}
+			if isOtherNumberText(v) {
+				return x.unsupported(fmt.Sprintf("number text in a form detest does not model, written to column %q", col))
+			}
+			if t == "numeric" && !exactAsFloat(v) {
+				return x.unsupported(fmt.Sprintf("a numeric value with more digits than a float keeps, written to column %q", col))
+			}
+			n, err := columnNumber(v, t)
+			if errors.Is(err, strconv.ErrRange) {
+				return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, fmt.Sprintf("value %q is out of range for type %s", v, name), relname(table), col, "")
+			}
+			if err != nil {
+				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
+			}
+			// Postgres sorts NaN above every number, which the comparisons
+			// do not, so a NaN would match ranges it is outside of.
+			if f, ok := toFloat(n); ok && math.IsNaN(f) {
+				return x.unsupported(fmt.Sprintf("NaN written to column %q", col))
+			}
+			if strings.HasPrefix(t, "int") {
+				if n, ok = integralNumber(n); !ok {
+					return x.unsupported(fmt.Sprintf("a number with a fraction written to the %s column %q", name, col))
+				}
+			}
+			// A numeric has no negative zero, while a float keeps one that
+			// still equals 0, which keys made from the value tell apart.
+			if f, ok := n.(float64); ok && f == 0 && math.Signbit(f) {
+				if t != "numeric" {
+					return x.unsupported(fmt.Sprintf("a negative zero written to column %q", col))
+				}
+				n = float64(0)
+			}
+			if l, ok := def.nums[col]; ok && t == "numeric" && !x.tx.db.kind.InnoDB() {
+				if n, err = scaledNumeric(n, l); err != nil {
+					return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, "numeric field overflow", relname(table), col, "")
+				}
+			}
+			row[col], v = n, n
+		}
+		if textTypes[t] {
+			// A number written to a text column is stored as its text, as
+			// Postgres's assignment does, so it compares as text afterwards.
+			// Postgres keeps the digits of a numeric literal (1.20) and a
+			// driver sends a float parameter as it formats it, which the
+			// value does not tell apart.
+			switch {
+			case isNumber(v):
+				if _, ok := integer(v); !ok {
+					return x.unsupported(fmt.Sprintf("a number with a fraction written to the text column %q", col))
+				}
+				v = fmt.Sprint(v)
+			case isOther(v) && v != sqlir.Unknown:
+				// The text a driver sends for a boolean or a time depends
+				// on the driver, which detest does not model.
+				return x.unsupported(fmt.Sprintf("a %T written to the text column %q", v, col))
+			}
+			// Bytes written to a text column are the text they hold, so
+			// they order as text.
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			if str, ok := v.(string); ok {
+				if l, limited := def.strs[col]; limited && l.maxLen > 0 {
+					stored, err := x.pgTextLimit(table, col, t, str, l.maxLen)
+					if err != nil {
+						return err
+					}
+					str = stored
+				}
+				row[col] = str
+			}
+			continue
+		}
+		switch t {
 		case "double", "float", "decimal":
 			if !x.tx.db.kind.InnoDB() {
 				continue
@@ -591,12 +671,75 @@ func (x *sqlExec) mysqlStoredText(t string, v any, fsp int) (any, error) {
 	return v, nil
 }
 
-// strLimit is what a MySQL string column holds: at most maxLen characters,
-// or, with members, one of them (ENUM) or a set of them (SET).
+// strLimit is what a string column holds: at most maxLen characters, or,
+// with members, one of them (a MySQL ENUM) or a set of them (SET).
 type strLimit struct {
 	maxLen  int
 	members []string
 	set     bool
+}
+
+// pgTextLimit is s as a Postgres varchar(n) or char(n) column stores it.
+// Characters past n are dropped when they are spaces and refused otherwise.
+// A char(n) pads a shorter value with spaces and then compares it without
+// them, which detest's plain strings do not follow, so only values of the
+// declared length are supported there, and 'a  ' in a char(3) is short too.
+func (x *sqlExec) pgTextLimit(table, col, t, s string, n int) (string, error) {
+	if utf8.RuneCountInString(s) > n {
+		if utf8.RuneCountInString(strings.TrimRight(s, " ")) > n {
+			name := fmt.Sprintf("character varying(%d)", n)
+			if t == "bpchar" {
+				name = fmt.Sprintf("character(%d)", n)
+			}
+			return "", x.tx.db.kind.Error(sqlir.StringDataRightTruncation, "value too long for type "+name, relname(table), col, "")
+		}
+		s = string([]rune(s)[:n])
+	}
+	if t == "bpchar" && utf8.RuneCountInString(strings.TrimRight(s, " ")) < n {
+		return "", x.unsupported(fmt.Sprintf("a value shorter than the char(%d) column %q, which Postgres pads with spaces", n, col))
+	}
+	return s, nil
+}
+
+// numLimit is a NUMERIC(p, s) column's precision and scale.
+type numLimit struct {
+	precision int
+	scale     int
+}
+
+// scaledNumeric is v as a NUMERIC(p, s) column stores it: rounded to s
+// places, half away from zero, and refused when more than p - s digits are
+// left before the point. The rounding reads the shortest decimal form of
+// the float rather than its binary value, so 1.005 rounds to 1.01 as the
+// text written does, not to 1.00 as the nearest float would.
+func scaledNumeric(v any, l numLimit) (any, error) {
+	f, ok := toFloat(v)
+	if !ok || math.IsNaN(f) {
+		return v, nil
+	}
+	if math.IsInf(f, 0) {
+		return nil, errors.New("numeric field overflow") // no finite precision holds it
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
+	if !ok {
+		return v, nil
+	}
+	unit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(l.scale)), nil)
+	num := new(big.Int).Mul(r.Num(), unit)
+	q, rem := new(big.Int).QuoRem(num, r.Denom(), new(big.Int))
+	if rem.Abs(rem).Lsh(rem, 1).Cmp(r.Denom()) >= 0 {
+		if num.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(l.precision)), nil)
+	if new(big.Int).Abs(q).Cmp(limit) >= 0 {
+		return nil, errors.New("numeric field overflow")
+	}
+	out, _ := new(big.Rat).SetFrac(q, unit).Float64()
+	return numericValue(out), nil
 }
 
 // mysqlMember is v as an ENUM or a SET column stores it: the members it
@@ -640,6 +783,113 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 		}
 	}
 	return strings.Join(out, ","), nil
+}
+
+// numberTypes are the number types by the name Postgres gives them in errors.
+var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
+
+// exactAsFloat reports whether a numeric, an integer or text, reads back as
+// the same number from the float detest keeps, so that two values Postgres tells
+// apart, such as 9007199254740992 and 9007199254740993, do not become one.
+// Text that is not a number is left to the conversion to report.
+func exactAsFloat(v any) bool {
+	if n, ok := integer(v); ok {
+		f := float64(n)
+		return f < 1<<63 && int64(f) == n
+	}
+	s, ok := v.(string)
+	if b, isBytes := v.([]byte); isBytes {
+		s, ok = string(b), true
+	}
+	if !ok {
+		return true
+	}
+	s = strings.TrimSpace(s)
+	want, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return true
+	}
+	f, err := parseNumber(s)
+	if err != nil {
+		// A number beyond a float's range, such as 1e400, is valid input
+		// that the float cannot keep, not a syntax error.
+		return !errors.Is(err, strconv.ErrRange)
+	}
+	got, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
+	return ok && got.Cmp(want) == 0
+}
+
+// integralNumber returns a float written to an integer column as an integer.
+// Postgres rounds a numeric literal with a fraction but refuses a float
+// parameter with one, and the value does not tell which of the two it came
+// from, so one with a fraction is refused.
+func integralNumber(v any) (any, bool) {
+	var f float64
+	switch n := v.(type) {
+	case float64:
+		f = n
+	case float32:
+		f = float64(n)
+	default:
+		return v, true
+	}
+	if f != math.Trunc(f) || math.Abs(f) >= 1<<53 {
+		return nil, false
+	}
+	return int64(f), true
+}
+
+// textTypes are the character types.
+var textTypes = map[string]bool{"text": true, "varchar": true, "bpchar": true}
+
+// columnNumber converts a value written to a column of the number type t to
+// the number it holds, as the type's input function does for text. The error
+// tells text that does not parse from a number out of range
+// (strconv.ErrRange). The
+// digits as written, such as the 0 of 1.50, are not kept.
+func columnNumber(v any, t string) (any, error) {
+	var s string
+	switch b := v.(type) {
+	case string:
+		s = b
+	case []byte:
+		s = string(b)
+	default:
+		switch t {
+		case "numeric":
+			return numericValue(v), nil
+		case "float4", "float8":
+			// An integer is stored as the float it becomes, so arithmetic
+			// on the column is float arithmetic (1 / 2 is 0.5).
+			if n, ok := integer(v); ok {
+				return float64(n), nil
+			}
+		}
+		return v, nil
+	}
+	s = strings.TrimSpace(s)
+	switch t {
+	case "int2", "int4", "int8":
+		return strconv.ParseInt(s, 10, 64)
+	case "float4", "float8":
+		return parseNumber(s)
+	}
+	f, err := parseNumber(s)
+	return numericValue(f), err
+}
+
+// numericValue is the representation of a numeric: a float, so arithmetic on
+// it is not integer arithmetic (1 / 2 is 0.5). Keeping an integer beyond 2^53
+// as an integer would make arithmetic on it integer arithmetic, so such a
+// value is refused before it gets here (exactAsFloat).
+func numericValue(v any) any {
+	if n, ok := integer(v); ok {
+		return float64(n)
+	}
+	if f, ok := v.(float64); ok && f == 0 {
+		return float64(0) // a numeric has no negative zero
+	}
+	return v
 }
 
 // validUUID accepts what Postgres's uuid input does: 32 hex digits, with or

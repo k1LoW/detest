@@ -3,8 +3,11 @@ package detest
 import (
 	"cmp"
 	"fmt"
+	"math"
+	"math/big"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +73,11 @@ func sameValue(a, b any) bool {
 	if bb, ok := b.([]byte); ok {
 		b = string(bb)
 	}
+	// Numbers are equal by value, as 1000000 and 1000000.0 format apart.
+	if isNumber(a) && isNumber(b) {
+		c, _ := compareValues(a, b)
+		return c == 0
+	}
 	if reflect.DeepEqual(a, b) {
 		return true
 	}
@@ -88,10 +96,34 @@ func compareValues(a, b any) (int, bool) {
 		}
 		return ta.Compare(tb), true
 	}
-	// Integers compare exactly: as float64 two BIGINTs above 2^53 may be equal.
+	// Postgres takes NaN as equal to NaN and greater than every other
+	// number, so ORDER BY and min/max place it as Postgres does.
+	if na, nb := isNaNValue(a), isNaNValue(b); na || nb {
+		if !isNumber(a) || !isNumber(b) {
+			return 0, false
+		}
+		switch {
+		case na && nb:
+			return 0, true
+		case na:
+			return 1, true
+		}
+		return -1, true
+	}
+	// Two integers are compared as integers, and an integer with a float
+	// exactly, as a float64 cannot tell apart integers above 2^53, such as
+	// adjacent snowflake IDs.
 	if ia, ok := integer(a); ok {
 		if ib, ok := integer(b); ok {
 			return cmp.Compare(ia, ib), true
+		}
+		if fb, ok := b.(float64); ok {
+			return new(big.Float).SetInt64(ia).Cmp(big.NewFloat(fb)), true
+		}
+	}
+	if fa, ok := a.(float64); ok {
+		if ib, ok := integer(b); ok {
+			return big.NewFloat(fa).Cmp(new(big.Float).SetInt64(ib)), true
 		}
 	}
 	fa, oka := toFloat(a)
@@ -106,6 +138,92 @@ func compareValues(a, b any) (int, bool) {
 		return 0, true
 	}
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)), true
+}
+
+// isOtherNumberText reports number text in a form Postgres reads for some
+// types but detest does not model: a non-decimal integer (0x10, 0o17, 0b101)
+// or a hexadecimal float (0x1p2), and digits grouped with underscores (1_000).
+// Postgres takes or refuses each by the target type, so detest refuses them
+// all rather than answer for one type as for another.
+// Text that is not a number at all, such as 'not_a_number', is left to fail
+// as invalid input.
+var (
+	prefixedNumberText   = regexp.MustCompile(`(?i)^\s*[+-]?0[xob][0-9a-f_.p+-]*\s*$`)
+	underscoreNumberText = regexp.MustCompile(`(?i)^\s*[+-]?[0-9]+(_[0-9]+)*(\.([0-9]+(_[0-9]+)*)?)?(e[+-]?[0-9]+(_[0-9]+)*)?\s*$`)
+)
+
+func isOtherNumberText(v any) bool {
+	var s string
+	switch t := derefValue(v).(type) {
+	case string:
+		s = t
+	case []byte:
+		s = string(t)
+	default:
+		return false
+	}
+	return prefixedNumberText.MatchString(s) || strings.Contains(s, "_") && underscoreNumberText.MatchString(s)
+}
+
+var (
+	decimalText = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
+	specialText = regexp.MustCompile(`(?i)^[+-]?(inf|infinity|nan)$`)
+)
+
+// parseNumber reads text in decimal or scientific notation, or as a special
+// value, the forms Postgres's float and numeric input both take. The others
+// strconv.ParseFloat takes are refused before (isOtherNumberText).
+func parseNumber(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if !decimalText.MatchString(s) && !specialText.MatchString(s) {
+		return 0, strconv.ErrSyntax
+	}
+	return strconv.ParseFloat(s, 64)
+}
+
+// valueKey is a key equal values share, for grouping, DISTINCT, set
+// operations and window partitions: numbers by value whatever their Go type,
+// as sameValue compares them, and values of different kinds apart.
+func valueKey(v any) string {
+	v = derefValue(v)
+	switch t := v.(type) {
+	case nil:
+		return "N"
+	case string:
+		return "s" + strconv.Quote(t)
+	case []byte:
+		return "s" + strconv.Quote(string(t))
+	case bool:
+		if t {
+			return "b1"
+		}
+		return "b0"
+	case time.Time:
+		return "t" + t.UTC().Format(time.RFC3339Nano)
+	}
+	if isNumber(v) {
+		if n, ok := integer(v); ok {
+			return "n" + strconv.FormatInt(n, 10)
+		}
+		if f, ok := toFloat(v); ok {
+			if math.IsNaN(f) {
+				return "nNaN"
+			}
+			return "n" + keyString(f)
+		}
+	}
+	return fmt.Sprintf("%T%#v", v, v)
+}
+
+// valuesKey is valueKey of several values.
+func valuesKey(b *strings.Builder, v any) {
+	b.WriteString(valueKey(v))
+	b.WriteByte(0x1f)
+}
+
+func isNaNValue(v any) bool {
+	f, ok := toFloat(v)
+	return ok && math.IsNaN(f)
 }
 
 func toFloat(v any) (float64, bool) {
@@ -165,4 +283,26 @@ func likeMatch(v any, pattern any, caseInsensitive bool) (match, dangling bool) 
 		return false, dangling
 	}
 	return re.MatchString(fmt.Sprint(v)), dangling
+}
+
+// valueKind names the kind of a value as the types of a set operation's
+// column tell them apart: text, number, boolean, time or other, and nothing
+// for NULL.
+func valueKind(v any) string {
+	v = derefValue(v)
+	switch {
+	case v == nil:
+		return ""
+	case isText(v):
+		return "text"
+	case isNumber(v):
+		return "number"
+	}
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case time.Time:
+		return "time"
+	}
+	return "other"
 }

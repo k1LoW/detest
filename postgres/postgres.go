@@ -426,6 +426,9 @@ func unqualify(e sqlir.Expr) {
 // columnDef converts a column with the constraints written on it.
 func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
 	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
+	if err := c.columnLimits(&col, d.TypeName); err != nil {
+		return col, nil, nil, err
+	}
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
 	}
@@ -636,6 +639,50 @@ func typeName(t *pg.TypeName) string {
 	return n
 }
 
+// columnLimits sets the length a varchar(n) or char(n) column holds and the
+// precision and scale of a numeric(p, s), from the type's modifiers. A
+// negative scale, which rounds to the left of the point, is not modeled.
+func (c *pgConv) columnLimits(col *sqlir.ColumnDef, t *pg.TypeName) error {
+	mods := typmods(t)
+	switch col.Type {
+	case "varchar":
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "bpchar":
+		// char without a length is char(1).
+		col.MaxLen = 1
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "numeric":
+		if len(mods) >= 1 {
+			col.Precision = mods[0]
+		}
+		if len(mods) == 2 {
+			col.Scale = mods[1]
+		}
+		if col.Scale < 0 {
+			return c.unsupported("a numeric column with a negative scale")
+		}
+	}
+	return nil
+}
+
+// typmods are the integers a type is declared with, as varchar(255) and
+// numeric(10, 2) carry them.
+func typmods(t *pg.TypeName) []int {
+	var out []int
+	for _, m := range t.GetTypmods() {
+		k := m.GetAConst()
+		if k == nil || k.GetIval() == nil {
+			return nil
+		}
+		out = append(out, int(k.GetIval().Ival))
+	}
+	return out
+}
+
 func isSerial(t *pg.TypeName) bool {
 	if t == nil || len(t.Names) == 0 {
 		return false
@@ -749,7 +796,16 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
-				ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true})
+				// USING transforms the rows by an expression, which the
+				// rewrite under the new type does not run.
+				if cd.RawDefault != nil {
+					return nil, c.unsupported("ALTER COLUMN TYPE with USING")
+				}
+				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true}
+				if err := c.columnLimits(&col, cd.TypeName); err != nil {
+					return nil, err
+				}
+				ch.Columns = append(ch.Columns, col)
 			}
 		case pg.AlterTableType_AT_SetNotNull:
 			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, NotNull: true, TypeOnly: true})
@@ -1497,6 +1553,37 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 	return nil, c.unsupported(fmt.Sprintf("expression %T", n.Node))
 }
 
+// textElements reports whether Postgres types an array of these elements as
+// text: each is a string literal, NULL, a parameter or a cast to text or
+// varchar, and one at least is a string or such a cast, or every one is NULL.
+// A number among them would make the array a number's instead.
+func textElements(elements []*pg.Node) bool {
+	str, nulls := false, len(elements) > 0
+	for _, el := range elements {
+		if tc := el.GetTypeCast(); tc != nil {
+			if _, ok := plainTextCast(tc, false, "text", "varchar"); !ok {
+				return false
+			}
+			str, nulls = true, false
+			continue
+		}
+		if el.GetParamRef() != nil {
+			nulls = false
+			continue
+		}
+		k := el.GetAConst()
+		switch {
+		case k == nil:
+			return false
+		case k.GetSval() != nil:
+			str, nulls = true, false
+		case !k.Isnull:
+			return false
+		}
+	}
+	return str || nulls
+}
+
 // isConstElement reports whether an array element is a constant or a
 // parameter, possibly cast to text or varchar as pg_dump writes it, whose
 // evaluation cannot fail and keeps its value. A number that becomes text,
@@ -1628,6 +1715,12 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		list, err := c.exprs(arr.GetAArrayExpr().Elements)
 		if err != nil {
 			return nil, err
+		}
+		// An array of string literals is a text[] in Postgres, not literals
+		// each resolved against x, so id = ANY (ARRAY['1']) compares an
+		// integer with text, which Postgres refuses.
+		if len(casts) == 0 && textElements(arr.GetAArrayExpr().Elements) {
+			casts = []string{"text"}
 		}
 		// A cast of the array casts each element, so it is kept on them:
 		// x = ANY ((ARRAY['1'])::text[]) compares x with the text '1'.

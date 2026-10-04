@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,6 +37,14 @@ func keyString(v any) string {
 		return strconv.FormatInt(v, 10)
 	case int:
 		return strconv.Itoa(v)
+	case float64:
+		// Equal numbers have one key whatever their Go type, as the
+		// comparisons take them as equal: a whole float is written as the
+		// integer, and -0 as 0.
+		if v == math.Trunc(v) && v >= -1<<63 && v < 1<<63 {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'g', -1, 64)
 	}
 	return fmt.Sprint(v)
 }
@@ -211,9 +220,11 @@ type tableDef struct {
 	indexes  []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
 	autoInc  map[string]bool       // MySQL's AUTO_INCREMENT columns
 	onUpdate map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
-	// strs are MySQL's limits on what a string column holds: CHAR(n) and
-	// VARCHAR(n) lengths, and ENUM and SET members.
+	// strs are the limits on what a string column holds: CHAR(n) and
+	// VARCHAR(n) lengths, and MySQL's ENUM and SET members.
 	strs map[string]strLimit
+	// nums are the Postgres NUMERIC(p, s) columns' precision and scale.
+	nums map[string]numLimit
 	// collation is a MySQL table's default collation, and ci the text
 	// columns whose collation is case-insensitive, which detest's exact
 	// string comparison does not follow.
@@ -562,6 +573,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.defaults, col)
 	delete(def.onUpdate, col)
 	delete(def.strs, col)
+	delete(def.nums, col)
 	delete(def.ci, col)
 	delete(def.fsp, col)
 	delete(def.generated, col)
@@ -591,6 +603,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if l, ok := def.strs[old]; ok {
 		delete(def.strs, old)
 		def.strs[nw] = l
+	}
+	if l, ok := def.nums[old]; ok {
+		delete(def.nums, old)
+		def.nums[nw] = l
 	}
 	if def.ci[old] {
 		delete(def.ci, old)
@@ -971,14 +987,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		case col.DropAutoIncrement:
 			delete(def.autoInc, col.Name)
 		}
-		if col.TypeOnly {
-			continue
-		}
 		if col.Type != "" {
-			if def.fsp == nil {
-				def.fsp = map[string]int{}
-			}
-			def.fsp[col.Name] = col.FSP
 			if col.MaxLen > 0 || col.Members != nil {
 				if def.strs == nil {
 					def.strs = map[string]strLimit{}
@@ -987,6 +996,29 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			} else {
 				delete(def.strs, col.Name)
 			}
+			if col.Precision > 0 {
+				if def.nums == nil {
+					def.nums = map[string]numLimit{}
+				}
+				def.nums[col.Name] = numLimit{precision: col.Precision, scale: col.Scale}
+			} else {
+				delete(def.nums, col.Name)
+			}
+			// ALTER COLUMN TYPE rewrites the rows under the new type: an
+			// integer becomes a numeric's float, a numeric(p, s) rounds
+			// what they hold, and a varchar(n) refuses what is too long.
+			if col.TypeOnly {
+				redefined = true
+			}
+		}
+		if col.TypeOnly {
+			continue
+		}
+		if col.Type != "" {
+			if def.fsp == nil {
+				def.fsp = map[string]int{}
+			}
+			def.fsp[col.Name] = col.FSP
 			// A whole column definition, which says ON UPDATE again or drops
 			// it, as MySQL's MODIFY and CHANGE do; ALTER COLUMN leaves it.
 			if col.OnUpdate != nil {
