@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -301,9 +302,14 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 				updated[c] = parent[x.tx.db.refColumns(ck.fk)[i]]
 				skip = ck.fk.Name // the parent's new key is not written yet
 			case action == "set default" && def != nil && def.defaults[c] != nil:
+				// The Unknown marker, as applyDefaults writes for a
+				// default detest cannot compute.
 				v, err := x.eval(def.defaults[c], &env{})
 				if err != nil {
-					return x.unsupportedExpr(err, "in the default ON ... SET DEFAULT writes")
+					if !errors.As(err, new(errUnknownExpr)) {
+						return err
+					}
+					v = sqlir.Unknown
 				}
 				updated[c] = v
 			default:

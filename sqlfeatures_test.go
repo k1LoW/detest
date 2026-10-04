@@ -153,3 +153,22 @@ func TestUnevaluableExpressionIsUnsupported(t *testing.T) {
 		t.Fatalf("got %d rows, v=%q, err=%v; want the table untouched", n, v, err)
 	}
 }
+
+// A CHECK detest cannot convert loads with the schema, and a write to its
+// table is refused rather than checked against nothing. A default detest
+// cannot convert loads as well, and a write that leaves the column out
+// stores the Unknown marker, so the INSERTs a dump's tables take still run.
+func TestUnconvertedSchemaExpressions(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE c (id int PRIMARY KEY, v text, CONSTRAINT c_v_check CHECK (v <> CURRENT_USER))`)
+	if _, err := db.Exec(`INSERT INTO c VALUES (1, 'a')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("insert into a table with an unconverted CHECK: got %v", err)
+	}
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, tags text[] DEFAULT ARRAY[]::text[])`)
+	mustExec(t, db, `INSERT INTO d (id) VALUES (1)`)
+	var tags string
+	if err := db.QueryRow(`SELECT tags FROM d WHERE id = 1`).Scan(&tags); err != nil || tags != Unknown {
+		t.Errorf("default detest cannot convert: got %q, %v; want the Unknown marker", tags, err)
+	}
+}
