@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/k1LoW/detest"
@@ -16,6 +17,7 @@ import (
 	"github.com/k1LoW/detest/mysql/mysqlerr"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 var (
@@ -30,7 +32,10 @@ var (
 func start() error {
 	myOnce.Do(func() {
 		ctx := context.Background()
-		myCtr, myErr = tcmysql.Run(ctx, "mysql:8.4", tcmysql.WithUsername("root"), tcmysql.WithPassword("detest"))
+		// The module waits 60 seconds for the server, which a machine busy
+		// with other test runs can take longer than to start it.
+		myCtr, myErr = tcmysql.Run(ctx, "mysql:8.4", tcmysql.WithUsername("root"), tcmysql.WithPassword("detest"),
+			testcontainers.WithWaitStrategyAndDeadline(10*time.Minute, wait.ForLog("port: 3306  MySQL Community Server"), wait.ForListeningPort("3306/tcp")))
 		if myErr != nil {
 			return
 		}
