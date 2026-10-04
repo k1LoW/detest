@@ -86,9 +86,23 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 	return tx.lockModeAs(lk, mode, key)
 }
 
-// lockModeAs is lockMode for a lock InnoDB keeps in the lock struct named
-// key, which a wait for it weighs.
+// lockModeAs is lockMode for a lock InnoDB keeps in the lock struct key,
+// which a wait for it weighs too.
 func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key lockStruct) error {
+	return tx.lockWith(lk, mode, key, key)
+}
+
+// lockImplicit takes the lock InnoDB holds implicitly on a record the
+// transaction writes, a row it inserts or an index entry it writes or
+// removes: no lock struct, and, as a statement's rollback undoes the write,
+// no lock left once it fails. A wait for it weighs as wait does.
+func (tx *Tx) lockImplicit(lk lockKey, wait lockStruct) error {
+	return tx.lockWith(lk, lockUpdate, lockStruct{}, wait)
+}
+
+// lockWith takes a lock that InnoDB keeps in the struct grant once granted,
+// none for an implicit lock, and in the struct wait while it waits.
+func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error {
 	table := lk.table
 	if name, ok := strings.CutPrefix(table, "\x00unique\x00"); ok {
 		table, _, _ = strings.Cut(name, "\x00")
@@ -109,6 +123,15 @@ func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key lockStruct) error {
 			} else if mode > cur {
 				holders[tx] = mode
 			}
+			if grant != (lockStruct{}) && tx.db.kind.InnoDB() {
+				tx.addStruct(grant)
+				if strings.HasPrefix(lk.table, "\x00") {
+					if tx.explicit == nil {
+						tx.explicit = map[lockKey]bool{}
+					}
+					tx.explicit[lk] = true
+				}
+			}
 			return nil
 		}
 		what := fmt.Sprintf("a lock on %s/%s", lk.table, lk.key)
@@ -116,7 +139,7 @@ func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key lockStruct) error {
 			return err
 		}
 		if cancelWait == nil {
-			cancelWait = tx.noteWait(key)
+			cancelWait = tx.noteWait(wait)
 			for _, o := range conflict {
 				o.convertImplicit(lk)
 			}
@@ -224,42 +247,19 @@ func innodbVictim(members []*Tx) *Tx {
 // implicit lock, no struct.
 func innodbWeight(t *Tx) int { return t.undo + len(t.heldStructs()) }
 
-// heldStructs is the set of lock structs innodbWeight counts.
+// heldStructs is the set of lock structs innodbWeight counts: those its
+// locks and waits were recorded in, and IX on each table it wrote, which an
+// insert's implicit locks leave as the only struct of the table.
 func (t *Tx) heldStructs() map[lockStruct]bool {
 	structs := maps.Clone(t.lockStructs)
 	if structs == nil {
 		structs = map[lockStruct]bool{}
 	}
-	// A table's intention locks are recorded as they are taken
-	// (noteTableLock), as which ones InnoDB keeps depends on their order; a
-	// write holds IX all the same.
-	note := func(table string) { structs[tableStruct(table, "IX")] = true }
-	for _, lk := range t.locks {
-		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
-			continue
-		}
-		if _, written := t.writes[lk]; written {
-			if _, committed := t.db.committed[lk.table][lk.key]; !committed {
-				continue // an inserted row's lock is implicit
-			}
-		}
-		mode := t.db.locks[lk][t]
-		searched := false
-		for k := range t.lockStructs {
-			if k.table == lk.table && k.index == "PRIMARY" && k.mode == lockClass(mode) && k.wait == 0 {
-				searched = true
-				break
-			}
-		}
-		if !searched {
-			structs[structKey(lk.table, "PRIMARY", mode, "record")] = true
-		}
-	}
 	for lk := range t.writes {
-		note(lk.table)
+		structs[tableStruct(lk.table, "IX")] = true
 	}
 	for lk := range t.deleted {
-		note(lk.table)
+		structs[tableStruct(lk.table, "IX")] = true
 	}
 	return structs
 }
@@ -361,13 +361,10 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 		if i < 0 {
 			return
 		}
-		index := uniqueIndex(&def.uniques[i])
-		for k := range tx.lockStructs {
-			if k.table == table && k.index == index && k.mode == "X" && k.wait == 0 {
-				return // a search on the index locked it explicitly
-			}
+		if tx.explicit[lk] {
+			return // a search or a check on the index locked it explicitly
 		}
-		key = structKey(table, index, lockUpdate, "record")
+		key = structKey(table, uniqueIndex(&def.uniques[i]), lockUpdate, "record")
 	} else {
 		if _, written := tx.writes[lk]; !written {
 			return

@@ -538,7 +538,8 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			}
 		}
 		keys = append(keys, lockKey{table, r.Key()})
-		if index == "PRIMARY" {
+		// The record past the range is locked on the searched index alone.
+		if index == "PRIMARY" || !matched {
 			structs = append(structs, structKey(table, index, mode, k))
 		} else {
 			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))

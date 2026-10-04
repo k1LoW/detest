@@ -164,7 +164,9 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		if dup, err := x.sharedDuplicate(table, key, self); err != nil || dup != nil {
 			return dup, err
 		}
-		if err := x.tx.lock(lockKey{table, key}); err != nil {
+		// No row holds the key (sharedDuplicate locked one that does), so
+		// this is the new row's own lock, implicit in InnoDB.
+		if err := x.tx.lockImplicit(lockKey{table, key}, lockStruct{}); err != nil {
 			return nil, err
 		}
 		if ex, found := x.tx.view(table, key); found && key != self {
@@ -193,7 +195,7 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 	}
 	// A writer of the same value that has not finished holds the record
 	// implicitly, and InnoDB's duplicate check waits for it in share mode.
-	if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockUpdate, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
+	if err := x.tx.lockImplicit(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 		return nil, err
 	}
 	return x.uniqueHolder(table, u, vals, self)
@@ -261,7 +263,7 @@ func (x *sqlExec) releaseEntries(table string, old, row Row) error {
 				continue
 			}
 		}
-		if err := x.tx.lock(uniqueLock(table, u, ov)); err != nil {
+		if err := x.tx.lockImplicit(uniqueLock(table, u, ov), lockStruct{}); err != nil {
 			return err
 		}
 	}
@@ -359,7 +361,7 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	if nlk == lk {
 		return lk, nil
 	}
-	if err := x.tx.lock(nlk); err != nil {
+	if err := x.tx.lockImplicit(nlk, lockStruct{}); err != nil {
 		return lk, err
 	}
 	if _, exists := x.tx.view(table, nlk.key); exists {

@@ -1401,6 +1401,9 @@ type Tx struct {
 	lockStructs map[lockStruct]bool
 	// waits counts the lock waits, each a lock struct of its own.
 	waits int
+	// explicit is the unique index entries the transaction locked
+	// explicitly, by a search or a check, as opposed to the ones it wrote.
+	explicit map[lockKey]bool
 	// put is the rows the running statement put into a primary key, which
 	// leave a gap lock if the statement fails.
 	put []putRow
@@ -1500,7 +1503,7 @@ func (tx *Tx) Insert(table string, row Row) error {
 	}
 	lk := lockKey{table, row.Key()}
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
-	if err := tx.lock(lk); err != nil {
+	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
 		return err
 	}
 	if _, exists := tx.view(table, row.Key()); exists {
@@ -1779,7 +1782,7 @@ func (tx *Tx) releaseInsertLocks(from int) {
 	for _, lk := range since {
 		_, written := tx.writes[lk]
 		_, committed := tx.db.committed[lk.table][lk.key]
-		if lk.key == gapWaitKey || written || committed {
+		if lk.key == gapWaitKey || written || committed || tx.explicit[lk] {
 			tx.locks = append(tx.locks, lk)
 		} else {
 			gone = append(gone, lk)

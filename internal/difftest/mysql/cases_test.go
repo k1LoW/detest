@@ -461,6 +461,40 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// The duplicate check's shared lock on the unique index record stays
+		// after the insert fails, so a write of that key waits.
+		Name:   "a failed insert keeps its duplicate check's lock",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'a')`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(1, `UPDATE u SET code = 'q' WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code, v FROM u ORDER BY id`),
+		},
+	},
+	{
+		// The foreign key check of a row the failed statement inserted keeps
+		// its lock on the parent's index record.
+		Name: "a failed insert keeps its foreign key check's lock",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a'), (1, 'b')`),
+			difftest.S(1, `UPDATE p SET code = 'z' WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code FROM p ORDER BY id`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

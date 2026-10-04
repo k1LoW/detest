@@ -1333,7 +1333,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 			}
 		}
-		if err := x.tx.lock(lk); err != nil {
+		if err := x.tx.lockImplicit(lk, lockStruct{}); err != nil {
 			return nil, err
 		}
 		// The row lock may have waited, and a gap lock taken meanwhile

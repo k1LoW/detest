@@ -150,7 +150,7 @@ func (tx *Tx) markStatement() stmtMark {
 func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	tx.aborted = false
 	if deadlock {
-		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo, tx.lockStructs = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0, nil
+		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo, tx.lockStructs, tx.explicit = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0, nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
 			tx.releaseLocks(tx.locks)
