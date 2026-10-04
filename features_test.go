@@ -923,3 +923,22 @@ func TestIdleLoopRetriesAfterADeadlockSurvivorCommitsUnchanged(t *testing.T) {
 		})
 	})
 }
+// A loop whose idle tick spawns a process that changes a row is woken by it
+// with no progress in between, so its runs end, cut at MaxIdleTicks.
+func TestIdleLoopSpawningWorkIsCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE runs (id text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO runs VALUES ('r', 0)`) })
+		s.Loop("scheduler", 1, func(p *Proc) error {
+			p.Spawn("runner", func(c *Proc) error {
+				_, err := db.ExecContext(c.Context(), `UPDATE runs SET n = n + 1 WHERE id = 'r'`)
+				return err
+			})
+			return ErrIdle
+		})
+	}, []Option{MaxRuns(100000)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns == 0 {
+		t.Fatalf("want a complete exploration with runs cut, got %s", res.report())
+	}
+}

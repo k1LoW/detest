@@ -947,7 +947,7 @@ func (p *Proc) main() {
 	p.r.gidMu.Lock()
 	p.r.byGid[p.gid] = p
 	p.r.gidMu.Unlock()
-	<-p.resume
+	p.wait() // a run that ends before the process first runs aborts it here
 	switch p.pt.kind {
 	case trigMessage:
 		p.err = p.pt.msgFn(p, p.msg.msg)
