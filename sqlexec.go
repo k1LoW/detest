@@ -58,6 +58,10 @@ type sqlExec struct {
 	// frozen are the rows of the tables a statement reads, as they were
 	// when it began, which its queries read instead of the latest.
 	frozen map[string][]Row
+	// queryCols are the output columns of the queries the statement ran,
+	// in order, by the query (a *sqlir.SelectStmt) or by CTE name, for a *
+	// over them.
+	queryCols map[any][]string
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -567,7 +571,7 @@ func (x *sqlExec) withCTEs(ctes []sqlir.CTE, outer *env) error {
 		if err != nil {
 			return err
 		}
-		_ = cols
+		x.noteCols(cte.Name, cols)
 		x.ctes[cte.Name] = rows
 	}
 	return nil
@@ -580,7 +584,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 		cols, rows, err := x.evalSelect(t.Sub, outer)
 		if err == nil && len(t.Columns) > 0 {
 			rows = renameColumns(rows, cols, t.Columns) // AS alias(a, b)
+			cols = renamedCols(cols, t.Columns)
 		}
+		x.noteCols(t.Sub, cols)
 		return alias, rows, false, err
 	}
 	if t.Func != nil {
@@ -603,7 +609,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 		cols, rows, err := x.evalSelect(v.View, nil)
 		if err == nil && len(v.ViewColumns) > 0 {
 			rows = renameColumns(rows, cols, v.ViewColumns)
+			cols = renamedCols(cols, v.ViewColumns)
 		}
+		x.noteCols(v.View, cols)
 		return alias, rows, false, err
 	}
 	if x.consistent {
@@ -866,55 +874,13 @@ func (x *sqlExec) evalBound(e sqlir.Expr, what string, outer *env) (int, error) 
 }
 
 func (x *sqlExec) project(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {
-	var cols []string
-	starCols := func(t sqlir.Target) []string {
-		set := map[string]bool{}
-		for _, r := range rows {
-			src := r.merged
-			if t.Table != "" {
-				src = r.by[t.Table]
-			}
-			for k := range src {
-				if k != "_key" {
-					set[k] = true
-				}
-			}
-		}
-		var all []string
-		for k := range set {
-			all = append(all, k)
-		}
-		sort.Strings(all)
-		return all
-	}
-	for _, t := range sel.Targets {
-		if t.Star {
-			cols = append(cols, starCols(t)...)
-			continue
-		}
-		cols = append(cols, targetName(t))
-	}
+	ocols := x.outputCols(sel, rows)
+	cols := outKeys(ocols)
 	var out []Row
 	for _, r := range rows {
-		o := Row{}
-		for _, t := range sel.Targets {
-			if t.Star {
-				src := r.merged
-				if t.Table != "" {
-					src = r.by[t.Table]
-				}
-				for k, v := range src {
-					if k != "_key" {
-						o[k] = v
-					}
-				}
-				continue
-			}
-			v, err := x.eval(t.Expr, r.env(outer))
-			if err != nil {
-				return nil, nil, err
-			}
-			o[targetName(t)] = v
+		o, err := outputRow(ocols, r, func(i int) (any, error) { return x.eval(sel.Targets[i].Expr, r.env(outer)) })
+		if err != nil {
+			return nil, nil, err
 		}
 		if !sel.Distinct || !seenDistinct(out, o, cols) {
 			out = append(out, o)
