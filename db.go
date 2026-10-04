@@ -1394,6 +1394,9 @@ type Tx struct {
 	atomic         bool
 	block          bool // begun with BeginTx, so SAVEPOINT may be used
 	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
+	// undo counts the undo records of the transaction's row changes, which
+	// InnoDB weighs a deadlock victim by.
+	undo int
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1432,6 +1435,7 @@ func (db *DB) newTx(p *Proc) *Tx {
 type savepoint struct {
 	name    string
 	pending *bool // the transaction's pendingLockTimeout
+	undo    int   // and the undo records it had written
 	timeout bool  // and its lockTimeout
 	writes  map[lockKey]Row
 	deleted map[lockKey]bool
@@ -1687,7 +1691,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
-		sp.pending, sp.timeout = tx.pendingLockTimeout, tx.lockTimeout
+		sp.pending, sp.timeout, sp.undo = tx.pendingLockTimeout, tx.lockTimeout, tx.undo
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1712,7 +1716,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
-	tx.pendingLockTimeout = sp.pending
+	tx.pendingLockTimeout, tx.undo = sp.pending, sp.undo
 	if !tx.db.kind.InnoDB() {
 		tx.lockTimeout = sp.timeout // MySQL's setting is the session's, which no rollback undoes
 	}

@@ -303,6 +303,7 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	}
 	delete(x.tx.writes, lk)
 	x.tx.deleted[lk] = true
+	x.tx.undo++ // a new primary key deletes the old entry and inserts a new one
 	delete(x.tx.deleted, nlk)
 	if x.tx.moved == nil {
 		x.tx.moved = map[lockKey]string{}

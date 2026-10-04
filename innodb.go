@@ -127,10 +127,11 @@ type stmtMark struct {
 	moved    map[lockKey]string
 	deferred int
 	locks    int
+	undo     int
 }
 
 func (tx *Tx) markStatement() stmtMark {
-	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks)}
+	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks), undo: tx.undo}
 	for k, v := range tx.writes {
 		m.writes[k] = v.clone()
 	}
@@ -145,7 +146,7 @@ func (tx *Tx) markStatement() stmtMark {
 func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	tx.aborted = false
 	if deadlock {
-		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil
+		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
 			tx.releaseLocks(tx.locks)
@@ -154,7 +155,7 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.locks = nil
 		return
 	}
-	tx.writes, tx.deleted, tx.moved, tx.deferred = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred]
+	tx.writes, tx.deleted, tx.moved, tx.deferred, tx.undo = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred], m.undo
 	tx.releaseInsertLocks(m.locks)
 }
 

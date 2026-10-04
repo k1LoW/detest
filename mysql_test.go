@@ -4739,18 +4739,14 @@ func TestMySQLDoubleColumnsAndVolatileNullif(t *testing.T) {
 	}
 }
 
-// InnoDB rolls back the lighter transaction of a deadlock, by the rows it
-// changed and the locks it holds, and of equal ones the one that closed the
-// cycle, which comes first.
+// InnoDB rolls back the lighter transaction of a deadlock, by the undo
+// records it wrote and the lock structs it holds, and of equal ones the one
+// that closed the cycle, which comes first.
 func TestInnoDBDeadlockVictim(t *testing.T) {
 	s := newSim(t)
 	_, store := s.DB("app", mysqlBin())
-	tx := func(writes int) *Tx {
-		x := &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
-		for i := range writes {
-			x.writes[lockKey{"t", fmt.Sprint(i)}] = Row{}
-		}
-		return x
+	tx := func(undo int) *Tx {
+		return &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, undo: undo}
 	}
 	closer, other := tx(1), tx(1)
 	if v := innodbVictim([]*Tx{closer, other}); v != closer {

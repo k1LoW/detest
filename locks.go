@@ -3,6 +3,7 @@ package detest
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -174,29 +175,102 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 }
 
 // innodbVictim is the transaction InnoDB rolls back to break a deadlock
-// among members, the first of which closed the cycle: the lightest, by the
-// rows it changed and the locks it holds, and of equal ones the one that
-// closed the cycle, as InnoDB's detector picks it the moment the wait
-// begins, with no timing involved.
+// among members, the first of which closed the cycle: the lightest by
+// innodbWeight, and of equal ones the one that closed the cycle, as InnoDB's
+// detector picks it the moment the wait begins, with no timing involved.
 func innodbVictim(members []*Tx) *Tx {
-	weight := func(t *Tx) int {
-		groups := map[lockKey]bool{} // a table lock and a lock struct per mode
-		for _, lk := range t.locks {
-			if lk.key == gapWaitKey {
-				continue
-			}
-			groups[lockKey{lk.table, ""}] = true
-			groups[lockKey{lk.table, fmt.Sprint(t.db.locks[lk][t])}] = true
-		}
-		return len(t.writes) + len(t.deleted) + len(groups)
-	}
-	v := members[0]
+	v, vw := members[0], innodbWeight(members[0])
 	for _, m := range members[1:] {
-		if weight(m) < weight(v) {
-			v = m
+		if w := innodbWeight(m); w < vw {
+			v, vw = m, w
 		}
 	}
 	return v
+}
+
+// innodbWeight is a transaction's weight as InnoDB's deadlock detector takes
+// it: the undo records it wrote and the lock structs it holds. InnoDB keeps a
+// lock struct per table and table lock mode, and per index page, mode and
+// kind of record lock (the record alone, or next-key with the gap before
+// it). detest has no pages, so a table's records count as one page; a row
+// the transaction inserted holds an implicit lock, no struct.
+func innodbWeight(t *Tx) int {
+	structs := map[string]bool{}
+	class := func(m lockMode) string {
+		if m == lockShare || m == lockKeyShare {
+			return "S"
+		}
+		return "X"
+	}
+	tableMode := map[string]string{} // the strongest record lock on each table
+	note := func(table, mode string) {
+		if tableMode[table] != "X" {
+			tableMode[table] = mode
+		}
+	}
+	nextKey := map[string]bool{} // tables whose primary key records a range search locked
+	for _, g := range t.db.gaps {
+		if g.tx != t {
+			continue
+		}
+		def := t.db.defs[g.table]
+		primary := len(g.cols) == 0 || def != nil && slices.Equal(g.cols, def.pk)
+		mode := "X"
+		if m, ok := t.tableModes()[g.table]; ok {
+			mode = m
+		}
+		if primary {
+			structs["R|"+g.table+"|PRIMARY|"+mode+"|next-key"] = true
+			nextKey[g.table] = true
+		} else {
+			structs["R|"+g.table+"|"+strings.Join(g.cols, ",")+"|"+mode+"|next-key"] = true
+			structs["R|"+g.table+"|PRIMARY|"+mode+"|record"] = true
+		}
+		note(g.table, mode)
+	}
+	for _, lk := range t.locks {
+		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
+			continue
+		}
+		if _, written := t.writes[lk]; written {
+			if _, committed := t.db.committed[lk.table][lk.key]; !committed {
+				continue // an inserted row's lock is implicit
+			}
+		}
+		mode := class(t.db.locks[lk][t])
+		note(lk.table, mode)
+		if !nextKey[lk.table] {
+			structs["R|"+lk.table+"|PRIMARY|"+mode+"|record"] = true
+		}
+	}
+	for lk := range t.writes {
+		note(lk.table, "X")
+	}
+	for lk := range t.deleted {
+		note(lk.table, "X")
+	}
+	for table, mode := range tableMode {
+		structs["T|"+table+"|I"+mode] = true
+	}
+	return t.undo + len(structs)
+}
+
+// tableModes is the strongest record lock t holds on each table, X or S.
+func (t *Tx) tableModes() map[string]string {
+	out := map[string]string{}
+	for _, lk := range t.locks {
+		if lk.key == gapWaitKey {
+			continue
+		}
+		m := "S"
+		if mode := t.db.locks[lk][t]; mode != lockShare && mode != lockKeyShare {
+			m = "X"
+		}
+		if out[lk.table] != "X" {
+			out[lk.table] = m
+		}
+	}
+	return out
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

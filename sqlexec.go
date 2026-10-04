@@ -1259,6 +1259,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			x.tx.writes[lk] = updated
+			if !sameRow(cur, updated) {
+				x.tx.undo++
+			}
 			if x.tx.p != nil {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
@@ -1337,6 +1340,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
+		x.tx.undo++
 		out.affected++
 		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {
@@ -1656,6 +1660,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		x.tx.writes[lk] = updated
+		if !sameRow(cur, updated) {
+			x.tx.undo++ // InnoDB writes no undo record for an update that changes nothing
+		}
 		matched++
 		if !x.tx.db.kind.InnoDB() || !sameRow(cur, updated) {
 			// MySQL counts the rows an UPDATE changed, as go-sql-driver
@@ -1764,6 +1771,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		done[key] = true
 		delete(x.tx.writes, lk)
 		x.tx.deleted[lk] = true
+		x.tx.undo++
 		if err := x.onParentDelete(table, cur); err != nil {
 			return nil, err
 		}

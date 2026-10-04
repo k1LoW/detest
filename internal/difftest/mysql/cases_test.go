@@ -147,6 +147,43 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// Each update of a row writes an undo record, so the transaction
+		// that updated one row three times weighs more than the one that
+		// updated two rows once.
+		Name:   "deadlock victim weighs every update of a row",
+		Schema: stockSchema, Seed: []string{`INSERT INTO stock VALUES ('apple', 1), ('pear', 1), ('plum', 1)`}, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `UPDATE stock SET n = 2 WHERE sku = 'apple'`),
+			difftest.S(0, `UPDATE stock SET n = 3 WHERE sku = 'apple'`),
+			difftest.S(0, `UPDATE stock SET n = 4 WHERE sku = 'apple'`),
+			difftest.S(1, `UPDATE stock SET n = 2 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 2 WHERE sku = 'plum'`),
+			difftest.S(1, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// The range read's next-key locks are lock structs of their own,
+		// which weigh too.
+		Name:   "deadlock victim weighs the locks of a range read",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.Q(0, `SELECT id FROM items WHERE k BETWEEN 1 AND 15 FOR UPDATE`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 10`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
