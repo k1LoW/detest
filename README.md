@@ -70,11 +70,11 @@ func TestReserve(t *testing.T) {
             1  alice#1  shop: begin   (stock_test.go:15)
             2  alice#1  shop: select stock where sku = apple   (stock_test.go:21)
             3  alice#1  shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            4  alice#1  shop: commit   (stock_test.go:30)
-            5  bob#2    shop: begin   (stock_test.go:15)
-            6  bob#2    shop: select stock where sku = apple   (stock_test.go:21)
-            7  bob#2    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            8  alice#1  done
+            4  bob#2    shop: begin   (stock_test.go:15)
+            5  bob#2    shop: select stock where sku = apple   (stock_test.go:21)
+            6  alice#1  shop: commit   (stock_test.go:30)
+            7  alice#1  done
+            8  bob#2    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
             9  bob#2    shop: commit   (stock_test.go:30)
            10  bob#2    done
 ```
