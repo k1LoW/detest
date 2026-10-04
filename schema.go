@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -314,7 +315,7 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 // conflictTargets returns the unique indexes an INSERT ... ON CONFLICT (cols)
 // arbitrates on: the one over exactly cols, or every one, primary key
 // included, without a column list.
-func (x *sqlExec) conflictTargets(table string, cols []string) ([]sqlir.UniqueDef, error) {
+func (x *sqlExec) conflictTargets(table string, oc *sqlir.OnConflict) ([]sqlir.UniqueDef, error) {
 	def := x.tx.db.defs[table]
 	var all []sqlir.UniqueDef
 	if len(def.pk) > 0 {
@@ -325,24 +326,55 @@ func (x *sqlExec) conflictTargets(table string, cols []string) ([]sqlir.UniqueDe
 		all = append(all, pk)
 	}
 	all = append(all, def.uniques...)
-	if len(cols) == 0 {
+	if oc.Constraint != "" {
+		for _, u := range all {
+			if u.Name == oc.Constraint || u.Primary && oc.Constraint == x.tx.db.pkConstraint(table) {
+				return []sqlir.UniqueDef{u}, nil
+			}
+		}
+		return nil, x.unsupported(fmt.Sprintf("ON CONFLICT ON CONSTRAINT %q, which is no unique constraint of the table", oc.Constraint))
+	}
+	if len(oc.Elems) == 0 {
+		if !oc.DoNothing && !x.tx.db.kind.InnoDB() {
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, "ON CONFLICT DO UPDATE requires inference specification or constraint name", relname(table), "", "")
+		}
 		return all, nil
 	}
+	// Postgres arbitrates on every unique index whose elements are the
+	// inference elements in any order, a partial one only when the
+	// inference predicate implies its own.
+	var out []sqlir.UniqueDef
 	for _, u := range all {
-		if sameColumns(u, cols) {
-			return []sqlir.UniqueDef{u}, nil
+		if !sameElems(u.Elems, oc.Elems) {
+			continue
 		}
+		if u.Where != nil {
+			if oc.InferWhere == nil {
+				continue
+			}
+			if !reflect.DeepEqual(u.Where, oc.InferWhere) {
+				// Postgres proves the implication; detest only sees an
+				// identical predicate, and would otherwise pick other
+				// arbiters than the server.
+				return nil, x.unsupported("ON CONFLICT ... WHERE with a predicate other than the partial index's own")
+			}
+		}
+		out = append(out, u)
 	}
-	return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, "there is no unique or exclusion constraint matching the ON CONFLICT specification", relname(table), strings.Join(cols, ", "), "")
+	if len(out) == 0 {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, "there is no unique or exclusion constraint matching the ON CONFLICT specification", relname(table), strings.Join(oc.Columns, ", "), "")
+	}
+	return out, nil
 }
 
-func sameColumns(u sqlir.UniqueDef, cols []string) bool {
-	if len(u.Elems) != len(cols) || u.Where != nil {
+// sameElems reports whether a unique index's elements are the inference
+// elements, in any order.
+func sameElems(index, infer []sqlir.Expr) bool {
+	if len(index) != len(infer) {
 		return false
 	}
-	for _, e := range u.Elems {
-		c, ok := e.(*sqlir.ColumnRef)
-		if !ok || !strings.Contains(","+strings.Join(cols, ",")+",", ","+c.Column+",") {
+	for _, e := range index {
+		if !slices.ContainsFunc(infer, func(f sqlir.Expr) bool { return reflect.DeepEqual(e, f) }) {
 			return false
 		}
 	}

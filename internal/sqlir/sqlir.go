@@ -146,10 +146,17 @@ type InsertStmt struct {
 // OnConflict is ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ... WHERE ...
 // (MySQL's INSERT IGNORE and ON DUPLICATE KEY UPDATE map here too).
 type OnConflict struct {
-	Columns   []string
-	DoNothing bool
-	Set       []Assignment
-	Where     Expr
+	Columns []string
+	// Elems are Postgres's inference elements, the columns and expressions
+	// of the unique index to arbitrate on, when one of them is not a plain
+	// column; Where is the predicate that infers a partial one, and
+	// Constraint names the constraint of ON CONFLICT ON CONSTRAINT.
+	Elems      []Expr
+	InferWhere Expr
+	Constraint string
+	DoNothing  bool
+	Set        []Assignment
+	Where      Expr
 }
 
 // UpdateStmt is UPDATE ... SET ... [FROM ...] WHERE ... [RETURNING ...].

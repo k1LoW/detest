@@ -1138,6 +1138,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		generated bool
 	}
 	ids := make([]autoID, len(rows))
+	// Postgres refuses a DO UPDATE of a row this statement already inserted
+	// or updated, where MySQL's ON DUPLICATE KEY UPDATE applies it again.
+	written := map[string]bool{}
 	// InnoDB reserves the values of an INSERT ... VALUES, whose rows it
 	// knows, before inserting any, so they are consecutive however other
 	// inserts interleave, and a row an error stops still used its value. An
@@ -1182,7 +1185,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		var lk lockKey
 		for ins.OnConflict != nil {
 			var err error
-			if existing, err = x.findConflict(table, ins.OnConflict.Columns, row); err != nil {
+			if existing, err = x.findConflict(table, ins.OnConflict, row); err != nil {
 				return nil, err
 			}
 			if existing == nil {
@@ -1208,7 +1211,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			// The row may no longer conflict after the wait, when its
 			// arbiter value changed: then the insert is tried again too.
-			again, err := x.findConflict(table, ins.OnConflict.Columns, row)
+			again, err := x.findConflict(table, ins.OnConflict, row)
 			if err != nil {
 				return nil, err
 			}
@@ -1223,6 +1226,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 					x.tx.p.r.note(x.tx.p, "on conflict do nothing: row skipped")
 				}
 				continue
+			}
+			if !x.tx.db.kind.InnoDB() && written[lk.key] {
+				return nil, x.tx.db.kind.Error(sqlir.CardinalityViolation, "ON CONFLICT DO UPDATE command cannot affect row a second time", relname(table), "", "")
 			}
 			// DO UPDATE: apply SET to the locked row with EXCLUDED bound to
 			// the proposed row.
@@ -1278,6 +1284,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			x.tx.writes[lk] = updated
+			written[lk.key] = true
 			if x.tx.p != nil {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
@@ -1356,6 +1363,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
+		written[lk.key] = true
 		out.affected++
 		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {
@@ -1367,9 +1375,10 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 
 // findConflict returns the existing row the proposed row collides with: on
 // the conflict columns when given, otherwise on the key.
-func (x *sqlExec) findConflict(table string, cols []string, row Row) (Row, error) {
+func (x *sqlExec) findConflict(table string, oc *sqlir.OnConflict, row Row) (Row, error) {
+	cols := oc.Columns
 	if x.tx.db.defs[table] != nil {
-		targets, err := x.conflictTargets(table, cols)
+		targets, err := x.conflictTargets(table, oc)
 		if err != nil {
 			return nil, err
 		}

@@ -1208,8 +1208,31 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 	if oc := s.OnConflictClause; oc != nil {
 		conf := &sqlir.OnConflict{}
 		if oc.Infer != nil {
-			for _, ie := range oc.Infer.IndexElems {
-				conf.Columns = append(conf.Columns, ie.GetIndexElem().GetName())
+			conf.Constraint = oc.Infer.Conname
+			exprs := false
+			for _, n := range oc.Infer.IndexElems {
+				ie := n.GetIndexElem()
+				if ie.Expr == nil {
+					conf.Columns = append(conf.Columns, ie.Name)
+					conf.Elems = append(conf.Elems, &sqlir.ColumnRef{Column: ie.Name})
+					continue
+				}
+				e, err := c.expr(ie.Expr)
+				if err != nil {
+					return nil, err
+				}
+				exprs = true
+				conf.Elems = append(conf.Elems, e)
+			}
+			if exprs {
+				conf.Columns = nil
+			}
+			if oc.Infer.WhereClause != nil {
+				w, err := c.expr(oc.Infer.WhereClause)
+				if err != nil {
+					return nil, err
+				}
+				conf.InferWhere = w
 			}
 		}
 		switch oc.Action {
