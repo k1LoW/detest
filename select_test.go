@@ -455,6 +455,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 		want  []string
 	}{
 		{`SELECT id FROM t WHERE id = '01'`, nil, []string{"1"}},
+		{`SELECT id FROM t WHERE id = $1`, []any{"02"}, []string{"2"}},
 		{`SELECT id FROM t WHERE ratio > 1 ORDER BY id`, nil, []string{"2"}},
 		{`SELECT id FROM t WHERE amount < 100 ORDER BY id`, nil, []string{"1", "2"}},
 		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99"}},
@@ -476,6 +477,37 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
+	}
+}
+
+// Postgres has no operator comparing text with a number, and resolves only an
+// untyped literal or a parameter to the other side's type.
+func TestTextComparedWithNumber(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, '1')`)
+	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE name = 1`,
+		`SELECT count(*) FROM t WHERE id = name`,
+		`SELECT count(*) FROM t WHERE name::text < 2`,
+		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`SELECT count(*) FROM t WHERE name = $1`, []any{int64(1)}},
+		{`SELECT count(*) FROM t WHERE id = $1`, []any{"1"}},
+		{`SELECT count(*) FROM t WHERE name = '1'`, nil},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != "1" {
+			t.Errorf("%s: got %v, want 1", tc.query, got)
 		}
 	}
 }

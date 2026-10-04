@@ -1917,11 +1917,11 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				// row's comparison unknown unless another column differs.
 				match, unknown := len(cols) == len(lhs), false
 				for i := 0; match && i < len(cols); i++ {
-					li, err := x.untyped(lhsExprs[i], lhs[i], r[cols[i]])
+					li, ri, err := x.untypedPair(lhsExprs[i], lhs[i], nil, r[cols[i]])
 					if err != nil {
 						return nil, err
 					}
-					a, b := x.comparable(li, r[cols[i]])
+					a, b := x.comparable(li, ri)
 					switch {
 					case derefValue(a) == nil || derefValue(b) == nil:
 						unknown = true
@@ -2078,12 +2078,14 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 }
 
 // untypedPair resolves the operands of a comparison as Postgres resolves an
-// untyped string literal: to the type of the other operand when that is a
-// number, so '01' = 1 holds. Only a literal is resolved, as Postgres
-// coerces nothing else. A text column or a cast compared with a number is an
-// error there, which detest does not raise, since a value does not carry its
-// column's type.
+// untyped string literal or a parameter: to the type of the other operand
+// when that is a number, so '01' = 1 holds. Any other text compared with a
+// number is unsupported, as Postgres has no operator for it and fails the
+// statement, which detest cannot do before it reaches a row.
 func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, any, error) {
+	if x.tx.db.kind.InnoDB() {
+		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
+	}
 	l, err := x.untyped(le, l, r)
 	if err != nil {
 		return nil, nil, err
@@ -2092,23 +2094,51 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if err != nil {
 		return nil, nil, err
 	}
+	_, lp := le.(*sqlir.Param)
+	_, rp := re.(*sqlir.Param)
+	// A parameter compared with text takes the text type, so only a value of
+	// another expression makes the comparison an error.
+	if !lp && !rp && (isText(l) && isNumber(r) || isNumber(l) && isText(r)) {
+		return nil, nil, x.unsupported("a comparison of text with a number")
+	}
 	return l, r, nil
+}
+
+func isText(v any) bool {
+	switch derefValue(v).(type) {
+	case string, []byte:
+		return true
+	}
+	return false
+}
+
+func isNumber(v any) bool {
+	_, ok := toFloat(derefValue(v))
+	return ok
 }
 
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if x.tx.db.kind.InnoDB() {
 		return v, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
-	k, ok := e.(*sqlir.Const)
-	if !ok {
+	var s string
+	switch e := e.(type) {
+	case *sqlir.Const:
+		k, ok := e.Value.(string)
+		if !ok {
+			return v, nil
+		}
+		s = k
+	case *sqlir.Param:
+		k, ok := derefValue(v).(string)
+		if !ok {
+			return v, nil
+		}
+		s = k
+	default:
 		return v, nil
 	}
-	s, ok := k.Value.(string)
-	if !ok {
-		return v, nil
-	}
-	other = derefValue(other)
-	if _, ok := toFloat(other); !ok {
+	if !isNumber(other) {
 		return v, nil
 	}
 	t := strings.TrimSpace(s)
@@ -2118,11 +2148,12 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if _, err := strconv.ParseFloat(t, 64); err == nil {
 		// Postgres refuses '1.5' for an integer and compares it with a
 		// float8 or numeric, but values do not carry their column's type,
-		// and a float8 column keeps a whole number as an integer.
-		return nil, x.unsupported("a string literal with a fraction compared with a number")
+		// and a float8 column keeps a whole number written as one as an
+		// integer.
+		return nil, x.unsupported("a string literal or parameter with a fraction compared with a number")
 	}
 	typ := "integer"
-	if _, ok := other.(float64); ok {
+	if _, ok := derefValue(other).(float64); ok {
 		typ = "double precision"
 	}
 	return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s), "", "", "")
