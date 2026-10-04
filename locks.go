@@ -143,7 +143,12 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		// its own wait, and the one that finds the cycle aborts itself. Which
 		// one that is depends on timing, so every member may be the victim.
 		members := append([]*Tx{tx}, cycle...)
-		v := members[tx.p.Choose("deadlock victim", len(members))]
+		var v *Tx
+		if tx.db.kind.InnoDB() {
+			v = innodbVictim(members)
+		} else {
+			v = members[tx.p.Choose("deadlock victim", len(members))]
+		}
 		// The victim gives up on the locks it waited for, as NOWAIT does,
 		// so their holders' release may let an idle loop it ran in retry.
 		if v == tx {
@@ -166,6 +171,32 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		}
 	}
 	return nil
+}
+
+// innodbVictim is the transaction InnoDB rolls back to break a deadlock
+// among members, the first of which closed the cycle: the lightest, by the
+// rows it changed and the locks it holds, and of equal ones the one that
+// closed the cycle, as InnoDB's detector picks it the moment the wait
+// begins, with no timing involved.
+func innodbVictim(members []*Tx) *Tx {
+	weight := func(t *Tx) int {
+		groups := map[lockKey]bool{} // a table lock and a lock struct per mode
+		for _, lk := range t.locks {
+			if lk.key == gapWaitKey {
+				continue
+			}
+			groups[lockKey{lk.table, ""}] = true
+			groups[lockKey{lk.table, fmt.Sprint(t.db.locks[lk][t])}] = true
+		}
+		return len(t.writes) + len(t.deleted) + len(groups)
+	}
+	v := members[0]
+	for _, m := range members[1:] {
+		if weight(m) < weight(v) {
+			v = m
+		}
+	}
+	return v
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

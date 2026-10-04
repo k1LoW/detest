@@ -4738,3 +4738,26 @@ func TestMySQLDoubleColumnsAndVolatileNullif(t *testing.T) {
 		t.Errorf("NULLIF(UUID(), ''): %v, want unsupported", err)
 	}
 }
+
+// InnoDB rolls back the lighter transaction of a deadlock, by the rows it
+// changed and the locks it holds, and of equal ones the one that closed the
+// cycle, which comes first.
+func TestInnoDBDeadlockVictim(t *testing.T) {
+	s := newSim(t)
+	_, store := s.DB("app", mysqlBin())
+	tx := func(writes int) *Tx {
+		x := &Tx{db: store, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}}
+		for i := range writes {
+			x.writes[lockKey{"t", fmt.Sprint(i)}] = Row{}
+		}
+		return x
+	}
+	closer, other := tx(1), tx(1)
+	if v := innodbVictim([]*Tx{closer, other}); v != closer {
+		t.Error("of equal weights, the transaction that closed the cycle is the victim")
+	}
+	heavy, light := tx(3), tx(1)
+	if v := innodbVictim([]*Tx{heavy, light}); v != light {
+		t.Error("the lighter transaction is the victim")
+	}
+}
