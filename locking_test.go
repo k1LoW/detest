@@ -520,3 +520,356 @@ func TestLockingReadEvaluatesPredicateOnce(t *testing.T) {
 		t.Errorf("nextval after one locking read of one row: %d, %v, want 2", n, err)
 	}
 }
+
+// Postgres breaks a deadlock in whichever waiter's check finds the cycle
+// first, which depends on timing, so the first waiter may be the victim as
+// well as the transaction closing the cycle.
+func TestDeadlockVictimIsEitherWaiter(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			victim           string
+			aLocked, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			victim = ""
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+		})
+		// update writes first, closes locked, runs beforeSecond and writes
+		// second, in one transaction.
+		update := func(p *Proc, name, first string, locked chan struct{}, beforeSecond func(), second string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, first); err != nil {
+				return err
+			}
+			close(locked)
+			beforeSecond()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, second); errors.Is(err, ErrDeadlock) {
+				victim = name
+				return nil
+			} else if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		// x waits for b first; y closes the cycle once nothing else can run,
+		// that is once x waits.
+		s.Manual("x", 1, func(p *Proc) error {
+			return update(p, "x", "a", aLocked, func() { <-bLocked }, "b")
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			return update(p, "y", "b", bLocked, func() { p.WaitUntil(p.Now() + 1) }, "a")
+		})
+		s.Sometimes("the first waiter is the victim", func(*State) bool { return victim == "x" })
+		s.Sometimes("the transaction closing the cycle is the victim", func(*State) bool { return victim == "y" })
+	})
+}
+
+// lockAfterFailure declares a process that writes rows in a transaction, fails a
+// statement and then waits for mu before ending the transaction, and another
+// that writes row sku while holding mu. If the failed transaction still held
+// the row lock, the two would wait for each other.
+func lockAfterFailure(t *testing.T, s *Sim, savepoint bool, sku string) {
+	t.Helper()
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+	s.Seed(func() {
+		mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+	})
+	mu := s.Mutex("mu")
+	s.Manual("x", 1, func(p *Proc) error {
+		tx, err := db.BeginTx(p.Context(), nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+			return err
+		}
+		if savepoint {
+			if _, err := tx.Exec(`SAVEPOINT s`); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO stock VALUES ('a', 1)`); !errors.Is(err, ErrUniqueViolation) {
+			return fmt.Errorf("insert: got %w", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return nil
+	})
+	s.Manual("y", 1, func(p *Proc) error {
+		mu.Lock()
+		defer mu.Unlock()
+		_, err := db.ExecContext(p.Context(), `UPDATE stock SET n = 5 WHERE sku = $1`, sku)
+		return err
+	})
+}
+
+// A failed statement aborts the transaction, and Postgres releases its row
+// locks then rather than at ROLLBACK.
+func TestFailedStatementReleasesLocks(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		lockAfterFailure(t, s, false, "a")
+	})
+}
+
+// After a savepoint, a failed statement aborts only the subtransaction: the
+// locks taken since the savepoint are released, the ones before are kept.
+func TestFailedStatementAfterSavepointReleasesItsLocks(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		lockAfterFailure(t, s, true, "b")
+	})
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.ExpectViolation("closing a cycle of waits the database cannot detect")
+		lockAfterFailure(t, s, true, "a")
+	})
+}
+
+// A lock taken before a savepoint and strengthened after it goes back to its
+// earlier strength when the subtransaction aborts, by a failed statement or by
+// ROLLBACK TO. x holds FOR KEY SHARE on a while it waits for mu, which does
+// not conflict with y's UPDATE; the FOR UPDATE it took after the savepoint
+// would.
+func TestSubtransactionAbortWeakensUpgradedLock(t *testing.T) {
+	for _, end := range []string{"failure", "rollback to"} {
+		t.Run(end, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+				s.Seed(func() {
+					mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`)
+				})
+				mu := s.Mutex("mu")
+				s.Manual("x", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					for _, q := range []string{
+						`SELECT sku FROM stock WHERE sku = 'a' FOR KEY SHARE`,
+						`SAVEPOINT s`,
+						`SELECT sku FROM stock WHERE sku = 'a' FOR UPDATE`,
+					} {
+						if _, err := tx.Exec(q); err != nil {
+							return err
+						}
+					}
+					if end == "failure" {
+						if _, err := tx.Exec(`INSERT INTO stock VALUES ('a', 1)`); !errors.Is(err, ErrUniqueViolation) {
+							return fmt.Errorf("insert: got %w", err)
+						}
+					} else if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT s`); err != nil {
+						return err
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					return nil
+				})
+				s.Manual("y", 1, func(p *Proc) error {
+					mu.Lock()
+					defer mu.Unlock()
+					_, err := db.ExecContext(p.Context(), `UPDATE stock SET n = 5 WHERE sku = 'a'`)
+					return err
+				})
+			})
+		})
+	}
+}
+
+// When two transactions sharing a row lock both wait for the one that closes
+// the cycle, all three are on a cycle, and each may be the victim.
+func TestDeadlockVictimOfBranchedCycle(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			victims         []string
+			shared, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			victims = nil
+			shared, bLocked = make(chan struct{}, 2), make(chan struct{})
+		})
+		run := func(p *Proc, name string, steps func(tx *sql.Tx) error) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if err := steps(tx); errors.Is(err, ErrDeadlock) {
+				victims = append(victims, name)
+				return nil
+			} else if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		for _, name := range []string{"x", "y"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				return run(p, name, func(tx *sql.Tx) error {
+					if _, err := tx.Exec(`SELECT sku FROM stock WHERE sku = 'a' FOR SHARE`); err != nil {
+						return err
+					}
+					shared <- struct{}{}
+					<-bLocked
+					_, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`)
+					return err
+				})
+			})
+		}
+		// z closes the cycle once x and y both wait for b.
+		s.Manual("z", 1, func(p *Proc) error {
+			<-shared
+			<-shared
+			return run(p, "z", func(tx *sql.Tx) error {
+				if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+					return err
+				}
+				close(bLocked)
+				p.WaitUntil(p.Now() + 1)
+				_, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`)
+				return err
+			})
+		})
+		for _, name := range []string{"x", "y", "z"} {
+			s.Sometimes(name+" is the first victim", func(*State) bool { return len(victims) > 0 && victims[0] == name })
+		}
+	}, MaxPreemptions(0))
+}
+
+// A lock timeout that ends the wait closing a cycle breaks the cycle, so the
+// other waiter goes on and no transaction is aborted as a deadlock victim.
+func TestLockTimeoutBreaksDeadlock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			errs             map[string]error
+			aLocked, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			errs = map[string]error{}
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+		})
+		update := func(p *Proc, name, first string, locked chan struct{}, beforeSecond func(), second string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if name == "y" {
+				if _, err := tx.Exec(`SET LOCAL lock_timeout = '1s'`); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, first); err != nil {
+				return err
+			}
+			close(locked)
+			beforeSecond()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, second); err != nil {
+				errs[name] = err
+				return nil
+			}
+			return tx.Commit()
+		}
+		s.Manual("x", 1, func(p *Proc) error {
+			return update(p, "x", "a", aLocked, func() { <-bLocked }, "b")
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			return update(p, "y", "b", bLocked, func() { p.WaitUntil(p.Now() + 1) }, "a")
+		})
+		s.AtQuiescence(func(*State) error {
+			if errors.Is(errs["y"], ErrLockNotAvailable) && errs["x"] != nil {
+				return fmt.Errorf("y timed out, and x still failed: %w", errs["x"])
+			}
+			return nil
+		})
+		s.Sometimes("y times out", func(*State) bool { return errors.Is(errs["y"], ErrLockNotAvailable) })
+	})
+}
+
+// A transaction its process keeps open while a second connection of the same
+// process waits is idle, not waiting, so a cycle through it is not a deadlock
+// Postgres detects but a hang.
+func TestIdleTransactionIsNoDeadlock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.ExpectViolation("closing a cycle of waits the database cannot detect")
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			aLocked, bLocked chan struct{}
+			deadlocked       bool
+		)
+		s.Seed(func() {
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+			deadlocked = false
+		})
+		s.Always(func(*State) error {
+			if deadlocked {
+				return errors.New("a deadlock was reported")
+			}
+			return nil
+		})
+		fail := func(err error) error {
+			if errors.Is(err, ErrDeadlock) {
+				deadlocked = true
+				return nil
+			}
+			return err
+		}
+		s.Manual("x", 1, func(p *Proc) error {
+			idle, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = idle.Rollback() }()
+			if _, err := idle.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+				return err
+			}
+			close(aLocked)
+			<-bLocked
+			_, err = db.ExecContext(p.Context(), `UPDATE stock SET n = 0 WHERE sku = 'b'`)
+			return fail(err)
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+				return err
+			}
+			close(bLocked)
+			p.WaitUntil(p.Now() + 1)
+			_, err = tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`)
+			return fail(err)
+		})
+	})
+}

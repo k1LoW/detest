@@ -3,9 +3,11 @@ package detest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/k1LoW/detest/internal/sqlir"
 	"github.com/k1LoW/detest/postgres"
 )
 
@@ -72,4 +74,44 @@ func TestSQLDriverLostUpdate(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A process woken from a channel reports back to the scheduler before its
+// statement runs, with no yield point or choice, so a statement that fails
+// before its own yield point, and releases the locks of its transaction, does
+// not run alongside the process that woke it. Run with -race.
+func TestStatementAfterWakeFromChannel(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`)
+		})
+		var wake chan struct{}
+		s.Seed(func() { wake = make(chan struct{}, 1) })
+		s.Manual("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO stock VALUES ('a', 1)`); !errors.Is(err, ErrUniqueViolation) {
+				return fmt.Errorf("insert: got %w", err)
+			}
+			<-wake
+			// The transaction is aborted, so this fails before its yield point.
+			if _, err := tx.Exec(`SELECT 1`); !errors.Is(err, sqlir.ErrInFailedTx) {
+				return fmt.Errorf("select: got %w", err)
+			}
+			return nil
+		})
+		s.Manual("waker", 1, func(p *Proc) error {
+			wake <- struct{}{}
+			p.WaitUntil(p.Now() + 1)
+			return nil
+		})
+	})
 }

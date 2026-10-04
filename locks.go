@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -93,45 +94,103 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 				return ErrSelfWait
 			}
 		}
-		if tx.rowWaitCycle(conflict) {
-			tx.aborted = true
-			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
-			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
-		}
-		for _, o := range conflict {
-			if tx.p.r.waitsFor(o.p, tx.p) {
-				tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for a lock on %s/%s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, lk.table, lk.key, o.p.name)}
-				break
-			}
-		}
+		// The timeout is decided before a deadlock victim, since a timeout
+		// that ends this wait breaks the cycle and no victim is aborted.
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
 			tx.aborted = true
 			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
 			return tx.db.kind.Error(sqlir.LockNotAvailable, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
+		cycle := tx.rowWaitCycle(conflict)
+		if cycle != nil {
+			// Each waiter checks for a deadlock once deadlock_timeout passes in
+			// its own wait, and the one that finds the cycle aborts itself. Which
+			// one that is depends on timing, so every member may be the victim.
+			members := append([]*Tx{tx}, cycle...)
+			v := members[tx.p.Choose("deadlock victim", len(members))]
+			if v == tx {
+				tx.aborted = true
+				tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+				return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
+			}
+			v.deadlockVictim = true
+			v.p.state = stateReady
+			v.p.waitRow = nil
+		}
+		// A cycle left after another victim was picked is one the database
+		// detects too, once that victim's abort wakes this wait.
+		for _, o := range conflict {
+			if cycle == nil && tx.p.r.waitsFor(o.p, tx.p) {
+				tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for a lock on %s/%s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, lk.table, lk.key, o.p.name)}
+				break
+			}
+		}
 		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
+		if tx.deadlockVictim {
+			tx.deadlockVictim = false
+			tx.aborted = true
+			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
+		}
 	}
 }
 
-// rowWaitCycle reports whether one of the transactions tx would wait for is,
-// through row lock waits only, waiting for tx: a deadlock Postgres detects.
-func (tx *Tx) rowWaitCycle(conflict []*Tx) bool {
-	seen := map[*Tx]bool{}
-	stack := append([]*Tx(nil), conflict...)
+// rowWaitCycle returns the waiting transactions that are on a cycle of row
+// lock waits through tx, were tx to wait for conflict: a deadlock Postgres
+// detects. It returns them in the order their processes started, since the
+// lock tables are maps and the explorer needs the same options in the same
+// order on every run. It returns nil when there is no cycle.
+func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
+	waitsFor := func(w *Tx) []*Tx {
+		// The process's wait may be another transaction's of the same process:
+		// one it keeps open while a second connection waits.
+		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil || w.p.waitRow.tx != w {
+			return nil
+		}
+		wr := w.p.waitRow
+		return wr.tx.conflicting(wr.key, wr.mode)
+	}
+	// The transactions tx would wait for, directly or through their waits,
+	// and for each one the transactions waiting for it among them.
+	reached := map[*Tx]bool{}
+	waiters := map[*Tx][]*Tx{}
+	stack := slices.Clone(conflict)
+	for _, c := range conflict {
+		reached[c] = true
+	}
 	for len(stack) > 0 {
 		w := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if w == tx {
-			return true
+		for _, o := range waitsFor(w) {
+			waiters[o] = append(waiters[o], w)
+			if o != tx && !reached[o] {
+				reached[o] = true
+				stack = append(stack, o)
+			}
 		}
-		if seen[w] || w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil {
-			continue
-		}
-		seen[w] = true
-		wr := w.p.waitRow
-		stack = append(stack, wr.tx.conflicting(wr.key, wr.mode)...)
 	}
-	return false
+	// Those of them that wait for tx, directly or through each other.
+	onCycle := map[*Tx]bool{}
+	stack = []*Tx{tx}
+	for len(stack) > 0 {
+		o := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, w := range waiters[o] {
+			if !onCycle[w] {
+				onCycle[w] = true
+				stack = append(stack, w)
+			}
+		}
+	}
+	var cycle []*Tx
+	for _, p := range tx.p.r.procs {
+		for w := range onCycle {
+			if w.p == p {
+				cycle = append(cycle, w)
+			}
+		}
+	}
+	return cycle
 }
 
 // releaseLocks drops tx's hold on the given locks and wakes the processes
@@ -149,11 +208,33 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 		}
 		released[lk] = true
 	}
-	if tx.p == nil {
+	tx.wake(released)
+}
+
+// rollbackLocks returns tx's locks to what it held at sp: it releases the
+// ones taken since and weakens the ones strengthened since, as Postgres does
+// when it aborts the subtransaction that took them.
+func (tx *Tx) rollbackLocks(sp *savepoint) {
+	tx.releaseLocks(tx.locks[sp.locks:])
+	tx.locks = tx.locks[:sp.locks]
+	weakened := map[lockKey]bool{}
+	for _, lk := range tx.locks {
+		if holders := tx.db.locks[lk]; holders[tx] > sp.modes[lk] {
+			holders[tx] = sp.modes[lk]
+			weakened[lk] = true
+		}
+	}
+	tx.wake(weakened)
+}
+
+// wake makes the processes waiting for one of keys ready; each re-checks
+// when resumed.
+func (tx *Tx) wake(keys map[lockKey]bool) {
+	if tx.p == nil || len(keys) == 0 {
 		return
 	}
 	for _, p := range tx.p.r.procs {
-		if p.state == stateBlockedLock && p.waitRow != nil && released[p.waitRow.key] {
+		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
 			p.state = stateReady
 			p.waitRow = nil
 		}

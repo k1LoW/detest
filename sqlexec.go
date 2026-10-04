@@ -1395,8 +1395,7 @@ func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL exp
 // placeholder value would be read back as the column's, and a dropped sort
 // key would return other rows under LIMIT. Any other error passes through.
 func (x *sqlExec) unsupportedExpr(err error, where string) error {
-	var u errUnknownExpr
-	if errors.As(err, &u) {
+	if u, ok := errors.AsType[errUnknownExpr](err); ok {
 		return x.unsupported("an expression " + where + " detest cannot evaluate (" + u.what + ")")
 	}
 	return err
