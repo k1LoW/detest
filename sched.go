@@ -907,6 +907,17 @@ func (p *Proc) yieldf(format string, args ...any) {
 	p.wait()
 }
 
+// syncOutside makes a process that woke from a primitive detest does not
+// model, and has not reported back since, yield before it goes on. Until it
+// does it runs alongside the process that woke it, so a statement that fails
+// before its own yield point would release locks and wake waiters while the
+// scheduler acts on the same state.
+func (p *Proc) syncOutside(format string, args ...any) {
+	if p.state == stateBlockedOutside {
+		p.yieldf(format, args...)
+	}
+}
+
 // send reports ev to the scheduler. Once the run is over nobody reads, and a
 // process unwinding then must not block on its full channel.
 func (p *Proc) send(ev procEvent) {

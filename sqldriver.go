@@ -233,6 +233,9 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
+	if p := c.current(); p != nil {
+		p.syncOutside("%s: resumes to run a statement", c.db.name)
+	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)
 	if err != nil {
 		if pe, ok := errors.AsType[*sqlir.ParseError](err); ok {
