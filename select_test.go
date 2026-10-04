@@ -481,6 +481,12 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT id FROM t WHERE id = '06'`); !reflect.DeepEqual(got, []string{"6"}) {
 		t.Errorf("whole float: got %v", got)
 	}
+	// A numeric is not divided as an integer, however it was written.
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, n numeric)`)
+	mustExec(t, db, `INSERT INTO d VALUES (1, '1'), (2, $1), (3, $2)`, 1.0, int64(1))
+	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
+		t.Errorf("numeric division: got %v", got)
+	}
 	// A whole numeric has one key however it was written.
 	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
 	mustExec(t, db, `INSERT INTO u VALUES ('9007199254740993')`)
@@ -691,7 +697,9 @@ func TestCastToNumber(t *testing.T) {
 	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
 	}
-	if _, err := db.Exec(`SELECT 2.5::int`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("2.5::int: got %v, want unsupported", err)
+	for _, q := range []string{`SELECT 2.5::int`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
 	}
 }

@@ -175,7 +175,7 @@ s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert))) // *mysql.MySQLError
 
 For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` that sets columns of a joined table, multi-table `DELETE`, a locking read, `UPDATE` or `DELETE` that searches by a prefix index (`KEY (name(3))`), or that more than one index serves without a unique point lookup among them (MySQL's optimizer picks one by its statistics), or that a descending index serves, or with `OR` (write it as `IN`), `<>`, `!=` or `NOT IN` on an indexed column, at Repeatable Read or Serializable, descending primary keys and unique indexes, a `sql_mode` without strict mode (other than the `NO_AUTO_VALUE_ON_ZERO` a dump sets), a `time_zone` other than UTC (`'+00:00'` as a dump sets it), `RETURNING`, temporal strings in formats other than `YYYY-MM-DD[ HH:MM:SS[.ffffff]]`, values of `TIME` columns, generated columns, and exact DECIMAL arithmetic (DECIMAL values are kept as float64, so sums like 0.1 + 0.2 are approximate).
 
-A `numeric` value written as text, as decimal libraries send it, is kept as a float, or as an integer when it is whole. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one with more digits than a float keeps fails with `detest.ErrUnsupportedSQL`. A Go integer written to it stays an integer.
+A `numeric` value is kept as a float, or as an integer beyond 2^53, which a float cannot keep exactly. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one written as text with more digits than a float keeps fails with `detest.ErrUnsupportedSQL`.
 
 ### Queue
 

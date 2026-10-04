@@ -742,10 +742,9 @@ func integralNumber(v any) (any, bool) {
 // textTypes are the character types.
 var textTypes = map[string]bool{"text": true, "varchar": true, "bpchar": true}
 
-// columnNumber converts a string written to a column of the number type t to
-// a number, as the type's input function does. A numeric becomes a float,
-// whole numbers an integer, so it compares and sorts as a number; the digits
-// as written, such as the 0 of 1.50, are not kept.
+// columnNumber converts a value written to a column of the number type t to
+// the number it holds, as the type's input function does for text. The
+// digits as written, such as the 0 of 1.50, are not kept.
 func columnNumber(v any, t string) (any, bool) {
 	var s string
 	switch b := v.(type) {
@@ -753,14 +752,10 @@ func columnNumber(v any, t string) (any, bool) {
 		s = b
 	case []byte:
 		s = string(b)
-	case float64:
-		// A whole numeric is kept as an integer however it was written, so
-		// equal values have one key.
-		if t == "numeric" {
-			return numeric(b), true
-		}
-		return v, true
 	default:
+		if t == "numeric" {
+			return numericValue(v), true
+		}
 		return v, true
 	}
 	s = strings.TrimSpace(s)
@@ -773,10 +768,21 @@ func columnNumber(v any, t string) (any, bool) {
 		return f, err == nil
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return n, true
+		return numericValue(n), true
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	return numeric(f), err == nil
+	return f, err == nil
+}
+
+// numericValue is the representation of a numeric: a float, so arithmetic on
+// it is not integer arithmetic (1 / 2 is 0.5), and every value has one key
+// however it was written. An integer a float cannot keep exactly, beyond
+// 2^53, stays an integer.
+func numericValue(v any) any {
+	if n, ok := integer(v); ok && n > -1<<53 && n < 1<<53 {
+		return float64(n)
+	}
+	return v
 }
 
 // validUUID accepts what Postgres's uuid input does: 32 hex digits, with or
