@@ -185,9 +185,10 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 	if pdef := x.tx.db.defs[parent]; pdef != nil && slices.Equal(cols, pdef.pk) {
 		key = encodeKey(vals)
 		if _, ok := x.tx.view(parent, key); !ok && !x.tx.db.kind.InnoDB() {
-			// Postgres's check is a locking read under the statement's
-			// snapshot, which does not see a parent another transaction is
-			// inserting, so it fails at once where InnoDB's waits for it.
+			// Postgres's check is a locking read under the snapshot it
+			// takes when it runs, which sees a parent committed by then but
+			// not one another transaction is still inserting, so it fails at
+			// once where InnoDB's waits for it.
 			return false, nil
 		}
 	} else {
