@@ -1097,13 +1097,21 @@ func foldAggregate(name string, star bool, vals []any, n int) any {
 		if len(vals) == 0 {
 			return nil
 		}
-		total := 0.0
+		total, ints := 0.0, true
 		for _, val := range vals {
 			f, _ := toFloat(derefValue(val))
 			total += f
+			if _, ok := integer(derefValue(val)); !ok {
+				ints = false
+			}
 		}
 		if name == "avg" {
 			return total / float64(len(vals))
+		}
+		// The sum of floats or numerics stays a float, so dividing it is
+		// not integer division.
+		if !ints {
+			return total
 		}
 		return numeric(total)
 	default:

@@ -503,6 +503,18 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO z VALUES (1, '-0')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("float -0: got %v, want unsupported", err)
 	}
+	mustExec(t, db, `CREATE TABLE s (id int PRIMARY KEY, n numeric)`)
+	mustExec(t, db, `INSERT INTO s VALUES (1, '1.5'), (2, '0.5')`)
+	// Arithmetic on a numeric stays float arithmetic, even through a whole
+	// intermediate result.
+	for _, tc := range []struct{ query, want string }{
+		{`SELECT (n * 2) / 2 FROM s WHERE id = 1`, "1.5"},
+		{`SELECT sum(n) / 4 FROM s`, "0.5"},
+	} {
+		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
 	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, r float8)`)
 	mustExec(t, db, `INSERT INTO f VALUES (1, 1), (2, $1)`, int64(1))
 	if got := rowsOf(t, db, `SELECT r / 2 FROM f ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5"}) {
@@ -721,6 +733,9 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
 		{`SELECT 1.6::int`, nil, "2"},
 		{`SELECT (-1.4)::smallint`, nil, "-1"},
+		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
+		{`SELECT floor(1.5) / 2`, nil, "0.5"},
+		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
 	} {
 		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)

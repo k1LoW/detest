@@ -1831,8 +1831,14 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			return !b, nil
 		case "-":
+			if n, ok := integer(derefValue(val)); ok {
+				if n == math.MinInt64 {
+					return nil, x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, "bigint out of range", "", "", "")
+				}
+				return -n, nil
+			}
 			if f, ok := toFloat(derefValue(val)); ok {
-				return numeric(-f), nil
+				return -f, nil
 			}
 		}
 		return nil, errUnknownExpr{"unary " + v.Op}
@@ -2453,7 +2459,18 @@ func arith(op string, l, r any) (any, error) {
 		}
 		v = math.Mod(fl, fr)
 	}
-	return numeric(v), nil
+	// A float or numeric operand makes a float result even when it is whole,
+	// so a later division is not integer division ((1.5 * 2) / 2 is 1.5).
+	return v, nil
+}
+
+// asKindOf returns f as an integer when v is one and as a float otherwise, so
+// a function of a float or numeric keeps float arithmetic after it.
+func asKindOf(v any, f float64) any {
+	if _, ok := integer(derefValue(v)); ok {
+		return numeric(f)
+	}
+	return f
 }
 
 func numeric(v float64) any {
@@ -2844,15 +2861,15 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		return 0.5, nil
 	case "abs":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Abs(f)), nil
+			return asKindOf(d(0), math.Abs(f)), nil
 		}
 	case "floor":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Floor(f)), nil
+			return asKindOf(d(0), math.Floor(f)), nil
 		}
 	case "ceil", "ceiling":
 		if f, ok := toFloat(d(0)); ok {
-			return numeric(math.Ceil(f)), nil
+			return asKindOf(d(0), math.Ceil(f)), nil
 		}
 	case "round":
 		f, ok := toFloat(d(0))
@@ -2860,7 +2877,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			break
 		}
 		if len(args) == 1 {
-			return numeric(math.Round(f)), nil
+			return asKindOf(d(0), math.Round(f)), nil
 		}
 		places, ok := toFloat(d(1))
 		if !ok {
