@@ -2565,6 +2565,22 @@ func floatTyped(e sqlir.Expr) bool {
 		case "numeric", "float8", "float4", "double precision", "real":
 			return true
 		}
+	case *sqlir.UnaryExpr:
+		return e.Op == "-" && floatTyped(e.X)
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			return floatTyped(e.L) || floatTyped(e.R)
+		}
+	case *sqlir.CaseExpr:
+		return slices.ContainsFunc(caseBranches(e), floatTyped)
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "floor", "ceil", "ceiling", "round", "avg":
+			return true
+		case "coalesce", "greatest", "least", "abs", "sum", "min", "max":
+			return slices.ContainsFunc(e.Args, floatTyped)
+		}
 	}
 	return false
 }
