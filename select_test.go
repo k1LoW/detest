@@ -523,6 +523,12 @@ func TestTextComparedWithNumber(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name = '02'`); len(got) != 1 || got[0] != "0" {
 		t.Errorf("name = '02': got %v, want 0", got)
 	}
+	// A parameter holding a boolean or a time cannot be sent as a number.
+	for _, v := range []any{true, time.Unix(0, 0)} {
+		if _, err := db.Exec(`SELECT count(*) FROM t WHERE id = $1`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%T: got %v, want unsupported", v, err)
+		}
+	}
 	// A parameter compared with an untyped literal is text, as both are.
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE $1 = '01'`, int64(1)); len(got) != 1 || got[0] != "0" {
 		t.Errorf("$1 = '01': got %v, want 0", got)
@@ -533,6 +539,7 @@ func TestTextComparedWithNumber(t *testing.T) {
 		`SELECT count(*) FROM t WHERE id = name`,
 		`SELECT count(*) FROM t WHERE name::text < 2`,
 		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
+		`SELECT count(*) FROM t WHERE id = true`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)

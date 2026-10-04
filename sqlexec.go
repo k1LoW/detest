@@ -2114,6 +2114,11 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if !lp && !rp && (isText(l) && isNumber(r) || isNumber(l) && isText(r)) {
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
+	// Postgres has no operator comparing a number with a boolean or a time
+	// either, and a parameter holding one fails to be sent as a number.
+	if isNumber(l) && isOther(r) || isOther(l) && isNumber(r) {
+		return nil, nil, x.unsupported("a comparison of a number with a value of another type")
+	}
 	return l, r, nil
 }
 
@@ -2174,6 +2179,12 @@ func asText(v any) any {
 		return fmt.Sprint(derefValue(v))
 	}
 	return v
+}
+
+// isOther reports whether v is a value that is neither NULL, text nor a
+// number, such as a boolean or a time.
+func isOther(v any) bool {
+	return derefValue(v) != nil && !isText(v) && !isNumber(v)
 }
 
 func isText(v any) bool {
