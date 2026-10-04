@@ -316,8 +316,19 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		// detest cannot run PL/pgSQL. In migrations a DO block usually checks the
 		// catalog and raises, declaring nothing, so it runs as nothing.
 		return nil, true, nil
-	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt,
-		*pg.Node_CreateSeqStmt, *pg.Node_AlterSeqStmt, *pg.Node_CreateExtensionStmt,
+	case *pg.Node_CreateSeqStmt:
+		opts, _, err := c.sequenceOptions(s.CreateSeqStmt.Options)
+		if err != nil {
+			return nil, true, err
+		}
+		return []sqlir.SchemaChange{{Table: rangeVarName(s.CreateSeqStmt.Sequence), Object: "sequence", Create: true, IfNotExists: s.CreateSeqStmt.IfNotExists, Sequence: opts}}, true, nil
+	case *pg.Node_AlterSeqStmt:
+		opts, _, err := c.sequenceOptions(s.AlterSeqStmt.Options)
+		if err != nil {
+			return nil, true, err
+		}
+		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts}}, true, nil
+	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
 		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
@@ -434,11 +445,12 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
 	}
-	if d.Identity != "" || isSerial(d.TypeName) {
+	if isSerial(d.TypeName) {
 		col.Default = sequenceDefault(table, d.Colname)
 	}
 	var cons []sqlir.UniqueDef
 	var checks []sqlir.CheckDef
+	var last *sqlir.UniqueDef
 	col.NotNull = d.IsNotNull
 	for _, n := range d.Constraints {
 		k := n.GetConstraint()
@@ -462,7 +474,9 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_DEFAULT:
 			col.Default = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_IDENTITY:
-			col.Default = sequenceDefault(table, d.Colname)
+			if err := c.identity(&col, table, k); err != nil {
+				return col, nil, nil, err
+			}
 		case pg.ConstrType_CONSTR_GENERATED:
 			g, err := c.expr(k.RawExpr)
 			// Every refusal of an aggregate (string_agg, FILTER, ORDER BY,
@@ -486,6 +500,15 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 				return col, nil, nil, err
 			}
 			cons = append(cons, u)
+			last = &cons[len(cons)-1]
+		case pg.ConstrType_CONSTR_FOREIGN:
+			last = nil // the attributes after it are the foreign key's
+		case pg.ConstrType_CONSTR_ATTR_DEFERRABLE, pg.ConstrType_CONSTR_ATTR_DEFERRED:
+			// The grammar gives DEFERRABLE and INITIALLY DEFERRED written
+			// after a column constraint as constraints of their own.
+			if last != nil {
+				last.Deferrable = true
+			}
 		}
 	}
 	if col.Generated != nil && col.Default != nil {
@@ -696,6 +719,75 @@ func isSerial(t *pg.TypeName) bool {
 	return false
 }
 
+// identity makes col an identity column, whose default is nextval of the
+// sequence the constraint names, or of table_column_seq.
+func (c *pgConv) identity(col *sqlir.ColumnDef, table string, k *pg.Constraint) error {
+	seq, name, err := c.sequenceOptions(k.GetOptions())
+	if err != nil {
+		return err
+	}
+	col.Default = sequenceDefault(table, col.Name)
+	if name != "" {
+		col.Default = &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: name}}}
+	}
+	col.Sequence = seq
+	col.IdentityAlways = k.GetGeneratedWhen() == "a"
+	return nil
+}
+
+// sequenceOptions converts the options of a sequence that decide its values,
+// and returns the name an identity column's SEQUENCE NAME gives it. AS, OWNED
+// BY and CYCLE change nothing a run reaches.
+func (c *pgConv) sequenceOptions(opts []*pg.Node) (*sqlir.SequenceOptions, string, error) {
+	out := &sqlir.SequenceOptions{}
+	var name string
+	for _, n := range opts {
+		d := n.GetDefElem()
+		if d == nil {
+			continue
+		}
+		var v *int64
+		if a := d.Arg; a != nil {
+			var n int64
+			switch {
+			case a.GetInteger() != nil:
+				n = int64(a.GetInteger().Ival)
+				v = &n
+			case a.GetFloat() != nil:
+				p, err := strconv.ParseInt(a.GetFloat().Fval, 10, 64)
+				if err != nil {
+					return nil, "", c.unsupported("sequence option " + d.Defname + " " + a.GetFloat().Fval)
+				}
+				v = &p
+			}
+		}
+		switch d.Defname {
+		case "start":
+			out.Start = v
+		case "increment":
+			out.Increment = v
+		case "minvalue":
+			out.MinValue = v
+		case "maxvalue":
+			out.MaxValue = v
+		case "cache":
+			out.Cache = v
+		case "restart":
+			out.Restart, out.RestartStart = v, v == nil
+		case "sequence_name":
+			var parts []string
+			for _, p := range d.Arg.GetList().GetItems() {
+				parts = append(parts, p.GetString_().GetSval())
+			}
+			name = strings.Join(parts, ".")
+		}
+	}
+	if out.Increment != nil && *out.Increment == 0 {
+		return nil, "", c.unsupported("sequence INCREMENT 0")
+	}
+	return out, name, nil
+}
+
 // sequenceDefault is the default of a serial or identity column. Postgres
 // names the sequence table_column_seq.
 func sequenceDefault(table, column string) sqlir.Expr {
@@ -712,7 +804,7 @@ func (c *pgConv) constraintDef(k *pg.Constraint, cols []string) (sqlir.UniqueDef
 	if k.Contype != pg.ConstrType_CONSTR_PRIMARY && k.Contype != pg.ConstrType_CONSTR_UNIQUE {
 		return sqlir.UniqueDef{}, false, nil
 	}
-	u := sqlir.UniqueDef{Name: k.Conname, Primary: k.Contype == pg.ConstrType_CONSTR_PRIMARY, NullsNotDistinct: k.NullsNotDistinct}
+	u := sqlir.UniqueDef{Name: k.Conname, Primary: k.Contype == pg.ConstrType_CONSTR_PRIMARY, NullsNotDistinct: k.NullsNotDistinct, Deferrable: k.Deferrable || k.Initdeferred}
 	if k.Indexname != "" {
 		return u, false, c.unsupported("constraint USING INDEX")
 	}
@@ -786,7 +878,25 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			}
 			ch.Columns = append(ch.Columns, col)
 		case pg.AlterTableType_AT_AddIdentity:
-			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Default: sequenceDefault(ch.Table, cmd.Name)})
+			col := sqlir.ColumnDef{Name: cmd.Name}
+			if err := c.identity(&col, ch.Table, cmd.Def.GetConstraint()); err != nil {
+				return nil, err
+			}
+			ch.Columns = append(ch.Columns, col)
+		case pg.AlterTableType_AT_SetIdentity:
+			var opts []*pg.Node
+			for _, n := range cmd.Def.GetList().GetItems() {
+				if n.GetDefElem().GetDefname() != "generated" {
+					opts = append(opts, n)
+				}
+			}
+			seq, _, err := c.sequenceOptions(opts)
+			if err != nil {
+				return nil, err
+			}
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, TypeOnly: true, Sequence: seq})
+		case pg.AlterTableType_AT_DropIdentity:
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name}) // as DROP DEFAULT
 		case pg.AlterTableType_AT_AddColumn:
 			col, cons, checks, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
 			if err != nil {
@@ -1181,6 +1291,12 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 			return nil, err
 		}
 		out.Columns = append(out.Columns, name)
+	}
+	switch s.Override {
+	case pg.OverridingKind_OVERRIDING_SYSTEM_VALUE:
+		out.OverridingSystemValue = true
+	case pg.OverridingKind_OVERRIDING_USER_VALUE:
+		return nil, c.unsupported("OVERRIDING USER VALUE")
 	}
 	sel := s.SelectStmt.GetSelectStmt()
 	if sel == nil {

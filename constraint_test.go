@@ -363,3 +363,43 @@ func TestStrictFunctionsOfNull(t *testing.T) {
 		}
 	}
 }
+
+func TestRefusedKeyAndSequenceForms(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE pos (id int PRIMARY KEY, p int UNIQUE DEFERRABLE INITIALLY DEFERRED, note text);
+CREATE TABLE dpk (id int PRIMARY KEY DEFERRABLE, note text);
+CREATE TABLE ga (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v text);
+CREATE TABLE u (id int PRIMARY KEY, email text, deleted bool NOT NULL DEFAULT false);
+CREATE UNIQUE INDEX u_email ON u (email) WHERE NOT deleted;
+CREATE SEQUENCE cached CACHE 20;
+`)
+	mustExec(t, db, `INSERT INTO ga (v) VALUES ('a')`)
+	mustExec(t, db, `INSERT INTO ga (id, v) VALUES (DEFAULT, 'b')`)
+	mustExec(t, db, `INSERT INTO ga (id, v) OVERRIDING SYSTEM VALUE VALUES (10, 'c')`)
+	for _, q := range []string{
+		// Postgres checks a deferrable key at the end of the statement or
+		// at commit, not on each row.
+		`INSERT INTO pos VALUES (1, 1, 'a')`,
+		`UPDATE pos SET p = p + 1`,
+		`INSERT INTO dpk VALUES (1, 'a')`,
+		`UPDATE dpk SET id = id + 1`,
+		`INSERT INTO ga (id, v) VALUES (5, 'a')`,
+		`UPDATE ga SET id = 5`,
+		`INSERT INTO ga (v) OVERRIDING USER VALUE VALUES ('a')`,
+		`SELECT nextval('cached')`,
+		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT (email) WHERE deleted = false DO NOTHING`,
+		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT ON CONSTRAINT nope DO NOTHING`,
+		`WITH d AS (DELETE FROM u RETURNING id) INSERT INTO u SELECT id, 'x', false FROM d`,
+		`WITH s AS (SELECT 1) INSERT INTO u VALUES (1, 'a', false)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// A write that leaves a deferrable key's columns alone runs.
+	mustExec(t, db, `UPDATE pos SET note = 'x'`)
+	mustExec(t, db, `DELETE FROM pos`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 'a', false) ON CONFLICT (email) WHERE NOT deleted DO NOTHING`)
+}

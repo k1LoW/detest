@@ -142,6 +142,7 @@ type DB struct {
 	defs     map[string]*tableDef
 	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views    map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs     map[string]int64                    // sequence values of the run, for nextval
 	uuids    int64                               // gen_random_uuid values handed out in the run
 	ignored  map[string]bool                     // tables Ignore took out of the simulation
@@ -240,6 +241,10 @@ type tableDef struct {
 	// generated are the expressions of generated columns, kept as written
 	// with the renames since in alias, as a CHECK's are.
 	generated map[string]*tableCheck
+	// identityAlways are the GENERATED ALWAYS identity columns, and
+	// pkDeferrable is a DEFERRABLE primary key.
+	identityAlways map[string]bool
+	pkDeferrable   bool
 }
 
 // Name returns the database name.
@@ -420,7 +425,7 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 	if def.pk != nil {
 		return kind.Error(sqlir.InvalidTableDefinition, fmt.Sprintf("multiple primary keys for table %q are not allowed", relname(table)), relname(table), "", "")
 	}
-	def.pkName = u.Name
+	def.pkName, def.pkDeferrable = u.Name, u.Deferrable
 	if def.pkName == "" {
 		def.pkName = relname(table) + "_pkey"
 	}
@@ -440,7 +445,7 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 // another index, never a foreign key or a check of the same name.
 func (def *tableDef) dropIndex(name string) {
 	if def.pkName == name {
-		def.pk, def.pkName = nil, ""
+		def.pk, def.pkName, def.pkDeferrable = nil, "", false
 	}
 	def.uniques = slices.DeleteFunc(def.uniques, func(u sqlir.UniqueDef) bool { return u.Name == name })
 	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return ix.Name == name })
@@ -619,6 +624,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if g, ok := def.generated[old]; ok {
 		delete(def.generated, old)
 		def.generated[nw] = g
+	}
+	if def.identityAlways[old] {
+		delete(def.identityAlways, old)
+		def.identityAlways[nw] = true
 	}
 	for _, g := range def.generated {
 		g.renameColumn(old, nw)
@@ -831,18 +840,96 @@ func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
 	return db.Open(), db
 }
 
-func (db *DB) nextval(seq string) int64 {
-	seq = sequenceName(seq)
-	db.seqs[seq]++
-	return db.seqs[seq]
+// seqDef is a sequence's options: the value it starts from, the step, and
+// the value each run's first nextval returns, which RESTART moves.
+type seqDef struct {
+	start, inc, first int64
+	min, max          *int64
+	cache             int64
 }
 
-// setval sets a sequence so that nextval returns v+1, or v when not called.
-func (db *DB) setval(seq string, v int64, called bool) {
-	if !called {
-		v--
+// seq returns the options of seq, those of a sequence declared without any
+// when it was not.
+func (db *DB) seqOptions(seq string) seqDef {
+	if d := db.seqDefs[seq]; d != nil {
+		return *d
 	}
-	db.seqs[sequenceName(seq)] = v
+	return seqDef{start: 1, inc: 1, first: 1, cache: 1}
+}
+
+// alterSequence applies CREATE SEQUENCE (create) or ALTER SEQUENCE options.
+func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
+	seq = sequenceName(seq)
+	d := db.seqOptions(seq)
+	if create {
+		d = seqDef{inc: 1, cache: 1}
+	}
+	if o.Increment != nil {
+		d.inc = *o.Increment
+	}
+	if o.MinValue != nil {
+		d.min = o.MinValue
+	}
+	if o.MaxValue != nil {
+		d.max = o.MaxValue
+	}
+	if o.Cache != nil {
+		d.cache = *o.Cache
+	}
+	switch {
+	case o.Start != nil:
+		d.start = *o.Start
+	case create && d.inc > 0:
+		d.start = 1
+		if d.min != nil {
+			d.start = *d.min
+		}
+	case create:
+		d.start = -1
+		if d.max != nil {
+			d.start = *d.max
+		}
+	}
+	switch {
+	case create || o.RestartStart:
+		d.first = d.start
+	case o.Restart != nil:
+		d.first = *o.Restart
+	}
+	if db.seqDefs == nil {
+		db.seqDefs = map[string]*seqDef{}
+	}
+	db.seqDefs[seq] = &d
+}
+
+// nextval returns the next value of seq, or why detest refuses to. A
+// sequence that caches more than one value hands each session its own block
+// of them, which detest does not do, so its values are refused rather than
+// given in another order.
+func (db *DB) nextval(seq string) (int64, string) {
+	seq = sequenceName(seq)
+	d := db.seqOptions(seq)
+	if d.cache > 1 {
+		return 0, fmt.Sprintf("nextval of sequence %q, which caches %d values per session", seq, d.cache)
+	}
+	v, called := db.seqs[seq]
+	if called {
+		v += d.inc
+	} else {
+		v = d.first
+	}
+	db.seqs[seq] = v
+	return v, ""
+}
+
+// setval sets a sequence so that nextval returns the value after v, or v
+// when not called.
+func (db *DB) setval(seq string, v int64, called bool) {
+	seq = sequenceName(seq)
+	if !called {
+		v -= db.seqOptions(seq).inc
+	}
+	db.seqs[seq] = v
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
@@ -872,6 +959,11 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "sequence":
+		if ch.Sequence != nil {
+			db.alterSequence(ch.Table, ch.Sequence, ch.Create)
+		}
+		return nil
 	case ch.Object == "index":
 		return db.indexChange(table, ch)
 	case ch.Object == "view" && !ch.Drop:
@@ -1009,6 +1101,21 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			// what they hold, and a varchar(n) refuses what is too long.
 			if col.TypeOnly {
 				redefined = true
+			}
+		}
+		if col.Sequence != nil && !col.TypeOnly {
+			if def.identityAlways == nil {
+				def.identityAlways = map[string]bool{}
+			}
+			def.identityAlways[col.Name] = col.IdentityAlways
+		}
+		if col.Sequence != nil {
+			d := col.Default
+			if col.TypeOnly {
+				d = def.defaults[col.Name]
+			}
+			if name, ok := nextvalOf(d); ok {
+				db.alterSequence(name, col.Sequence, !col.TypeOnly)
 			}
 		}
 		if col.TypeOnly {
@@ -2032,4 +2139,17 @@ func (db *DB) pkConstraint(table string) string {
 		return def.pkName
 	}
 	return relname(table) + "_pkey"
+}
+
+// nextvalOf returns the sequence a default of nextval('name') draws from.
+func nextvalOf(e sqlir.Expr) (string, bool) {
+	f, ok := e.(*sqlir.FuncCall)
+	if !ok || f.Name != "nextval" || len(f.Args) != 1 {
+		return "", false
+	}
+	c, ok := f.Args[0].(*sqlir.Const)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprint(c.Value), true
 }

@@ -966,16 +966,17 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 	return nil
 }
 
-// writesGenerated refuses a statement that gives a generated column a value
-// other than DEFAULT, which Postgres rejects. exprs are the values written to
-// cols, nil when they come from a query.
-func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr) error {
+// writesGenerated refuses a statement that gives a generated column or a
+// GENERATED ALWAYS identity column a value other than DEFAULT, which Postgres
+// refuses, unless OVERRIDING SYSTEM VALUE (overriding) lets the identity
+// column take it. exprs are the values, nil when a query gives them.
+func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr, overriding bool) error {
 	def := x.tx.db.defs[table]
-	if def == nil || len(def.generated) == 0 {
+	if def == nil || len(def.generated) == 0 && len(def.identityAlways) == 0 {
 		return nil
 	}
 	for i, col := range cols {
-		if def.generated[col] == nil {
+		if def.generated[col] == nil && (!def.identityAlways[col] || overriding) {
 			continue
 		}
 		if exprs != nil {
@@ -983,7 +984,37 @@ func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Exp
 				continue
 			}
 		}
+		if def.generated[col] == nil {
+			return x.unsupported(fmt.Sprintf("a value other than DEFAULT for GENERATED ALWAYS identity column %q", col))
+		}
 		return x.unsupported(fmt.Sprintf("a value other than DEFAULT for generated column %q", col))
+	}
+	return nil
+}
+
+// writesDeferrableKey refuses a write of the columns cols (every column when
+// nil) that a DEFERRABLE primary key or unique constraint covers. Postgres
+// checks one at the end of the statement or at commit, and waits there for a
+// concurrent insert of the same key, which detest's checks on each row do
+// not do.
+func (x *sqlExec) writesDeferrableKey(table string, cols []string) error {
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return nil
+	}
+	covers := func(c string) bool { return cols == nil || slices.Contains(cols, c) }
+	if def.pkDeferrable && slices.ContainsFunc(def.pk, covers) {
+		return x.unsupported(fmt.Sprintf("a write to the DEFERRABLE primary key %q", def.pkName))
+	}
+	for _, u := range def.uniques {
+		if !u.Deferrable {
+			continue
+		}
+		for _, e := range u.Elems {
+			if slices.ContainsFunc(sqlir.ColumnRefs(e), func(r *sqlir.ColumnRef) bool { return covers(r.Column) }) {
+				return x.unsupported(fmt.Sprintf("a write to the DEFERRABLE unique constraint %q", u.Name))
+			}
+		}
 	}
 	return nil
 }
@@ -992,16 +1023,16 @@ func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Exp
 // it evaluates anything, as Postgres does when it plans the statement.
 func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []string) error {
 	def := x.tx.db.defs[table]
-	if def == nil || len(def.generated) == 0 {
+	if def == nil || len(def.generated) == 0 && len(def.identityAlways) == 0 {
 		return nil
 	}
 	if ins.OnConflict != nil {
-		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
+		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set), false); err != nil {
 			return err
 		}
 	}
 	for _, exprs := range ins.Rows {
-		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs); err != nil {
+		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs, ins.OverridingSystemValue); err != nil {
 			return err
 		}
 	}
@@ -1015,7 +1046,7 @@ func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []s
 			return x.unsupported("INSERT ... SELECT without a column list into a table with generated columns")
 		}
 	}
-	return x.writesGenerated(table, cols[:min(len(cols), width)], nil)
+	return x.writesGenerated(table, cols[:min(len(cols), width)], nil, ins.OverridingSystemValue)
 }
 
 // selectWidth is the number of columns a query returns, when it is known

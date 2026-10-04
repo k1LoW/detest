@@ -141,6 +141,9 @@ type InsertStmt struct {
 	Select     *SelectStmt
 	OnConflict *OnConflict
 	Returning  []Target
+	// OverridingSystemValue is OVERRIDING SYSTEM VALUE, which lets an
+	// INSERT give a GENERATED ALWAYS identity column a value.
+	OverridingSystemValue bool
 }
 
 // OnConflict is ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ... WHERE ...
@@ -236,6 +239,19 @@ type SchemaChange struct {
 	View        *SelectStmt
 	ViewColumns []string
 	Replace     bool
+	// Sequence is CREATE SEQUENCE (Create) or ALTER SEQUENCE of the
+	// sequence Table names, with Object "sequence".
+	Sequence *SequenceOptions
+}
+
+// SequenceOptions are the options of a sequence that decide the values
+// nextval returns, nil when not given.
+type SequenceOptions struct {
+	Start, Increment, MinValue, MaxValue, Cache *int64
+	// Restart is RESTART WITH n, and RestartStart a RESTART without a
+	// value, which starts over at the start value.
+	Restart      *int64
+	RestartStart bool
 }
 
 // ColumnDef is a column with its default, if any. A serial or identity column
@@ -255,6 +271,11 @@ type ColumnDef struct {
 	// Generated is the expression of a generated column, GENERATED ALWAYS
 	// AS (expr), whose value is computed from the row on every write.
 	Generated Expr
+	// Sequence are the options of an identity column's sequence, the one
+	// its Default calls nextval of, and IdentityAlways makes it GENERATED
+	// ALWAYS, which takes no value but DEFAULT.
+	Sequence       *SequenceOptions
+	IdentityAlways bool
 	// AutoIncrement is MySQL's AUTO_INCREMENT: an insert that leaves the
 	// column NULL or 0 takes the next value, and an explicit larger value
 	// moves the counter past it. DropAutoIncrement removes it, as a MODIFY
@@ -314,6 +335,9 @@ type UniqueDef struct {
 	Elems            []Expr
 	Where            Expr
 	NullsNotDistinct bool
+	// Deferrable is a constraint DEFERRABLE, whose check Postgres runs at
+	// the end of the statement or at commit.
+	Deferrable bool
 }
 
 // ForeignKey is a FOREIGN KEY or REFERENCES constraint. RefColumns empty

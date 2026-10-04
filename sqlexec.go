@@ -1112,6 +1112,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if err := x.insertsGenerated(table, ins, cols); err != nil {
 		return nil, err
 	}
+	if err := x.writesDeferrableKey(table, nil); err != nil {
+		return nil, err
+	}
 	var rows []Row
 	switch {
 	case ins.Select != nil:
@@ -1601,7 +1604,10 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		}
 	}
 	// Validate the predicate and preview SET for the trace.
-	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set)); err != nil {
+	if err := x.writesDeferrableKey(table, assignedColumns(up.Set)); err != nil {
+		return nil, err
+	}
+	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set), false); err != nil {
 		return nil, err // before WHERE is evaluated, which may have effects
 	}
 	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
@@ -3457,7 +3463,11 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if len(args) != 1 {
 			return nil, x.unsupported("nextval with other than one argument")
 		}
-		return x.tx.db.nextval(fmt.Sprint(derefValue(args[0]))), nil
+		v, refused := x.tx.db.nextval(fmt.Sprint(derefValue(args[0])))
+		if refused != "" {
+			return nil, x.unsupported(refused)
+		}
+		return v, nil
 	case "setval":
 		if len(args) < 2 || len(args) > 3 {
 			return nil, x.unsupported("setval with other than two or three arguments")
