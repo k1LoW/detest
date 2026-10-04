@@ -4282,3 +4282,17 @@ func TestMySQLLimitGapIncludesThePrimaryKey(t *testing.T) {
 		t.Errorf("covers (5, 0): %v, want true; (5, 2): %v, want false", covered(0), covered(2))
 	}
 }
+
+// A locking search with OR on an indexed column is refused, as MySQL's
+// optimizer picks how to search it; IN is searched as points.
+func TestMySQLLockingSearchWithOr(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)")
+	if _, err := db.Exec("UPDATE t SET v = 1 WHERE id = 1 OR id = 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("OR on the primary key: %v, want unsupported", err)
+	}
+	mustExec(t, db, "UPDATE t SET v = 1 WHERE id IN (1, 2)")
+	mustExec(t, db, "UPDATE t SET v = 2 WHERE id = 1 AND (v = 1 OR v = 3)")
+}

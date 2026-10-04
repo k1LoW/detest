@@ -223,6 +223,12 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 	if err := x.prefixSearch(table, alias, where); err != nil {
 		return err
 	}
+	if x.orOnIndex(table, alias, where) {
+		// MySQL may search such an OR as ranges of an index or a merge of
+		// several, by its optimizer's choice, which detest does not model;
+		// taken for a full scan, it would lock the whole table.
+		return x.unsupported("a locking search with OR on an indexed column (write it as IN)")
+	}
 	switch sr := x.searchRange(table, alias, where); {
 	case sr.ambiguous:
 		// Which index MySQL searches, and so which range it locks, depends
@@ -712,6 +718,43 @@ func (x *sqlExec) prefixSearch(table, alias string, where sqlir.Expr) error {
 		}
 	}
 	return nil
+}
+
+// orOnIndex reports whether a conjunct of where is an OR that refers to a
+// column of one of table's indexes.
+func (x *sqlExec) orOnIndex(table, alias string, where sqlir.Expr) bool {
+	def := x.tx.db.defs[table]
+	if def == nil || where == nil {
+		return false
+	}
+	indexed := map[string]bool{}
+	for _, c := range def.pk {
+		indexed[c] = true
+	}
+	for _, u := range def.uniques {
+		for _, e := range u.Elems {
+			for _, c := range sqlir.ColumnRefs(e) {
+				indexed[c.Column] = true
+			}
+		}
+	}
+	for _, ix := range def.indexes {
+		for _, c := range ix.Columns {
+			indexed[c] = true
+		}
+	}
+	for _, e := range splitAnd(where) {
+		b, ok := e.(*sqlir.BinaryExpr)
+		if !ok || b.Op != "OR" {
+			continue
+		}
+		if slices.ContainsFunc(sqlir.ColumnRefs(b), func(c *sqlir.ColumnRef) bool {
+			return indexed[c.Column] && (c.Table == "" || c.Table == alias || c.Table == relname(table))
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // volatile reports whether e calls a function that returns another value each
