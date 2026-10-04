@@ -945,6 +945,11 @@ func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
 	db.seqDefs[seq] = &d
 }
 
+func (db *DB) dropSequence(seq string) {
+	delete(db.seqDefs, seq)
+	delete(db.seqs, seq)
+}
+
 // nextval returns the next value of seq, or why detest refuses to. A
 // sequence that caches more than one value hands each session its own block
 // of them, which detest does not do, so its values are refused rather than
@@ -1002,6 +1007,9 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "sequence" && ch.Drop:
+		db.dropSequence(db.seqName(ch.Table))
+		return nil
 	case ch.Object == "sequence":
 		if ch.Sequence != nil {
 			if _, exists := db.seqDefs[db.newSeqName(ch.Table)]; exists && ch.Create && ch.IfNotExists {
@@ -1023,6 +1031,15 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		_, isView := db.views[table]
 		if db.defs[table] == nil && !isView && !ch.IfExists {
 			return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
+		}
+		if def := db.defs[table]; def != nil {
+			// The sequences of its serial and identity columns are the
+			// table's and go with it.
+			for col, d := range def.defaults {
+				if name, ok := nextvalOf(d); ok && db.seqName(name) == db.seqName(table+"_"+col+"_seq") {
+					db.dropSequence(db.seqName(name))
+				}
+			}
 		}
 		delete(db.defs, table)
 		delete(db.committed, table)

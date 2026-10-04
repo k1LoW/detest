@@ -281,7 +281,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
 		object, ok := map[pg.ObjectType]string{pg.ObjectType_OBJECT_TABLE: "", pg.ObjectType_OBJECT_VIEW: "view",
-			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index"}[s.DropStmt.RemoveType]
+			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index", pg.ObjectType_OBJECT_SEQUENCE: "sequence"}[s.DropStmt.RemoveType]
 		if !ok {
 			return nil, true, nil
 		}
