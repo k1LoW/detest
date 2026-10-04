@@ -406,8 +406,7 @@ func TestUntypedLiteralComparedWithNumber(t *testing.T) {
 		{`SELECT count(*) FROM t WHERE id IN ('01')`, "1"},
 		{`SELECT count(*) FROM t WHERE id <> ' 1 '`, "1"},
 		{`SELECT count(*) FROM t WHERE id < '10'`, "2"},
-		{`SELECT count(*) FROM t WHERE price = '1.50'`, "1"},
-		{`SELECT count(*) FROM t WHERE price >= '1.75'`, "1"},
+		{`SELECT count(*) FROM t WHERE price < '2'`, "1"},
 		{`SELECT CASE id WHEN '09' THEN 'nine' ELSE 'other' END FROM t WHERE id = 9`, "nine"},
 		{`SELECT count(*) FROM t HAVING count(*) = '02'`, "2"},
 		{`SELECT count(*) FROM t WHERE '01' IN (SELECT id FROM t)`, "2"},
@@ -419,6 +418,16 @@ func TestUntypedLiteralComparedWithNumber(t *testing.T) {
 	} {
 		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	// Postgres compares '1.5' with a float8 and refuses it for an integer,
+	// and detest cannot tell the two apart by the value.
+	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE price = '1.50'`,
+		`SELECT count(*) FROM t WHERE id = '1.5'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
 	for _, q := range []string{
