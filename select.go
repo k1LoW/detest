@@ -775,6 +775,22 @@ func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, e
 	return stop, x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, stop)
 }
 
+// anyRow is a row of table with a value of its type in each column, for a
+// check that depends on the shape of a search, not on its values.
+func (x *sqlExec) anyRow(table string) Row {
+	r := Row{}
+	if def := x.tx.db.defs[table]; def != nil {
+		for _, c := range def.columns {
+			if mysqlNumericType(def.types[c]) {
+				r[c] = int64(1)
+			} else {
+				r[c] = "1"
+			}
+		}
+	}
+	return r
+}
+
 // pushDown sets x.pushdown for a locking read's search of table by where,
 // when it goes through a secondary index that does not hold every column
 // the read uses of table, and returns the function that clears it.
@@ -784,7 +800,9 @@ func (x *sqlExec) pushDown(sel *sqlir.SelectStmt, table, alias string, where sql
 	if def == nil || sr.index == "" || sr.index == "PRIMARY" {
 		return func() {}
 	}
-	covered := !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
+	covered := !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool {
+		return t.Star && (t.Table == "" || t.Table == alias || t.Table == relname(table))
+	})
 	walkNodes(sel, func(n any) {
 		if c, ok := n.(*sqlir.ColumnRef); ok && x.searchedColumn(c, table, alias) && !slices.Contains(sr.cols, c.Column) && !slices.Contains(def.pk, c.Column) {
 			covered = false
@@ -861,6 +879,11 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 		rows, err := outer()
 		if err != nil {
 			return err
+		}
+		if len(rows) == 0 {
+			// The first table's lock may wait for a row it cannot see yet,
+			// so the joined search is checked for a row of any values.
+			rows = []Row{x.anyRow(table)}
 		}
 		for _, r := range rows {
 			x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}

@@ -1525,10 +1525,13 @@ func (tx *Tx) Insert(table string, row Row) error {
 	if _, exists := tx.view(table, row.Key()); exists {
 		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
 	}
+	tx.undo++ // written as the row goes into the primary key, before the checks
 	if err := x.checkUniques(table, row, "", nil); err != nil {
+		tx.undo-- // the failed insert's, rolled back
 		return err
 	}
 	if err := x.checkParents(table, row, nil); err != nil {
+		tx.undo--
 		return err
 	}
 	if err := tx.claimEntries(table, row); err != nil {
@@ -1677,6 +1680,11 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 	cur, ok := tx.view(table, key)
 	if !ok {
 		return false, nil
+	}
+	tx.undo++ // written before the secondary entries, which may wait
+	if err := tx.evaluator().releaseEntries(table, cur, nil); err != nil {
+		tx.undo-- // the failed delete's, rolled back
+		return false, err
 	}
 	delete(tx.writes, lk)
 	tx.deleted[lk] = true
@@ -1942,16 +1950,24 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if err := x.checkRow(table, cur); err != nil {
 			return n, err
 		}
+		undo := tx.undo
+		if !sameRow(old, cur) {
+			tx.undo++ // written before the secondary indexes' checks, which may wait
+		}
 		if err := x.checkUniques(table, cur, key, old); err != nil {
+			tx.undo = undo // the failed update's, rolled back
 			return n, err
 		}
 		if err := x.checkParents(table, cur, old); err != nil {
+			tx.undo = undo
 			return n, err
 		}
 		if err := x.onParentUpdate(table, old, cur); err != nil {
+			tx.undo = undo
 			return n, err
 		}
 		if lk, err = x.rekey(table, lk, cur); err != nil {
+			tx.undo = undo
 			return n, err
 		}
 		tx.writes[lk] = cur

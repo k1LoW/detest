@@ -4862,3 +4862,33 @@ func TestLockingJoinRefusals(t *testing.T) {
 		_ = conn.Close()
 	}
 }
+
+// The direct transaction API weighs a deadlock victim by the undo records
+// of its writes as the SQL executor does, and a failed write's goes with it.
+func TestInnoDBTxAPIUndo(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE t (id VARCHAR(5) PRIMARY KEY, code VARCHAR(5), UNIQUE KEY (code))")
+		var got []int
+		s.Seed(func() { got = nil })
+		s.Manual("writer", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				_ = tx.Insert("t", Row{"id": "a", "code": "x"})
+				got = append(got, tx.undo)
+				_ = tx.Insert("t", Row{"id": "b", "code": "x"}) // a duplicate code
+				got = append(got, tx.undo)
+				_, _ = tx.Update("t", "a", Row{"code": "y"})
+				got = append(got, tx.undo)
+				_, _ = tx.Delete("t", "a")
+				got = append(got, tx.undo)
+				return nil
+			})
+		})
+		s.AtQuiescence(func(*State) error {
+			if want := []int{1, 1, 2, 3}; !slices.Equal(got, want) {
+				return fmt.Errorf("undo after insert, failed insert, update, delete: %v, want %v", got, want)
+			}
+			return nil
+		})
+	})
+}
