@@ -629,6 +629,9 @@ func TestRowComparison(t *testing.T) {
 	}
 	for _, q := range []string{
 		`SELECT count(*) FROM p WHERE 1 IN ((1, 2))`,
+		`SELECT count(*) FROM p HAVING (count(*), 1) > (3, 1)`,
+		`SELECT count(*) FROM p WHERE CASE (a, b) WHEN (9, 1) THEN true ELSE false END`,
+		`SELECT count(*) FROM p WHERE NULLIF((a, b), (9, 1)) IS NULL`,
 		`SELECT count(*) FROM p WHERE a IN (SELECT a, b FROM p)`,
 		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,

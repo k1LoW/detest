@@ -2094,6 +2094,14 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if x.tx.db.kind.InnoDB() {
 		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
+	// Rows are compared pair by pair in compareRows; one reaching here comes
+	// from a context that does not, such as HAVING, CASE or NULLIF.
+	if _, ok := l.([]any); ok {
+		return nil, nil, x.unsupported("row comparison")
+	}
+	if _, ok := r.([]any); ok {
+		return nil, nil, x.unsupported("row comparison")
+	}
 	// With neither side typed, as in $1 = '01', Postgres compares text, so a
 	// number the parameter holds is compared as the text it is sent as.
 	if untypedExpr(le) && untypedExpr(re) {
