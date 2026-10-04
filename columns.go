@@ -240,6 +240,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	}
 	sc.outputs = outputColumns(sel)
 	for _, e := range sel.GroupBy {
+		if err := c.position(sel, e, "GROUP BY"); err != nil {
+			return nil, err
+		}
 		if err := c.orderExpr(e, sc); err != nil {
 			return nil, err
 		}
@@ -250,6 +253,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 	}
 	for _, o := range sel.OrderBy {
+		if err := c.position(sel, o.Expr, "ORDER BY"); err != nil {
+			return nil, err
+		}
 		if err := c.orderExpr(o.Expr, sc); err != nil {
 			return nil, err
 		}
@@ -261,6 +267,24 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	return outputColumns(sel), nil
+}
+
+// position fails an integer GROUP BY or ORDER BY item that is no position
+// of the select list. A * makes the list longer by columns detest does not
+// count here, so a query with one is let through.
+func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause string) error {
+	k, ok := e.(*sqlir.Const)
+	if !ok {
+		return nil
+	}
+	n, ok := k.Value.(int64)
+	if !ok || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		return nil
+	}
+	if n < 1 || n > int64(len(sel.Targets)) {
+		return c.x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("%s position %d is not in select list", clause, n), "", "", "")
+	}
+	return nil
 }
 
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name
