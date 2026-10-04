@@ -733,8 +733,17 @@ func (c *pgConv) identity(col *sqlir.ColumnDef, table string, k *pg.Constraint) 
 		col.Default = &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: name}}}
 	}
 	col.Sequence = seq
-	col.IdentityAlways = k.GetGeneratedWhen() == "a"
+	col.Identity = identityMode(k.GetGeneratedWhen())
 	return nil
+}
+
+// identityMode is the IR's name for the generated_when of an identity
+// column: 'a' for ALWAYS, 'd' for BY DEFAULT.
+func identityMode(when string) string {
+	if when == "a" {
+		return "always"
+	}
+	return "by default"
 }
 
 // sequenceOptions converts the options of a sequence that decide its values,
@@ -887,18 +896,22 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.Columns = append(ch.Columns, col)
 		case pg.AlterTableType_AT_SetIdentity:
 			var opts []*pg.Node
+			var mode string
 			for _, n := range cmd.Def.GetList().GetItems() {
-				if n.GetDefElem().GetDefname() != "generated" {
-					opts = append(opts, n)
+				if d := n.GetDefElem(); d.GetDefname() == "generated" {
+					mode = identityMode(string(rune(d.GetArg().GetInteger().GetIval())))
+					continue
 				}
+				opts = append(opts, n)
 			}
 			seq, _, err := c.sequenceOptions(opts)
 			if err != nil {
 				return nil, err
 			}
-			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, TypeOnly: true, Sequence: seq})
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, TypeOnly: true, Sequence: seq, Identity: mode})
 		case pg.AlterTableType_AT_DropIdentity:
-			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name}) // as DROP DEFAULT
+			// The default goes as with DROP DEFAULT, and the identity with it.
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Identity: "drop"})
 		case pg.AlterTableType_AT_AddColumn:
 			col, cons, checks, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
 			if err != nil {

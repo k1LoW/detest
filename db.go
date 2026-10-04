@@ -1106,11 +1106,15 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				redefined = true
 			}
 		}
-		if col.Sequence != nil && !col.TypeOnly {
+		switch col.Identity {
+		case "":
+		case "drop":
+			delete(def.identityAlways, col.Name)
+		default:
 			if def.identityAlways == nil {
 				def.identityAlways = map[string]bool{}
 			}
-			def.identityAlways[col.Name] = col.IdentityAlways
+			def.identityAlways[col.Name] = col.Identity == "always"
 		}
 		if col.Sequence != nil {
 			d := col.Default

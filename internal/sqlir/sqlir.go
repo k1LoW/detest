@@ -272,10 +272,11 @@ type ColumnDef struct {
 	// AS (expr), whose value is computed from the row on every write.
 	Generated Expr
 	// Sequence are the options of an identity column's sequence, the one
-	// its Default calls nextval of, and IdentityAlways makes it GENERATED
-	// ALWAYS, which takes no value but DEFAULT.
-	Sequence       *SequenceOptions
-	IdentityAlways bool
+	// its Default calls nextval of. Identity is "always" for GENERATED
+	// ALWAYS, which takes no value but DEFAULT, "by default" for GENERATED
+	// BY DEFAULT, "drop" for DROP IDENTITY and empty to leave it as it is.
+	Sequence *SequenceOptions
+	Identity string
 	// AutoIncrement is MySQL's AUTO_INCREMENT: an insert that leaves the
 	// column NULL or 0 takes the next value, and an explicit larger value
 	// moves the counter past it. DropAutoIncrement removes it, as a MODIFY
