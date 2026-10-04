@@ -118,7 +118,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 **Constraints**
 
 - Primary keys (composite too), unique constraints and unique indexes, including partial, expression and `NULLS NOT DISTINCT` indexes
-- Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`
+- Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`. A statement's checks run when it has written all its rows, as Postgres's do
 - `CHECK` and `NOT NULL`
 - Column types `uuid`, `smallint` and `integer` are checked on write
 

@@ -63,6 +63,7 @@ const (
 	CardinalityViolation      = sqlir.CardinalityViolation
 	StringDataRightTruncation = sqlir.StringDataRightTruncation
 	DataTruncated             = sqlir.DataTruncated
+	RestrictViolation         = sqlir.RestrictViolation
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

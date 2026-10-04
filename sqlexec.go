@@ -51,6 +51,10 @@ type sqlExec struct {
 	// selectStmt is set for a SELECT statement, as opposed to the query of
 	// an INSERT ... SELECT or a CREATE TABLE ... SELECT.
 	selectStmt bool
+	// inWrite is set while an INSERT, UPDATE or DELETE statement runs, and
+	// fkChecks are the foreign key checks it holds back to its end.
+	inWrite  bool
+	fkChecks []func() error
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -177,6 +181,21 @@ func (x *sqlExec) ddlInTransaction() error {
 	return nil
 }
 
+// write runs an INSERT, UPDATE or DELETE and then the checks it held back
+// to its end.
+func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
+	x.inWrite, x.fkChecks = true, nil
+	defer func() { x.inWrite, x.fkChecks = false, nil }()
+	res, err := run()
+	if err != nil {
+		return nil, err
+	}
+	if err := x.endStatement(); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
 	switch st := stmt.(type) {
@@ -223,7 +242,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.SelectStmt:
 		return x.execSelect(st)
 	case *sqlir.InsertStmt:
-		res, err := x.execInsert(st)
+		res, err := x.write(func() (*sqlResult, error) { return x.execInsert(st) })
 		if de, ok := errors.AsType[*sqlir.DBError](err); ok && x.tx.db.kind.InnoDB() && st.OnConflict != nil && st.OnConflict.DoNothing {
 			switch de.Kind {
 			case sqlir.UniqueViolation, sqlir.Deadlock, sqlir.LockWaitTimeout, sqlir.LockNotAvailable:
@@ -236,10 +255,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		}
 		return res, err
 	case *sqlir.UpdateStmt:
-		return x.execUpdate(st)
+		return x.write(func() (*sqlResult, error) { return x.execUpdate(st) })
 	case *sqlir.DeleteStmt:
 		if !st.Truncate {
-			return x.execDelete(st)
+			return x.write(func() (*sqlResult, error) { return x.execDelete(st) })
 		}
 		if x.tx.block && !x.tx.checking {
 			// MySQL's TRUNCATE commits the transaction first, which detest

@@ -114,6 +114,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "21000", 0
 	case sqlir.ForeignKeyParentViolation:
 		return "23503", 0
+	case sqlir.RestrictViolation:
+		return "23001", 0
 	case sqlir.ArithmeticOutOfRange:
 		return "22003", 0
 	case sqlir.LockWaitTimeout:

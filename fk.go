@@ -65,8 +65,12 @@ func (tx *Tx) childViolation(table string, fk sqlir.ForeignKey) error {
 	return tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("insert or update on table %q violates foreign key constraint %q", relname(table), fk.Name), relname(table), "", fk.Name)
 }
 
-func (tx *Tx) parentViolation(table string, ck childKey) error {
-	return tx.db.kind.Error(sqlir.ForeignKeyParentViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
+func (tx *Tx) parentViolation(table string, ck childKey, action string) error {
+	kind := sqlir.ForeignKeyParentViolation
+	if action == "restrict" {
+		kind = sqlir.RestrictViolation
+	}
+	return tx.db.kind.Error(kind, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
 }
 
 func rowMatches(r Row, cols []string, vals []any) bool {
@@ -113,13 +117,61 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 				continue
 			}
 		}
-		found, err := x.lockParent(fk, vals)
-		if err != nil {
+		if err := x.atStatementEnd(func() error {
+			found, err := x.lockParent(fk, vals)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return x.tx.childViolation(table, fk)
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-		if !found {
-			return x.tx.childViolation(table, fk)
+	}
+	return nil
+}
+
+// atStatementEnd runs a foreign key check when the statement has written all
+// its rows, as Postgres runs them in after-row triggers: a row may reference
+// one the same statement writes after it, and a unique violation of a later
+// row is reported first. InnoDB checks each row as it writes it, and a write
+// outside a statement has no end to wait for.
+func (x *sqlExec) atStatementEnd(check func() error) error {
+	if x.tx.db.kind.InnoDB() || !x.inWrite {
+		return check()
+	}
+	x.fkChecks = append(x.fkChecks, check)
+	return nil
+}
+
+// endStatement runs the checks atStatementEnd held back.
+func (x *sqlExec) endStatement() error {
+	checks := x.fkChecks
+	x.fkChecks = nil
+	for _, check := range checks {
+		if err := check(); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// referenced reports whether children still reference the parent key ov.
+// At the end of a Postgres statement, NO ACTION lets it through when it left
+// a row with the same key, where RESTRICT does not. InnoDB checks before the
+// row is written, while the old key is still there.
+func (x *sqlExec) referenced(table string, ck childKey, ov []any, action string) error {
+	if action == "no action" && !x.tx.db.kind.InnoDB() {
+		for _, r := range x.tx.selectNoYield(table, nil) {
+			if rowMatches(r, x.tx.db.refColumns(ck.fk), ov) {
+				return nil
+			}
+		}
+	}
+	if len(x.children(ck.table, ck.fk, ov)) > 0 {
+		return x.tx.parentViolation(table, ck, action)
 	}
 	return nil
 }
@@ -132,6 +184,12 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 	var key string
 	if pdef := x.tx.db.defs[parent]; pdef != nil && slices.Equal(cols, pdef.pk) {
 		key = encodeKey(vals)
+		if _, ok := x.tx.view(parent, key); !ok && !x.tx.db.kind.InnoDB() {
+			// Postgres's check is a locking read under the statement's
+			// snapshot, which does not see a parent another transaction is
+			// inserting, so it fails at once where InnoDB's waits for it.
+			return false, nil
+		}
 	} else {
 		for _, r := range x.tx.selectNoYield(parent, nil) {
 			if rowMatches(r, cols, vals) {
@@ -252,9 +310,11 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 			if x.tx.isDeferred(ck.fk) {
 				continue // the commit checks the children are gone by then
 			}
-			return x.tx.parentViolation(table, ck)
+			fallthrough
 		default: // restrict, which is never deferred
-			return x.tx.parentViolation(table, ck)
+			if err := x.atStatementEnd(func() error { return x.referenced(table, ck, vals, ck.fk.OnDelete) }); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -291,9 +351,11 @@ func (x *sqlExec) onParentUpdate(table string, old, row Row) error {
 			if x.tx.isDeferred(ck.fk) {
 				continue
 			}
-			return x.tx.parentViolation(table, ck)
+			fallthrough
 		default:
-			return x.tx.parentViolation(table, ck)
+			if err := x.atStatementEnd(func() error { return x.referenced(table, ck, ov, ck.fk.OnUpdate) }); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -452,7 +514,7 @@ func (x *sqlExec) checkDeferred(only func(sqlir.ForeignKey) bool) error {
 					}
 				}
 				if len(x.children(ck.table, ck.fk, ov)) > 0 {
-					return tx.parentViolation(table, ck)
+					return tx.parentViolation(table, ck, "no action")
 				}
 			}
 		}

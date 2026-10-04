@@ -659,6 +659,10 @@ const (
 	// DataTruncated is a value that is none of an ENUM's or a SET's members,
 	// which MySQL's strict mode refuses.
 	DataTruncated
+	// RestrictViolation is an update or delete of a parent row that children
+	// reference through an ON DELETE or ON UPDATE RESTRICT foreign key, which
+	// Postgres reports apart from NO ACTION.
+	RestrictViolation
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -693,7 +697,8 @@ var (
 		CheckViolation: ErrCheckViolation, InvalidParameterValue: ErrInvalidParameterValue, LockWaitTimeout: ErrLockNotAvailable,
 		InvalidRowCountInLimit: ErrInvalidParameterValue, InvalidRowCountInOffset: ErrInvalidParameterValue,
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
-		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated}
+		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
+		RestrictViolation: ErrForeignKeyViolation}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers
