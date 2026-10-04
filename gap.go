@@ -147,7 +147,8 @@ func (tx *Tx) gapHolders(table string, row, old Row) []*Tx {
 		// An update enters a gap only by changing the value the gap's index
 		// holds; for a whole-table gap that is the primary key, which a
 		// changed key inserts anew.
-		if old != nil && (len(g.cols) == 0 && old.Key() == row.Key() || len(g.cols) > 0 && sameKey(old, row, g.cols)) {
+		if old != nil && (g.key != nil && keyCompare(g.key(old), g.key(row)) == 0 ||
+			g.key == nil && (len(g.cols) == 0 && old.Key() == row.Key() || len(g.cols) > 0 && sameKey(old, row, g.cols))) {
 			continue
 		}
 		if g.tx != tx && g.table == table && g.covers(row) && !slices.Contains(out, g.tx) {

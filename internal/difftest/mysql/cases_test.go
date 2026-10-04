@@ -1028,6 +1028,21 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A session setting does not start the transaction in InnoDB.
+		Name:   "rollback to a savepoint after a setting releases every lock",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `SET SESSION innodb_lock_wait_timeout = 5`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
+		},
+	},
+	{
 		// A unique key with a NULL is in the index all the same: an update
 		// moving it writes a new entry, whose rollback leaves its gap.
 		Name:   "rollback leaves the gap of a moved unique key with a NULL",

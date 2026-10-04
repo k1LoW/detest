@@ -326,8 +326,14 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 		mark = tx.markStatement()
 	}
 	res, err := stmt.exec(tx, args)
-	if _, sp := stmt.stmt.(*sqlir.SavepointStmt); !sp {
-		tx.started = true
+	// A statement on InnoDB's data starts its transaction there; a session
+	// setting, a savepoint and a refused statement do not.
+	switch stmt.stmt.(type) {
+	case *sqlir.SavepointStmt, *sqlir.SetStmt:
+	default:
+		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
+			tx.started = true
+		}
 	}
 	if c.db.s.sqlObserver != nil {
 		c.db.s.sqlObserver(query, err)
