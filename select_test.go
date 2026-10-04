@@ -492,6 +492,9 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 			t.Errorf("%v: got %v, want unsupported", v, err)
 		}
 	}
+	if _, err := db.Exec(`SELECT id FROM t WHERE ratio < $1`, math.NaN()); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("comparison with NaN: got %v, want unsupported", err)
+	}
 	// A value of another type is not converted, where Postgres refuses it.
 	for _, v := range []any{true, time.Unix(0, 0)} {
 		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
