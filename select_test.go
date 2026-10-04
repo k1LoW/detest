@@ -733,6 +733,7 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
 		{`SELECT 1.6::int`, nil, "2"},
 		{`SELECT (-1.4)::smallint`, nil, "-1"},
+		{`SELECT 9007199254740993::numeric = 9007199254740993`, nil, "true"},
 		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
 		{`SELECT floor(1.5) / 2`, nil, "0.5"},
 		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
@@ -744,7 +745,12 @@ func TestCastToNumber(t *testing.T) {
 	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
 	}
-	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`} {
+	for _, q := range []string{`SELECT '40000'::smallint`, `SELECT 3000000000::int`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrNumericValueOutOfRange) {
+			t.Errorf("%s: got %v, want out of range", q, err)
+		}
+	}
+	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}

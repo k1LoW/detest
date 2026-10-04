@@ -2490,6 +2490,34 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 	return out, err
 }
 
+// castInteger casts v to an integer before the target type's width is
+// checked: text as the integer input function reads it, and a fraction
+// rounded. nil is a value castValue leaves as it is.
+func castInteger(v any) (any, error) {
+	if s, ok := v.(string); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s)}
+		}
+		return n, nil
+	}
+	if n, ok := integer(v); ok {
+		return n, nil
+	}
+	// Postgres rounds a numeric half away from zero but a float8 half to
+	// even, which the value does not tell apart, so a half is refused.
+	if f, ok := toFloat(v); ok && isNumber(v) {
+		if math.Abs(f-math.Trunc(f)) == 0.5 {
+			return nil, errUnknownExpr{"a cast to an integer of a number ending in .5"}
+		}
+		if math.IsNaN(f) || math.Abs(f) >= 1<<63 {
+			return nil, kindError{sqlir.NumericValueOutOfRange, "bigint out of range"}
+		}
+		return int64(math.Round(f)), nil
+	}
+	return nil, nil
+}
+
 func castValue(v any, typ string) (any, error) {
 	v = derefValue(v)
 	if v == nil {
@@ -2500,25 +2528,44 @@ func castValue(v any, typ string) (any, error) {
 	}
 	switch typ {
 	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
-		if s, ok := v.(string); ok {
-			n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-			if err != nil {
-				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s)}
+		n, err := castInteger(v)
+		if err != nil {
+			return nil, err
+		}
+		if n == nil {
+			break
+		}
+		lim, name := int64(math.MaxInt64), "bigint"
+		switch typ {
+		case "int2", "smallint":
+			lim, name = math.MaxInt16, "smallint"
+		case "int", "int4", "integer":
+			lim, name = math.MaxInt32, "integer"
+		}
+		if i, _ := n.(int64); i > lim || i < -lim-1 {
+			return nil, kindError{sqlir.NumericValueOutOfRange, name + " out of range"}
+		}
+		return n, nil
+	case "numeric":
+		// As a value written to a numeric column: refused when a float
+		// cannot keep it, and in the one representation numerics have.
+		if isText(v) {
+			if !exactAsFloat(v) {
+				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
+			}
+			n, ok := columnNumber(v, "numeric")
+			if !ok {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", v)}
+			}
+			if isNaN(n) {
+				return nil, errUnknownExpr{"a cast to NaN"}
 			}
 			return n, nil
 		}
-		if n, ok := integer(v); ok {
-			return n, nil
+		if isNumber(v) {
+			return numericValue(v), nil
 		}
-		// Postgres rounds a numeric half away from zero but a float8 half to
-		// even, which the value does not tell apart, so a half is refused.
-		if f, ok := toFloat(v); ok {
-			if math.Abs(f-math.Trunc(f)) == 0.5 {
-				return nil, errUnknownExpr{"a cast to an integer of a number ending in .5"}
-			}
-			return int64(math.Round(f)), nil
-		}
-	case "float8", "float4", "double precision", "numeric", "real":
+	case "float8", "float4", "double precision", "real":
 		if s, ok := v.(string); ok {
 			f, err := parseNumber(s)
 			if err != nil {
