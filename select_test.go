@@ -880,6 +880,7 @@ func TestValueFormsByType(t *testing.T) {
 		`SELECT round(ratio) FROM t`, `INSERT INTO t (id, c) VALUES (2, 'ab')`, `INSERT INTO t (id, c) VALUES (2, 'a  ')`,
 		`SELECT true UNION SELECT 1`, `SELECT id FROM t UNION SELECT NULL UNION SELECT now()`,
 		`SELECT true || false`, `SELECT 1 || true`, `SELECT CASE WHEN true THEN '2'::text ELSE 1 END`,
+		`SELECT '' || now()`, `SELECT now()::text`,
 		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -895,6 +896,7 @@ func TestValueFormsByType(t *testing.T) {
 		{`INSERT INTO t (id, v) VALUES (2, 1234)`, ErrStringDataRightTruncation},
 		{`INSERT INTO t (id, price) VALUES (2, 999.95)`, ErrNumericValueOutOfRange},
 		{`SELECT 'o'::bool`, ErrInvalidTextRepresentation},
+		{`SELECT CASE WHEN false THEN 1 ELSE '1.5' END`, ErrInvalidTextRepresentation},
 	} {
 		if _, err := db.Exec(tc.q); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, err, tc.want)

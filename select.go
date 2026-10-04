@@ -554,6 +554,16 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		if len(kinds) > 1 {
 			return nil, nil, x.unsupported("a set operation over a column of values of two types")
 		}
+		// An integer under a numeric or a float takes the column's type,
+		// so 1 UNION ALL 3.0 gives numerics and x / 2 is 0.5 for both.
+		rows := slices.Concat(lrows, rrows)
+		if kinds["number"] && slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) }) {
+			for _, r := range rows {
+				if n, ok := integer(derefValue(r[c])); ok {
+					r[c] = float64(n)
+				}
+			}
+		}
 	}
 	key := func(r Row) string {
 		var kb strings.Builder

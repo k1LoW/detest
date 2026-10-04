@@ -2319,6 +2319,14 @@ func isText(v any) bool {
 	return false
 }
 
+func isTemporal(v any) bool {
+	switch derefValue(v).(type) {
+	case time.Time, time.Duration:
+		return true
+	}
+	return false
+}
+
 func isFloat(v any) bool {
 	switch derefValue(v).(type) {
 	case float64, float32:
@@ -2502,6 +2510,11 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if !isText(l) && !isText(r) {
 			return nil, errUnknownExpr{"|| without a text operand"}
 		}
+		// As a cast to text, a timestamp or an interval is written by
+		// Postgres's own rules, not Go's.
+		if isTemporal(l) || isTemporal(r) {
+			return nil, errUnknownExpr{"|| of a timestamp or an interval"}
+		}
 		// As a cast to text, the text of a numeric or a float is not the
 		// float's.
 		if isFloat(l) || isFloat(r) {
@@ -2596,11 +2609,12 @@ func arith(op string, l, r any) (any, error) {
 // NULLIF gives, as the common type of all the branches: a number as
 // commonNumber gives it, and text as a number when another branch is typed as
 // one, which is how Postgres reads an untyped literal or a parameter there,
-// such as the '2' of CASE WHEN ... THEN 1 ELSE '2' END. Text of a branch
-// typed as text, a column or a cast, has no common type with a number in
-// Postgres, which fails the statement whatever row it reads, as does a
-// literal that reads as no number, so both are refused. MySQL converts
-// between the two instead.
+// such as the '2' of CASE WHEN ... THEN 1 ELSE '2' END. The number's type is
+// the branches' common one, an integer unless one is a numeric or a float,
+// and text that reads as no value of it fails as its input does. Text of a
+// branch typed as text, a column or a cast, has no common type with a number
+// in Postgres, which fails the statement whatever row it reads, so it is
+// refused. MySQL converts between the two instead.
 func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 	if x.tx.db.kind.InnoDB() || !slices.ContainsFunc(exprs, numberTyped) {
 		return commonNumber(exprs, v), nil
@@ -2619,9 +2633,19 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 			}
 		}
 	}
-	f, err := parseNumber(s)
-	if err != nil || isOtherNumberText(s) {
+	if isOtherNumberText(s) {
 		return nil, refuse
+	}
+	if !slices.ContainsFunc(exprs, floatTyped) {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
+		}
+		return n, nil
+	}
+	f, err := parseNumber(s)
+	if err != nil {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", s), "", "", "")
 	}
 	return commonNumber(exprs, numericValue(f)), nil
 }
@@ -2955,6 +2979,8 @@ func castValue(v any, typ string) (any, error) {
 		switch v.(type) {
 		case float64, float32:
 			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
+		case time.Time, time.Duration:
+			return nil, errUnknownExpr{"a cast of a timestamp or an interval to text"}
 		}
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":
