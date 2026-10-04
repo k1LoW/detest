@@ -179,11 +179,33 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 		}
 		released[lk] = true
 	}
-	if tx.p == nil {
+	tx.wake(released)
+}
+
+// rollbackLocks returns tx's locks to what it held at sp: it releases the
+// ones taken since and weakens the ones strengthened since, as Postgres does
+// when it aborts the subtransaction that took them.
+func (tx *Tx) rollbackLocks(sp *savepoint) {
+	tx.releaseLocks(tx.locks[sp.locks:])
+	tx.locks = tx.locks[:sp.locks]
+	weakened := map[lockKey]bool{}
+	for _, lk := range tx.locks {
+		if holders := tx.db.locks[lk]; holders[tx] > sp.modes[lk] {
+			holders[tx] = sp.modes[lk]
+			weakened[lk] = true
+		}
+	}
+	tx.wake(weakened)
+}
+
+// wake makes the processes waiting for one of keys ready; each re-checks
+// when resumed.
+func (tx *Tx) wake(keys map[lockKey]bool) {
+	if tx.p == nil || len(keys) == 0 {
 		return
 	}
 	for _, p := range tx.p.r.procs {
-		if p.state == stateBlockedLock && p.waitRow != nil && released[p.waitRow.key] {
+		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
 			p.state = stateReady
 			p.waitRow = nil
 		}

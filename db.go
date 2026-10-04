@@ -823,11 +823,14 @@ type Tx struct {
 // savepoint is what ROLLBACK TO restores: the transaction's writes and the
 // locks it held when the savepoint was set.
 type savepoint struct {
-	name     string
-	writes   map[lockKey]Row
-	deleted  map[lockKey]bool
-	moved    map[lockKey]string
-	locks    int
+	name    string
+	writes  map[lockKey]Row
+	deleted map[lockKey]bool
+	moved   map[lockKey]string
+	locks   int
+	// modes is the strength each lock held then had, since a lock taken
+	// before the savepoint may be strengthened after it.
+	modes    map[lockKey]lockMode
 	deferred int
 }
 
@@ -1044,7 +1047,10 @@ func (tx *Tx) savepoint(op, name string) error {
 		if err := tx.check(); err != nil {
 			return err
 		}
-		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), deferred: len(tx.deferred)}
+		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), modes: map[lockKey]lockMode{}, deferred: len(tx.deferred)}
+		for _, lk := range tx.locks {
+			sp.modes[lk] = tx.db.locks[lk][tx]
+		}
 		for k, v := range tx.writes {
 			sp.writes[k] = v.clone()
 		}
@@ -1066,7 +1072,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.saves = tx.saves[:i]
 		return nil
 	}
-	sp := tx.saves[i]
+	sp := &tx.saves[i]
 	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
 	tx.writes, tx.deleted = map[lockKey]Row{}, map[lockKey]bool{}
 	for k, v := range sp.writes {
@@ -1075,8 +1081,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
 	tx.deferred = tx.deferred[:sp.deferred]
-	tx.releaseLocks(tx.locks[sp.locks:])
-	tx.locks = tx.locks[:sp.locks]
+	tx.rollbackLocks(sp)
 	tx.aborted = false
 	return nil
 }
@@ -1089,12 +1094,12 @@ func (tx *Tx) abort() {
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}
-	from := 0
 	if n := len(tx.saves); n > 0 {
-		from = tx.saves[n-1].locks
+		tx.rollbackLocks(&tx.saves[n-1])
+		return
 	}
-	tx.releaseLocks(tx.locks[from:])
-	tx.locks = tx.locks[:from]
+	tx.releaseLocks(tx.locks)
+	tx.locks = nil
 }
 
 func (tx *Tx) yieldf(format string, args ...any) {

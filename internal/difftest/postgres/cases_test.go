@@ -100,6 +100,34 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "failed statement after a savepoint undoes a lock upgrade",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
+			difftest.S(0, `INSERT INTO stock VALUES ('apple', 1)`),
+			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
+			difftest.S(1, `DELETE FROM stock WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		Name:   "rollback to savepoint undoes a lock upgrade",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
+			difftest.S(1, `DELETE FROM stock WHERE sku = 'apple'`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
 		Name:   "skip locked",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

@@ -637,3 +637,55 @@ func TestFailedStatementAfterSavepointReleasesItsLocks(t *testing.T) {
 		lockAfterFailure(t, s, true, "a")
 	})
 }
+
+// A lock taken before a savepoint and strengthened after it goes back to its
+// earlier strength when the subtransaction aborts, by a failed statement or by
+// ROLLBACK TO. x holds FOR KEY SHARE on a while it waits for mu, which does
+// not conflict with y's UPDATE; the FOR UPDATE it took after the savepoint
+// would.
+func TestSubtransactionAbortWeakensUpgradedLock(t *testing.T) {
+	for _, end := range []string{"failure", "rollback to"} {
+		t.Run(end, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+				s.Seed(func() {
+					mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`)
+				})
+				mu := s.Mutex("mu")
+				s.Manual("x", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					for _, q := range []string{
+						`SELECT sku FROM stock WHERE sku = 'a' FOR KEY SHARE`,
+						`SAVEPOINT s`,
+						`SELECT sku FROM stock WHERE sku = 'a' FOR UPDATE`,
+					} {
+						if _, err := tx.Exec(q); err != nil {
+							return err
+						}
+					}
+					if end == "failure" {
+						if _, err := tx.Exec(`INSERT INTO stock VALUES ('a', 1)`); !errors.Is(err, ErrUniqueViolation) {
+							return fmt.Errorf("insert: got %w", err)
+						}
+					} else if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT s`); err != nil {
+						return err
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					return nil
+				})
+				s.Manual("y", 1, func(p *Proc) error {
+					mu.Lock()
+					defer mu.Unlock()
+					_, err := db.ExecContext(p.Context(), `UPDATE stock SET n = 5 WHERE sku = 'a'`)
+					return err
+				})
+			})
+		})
+	}
+}
