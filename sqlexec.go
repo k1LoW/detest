@@ -1101,8 +1101,10 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			noPK = true
 		}
 		// Waiting on a key made from the row's values would block where
-		// Postgres, with no key to wait on, takes both rows.
-		if noPK && x.tx.heldByOther(lk, lockUpdate) {
+		// Postgres, with no key to wait on, takes both rows. A row a unique
+		// index takes is waited on there too, on the same transaction, so
+		// it waits here as Postgres does.
+		if noPK && x.tx.heldByOther(lk, lockUpdate) && !x.inUniqueIndex(table, row) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
 		if err := x.tx.lock(lk); err != nil {
@@ -1408,6 +1410,21 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 type errUnknownExpr struct{ what string }
 
 func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL expression: " + e.what }
+
+// inUniqueIndex reports whether row has an entry in one of the table's
+// unique indexes, so that an equal row is decided by that index.
+func (x *sqlExec) inUniqueIndex(table string, row Row) bool {
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return false
+	}
+	for i := range def.uniques {
+		if _, ok, err := x.uniqueValues(table, &def.uniques[i], row); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
 
 // unsupportedExpr turns an expression detest cannot evaluate into
 // ErrUnsupportedSQL, naming where in the statement it stood. A written value

@@ -328,3 +328,37 @@ func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
 		t.Errorf("equal row another transaction is writing: got %v", err)
 	}
 }
+
+// An equal row a unique index takes waits for the transaction writing the
+// other one, as Postgres waits on the index entry, and then fails as a
+// unique violation once that transaction commits.
+func TestEqualRowUnderUniqueWaits(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE nkw (a int UNIQUE)`)
+		var errs []error
+		s.Seed(func() { errs = nil })
+		insert := func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`INSERT INTO nkw VALUES (1)`); err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			return tx.Commit()
+		}
+		s.Manual("x", 1, insert)
+		s.Manual("y", 1, insert)
+		s.AtQuiescence(func(*State) error {
+			for _, err := range errs {
+				if !errors.Is(err, ErrUniqueViolation) {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
