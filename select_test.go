@@ -871,8 +871,8 @@ func TestNumberKeysByValue(t *testing.T) {
 func TestValueFormsByType(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1), b bytea)`)
-	mustExec(t, db, `INSERT INTO t (id, ratio, name, b) VALUES (1, 0.5, 'a', $1)`, []byte("10"))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, ratio float8, name text, v varchar(3), c char(3), price numeric(4,1), b bytea, active bool)`)
+	mustExec(t, db, `INSERT INTO t (id, ratio, name, b, active) VALUES (1, 0.5, 'a', $1, true)`, []byte("10"))
 	for _, q := range []string{
 		`SELECT 1 || 2`, `SELECT 'a' || 1.5`, `SELECT 1.5::text`, `SELECT ratio::text FROM t`,
 		`SELECT coalesce(name, 1) FROM t`, `SELECT CASE WHEN id = 1 THEN name ELSE 2 END FROM t`, `SELECT greatest(name, 1) FROM t`,
@@ -920,6 +920,12 @@ func TestValueFormsByType(t *testing.T) {
 	}
 	if _, err := db.Exec(`SELECT $1::bool`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("$1::bool with 2: got %v, want invalid input", err)
+	}
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE active = $1`, int64(1)); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("active = $1 with 1: got %v", got)
+	}
+	if _, err := db.Exec(`SELECT count(*) FROM t WHERE active = $1`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("active = $1 with 2: got %v, want invalid input", err)
 	}
 	// ALTER COLUMN TYPE applies the new limits to the rows and the writes
 	// after it.

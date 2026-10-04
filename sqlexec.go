@@ -2384,6 +2384,14 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			s = k
 		case []byte:
 			s = string(k)
+		case int64:
+			// An integer bound to a parameter Postgres infers as boolean
+			// reaches it as the text the driver sends, so active = $1
+			// with 1 is true and with 2 fails as boolean input does.
+			if _, isBool := derefValue(other).(bool); !isBool {
+				return v, nil
+			}
+			s = strconv.FormatInt(k, 10)
 		default:
 			return v, nil
 		}
