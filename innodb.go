@@ -151,7 +151,7 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	tx.aborted = false
 	if deadlock {
 		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo, tx.lockStructs, tx.explicit, tx.implicit, tx.grants = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0, nil, nil, nil, nil
-		tx.inserts, tx.entries = nil, nil
+		tx.inserts, tx.entries, tx.updating = nil, nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
 			tx.releaseLocks(tx.locks)
@@ -185,7 +185,26 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	}
 	tx.put = nil
 	tx.rollEntries(m.entries)
+	tx.updating = nil
 }
+
+// beginUpdate records that tx is updating the row under lk to row, whose
+// new index entries searches meet as tx writes them.
+func (tx *Tx) beginUpdate(lk lockKey, row Row) {
+	if !tx.db.kind.InnoDB() {
+		return
+	}
+	if tx.updating == nil {
+		tx.updating = map[lockKey]Row{}
+	}
+	tx.updating[lk] = row
+}
+
+// endUpdate records that the update of the row under lk is written.
+func (tx *Tx) endUpdate(lk lockKey) { delete(tx.updating, lk) }
+
+// endUpdates records that the statement's updates are written.
+func (tx *Tx) endUpdates() { tx.updating = nil }
 
 // entryWrite is a secondary index entry an update wrote.
 type entryWrite struct {

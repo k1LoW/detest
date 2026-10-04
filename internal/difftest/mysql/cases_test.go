@@ -973,6 +973,43 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// An index over a primary key column holds it once: a delete holds
+		// the entry a search along the index locks.
+		Name:   "a search waits for a deleted entry of an index over a key column",
+		Schema: []string{`CREATE TABLE t (tenant INT, id INT, v INT NOT NULL DEFAULT 0, PRIMARY KEY (tenant, id), KEY (id))` + binary},
+		Seed:   []string{`INSERT INTO t (tenant, id) VALUES (1, 1), (1, 5), (1, 9)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `DELETE FROM t WHERE tenant = 1 AND id = 5`),
+			difftest.S(1, rr),
+			difftest.Q(1, `SELECT v FROM t WHERE id BETWEEN 3 AND 4 FOR UPDATE`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
+		// An update waiting on a later index's check has written its new
+		// entry in an earlier one, where a search meets it and waits.
+		Name: "a search meets an update's entry written before its wait",
+		Schema: []string{
+			`CREATE TABLE w (id INT PRIMARY KEY, a INT NOT NULL, b INT NULL, UNIQUE KEY ua (a), UNIQUE KEY ub (b))` + binary,
+		},
+		Seed:  []string{`INSERT INTO w VALUES (1, 1, 1), (2, 2, 2)`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(2, rr),
+			difftest.S(2, `INSERT INTO w VALUES (3, 3, 7)`),
+			difftest.S(0, rr),
+			difftest.S(0, `UPDATE w SET a = 50, b = 7 WHERE id = 1`),
+			difftest.S(1, rr),
+			difftest.Q(1, `SELECT id FROM w WHERE a BETWEEN 40 AND 60 FOR UPDATE`),
+			difftest.S(2, `ROLLBACK`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

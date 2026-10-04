@@ -3,6 +3,7 @@ package detest
 import (
 	"cmp"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -629,7 +630,7 @@ func (tx *Tx) lockingRows(table string) []Row {
 				pending = append(pending, r)
 				break
 			}
-			if r := o.inserting(lk); r != nil {
+			if r := o.writing(lk); r != nil {
 				pending = append(pending, r)
 				break
 			}
@@ -643,9 +644,13 @@ func (tx *Tx) lockingRows(table string) []Row {
 	return rows
 }
 
-// inserting is the row tx is inserting under lk, put into the primary key
-// while its checks have not passed yet, if any.
-func (tx *Tx) inserting(lk lockKey) Row {
+// writing is the row tx is writing under lk while its checks have not
+// passed yet, if any: one it is inserting, put into the primary key, or
+// one it is updating, with its new values.
+func (tx *Tx) writing(lk lockKey) Row {
+	if r, ok := tx.updating[lk]; ok {
+		return r
+	}
 	if !tx.putting || len(tx.put) == 0 {
 		return nil
 	}
@@ -656,18 +661,25 @@ func (tx *Tx) inserting(lk lockKey) Row {
 }
 
 // inIndex reports whether r has its entry in the secondary index sr
-// searches yet: a row another transaction is inserting has it only once
-// the insert has gone that far, holding the entry.
+// searches yet: the new values of a row another transaction is writing
+// have it only once the write has gone that far, holding the entry, or
+// when the entry is the old one, which stays there marked deleted.
 func (x *sqlExec) inIndex(table string, sr indexSearch, r Row) bool {
 	if sr.index == "" || sr.index == "PRIMARY" {
 		return true
 	}
 	lk := lockKey{table, r.Key()}
 	for o := range x.tx.db.locks[lk] {
-		if o != x.tx && o.inserting(lk) != nil {
-			_, held := x.tx.db.locks[x.indexEntry(table, sr, r)][o]
-			return held
+		p := o.writing(lk)
+		if o == x.tx || p == nil || !reflect.DeepEqual(p, r) {
+			continue
 		}
+		entry := x.indexEntry(table, sr, r)
+		if _, held := x.tx.db.locks[entry][o]; held {
+			return true
+		}
+		old, existed := x.tx.db.committed[table][lk.key]
+		return existed && x.indexEntry(table, sr, old) == entry
 	}
 	return true
 }
@@ -990,12 +1002,7 @@ func (x *sqlExec) searchRange(table, alias string, where sqlir.Expr) indexSearch
 		// A unique index holds any number of keys with a NULL, so a key with
 		// one is no point lookup.
 		nullKey := slices.ContainsFunc(prefixes, func(p ixKey) bool { return p.hasNull() })
-		key := slices.Clone(ix.cols)
-		for _, c := range def.pk {
-			if !slices.Contains(key, c) {
-				key = append(key, c)
-			}
-		}
+		key := withPK(ix.cols, def.pk)
 		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc, index: ix.name, def: ix.def, uniqueIndex: ix.unique}
 		for _, p := range prefixes {
 			if last == nil {

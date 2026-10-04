@@ -436,6 +436,18 @@ func (def *tableDef) fkIndex(fk sqlir.ForeignKey) string {
 	return ""
 }
 
+// withPK is a secondary index's key: its columns, with the primary key's
+// columns it does not hold after them, which InnoDB appends to its entries.
+func withPK(cols, pk []string) []string {
+	key := slices.Clone(cols)
+	for _, c := range pk {
+		if !slices.Contains(key, c) {
+			key = append(key, c)
+		}
+	}
+	return key
+}
+
 // indexOrder is the table's secondary indexes in the order InnoDB writes a
 // row's entries to, which MySQL sorts as unique indexes over NOT NULL
 // columns, other unique ones, then the rest, each in the order declared.
@@ -457,7 +469,7 @@ func (def *tableDef) indexOrder(innodb bool) []secIndex {
 		}
 		ix := secIndex{name: uniqueIndex(u), unique: u}
 		if cols != nil {
-			ix.key = append(cols, def.pk...)
+			ix.key = withPK(cols, def.pk)
 		}
 		if notNull && innodb {
 			strict = append(strict, ix)
@@ -467,7 +479,7 @@ func (def *tableDef) indexOrder(innodb bool) []secIndex {
 	}
 	for _, ix := range def.indexes {
 		if len(ix.Columns) > 0 {
-			plain = append(plain, secIndex{name: plainIndex(ix), key: append(slices.Clone(ix.Columns), def.pk...)})
+			plain = append(plain, secIndex{name: plainIndex(ix), key: withPK(ix.Columns, def.pk)})
 		}
 	}
 	return slices.Concat(strict, nullable, plain)

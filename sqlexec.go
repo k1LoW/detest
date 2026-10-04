@@ -1320,6 +1320,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if !sameRow(cur, updated) {
 				x.tx.undo++
 			}
+			x.tx.beginUpdate(lk, updated)
 			if err := x.checkUniques(table, updated, lk.key, cur); err != nil {
 				return nil, err
 			}
@@ -1339,6 +1340,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			x.tx.writes[lk] = updated
+			x.tx.endUpdates()
 			if x.tx.p != nil {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
@@ -1710,6 +1712,8 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if !sameRow(cur, updated) {
 			x.tx.undo++
 		}
+		x.tx.beginUpdate(lk, updated)
+		defer x.tx.endUpdates()
 		if err := x.checkUniques(table, updated, key, cur); err != nil {
 			return err
 		}

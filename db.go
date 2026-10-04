@@ -1424,6 +1424,9 @@ type Tx struct {
 	// entries is the secondary index entries the transaction's updates
 	// wrote, whose rollback leaves a gap lock where each was.
 	entries []entryWrite
+	// updating is the rows the transaction is updating, by their key, with
+	// their new values, while the checks of their secondary indexes run.
+	updating map[lockKey]Row
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1530,6 +1533,12 @@ func (tx *Tx) Insert(table string, row Row) error {
 		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
 	}
 	tx.undo++ // written as the row goes into the primary key, before the checks
+	if tx.db.kind.InnoDB() {
+		// The row is in the primary key while its checks run, where
+		// another transaction's locking search meets it.
+		tx.put, tx.putting = []putRow{{table: table, row: row}}, true
+		defer func() { tx.put, tx.putting = nil, false }()
+	}
 	if err := x.insertEntries(table, row); err != nil {
 		tx.undo-- // the failed insert's, rolled back
 		return err
@@ -1952,6 +1961,8 @@ func (tx *Tx) updateWhere(table string, pred func(Row) bool, fields Row, desc an
 		if !sameRow(old, cur) {
 			tx.undo++ // written before the secondary indexes' checks, which may wait
 		}
+		tx.beginUpdate(lk, cur)
+		defer tx.endUpdate(lk)
 		if err := x.checkUniques(table, cur, key, old); err != nil {
 			tx.undo = undo // the failed update's, rolled back
 			return n, err

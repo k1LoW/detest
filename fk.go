@@ -409,6 +409,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.undo++ // written before the secondary indexes' checks, which may wait
+		x.tx.beginUpdate(lk, updated)
 		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {
 			return err
 		}
@@ -428,6 +429,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.writes[nlk] = updated
+		x.tx.endUpdate(lk)
 	}
 	return nil
 }
