@@ -627,9 +627,11 @@ func TestTextComparedWithNumber(t *testing.T) {
 		}
 	}
 	// The text a driver sends for a float parameter is not modeled.
-	for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`} {
-		if _, err := db.Exec(q, 1.5); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s with 1.5: got %v, want unsupported", q, err)
+	for _, v := range []any{1.5, true, time.Unix(0, 0)} {
+		for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`} {
+			if _, err := db.Exec(q, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s with %v: got %v, want unsupported", q, v, err)
+			}
 		}
 	}
 	// Bytes written to a text column order as the text they hold.

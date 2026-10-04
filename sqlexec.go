@@ -2117,9 +2117,10 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
 	// A parameter compared with text is sent as text, and the text a driver
-	// formats a float as is not modeled, unlike an integer's.
-	if floatParam(le, l, r) || floatParam(re, r, l) {
-		return nil, nil, x.unsupported("a float parameter compared with text")
+	// formats a float, a boolean or a time as is not modeled, unlike an
+	// integer's.
+	if unmodeledTextParam(le, l, r) || unmodeledTextParam(re, r, l) {
+		return nil, nil, x.unsupported("a parameter other than text or an integer compared with text")
 	}
 	// With neither side typed, as in $1 = '01', Postgres compares text, so a
 	// number the parameter holds is compared as the text it is sent as.
@@ -2210,8 +2211,8 @@ func textCast(e sqlir.Expr) bool {
 	return ok && (c.Type == "text" || c.Type == "varchar" || c.Type == "bpchar")
 }
 
-func floatParam(e sqlir.Expr, v, other any) bool {
-	if _, ok := e.(*sqlir.Param); !ok || !isNumber(v) || !isText(other) {
+func unmodeledTextParam(e sqlir.Expr, v, other any) bool {
+	if _, ok := e.(*sqlir.Param); !ok || derefValue(v) == nil || isText(v) || !isText(other) {
 		return false
 	}
 	_, isInt := integer(derefValue(v))
