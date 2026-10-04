@@ -185,10 +185,15 @@ func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*sel
 	type group struct{ rows []jrow }
 	var gs []*group
 	index := map[string]*group{}
+	inputs := x.inputColumns(sel, rows)
+	by := make([]sqlir.Expr, len(sel.GroupBy))
+	for i, g := range sel.GroupBy {
+		by[i] = groupExpr(sel, g, inputs)
+	}
 	for _, r := range rows {
 		var kb strings.Builder
-		for _, g := range sel.GroupBy {
-			v, err := x.eval(groupExpr(sel, g, r), r.env(outer))
+		for _, g := range by {
+			v, err := x.eval(g, r.env(outer))
 			if err != nil {
 				return nil, err
 			}
@@ -230,13 +235,10 @@ func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*sel
 // groupExpr is what a GROUP BY item groups by, as Postgres reads it: a name
 // that is no column of the input but an output column's is that column's
 // expression, and an integer the select list item at that position.
-func groupExpr(sel *sqlir.SelectStmt, g sqlir.Expr, r jrow) sqlir.Expr {
+func groupExpr(sel *sqlir.SelectStmt, g sqlir.Expr, inputs map[string]bool) sqlir.Expr {
 	switch v := g.(type) {
 	case *sqlir.ColumnRef:
-		if v.Table != "" {
-			return g
-		}
-		if _, ok := r.env(nil).lookup("", v.Column); ok {
+		if v.Table != "" || inputs[v.Column] {
 			return g
 		}
 		for _, t := range sel.Targets {
@@ -1216,10 +1218,7 @@ func (x *sqlExec) outputCols(sel *sqlir.SelectStmt, rows []jrow) []outCol {
 		if sel.From == nil {
 			continue
 		}
-		items := []sqlir.TableRef{*sel.From}
-		for _, j := range sel.Joins {
-			items = append(items, j.Table)
-		}
+		items := fromRefs(sel)
 		from := x.fromItemsOf(sel)
 		for n, it := range items {
 			alias := from.aliases[n]
@@ -1234,6 +1233,32 @@ func (x *sqlExec) outputCols(sel *sqlir.SelectStmt, rows []jrow) []outCol {
 				seen[k] = true
 				out = append(out, outCol{key: k, target: i, alias: alias, col: c})
 			}
+		}
+	}
+	return out
+}
+
+func fromRefs(sel *sqlir.SelectStmt) []sqlir.TableRef {
+	if sel.From == nil {
+		return nil
+	}
+	items := []sqlir.TableRef{*sel.From}
+	for _, j := range sel.Joins {
+		items = append(items, j.Table)
+	}
+	return items
+}
+
+// inputColumns are the names of the columns of a query's FROM items, which
+// a GROUP BY name refers to before an output column of the same name. They
+// are taken from the items rather than from each row, as an unmatched row
+// of an outer join has none of its nullable side's.
+func (x *sqlExec) inputColumns(sel *sqlir.SelectStmt, rows []jrow) map[string]bool {
+	out := map[string]bool{}
+	from := x.fromItemsOf(sel)
+	for n, it := range fromRefs(sel) {
+		for _, c := range x.itemColumns(it, from.aliases[n], rows) {
+			out[c] = true
 		}
 	}
 	return out
