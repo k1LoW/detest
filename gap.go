@@ -290,14 +290,14 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 		return true, nil // LIMIT 0 reads nothing
 	}
 	sr := x.searchRange(table, alias, where)
-	cols := sr.cols
+	cols := sr.key
 	if len(cols) == 0 || len(sr.ranges) != 1 || len(stop.order) > 1 {
 		return false, nil
 	}
 	desc := false
 	if len(stop.order) == 1 {
 		c, ok := stop.order[0].Expr.(*sqlir.ColumnRef)
-		if !ok || sr.eq >= len(cols) || c.Column != cols[sr.eq] || c.Table != "" && c.Table != alias && c.Table != relname(table) {
+		if !ok || sr.eq >= len(sr.cols) || c.Column != sr.cols[sr.eq] || c.Table != "" && c.Table != alias && c.Table != relname(table) {
 			return false, nil
 		}
 		desc = stop.order[0].Desc
@@ -412,7 +412,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	tx := x.tx
 	rows := tx.selectNoYield(table, nil)
 	sr := x.searchRange(table, alias, where)
-	cols := sr.cols
+	cols := sr.key
 	lockRecord := func(r Row) error {
 		lk := lockKey{table, r.Key()}
 		if policy != nil && tx.heldByOther(lk, mode) {
@@ -535,7 +535,11 @@ func greater(a, b any) bool {
 // columns that are all fixed, which makes the search a point lookup. cols is
 // empty when no index serves the WHERE.
 type indexSearch struct {
-	cols   []string
+	cols []string
+	// key is cols with the primary key's columns after them, which InnoDB
+	// appends to a secondary index's entries, so equal values are ordered,
+	// and bound gaps, by the primary key.
+	key    []string
 	ranges []valRange
 	eq     int
 	unique bool
@@ -621,7 +625,13 @@ func (x *sqlExec) searchRange(table, alias string, where sqlir.Expr) indexSearch
 		// A unique index holds any number of keys with a NULL, so a key with
 		// one is no point lookup.
 		nullKey := slices.ContainsFunc(prefixes, func(p ixKey) bool { return p.hasNull() })
-		sr := indexSearch{cols: ix.cols, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc}
+		key := slices.Clone(ix.cols)
+		for _, c := range def.pk {
+			if !slices.Contains(key, c) {
+				key = append(key, c)
+			}
+		}
+		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc}
 		for _, p := range prefixes {
 			if last == nil {
 				sr.ranges = append(sr.ranges, valRange{lo: p, hi: p, hasLo: true, hasHi: true})

@@ -4256,3 +4256,29 @@ func TestMySQLBackfillConvertsTheDefault(t *testing.T) {
 		t.Errorf("backfilled %#v, want int64 5", got)
 	}
 }
+
+// A LIMIT scan of a secondary index stops at an entry of a key with
+// duplicates, and the gap up to it is bounded by the primary key that InnoDB
+// appends: an insert of the same key below that entry falls in it, one
+// above does not.
+func TestMySQLLimitGapIncludesThePrimaryKey(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 5), (3, 5), (5, 5)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("SELECT id FROM t WHERE k >= 5 LIMIT 1 FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	covered := func(id int64) bool {
+		r := Row{"id": id, "k": int64(5)}
+		return slices.ContainsFunc(store.gaps, func(g *gapLock) bool { return g.covers(r) })
+	}
+	if !covered(0) || covered(2) {
+		t.Errorf("covers (5, 0): %v, want true; (5, 2): %v, want false", covered(0), covered(2))
+	}
+}
