@@ -597,3 +597,24 @@ func TestRowComparison(t *testing.T) {
 		}
 	}
 }
+
+// Integers above 2^53, such as snowflake IDs, are ordered exactly, as a float
+// would round adjacent ones to one value.
+func TestLargeIntegersCompareExactly(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int8 PRIMARY KEY, amount numeric)`)
+	mustExec(t, db, `INSERT INTO t VALUES ($1, $2), ($3, $4)`, int64(1<<53), int64(1<<53), int64(1<<53+1), int64(1<<53+1))
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`SELECT id FROM t WHERE id > $1`, []any{int64(1 << 53)}},
+		{`SELECT id FROM t WHERE amount > $1`, []any{int64(1 << 53)}},
+		{`SELECT id FROM t ORDER BY id DESC LIMIT 1`, nil},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, []string{"9007199254740993"}) {
+			t.Errorf("%s: got %v", tc.query, got)
+		}
+	}
+}
