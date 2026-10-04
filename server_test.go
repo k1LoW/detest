@@ -44,7 +44,8 @@ func TestServerIsolation(t *testing.T) {
 	}{
 		{"postgres default", postgres.New(), ""},
 		{"postgres repeatable read", postgres.New(postgres.Isolation(RepeatableRead)), "postgres at Repeatable Read is not implemented"},
-		{"mysql default", mysql.New(), "mysql at Repeatable Read is not implemented"},
+		{"mysql default", mysql.New(), ""},
+		{"mysql read committed", mysql.New(mysql.Isolation(ReadCommitted)), ""},
 	} {
 		kind := sqlir.ImplOf(tc.s)
 		err := kind.Check(kind.Isolation())

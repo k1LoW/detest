@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -33,6 +34,23 @@ func equalValues(a, b any) bool {
 		return false
 	}
 	return sameValue(a, b)
+}
+
+// sameRow reports whether two rows hold the same values.
+// A column missing from a row is NULL, as a row omits the nullable columns
+// an insert did not give.
+func sameRow(a, b Row) bool {
+	for k, v := range a {
+		if !sameValue(v, b[k]) {
+			return false
+		}
+	}
+	for k, w := range b {
+		if _, ok := a[k]; !ok && derefValue(w) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // sameValue compares two values treating NULL as equal to NULL.
@@ -70,6 +88,12 @@ func compareValues(a, b any) (int, bool) {
 		}
 		return ta.Compare(tb), true
 	}
+	// Integers compare exactly: as float64 two BIGINTs above 2^53 may be equal.
+	if ia, ok := integer(a); ok {
+		if ib, ok := integer(b); ok {
+			return cmp.Compare(ia, ib), true
+		}
+	}
 	fa, oka := toFloat(a)
 	fb, okb := toFloat(b)
 	if oka && okb {
@@ -97,15 +121,28 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
-func likeMatch(v any, pattern any, caseInsensitive bool) bool {
+// likeMatch reports whether v matches a LIKE pattern. A pattern that ends
+// with the escape is an error in Postgres (dangling is true) and a literal
+// backslash in MySQL.
+func likeMatch(v any, pattern any, caseInsensitive bool) (match, dangling bool) {
 	v, pattern = derefValue(v), derefValue(pattern)
 	if v == nil || pattern == nil {
-		return false
+		return false, false
 	}
 	var b strings.Builder
 	b.WriteString("^")
+	escaped := false
 	for _, r := range fmt.Sprint(pattern) {
+		if escaped {
+			// A backslash, the default escape of MySQL and Postgres alike,
+			// makes the next character itself, % and _ included.
+			b.WriteString(regexp.QuoteMeta(string(r)))
+			escaped = false
+			continue
+		}
 		switch r {
+		case '\\':
+			escaped = true
 		case '%':
 			b.WriteString(".*")
 		case '_':
@@ -114,6 +151,10 @@ func likeMatch(v any, pattern any, caseInsensitive bool) bool {
 			b.WriteString(regexp.QuoteMeta(string(r)))
 		}
 	}
+	if escaped {
+		b.WriteString(regexp.QuoteMeta("\\"))
+		dangling = true
+	}
 	b.WriteString("$")
 	expr := b.String()
 	if caseInsensitive {
@@ -121,7 +162,7 @@ func likeMatch(v any, pattern any, caseInsensitive bool) bool {
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		return false
+		return false, dangling
 	}
-	return re.MatchString(fmt.Sprint(v))
+	return re.MatchString(fmt.Sprint(v)), dangling
 }

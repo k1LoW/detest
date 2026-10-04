@@ -121,7 +121,8 @@ type WindowFunc struct {
 	Whole     bool
 }
 
-// LockClause is FOR UPDATE / FOR SHARE with its wait policy.
+// LockClause is FOR UPDATE / FOR SHARE with its wait policy. Of lists the
+// tables FOR UPDATE OF names, by alias or name; empty locks every table.
 type LockClause struct {
 	Strength   string // "update", "no key update", "share" or "key share"
 	SkipLocked bool
@@ -159,7 +160,10 @@ type UpdateStmt struct {
 	From      []TableRef
 	Where     Expr
 	Returning []Target
-	Limit     Expr
+	// OrderBy and Limit are MySQL's UPDATE ... ORDER BY ... LIMIT: the rows
+	// updated are the first Limit of the matching rows in that order.
+	OrderBy []OrderKey
+	Limit   Expr
 }
 
 // DeleteStmt is DELETE FROM ... [USING ...] WHERE ... [RETURNING ...].
@@ -169,7 +173,10 @@ type DeleteStmt struct {
 	Using     []TableRef
 	Where     Expr
 	Returning []Target
+	OrderBy   []OrderKey // with Limit, as in UpdateStmt
 	Limit     Expr
+	// Truncate is MySQL's TRUNCATE, which also starts AUTO_INCREMENT over.
+	Truncate bool
 }
 
 // SchemaStmt declares table structure: the tables, their primary keys,
@@ -191,14 +198,32 @@ type SchemaChange struct {
 	Constraints []UniqueDef
 	ForeignKeys []ForeignKey
 	Checks      []CheckDef
+	// Indexes are the indexes that are not unique. Nothing checks them, but
+	// InnoDB locks gaps along the index a statement searches by.
+	Indexes []IndexDef
 	// Object is what Drop and the renames act on besides a table: "view",
 	// "matview" or "index" (Table then names the index).
-	Object           string
-	DropColumns      []string
-	DropConstraints  []string
-	RenameTo         string    // ALTER TABLE ... RENAME TO
+	Object          string
+	DropColumns     []string
+	DropConstraints []string // by name, whatever kind of constraint or index it is
+	// DropIndexes, DropForeignKeys and DropChecks drop only that kind, as
+	// MySQL's DROP INDEX, DROP FOREIGN KEY and DROP CHECK do: a foreign key
+	// and the index on its columns may share a name.
+	DropIndexes      []string
+	DropForeignKeys  []string
+	DropChecks       []string
+	RenameTo         string    // ALTER TABLE ... RENAME TO, qualified when the statement qualifies it
 	RenameColumn     [2]string // old and new name
 	RenameConstraint [2]string // old and new name of a constraint or index
+	RenameIndex      [2]string // old and new name of an index only, as MySQL's RENAME INDEX
+	// Collation is a MySQL table's default collation, for the text columns
+	// that declare none; ConvertCollation applies it to the table's text
+	// columns too, as CONVERT TO CHARACTER SET does.
+	Collation        string
+	ConvertCollation bool
+	// AutoIncrement is MySQL's AUTO_INCREMENT=n table option, the next
+	// value the table's AUTO_INCREMENT column generates at least.
+	AutoIncrement int64
 	// View is the query of CREATE [OR REPLACE] VIEW, with the column names
 	// the view gives it.
 	View        *SelectStmt
@@ -223,6 +248,43 @@ type ColumnDef struct {
 	// Generated is the expression of a generated column, GENERATED ALWAYS
 	// AS (expr), whose value is computed from the row on every write.
 	Generated Expr
+	// AutoIncrement is MySQL's AUTO_INCREMENT: an insert that leaves the
+	// column NULL or 0 takes the next value, and an explicit larger value
+	// moves the counter past it. DropAutoIncrement removes it, as a MODIFY
+	// that does not say it again does.
+	AutoIncrement     bool
+	DropAutoIncrement bool
+	// First and After place the column, as MySQL's ADD, MODIFY and CHANGE
+	// may: first, or after the column named.
+	First bool
+	After string
+	// OnUpdate is MySQL's ON UPDATE CURRENT_TIMESTAMP: an update that
+	// changes the row and does not set the column sets it to this.
+	OnUpdate Expr
+	// MaxLen is the most characters a MySQL CHAR(n) or VARCHAR(n) column
+	// holds, 0 for no limit detest checks. Members are an ENUM's or a SET's
+	// values, Set telling the two apart.
+	MaxLen  int
+	Members []string
+	Set     bool
+	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column
+	// keeps, 0 without one declared.
+	FSP int
+	// Collation is a MySQL text column's collation as declared, or the
+	// default one of the character set it declares; empty for the table's.
+	Collation string
+}
+
+// IndexDef is an index that is not unique, by the columns it is on.
+type IndexDef struct {
+	Name    string
+	Columns []string
+	// Prefix is the column whose first characters the part after Columns
+	// holds, as name(3) does.
+	Prefix string
+	// Desc is an index with a descending part, which orders its keys
+	// otherwise than detest's gap locks do.
+	Desc bool
 }
 
 // CheckDef is a CHECK constraint. Name is empty when the statement gives
@@ -288,8 +350,8 @@ type SavepointStmt struct {
 	Name string
 }
 
-// SetStmt is SET [LOCAL] name = value. detest acts on lock_timeout; other
-// settings do nothing.
+// SetStmt is SET [LOCAL] name = value. detest acts on lock_timeout, and on
+// database, which MySQL's USE sets; other settings do nothing.
 type SetStmt struct {
 	Name  string
 	Value string
@@ -485,6 +547,8 @@ type Impl struct {
 	searchPath []string
 	codes      func(DBErrorKind) (sqlstate string, number int)
 	convert    func(*DBError) error
+	innodb     bool
+	collation  string
 }
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
@@ -502,6 +566,14 @@ type ServerSpec struct {
 	// production code returns, such as *pgconn.PgError. nil returns the
 	// DBError itself.
 	Convert func(*DBError) error
+	// InnoDB selects InnoDB's semantics over PostgreSQL's: shared and
+	// exclusive row locks only, gap locks at Repeatable Read, reads from a
+	// snapshot taken at the transaction's first read, and a failed statement
+	// rolling back only itself.
+	InnoDB bool
+	// Collation is MySQL's server default collation, which a text column
+	// that neither it nor its table declares one for takes.
+	Collation string
 }
 
 // Server is a kind of database server as the code using detest holds it,
@@ -512,7 +584,7 @@ type Server struct{ impl *Impl }
 // NewServer describes a server.
 func NewServer(spec ServerSpec) Server {
 	return Server{impl: &Impl{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
-		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert}}
+		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB, collation: spec.Collation}}
 }
 
 // ImplOf returns the description behind s, nil for the zero Server.
@@ -560,6 +632,29 @@ const (
 	NoActiveTransaction
 	InvalidSavepoint
 	CheckViolation
+	InvalidParameterValue
+	// LockWaitTimeout is a lock wait that ran out its lock timeout, which
+	// MySQL reports apart from NOWAIT's LockNotAvailable.
+	LockWaitTimeout
+	// InvalidRowCountInLimit and InvalidRowCountInOffset are a LIMIT or an
+	// OFFSET that is not a count, which Postgres tells apart.
+	InvalidRowCountInLimit
+	InvalidRowCountInOffset
+	// ArithmeticOutOfRange is an expression whose integer result overflows,
+	// which MySQL reports apart from a value out of a column's range.
+	ArithmeticOutOfRange
+	// ForeignKeyParentViolation is an update or delete of a parent row that
+	// children still reference, which MySQL reports apart from a child row
+	// without its parent.
+	ForeignKeyParentViolation
+	// CardinalityViolation is a scalar subquery that returns more than one
+	// row.
+	CardinalityViolation
+	// StringDataRightTruncation is a string longer than its column allows.
+	StringDataRightTruncation
+	// DataTruncated is a value that is none of an ENUM's or a SET's members,
+	// which MySQL's strict mode refuses.
+	DataTruncated
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -583,11 +678,18 @@ var (
 	ErrNoActiveTransaction       = errors.New("detest: no active transaction")
 	ErrInvalidSavepoint          = errors.New("detest: invalid savepoint")
 	ErrCheckViolation            = errors.New("detest: check violation")
+	ErrInvalidParameterValue     = errors.New("detest: invalid parameter value")
+	ErrCardinalityViolation      = errors.New("detest: more than one row returned by a subquery used as an expression")
+	ErrStringDataRightTruncation = errors.New("detest: value too long for the column")
+	ErrDataTruncated             = errors.New("detest: data truncated for the column")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
 		WrongObjectType: ErrWrongObjectType, InvalidTableDefinition: ErrInvalidTableDefinition, NoActiveTransaction: ErrNoActiveTransaction, InvalidSavepoint: ErrInvalidSavepoint,
-		CheckViolation: ErrCheckViolation}
+		CheckViolation: ErrCheckViolation, InvalidParameterValue: ErrInvalidParameterValue, LockWaitTimeout: ErrLockNotAvailable,
+		InvalidRowCountInLimit: ErrInvalidParameterValue, InvalidRowCountInOffset: ErrInvalidParameterValue,
+		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
+		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers
@@ -615,6 +717,12 @@ func (e *DBError) Is(target error) bool { return kindErrors[e.Kind] == target }
 
 // Name identifies the kind, such as "postgres".
 func (s *Impl) Name() string { return s.name }
+
+// InnoDB reports whether the server has InnoDB's semantics.
+func (s *Impl) InnoDB() bool { return s.innodb }
+
+// Collation is the server's default collation, for MySQL.
+func (s *Impl) Collation() string { return s.collation }
 
 // Parser parses the server's SQL.
 func (s *Impl) Parser() Parser { return s.parser }

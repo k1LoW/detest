@@ -54,6 +54,15 @@ const (
 	NoActiveTransaction       = sqlir.NoActiveTransaction
 	InvalidSavepoint          = sqlir.InvalidSavepoint
 	CheckViolation            = sqlir.CheckViolation
+	InvalidParameterValue     = sqlir.InvalidParameterValue
+	LockWaitTimeout           = sqlir.LockWaitTimeout
+	InvalidRowCountInLimit    = sqlir.InvalidRowCountInLimit
+	InvalidRowCountInOffset   = sqlir.InvalidRowCountInOffset
+	ArithmeticOutOfRange      = sqlir.ArithmeticOutOfRange
+	ForeignKeyParentViolation = sqlir.ForeignKeyParentViolation
+	CardinalityViolation      = sqlir.CardinalityViolation
+	StringDataRightTruncation = sqlir.StringDataRightTruncation
+	DataTruncated             = sqlir.DataTruncated
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

@@ -66,7 +66,7 @@ func (tx *Tx) childViolation(table string, fk sqlir.ForeignKey) error {
 }
 
 func (tx *Tx) parentViolation(table string, ck childKey) error {
-	return tx.db.kind.Error(sqlir.ForeignKeyViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
+	return tx.db.kind.Error(sqlir.ForeignKeyParentViolation, fmt.Sprintf("update or delete on table %q violates foreign key constraint %q on table %q", relname(table), ck.fk.Name, relname(ck.table)), relname(ck.table), "", ck.fk.Name)
 }
 
 func rowMatches(r Row, cols []string, vals []any) bool {
@@ -90,6 +90,9 @@ func (x *sqlExec) checkParents(table string, row, old Row) error {
 // which a cascade is applying: its parent row is being rewritten and is not
 // visible with its new key yet.
 func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) error {
+	if x.tx.noFKChecks {
+		return nil // FOREIGN_KEY_CHECKS=0
+	}
 	def := x.tx.db.defs[table]
 	if def == nil {
 		return nil
@@ -137,14 +140,40 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 			}
 		}
 		if key == "" {
-			return false, nil
+			return false, x.lockMissingParent(parent, cols, vals)
 		}
 	}
-	if err := x.tx.lockMode(lockKey{parent, key}, lockKeyShare); err != nil {
+	mode := lockKeyShare
+	if x.tx.db.kind.InnoDB() {
+		mode = lockShare // InnoDB checks a parent with a shared lock
+	}
+	if err := x.tx.lockMode(lockKey{parent, key}, mode); err != nil {
 		return false, err
 	}
 	r, ok := x.tx.view(parent, key) // the version visible once the lock is granted
-	return ok && rowMatches(r, cols, vals), nil
+	if ok && rowMatches(r, cols, vals) {
+		return true, nil
+	}
+	return false, x.lockMissingParent(parent, cols, vals)
+}
+
+// lockMissingParent takes the shared gap lock InnoDB keeps where a missing
+// parent key would be, so that a concurrent insert of that parent waits for
+// the transaction whose check failed.
+func (x *sqlExec) lockMissingParent(parent string, cols []string, vals []any) error {
+	if !x.tx.db.kind.InnoDB() || x.tx.db.ignored[parent] {
+		return nil
+	}
+	var where sqlir.Expr
+	for i, c := range cols {
+		eq := &sqlir.BinaryExpr{Op: "=", L: &sqlir.ColumnRef{Column: c}, R: &sqlir.Const{Value: vals[i]}}
+		if where == nil {
+			where = eq
+		} else {
+			where = &sqlir.BinaryExpr{Op: "AND", L: where, R: eq}
+		}
+	}
+	return x.lockRange(parent, relname(parent), where, lockShare, nil)
 }
 
 // referencing returns the tables whose foreign keys reference table, sorted
@@ -187,6 +216,9 @@ func (x *sqlExec) children(child string, fk sqlir.ForeignKey, vals []any) []Row 
 // NO ACTION and RESTRICT refuse the delete, CASCADE deletes the children (and
 // theirs), SET NULL clears their key.
 func (x *sqlExec) onParentDelete(table string, row Row) error {
+	if x.tx.noFKChecks {
+		return nil // FOREIGN_KEY_CHECKS=0
+	}
 	for _, ck := range x.tx.db.referencing(table) {
 		vals, ok := values(row, x.tx.db.refColumns(ck.fk))
 		if !ok {
@@ -233,6 +265,9 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 // reference the old key, CASCADE moves the children to the new key, SET NULL
 // and SET DEFAULT clear theirs.
 func (x *sqlExec) onParentUpdate(table string, old, row Row) error {
+	if x.tx.noFKChecks {
+		return nil // FOREIGN_KEY_CHECKS=0
+	}
 	for _, ck := range x.tx.db.referencing(table) {
 		cols := x.tx.db.refColumns(ck.fk)
 		ov, ok := values(old, cols)
@@ -339,6 +374,11 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 		}
 		nlk, err := x.rekey(ck.table, lk, updated)
 		if err != nil {
+			return err
+		}
+		// A cascade that moves a child's key into another transaction's
+		// locked gap waits, as an UPDATE of the child does.
+		if err := x.tx.moveIntention(ck.table, updated, cur); err != nil {
 			return err
 		}
 		x.tx.writes[nlk] = updated

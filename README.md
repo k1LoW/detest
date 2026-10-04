@@ -104,7 +104,7 @@ Processes interact only through simulated resources. Every operation on them is 
 
 `s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.
 
-Each kind of server has its own package, which parses its SQL dialect with the server's real grammar and gives the locking, constraints and errors of that server, since they differ between servers. `postgres.New()` is PostgreSQL at Read Committed, which the lists below describe. `mysql.New()` (MySQL with InnoDB) is in progress.
+Each kind of server has its own package, which parses its SQL dialect with the server's real grammar and gives the locking, constraints and errors of that server, since they differ between servers. `postgres.New()` is PostgreSQL at Read Committed, which the lists below describe. `mysql.New()` is MySQL with InnoDB, described after them.
 
 **Concurrency**
 
@@ -151,7 +151,29 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 **Not supported**
 
-Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, `ANY (subquery)` with an operator other than `=`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), locking reads over a view, a subquery or a `LATERAL` item, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own; a case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs. MySQL support is in progress, and its parser is not available yet.
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, `ANY (subquery)` with an operator other than `=`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), locking reads over a view, a subquery or a `LATERAL` item, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own; a case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs.
+
+**MySQL**
+
+`mysql.New()` parses with the MySQL grammar of TiDB's parser and gives InnoDB's semantics at Repeatable Read (the default), Read Committed and Serializable (`mysql.Isolation`). The statements and constraints above carry over, written in MySQL's syntax, with these differences.
+
+- Shared and exclusive row locks only (`FOR SHARE`, `LOCK IN SHARE MODE`, `FOR UPDATE`), a shared lock on the parent row for a foreign key check, and `SET innodb_lock_wait_timeout` for lock wait timeouts
+- At Repeatable Read, plain reads come from a snapshot taken at the transaction's first read, while locking reads, `UPDATE` and `DELETE` read the latest rows. A value read from the snapshot and written back loses a concurrent update, as in MySQL
+- At Repeatable Read and Serializable, locking reads, `UPDATE` and `DELETE` take next-key locks along the index they search by, so an insert into a locked gap waits, and two transactions that lock the same gap and then insert into it deadlock (1213). Without a usable index, the whole table is locked, as a full scan locks it. Over a join, the first table's search takes next-key locks and the joined tables lock the rows the join read, as the locks InnoDB takes around each lookup into them depend on the join plan
+- At Serializable, plain reads in a transaction take shared locks
+- A failed statement rolls back only itself. A deadlock rolls back the whole transaction
+- `AUTO_INCREMENT` with `LastInsertId` and `LAST_INSERT_ID()`, `INSERT IGNORE` (which skips rows with a duplicate key, and refuses as unsupported a row whose other error MySQL would turn into a warning), `ON DUPLICATE KEY UPDATE` with `VALUES(col)` or a row alias, `UPDATE` and `DELETE` with `ORDER BY` and `LIMIT`, `UPDATE` of the first table joined with others, `ON UPDATE CURRENT_TIMESTAMP`, `IF`, `IFNULL` and `<=>`
+- `NULL` sorts first when ascending, and the integer types are checked against their ranges, unsigned ones too, except that `BIGINT UNSIGNED` stops at 2^63 - 1, refusing larger values as out of range. `CHAR(n)` and `VARCHAR(n)` lengths and `ENUM` and `SET` members are checked as strict mode does, and `DATE`, `DATETIME` and `TIMESTAMP` columns hold a `time.Time` (UTC) whether written as a time or as a string
+- A string compared with a number is compared as the number it converts to
+- Strings compare exactly, as a `_bin` collation compares them. A text column of a case-insensitive (`_ci`) collation, which MySQL 8 gives a column that declares none (`utf8mb4_0900_ai_ci`), loads with the schema, but a statement whose outcome depends on how it compares fails with `detest.ErrUnsupportedSQL`: a comparison, `LIKE`, `IN` or a join on it, `ORDER BY`, `GROUP BY`, `DISTINCT`, `UNION` or a window over it, `MIN` and `MAX` of it, a write that a unique index or a foreign key over it checks, and a `LIMIT` scan along a primary key that holds it. Reading and writing its values as they are runs. Declare `COLLATE utf8mb4_bin` on the column or the table, or pass `mysql.Collation("utf8mb4_bin")` when the server's default collation is a `_bin` one
+- Migrations, `mysqldump` output and `SHOW CREATE TABLE` output, which `ddl.From` writes for MySQL, run as they are. `mysql.Database` sets the current database
+- Errors carry MySQL's error number and SQLSTATE, and `mysqlerr.Convert` turns them into go-sql-driver's `*mysql.MySQLError`, which GORM's `TranslateError` reads
+
+``` go
+s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert))) // *mysql.MySQLError
+```
+
+For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` that sets columns of a joined table, multi-table `DELETE`, a locking read, `UPDATE` or `DELETE` that searches by a prefix index (`KEY (name(3))`), or that more than one index serves without a unique point lookup among them (MySQL's optimizer picks one by its statistics), or that a descending index serves, or with `OR` (write it as `IN`), `<>`, `!=` or `NOT IN` on an indexed column, at Repeatable Read or Serializable, descending primary keys and unique indexes, a `sql_mode` without strict mode (other than the `NO_AUTO_VALUE_ON_ZERO` a dump sets), a `time_zone` other than UTC (`'+00:00'` as a dump sets it), `RETURNING`, temporal strings in formats other than `YYYY-MM-DD[ HH:MM:SS[.ffffff]]`, values of `TIME` columns, generated columns, and exact DECIMAL arithmetic (DECIMAL values are kept as float64, so sums like 0.1 + 0.2 are approximate).
 
 ### Queue
 
