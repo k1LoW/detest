@@ -494,7 +494,13 @@ func TestTextComparedWithNumber(t *testing.T) {
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, '1')`)
+	// A number written to a text column is stored as its text.
+	mustExec(t, db, `INSERT INTO t VALUES (2, $1)`, int64(2))
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name = '02'`); len(got) != 1 || got[0] != "0" {
+		t.Errorf("name = '02': got %v, want 0", got)
+	}
 	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE id = 2 AND name = 2`,
 		`SELECT count(*) FROM t WHERE name = 1`,
 		`SELECT count(*) FROM t WHERE id = name`,
 		`SELECT count(*) FROM t WHERE name::text < 2`,

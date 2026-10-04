@@ -461,7 +461,13 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			}
 			row[col], v = n, n
 		}
-		switch t := def.types[col]; t {
+		// A number written to a text column is stored as its text, as
+		// Postgres's assignment does, so it compares as text afterwards.
+		if textTypes[t] && isNumber(v) {
+			row[col] = fmt.Sprint(v)
+			continue
+		}
+		switch t {
 		case "double", "float", "decimal":
 			if !x.tx.db.kind.InnoDB() {
 				continue
@@ -657,6 +663,9 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 
 // numberTypes are the number types by the name Postgres gives them in errors.
 var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
+
+// textTypes are the character types.
+var textTypes = map[string]bool{"text": true, "varchar": true, "bpchar": true}
 
 // columnNumber converts a string written to a column of the number type t to
 // a number, as the type's input function does. A numeric becomes a float,
