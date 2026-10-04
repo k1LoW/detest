@@ -758,6 +758,40 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// An update writes each row as its search locks it, so a row failing
+		// a unique check ends the statement before it waits for a later row.
+		Name:   "a multi-row update fails on a row before it waits for a later one",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b'), (3, 'c')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE u SET v = 9 WHERE id = 3`),
+			difftest.S(0, `UPDATE u SET code = 'b' WHERE id >= 1`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		// A delete does so too, failing on a row a foreign key references.
+		Name: "a multi-row delete fails on a row before it waits for a later one",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, p_id INT, FOREIGN KEY (p_id) REFERENCES p (id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id) VALUES (1), (2), (3)`, `INSERT INTO c VALUES (1, 1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE p SET v = 9 WHERE id = 3`),
+			difftest.S(0, `DELETE FROM p WHERE id >= 1`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

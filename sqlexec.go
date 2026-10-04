@@ -55,37 +55,31 @@ type sqlExec struct {
 	// columns the search takes as constants.
 	searchOuter *searchOuter
 	// scanned is called with each row a locking search of an UPDATE or a
-	// DELETE locks, as it locks it, and counted is the rows it counted the
-	// undo record of then.
+	// DELETE locks, as it locks it, to write the row then.
 	scanned func(table string, r Row) error
-	counted map[string]bool
 	// skipped is the rows a locking search's SKIP LOCKED passed over, on an
 	// index record another transaction holds, which the rows the statement
 	// then locks leave out too.
 	skipped map[lockKey]bool
 }
 
-func (x *sqlExec) countUndo(key string) {
-	if x.counted == nil {
-		x.counted = map[string]bool{}
-	}
-	x.counted[key] = true
-	x.tx.undo++
-}
-
-// steadyExpr reports whether e evaluates to the same value each time, with
-// no subquery, so that it may be evaluated ahead of the statement.
-func steadyExpr(e sqlir.Expr) bool {
-	if volatile(e) {
+// rowByRow reports whether InnoDB writes the rows of an UPDATE or a DELETE
+// of table one by one as its search locks them, so that a row's change, its
+// checks and its error come before the search goes on to the next. MySQL
+// reads all the rows first when it sorts them, and when the update changes
+// a column of the index it searches by or of the primary key, which it then
+// holds apart; detest locks and writes them so otherwise too, and here also
+// for a LIMIT and a write joining other tables, which it keeps whole.
+func (x *sqlExec) rowByRow(table, alias string, where sqlir.Expr, simple bool, set []string) bool {
+	if !x.tx.db.kind.InnoDB() || !simple {
 		return false
 	}
-	steady := true
-	walkNodes(e, func(n any) {
-		if _, ok := n.(*sqlir.SelectStmt); ok {
-			steady = false
-		}
-	})
-	return steady
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return false
+	}
+	sr := x.searchRange(table, alias, where)
+	return !slices.ContainsFunc(set, func(c string) bool { return slices.Contains(sr.cols, c) || slices.Contains(def.pk, c) })
 }
 
 func (x *sqlExec) skip(lk lockKey) {
@@ -1651,35 +1645,99 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			return nil, err
 		}
 	}
-	if len(up.From) == 0 && !slices.ContainsFunc(up.Set, func(a sqlir.Assignment) bool { return !steadyExpr(a.Value) }) {
-		// InnoDB changes each row as its search locks it, so the undo
-		// records of the rows before weigh a wait on a later one.
+	out := &sqlResult{cols: x.returningCols(up.Returning, nil)}
+	// MySQL's single-table UPDATE assigns left to right, each assignment
+	// seeing the ones before it, where Postgres evaluates them all against the
+	// old row.
+	sequential := x.tx.db.kind.InnoDB() && len(up.From) == 0
+	done := map[string]bool{}
+	var matched int64 // LIMIT counts the rows matched, changed or not
+	// apply updates the row of c if it still matches, once it is locked.
+	apply := func(c jrow) error {
+		key := c.base.Key()
+		c, joined, err := x.lockJoinedReads(up.From, c)
+		if err != nil {
+			return err
+		}
+		if !joined {
+			return nil // a joined row it waited for is gone
+		}
+		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
+		key, cur, ok, err := x.tx.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
+		if err != nil {
+			return err
+		}
+		if !ok || done[key] {
+			return nil
+		}
+		lk := lockKey{table, key}
+		// Re-evaluate the predicate on the version visible after the lock, as
+		// Postgres Read Committed does.
+		c2 := c.rebind(alias, cur)
+		if up.Where != nil {
+			ok, err := x.evalBool(up.Where, c2.env(nil))
+			if err != nil || !ok {
+				return err
+			}
+		}
+		done[key] = true
+		updated := cur.clone()
+		for _, a := range up.Set {
+			v, err := x.assignedValue(table, a, c2.env(nil), "in SET")
+			if err != nil {
+				return err
+			}
+			updated[a.Column] = v
+			if sequential {
+				c2 = c2.rebind(alias, updated)
+			}
+		}
+		if err := x.touchOnUpdate(table, cur, updated, up.Set); err != nil {
+			return err
+		}
+
+		if err := x.checkRow(table, updated); err != nil {
+			return err
+		}
+		// InnoDB writes the undo record as it changes the clustered record,
+		// before the secondary indexes' checks, which may wait; none for an
+		// update that changes nothing.
+		if !sameRow(cur, updated) {
+			x.tx.undo++
+		}
+		if err := x.checkUniques(table, updated, key, cur); err != nil {
+			return err
+		}
+		if err := x.checkParents(table, updated, cur); err != nil {
+			return err
+		}
+		if err := x.onParentUpdate(table, cur, updated); err != nil {
+			return err
+		}
+		lk, err = x.rekey(table, lk, updated)
+		if err != nil {
+			return err
+		}
+		// Last before the write, as the checks above may wait while another
+		// transaction takes a gap lock the new value falls into.
+		if err := x.tx.moveIntention(table, updated, cur); err != nil {
+			return err
+		}
+		x.tx.writes[lk] = updated
+		matched++
+		if !x.tx.db.kind.InnoDB() || !sameRow(cur, updated) {
+			// MySQL counts the rows an UPDATE changed, as go-sql-driver
+			// reports them without clientFoundRows.
+			out.affected++
+		}
+		return x.appendReturning(out, up.Returning, updated)
+	}
+	if x.rowByRow(table, alias, up.Where, len(up.From) == 0 && up.Limit == nil && len(up.OrderBy) == 0, assignedColumns(up.Set)) {
 		x.scanned = func(t string, r Row) error {
-			cur, ok := x.tx.view(t, r.Key())
-			if t != table || !ok || x.counted[r.Key()] {
+			if t != table || done[r.Key()] {
 				return nil
 			}
-			en := newJrow(alias, cur).env(nil)
-			if up.Where != nil {
-				if ok, err := x.evalBool(up.Where, en); err != nil || !ok {
-					return err
-				}
-			}
-			updated := cur.clone()
-			for _, a := range up.Set {
-				v, err := x.assignedValue(table, a, en, "in SET")
-				if err != nil {
-					return err
-				}
-				updated[a.Column] = v
-				if x.tx.db.kind.InnoDB() {
-					en = newJrow(alias, updated).env(nil)
-				}
-			}
-			if !sameRow(cur, updated) {
-				x.countUndo(r.Key())
-			}
-			return nil
+			return apply(newJrow(alias, r))
 		}
 	}
 	err := x.nextKeyLocks(table, alias, up.Where, lockUpdate, nil, stop)
@@ -1698,100 +1756,14 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := &sqlResult{cols: x.returningCols(up.Returning, nil)}
-	// MySQL's single-table UPDATE assigns left to right, each assignment
-	// seeing the ones before it, where Postgres evaluates them all against the
-	// old row.
-	sequential := x.tx.db.kind.InnoDB() && len(up.From) == 0
-	done := map[string]bool{}
-	var matched int64 // LIMIT counts the rows matched, changed or not
 	for _, c := range cands {
-		key := c.base.Key()
-		if done[key] {
+		if done[c.base.Key()] {
 			continue
 		}
 		if limit >= 0 && matched >= int64(limit) {
 			break
 		}
-		c, joined, err := x.lockJoinedReads(up.From, c)
-		if err != nil {
-			return nil, err
-		}
-		if !joined {
-			continue // a joined row it waited for is gone
-		}
-		mode := x.tx.db.updateLock(table, assignedColumns(up.Set))
-		key, cur, ok, err := x.tx.lockLatest(table, key, func(lk lockKey) error { return x.tx.lockMode(lk, mode) })
-		if err != nil {
-			return nil, err
-		}
-		if !ok || done[key] {
-			continue
-		}
-		lk := lockKey{table, key}
-		// Re-evaluate the predicate on the version visible after the lock, as
-		// Postgres Read Committed does.
-		c2 := c.rebind(alias, cur)
-		if up.Where != nil {
-			ok, err := x.evalBool(up.Where, c2.env(nil))
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				continue
-			}
-		}
-		done[key] = true
-		updated := cur.clone()
-		for _, a := range up.Set {
-			v, err := x.assignedValue(table, a, c2.env(nil), "in SET")
-			if err != nil {
-				return nil, err
-			}
-			updated[a.Column] = v
-			if sequential {
-				c2 = c2.rebind(alias, updated)
-			}
-		}
-		if err := x.touchOnUpdate(table, cur, updated, up.Set); err != nil {
-			return nil, err
-		}
-
-		if err := x.checkRow(table, updated); err != nil {
-			return nil, err
-		}
-		// InnoDB writes the undo record as it changes the clustered record,
-		// before the secondary indexes' checks, which may wait; none for an
-		// update that changes nothing.
-		if !sameRow(cur, updated) && !x.counted[key] {
-			x.tx.undo++
-		}
-		if err := x.checkUniques(table, updated, key, cur); err != nil {
-			return nil, err
-		}
-		if err := x.checkParents(table, updated, cur); err != nil {
-			return nil, err
-		}
-		if err := x.onParentUpdate(table, cur, updated); err != nil {
-			return nil, err
-		}
-		lk, err = x.rekey(table, lk, updated)
-		if err != nil {
-			return nil, err
-		}
-		// Last before the write, as the checks above may wait while another
-		// transaction takes a gap lock the new value falls into.
-		if err := x.tx.moveIntention(table, updated, cur); err != nil {
-			return nil, err
-		}
-		x.tx.writes[lk] = updated
-		matched++
-		if !x.tx.db.kind.InnoDB() || !sameRow(cur, updated) {
-			// MySQL counts the rows an UPDATE changed, as go-sql-driver
-			// reports them without clientFoundRows.
-			out.affected++
-		}
-		if err := x.appendReturning(out, up.Returning, updated); err != nil {
+		if err := apply(c); err != nil {
 			return nil, err
 		}
 	}
@@ -1843,24 +1815,49 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return nil, err
 		}
 	}
-	if len(del.Using) == 0 {
-		// InnoDB deletes each row as its search locks it, so the undo
-		// records of the rows before weigh a wait on a later one.
-		x.scanned = func(t string, r Row) error {
-			cur, ok := x.tx.view(t, r.Key())
-			if t != x.tx.db.resolve(del.Table) || !ok || x.counted[r.Key()] {
-				return nil
-			}
-			if del.Where != nil {
-				if ok, err := x.evalBool(del.Where, newJrow(delAlias, cur).env(nil)); err != nil || !ok {
-					return err
-				}
-			}
-			x.countUndo(r.Key())
+	table := x.tx.db.resolve(del.Table)
+	alias := delAlias
+	out := &sqlResult{cols: x.returningCols(del.Returning, nil)}
+	done := map[string]bool{}
+	// apply deletes the row of c if it still matches, once it is locked.
+	apply := func(c jrow) error {
+		key, cur, ok, err := x.tx.lockLatest(table, c.base.Key(), x.tx.lock)
+		if err != nil {
+			return err
+		}
+		if !ok || done[key] {
 			return nil
 		}
+		lk := lockKey{table, key}
+		if del.Where != nil {
+			c2 := c.rebind(alias, cur)
+			ok, err := x.evalBool(del.Where, c2.env(nil))
+			if err != nil || !ok {
+				return err
+			}
+		}
+		done[key] = true
+		x.tx.undo++ // written before the secondary entries, which may wait
+		if err := x.releaseEntries(table, cur, nil); err != nil {
+			return err
+		}
+		delete(x.tx.writes, lk)
+		x.tx.deleted[lk] = true
+		if err := x.onParentDelete(table, cur); err != nil {
+			return err
+		}
+		out.affected++
+		return x.appendReturning(out, del.Returning, cur)
 	}
-	err := x.nextKeyLocks(x.tx.db.resolve(del.Table), delAlias, del.Where, lockUpdate, nil, stop)
+	if x.rowByRow(table, alias, del.Where, len(del.Using) == 0 && del.Limit == nil && len(del.OrderBy) == 0, nil) {
+		x.scanned = func(t string, r Row) error {
+			if t != table || done[r.Key()] {
+				return nil
+			}
+			return apply(newJrow(alias, r))
+		}
+	}
+	err := x.nextKeyLocks(table, alias, del.Where, lockUpdate, nil, stop)
 	x.scanned = nil
 	if err != nil {
 		return nil, err
@@ -1869,60 +1866,21 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := x.inScanOrder(x.tx.db.resolve(del.Table), delAlias, del.Where, stop, cands); err != nil {
+	if err := x.inScanOrder(table, alias, del.Where, stop, cands); err != nil {
 		return nil, err
 	}
 	limit, err := x.writeLimit(cands, del.OrderBy, del.Limit)
 	if err != nil {
 		return nil, err
 	}
-	table := x.tx.db.resolve(del.Table)
-	alias := del.Alias
-	if alias == "" {
-		alias = relname(del.Table)
-	}
-	out := &sqlResult{cols: x.returningCols(del.Returning, nil)}
-	done := map[string]bool{}
 	for _, c := range cands {
-		key := c.base.Key()
-		if done[key] {
+		if done[c.base.Key()] {
 			continue
 		}
 		if limit >= 0 && out.affected >= int64(limit) {
 			break
 		}
-		key, cur, ok, err := x.tx.lockLatest(table, key, x.tx.lock)
-		if err != nil {
-			return nil, err
-		}
-		if !ok || done[key] {
-			continue
-		}
-		lk := lockKey{table, key}
-		if del.Where != nil {
-			c2 := c.rebind(alias, cur)
-			ok, err := x.evalBool(del.Where, c2.env(nil))
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				continue
-			}
-		}
-		done[key] = true
-		if !x.counted[key] {
-			x.tx.undo++ // written before the secondary entries, which may wait
-		}
-		if err := x.releaseEntries(table, cur, nil); err != nil {
-			return nil, err
-		}
-		delete(x.tx.writes, lk)
-		x.tx.deleted[lk] = true
-		if err := x.onParentDelete(table, cur); err != nil {
-			return nil, err
-		}
-		out.affected++
-		if err := x.appendReturning(out, del.Returning, cur); err != nil {
+		if err := apply(c); err != nil {
 			return nil, err
 		}
 	}
