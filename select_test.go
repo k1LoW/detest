@@ -781,8 +781,10 @@ func TestCastToNumber(t *testing.T) {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
 		}
 	}
-	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
-		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
+	for _, q := range []string{`SELECT 'abc'::int`, `SELECT 'not_a_number'::int`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
 	}
 	var b any
 	if err := db.QueryRow(`SELECT $1::bytea`, []byte("ab")).Scan(&b); err != nil {

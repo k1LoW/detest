@@ -79,6 +79,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT '10'::int > '9'::int, ' 01 '::int = 1, '1.50'::numeric = 1.5`),
 			difftest.Q(0, `SELECT 1.6::int, (-1.4)::smallint, true::int`),
 			difftest.Q(0, `SELECT 'abc'::int`),
+			difftest.Q(0, `SELECT 'not_a_number'::int`),
+			difftest.Q(0, `SELECT '1_000_'::int`),
 			difftest.Q(0, `SELECT '40000'::smallint`),
 			difftest.Q(0, `SELECT 3000000000::int`),
 			difftest.Q(0, `SELECT '1e3'::numeric = 1000, 'inf'::float8 > 1e308`),

@@ -126,21 +126,29 @@ func compareValues(a, b any) (int, bool) {
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)), true
 }
 
-// otherNumberText matches number text in a form Postgres reads for some
+// isOtherNumberText reports number text in a form Postgres reads for some
 // types but detest does not model: a non-decimal integer (0x10, 0o17, 0b101)
 // or a hexadecimal float (0x1p2), and digits grouped with underscores (1_000).
 // Postgres takes or refuses each by the target type, so detest refuses them
 // all rather than answer for one type as for another.
-var otherNumberText = regexp.MustCompile(`(?i)^\s*[+-]?0[xob]|_`)
+// Text that is not a number at all, such as 'not_a_number', is left to fail
+// as invalid input.
+var (
+	prefixedNumberText   = regexp.MustCompile(`(?i)^\s*[+-]?0[xob][0-9a-f_.p+-]*\s*$`)
+	underscoreNumberText = regexp.MustCompile(`(?i)^\s*[+-]?[0-9]+(_[0-9]+)*(\.([0-9]+(_[0-9]+)*)?)?(e[+-]?[0-9]+(_[0-9]+)*)?\s*$`)
+)
 
 func isOtherNumberText(v any) bool {
-	switch s := derefValue(v).(type) {
+	var s string
+	switch t := derefValue(v).(type) {
 	case string:
-		return otherNumberText.MatchString(s)
+		s = t
 	case []byte:
-		return otherNumberText.Match(s)
+		s = string(t)
+	default:
+		return false
 	}
-	return false
+	return prefixedNumberText.MatchString(s) || strings.Contains(s, "_") && underscoreNumberText.MatchString(s)
 }
 
 var (
