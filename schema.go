@@ -714,8 +714,11 @@ type numLimit struct {
 // text written does, not to 1.00 as the nearest float would.
 func scaledNumeric(v any, l numLimit) (any, error) {
 	f, ok := toFloat(v)
-	if !ok || math.IsInf(f, 0) || math.IsNaN(f) {
+	if !ok || math.IsNaN(f) {
 		return v, nil
+	}
+	if math.IsInf(f, 0) {
+		return nil, errors.New("numeric field overflow") // no finite precision holds it
 	}
 	r, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
 	if !ok {

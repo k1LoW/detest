@@ -2496,10 +2496,11 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if derefValue(l) == nil || derefValue(r) == nil {
 			return nil, nil // NULL || x is NULL
 		}
-		// text || anything concatenates, but Postgres has no || for two
-		// numbers and fails the statement.
-		if isNumber(l) && isNumber(r) {
-			return nil, errUnknownExpr{"|| of two numbers"}
+		// text || anything concatenates, but Postgres has no || without a
+		// text operand, as for two numbers or two booleans, and fails the
+		// statement.
+		if !isText(l) && !isText(r) {
+			return nil, errUnknownExpr{"|| without a text operand"}
 		}
 		// As a cast to text, the text of a numeric or a float is not the
 		// float's.
@@ -2594,22 +2595,35 @@ func arith(op string, l, r any) (any, error) {
 // branchValue is the value one branch of CASE, COALESCE, GREATEST, LEAST or
 // NULLIF gives, as the common type of all the branches: a number as
 // commonNumber gives it, and text as a number when another branch is typed as
-// one, which is how Postgres reads an untyped literal there, such as the '2'
-// of CASE WHEN ... THEN 1 ELSE '2' END. Text that reads as no number has no
-// common type with a number in Postgres, which fails the statement whatever
-// row it reads, so it is refused. MySQL converts between the two instead.
+// one, which is how Postgres reads an untyped literal or a parameter there,
+// such as the '2' of CASE WHEN ... THEN 1 ELSE '2' END. Text of a branch
+// typed as text, a column or a cast, has no common type with a number in
+// Postgres, which fails the statement whatever row it reads, as does a
+// literal that reads as no number, so both are refused. MySQL converts
+// between the two instead.
 func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 	if x.tx.db.kind.InnoDB() || !slices.ContainsFunc(exprs, numberTyped) {
 		return commonNumber(exprs, v), nil
 	}
-	if s, ok := derefValue(v).(string); ok {
-		f, err := parseNumber(s)
-		if err != nil || isOtherNumberText(s) {
-			return nil, x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
-		}
-		return commonNumber(exprs, numericValue(f)), nil
+	s, ok := derefValue(v).(string)
+	if !ok {
+		return commonNumber(exprs, v), nil
 	}
-	return commonNumber(exprs, v), nil
+	refuse := x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
+	for _, e := range exprs {
+		switch e.(type) {
+		case *sqlir.Const, *sqlir.Param:
+		default:
+			if !numberTyped(e) {
+				return nil, refuse
+			}
+		}
+	}
+	f, err := parseNumber(s)
+	if err != nil || isOtherNumberText(s) {
+		return nil, refuse
+	}
+	return commonNumber(exprs, numericValue(f)), nil
 }
 
 // numberTyped reports whether e is a number by its own form, before any value

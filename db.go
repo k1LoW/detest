@@ -1004,10 +1004,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			} else {
 				delete(def.nums, col.Name)
 			}
-			// ALTER COLUMN TYPE rewrites the rows under the new type, so a
-			// numeric(p, s) rounds what they hold and a varchar(n) refuses
-			// what is too long for it.
-			if col.TypeOnly && (col.MaxLen > 0 || col.Precision > 0) {
+			// ALTER COLUMN TYPE rewrites the rows under the new type: an
+			// integer becomes a numeric's float, a numeric(p, s) rounds
+			// what they hold, and a varchar(n) refuses what is too long.
+			if col.TypeOnly {
 				redefined = true
 			}
 		}
