@@ -1911,23 +1911,34 @@ func (tx *Tx) commit() {
 	}
 	maps.Copy(tx.db.moved, tx.moved)
 	tx.recordVersions()
+	// Only a commit that changes a row counts as a change for idle loops. A
+	// MySQL UPDATE leaving its rows as they were still commits writes, and
+	// two idle loops issuing such updates would otherwise wake each other
+	// forever. The enqueues in tx.deferred count themselves.
+	changed := false
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {
 			t = map[string]Row{}
 			tx.db.committed[lk.table] = t
 		}
+		if prev, ok := t[lk.key]; !ok || !sameRow(prev, r) {
+			changed = true
+		}
 		t[lk.key] = r
 		tx.db.touched[lk.table] = true
 	}
 	for lk := range tx.deleted {
+		if _, ok := tx.db.committed[lk.table][lk.key]; ok {
+			changed = true
+		}
 		delete(tx.db.committed[lk.table], lk.key)
 		tx.db.touched[lk.table] = true
 	}
 	for _, fn := range tx.deferred {
 		fn()
 	}
-	if tx.p != nil && len(tx.writes)+len(tx.deleted)+len(tx.deferred) > 0 {
+	if tx.p != nil && changed {
 		tx.p.r.bump(tx.p)
 	}
 	tx.release()

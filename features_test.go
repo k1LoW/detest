@@ -90,6 +90,29 @@ func TestLoopIdleTickIsNotWokenByItsOwnCommit(t *testing.T) {
 	}, MaxRuns(100))
 }
 
+// Two idle loops whose commits change nothing do not wake each other.
+func TestIdleLoopsAreNotWokenByUnchangedCommits(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true), ('w2', true)`) })
+		for _, id := range []string{"w1", "w2"} {
+			s.Loop("sweeper_"+id, 1, func(p *Proc) error {
+				res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = ?`, id)
+				if err != nil {
+					return err
+				}
+				n, _ := res.RowsAffected()
+				p.Step("reports the sweep")
+				if n == 0 {
+					return ErrIdle
+				}
+				return nil
+			})
+		}
+	}, MaxRuns(1000))
+}
+
 // When keeps a process from starting while its predicate is false.
 func TestWhenGatesTheStart(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {

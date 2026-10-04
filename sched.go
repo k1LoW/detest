@@ -194,8 +194,8 @@ type Proc struct {
 	// counts the version changes the process made itself. An idle loop tick
 	// saw no change another process made after it started, even one
 	// committed while the tick ran, so such a change lets the loop tick
-	// again. Its own writes do not: a MySQL UPDATE leaving a row as it was
-	// reports no affected rows yet commits, and would wake the loop forever.
+	// again. Its own writes do not, or a tick that records something every
+	// time it finds nothing to do would wake its loop forever.
 	started int
 	bumps   int
 }
