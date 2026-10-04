@@ -41,7 +41,7 @@ func keyString(v any) string {
 		// Equal numbers have one key whatever their Go type, as the
 		// comparisons take them as equal: a whole float is written as the
 		// integer, and -0 as 0.
-		if v == math.Trunc(v) && math.Abs(v) < 1<<63 {
+		if v == math.Trunc(v) && v >= -1<<63 && v < 1<<63 {
 			return strconv.FormatInt(int64(v), 10)
 		}
 		return strconv.FormatFloat(v, 'g', -1, 64)
