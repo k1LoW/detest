@@ -339,6 +339,9 @@ type UniqueDef struct {
 	// Deferrable is a constraint DEFERRABLE, whose check Postgres runs at
 	// the end of the statement or at commit.
 	Deferrable bool
+	// Index is a unique index made by CREATE UNIQUE INDEX, which is no
+	// constraint ON CONFLICT ON CONSTRAINT may name.
+	Index bool
 }
 
 // ForeignKey is a FOREIGN KEY or REFERENCES constraint. RefColumns empty

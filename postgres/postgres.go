@@ -275,6 +275,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		if err != nil {
 			return nil, true, err
 		}
+		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
 		object, ok := map[pg.ObjectType]string{pg.ObjectType_OBJECT_TABLE: "", pg.ObjectType_OBJECT_VIEW: "view",

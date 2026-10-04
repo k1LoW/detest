@@ -328,7 +328,7 @@ func (x *sqlExec) conflictTargets(table string, oc *sqlir.OnConflict) ([]sqlir.U
 	all = append(all, def.uniques...)
 	if oc.Constraint != "" {
 		for _, u := range all {
-			if u.Name == oc.Constraint || u.Primary && oc.Constraint == x.tx.db.pkConstraint(table) {
+			if !u.Index && u.Name == oc.Constraint || u.Primary && oc.Constraint == x.tx.db.pkConstraint(table) {
 				return []sqlir.UniqueDef{u}, nil
 			}
 		}
