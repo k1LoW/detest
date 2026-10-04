@@ -4463,3 +4463,22 @@ func TestMySQLBackfillSharesVolatileDefault(t *testing.T) {
 		}
 	}
 }
+
+// ON UPDATE CURRENT_TIMESTAMP compares the row as it stores it, so a value
+// that converts back to the one held changes nothing.
+func TestMySQLOnUpdateComparesStoredValues(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n INT, at DATETIME ON UPDATE CURRENT_TIMESTAMP)")
+	mustExec(t, db, "INSERT INTO t (id, n) VALUES (1, 1)")
+	res, err := db.Exec("UPDATE t SET n = 1.2 WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := res.RowsAffected(); n != 0 {
+		t.Errorf("affected %d, want 0", n)
+	}
+	if at := store.Peek("t")[0]["at"]; at != nil {
+		t.Errorf("at = %v, want NULL as nothing changed", at)
+	}
+}

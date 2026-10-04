@@ -1613,7 +1613,16 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 // of cur to updated that changes the row and does not set them itself.
 func (x *sqlExec) touchOnUpdate(table string, cur, updated Row, set []sqlir.Assignment) error {
 	def := x.tx.db.defs[table]
-	if def == nil || len(def.onUpdate) == 0 || sameRow(cur, updated) {
+	if def == nil || len(def.onUpdate) == 0 {
+		return nil
+	}
+	// The row changes by what it stores, after conversion: 1.2 into an
+	// integer column holding 1 changes nothing.
+	stored := updated.clone()
+	if err := x.checkTypes(table, stored); err != nil {
+		return err
+	}
+	if sameRow(cur, stored) {
 		return nil
 	}
 	for col, e := range def.onUpdate {
