@@ -76,10 +76,10 @@ func TestSQLDriverLostUpdate(t *testing.T) {
 	}
 }
 
-// A process woken from a channel yields before its statement runs, so a
-// statement that fails before its own yield point, and releases the locks of
-// its transaction, does not run alongside the process that woke it. Run with
-// -race.
+// A process woken from a channel reports back to the scheduler before its
+// statement runs, with no yield point or choice, so a statement that fails
+// before its own yield point, and releases the locks of its transaction, does
+// not run alongside the process that woke it. Run with -race.
 func TestStatementAfterWakeFromChannel(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
