@@ -2525,6 +2525,9 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 func castInteger(v any) (any, error) {
 	if s, ok := v.(string); ok {
 		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if errors.Is(err, strconv.ErrRange) {
+			return nil, kindError{sqlir.NumericValueOutOfRange, fmt.Sprintf("value %q is out of range for type bigint", s)}
+		}
 		if err != nil {
 			return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s)}
 		}
@@ -2601,8 +2604,8 @@ func castValue(v any, typ string) (any, error) {
 			if !exactAsFloat(v) {
 				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
 			}
-			n, ok := columnNumber(v, "numeric")
-			if !ok {
+			n, err := columnNumber(v, "numeric")
+			if err != nil {
 				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", v)}
 			}
 			if isNaN(n) {
@@ -2623,6 +2626,9 @@ func castValue(v any, typ string) (any, error) {
 	case "float8", "float4", "double precision", "real":
 		if s, ok := v.(string); ok {
 			f, err := parseNumber(s)
+			if errors.Is(err, strconv.ErrRange) {
+				return nil, kindError{sqlir.NumericValueOutOfRange, fmt.Sprintf("%q is out of range for type %s", s, typ)}
+			}
 			if err != nil {
 				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s)}
 			}

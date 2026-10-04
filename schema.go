@@ -462,8 +462,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if t == "numeric" && !exactAsFloat(v) {
 				return x.unsupported(fmt.Sprintf("a numeric value with more digits than a float keeps, written to column %q", col))
 			}
-			n, ok := columnNumber(v, t)
-			if !ok {
+			n, err := columnNumber(v, t)
+			if errors.Is(err, strconv.ErrRange) {
+				return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, fmt.Sprintf("value %q is out of range for type %s", v, name), relname(table), col, "")
+			}
+			if err != nil {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
 			}
 			// Postgres sorts NaN above every number, which the comparisons
@@ -761,9 +764,11 @@ func integralNumber(v any) (any, bool) {
 var textTypes = map[string]bool{"text": true, "varchar": true, "bpchar": true}
 
 // columnNumber converts a value written to a column of the number type t to
-// the number it holds, as the type's input function does for text. The
+// the number it holds, as the type's input function does for text. The error
+// tells text that does not parse from a number out of range
+// (strconv.ErrRange). The
 // digits as written, such as the 0 of 1.50, are not kept.
-func columnNumber(v any, t string) (any, bool) {
+func columnNumber(v any, t string) (any, error) {
 	var s string
 	switch b := v.(type) {
 	case string:
@@ -773,27 +778,25 @@ func columnNumber(v any, t string) (any, bool) {
 	default:
 		switch t {
 		case "numeric":
-			return numericValue(v), true
+			return numericValue(v), nil
 		case "float4", "float8":
 			// An integer is stored as the float it becomes, so arithmetic
 			// on the column is float arithmetic (1 / 2 is 0.5).
 			if n, ok := integer(v); ok {
-				return float64(n), true
+				return float64(n), nil
 			}
 		}
-		return v, true
+		return v, nil
 	}
 	s = strings.TrimSpace(s)
 	switch t {
 	case "int2", "int4", "int8":
-		n, err := strconv.ParseInt(s, 10, 64)
-		return n, err == nil
+		return strconv.ParseInt(s, 10, 64)
 	case "float4", "float8":
-		f, err := parseNumber(s)
-		return f, err == nil
+		return parseNumber(s)
 	}
 	f, err := parseNumber(s)
-	return numericValue(f), err == nil
+	return numericValue(f), err
 }
 
 // numericValue is the representation of a numeric: a float, so arithmetic on
