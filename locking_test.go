@@ -753,3 +753,59 @@ func TestDeadlockVictimOfBranchedCycle(t *testing.T) {
 		}
 	}, MaxPreemptions(0))
 }
+
+// A lock timeout that ends the wait closing a cycle breaks the cycle, so the
+// other waiter goes on and no transaction is aborted as a deadlock victim.
+func TestLockTimeoutBreaksDeadlock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			errs             map[string]error
+			aLocked, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			errs = map[string]error{}
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+		})
+		update := func(p *Proc, name, first string, locked chan struct{}, beforeSecond func(), second string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if name == "y" {
+				if _, err := tx.Exec(`SET LOCAL lock_timeout = '1s'`); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, first); err != nil {
+				return err
+			}
+			close(locked)
+			beforeSecond()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, second); err != nil {
+				errs[name] = err
+				return nil
+			}
+			return tx.Commit()
+		}
+		s.Manual("x", 1, func(p *Proc) error {
+			return update(p, "x", "a", aLocked, func() { <-bLocked }, "b")
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			return update(p, "y", "b", bLocked, func() { p.WaitUntil(p.Now() + 1) }, "a")
+		})
+		s.AtQuiescence(func(*State) error {
+			if errors.Is(errs["y"], ErrLockNotAvailable) && errs["x"] != nil {
+				return fmt.Errorf("y timed out, and x still failed: %v", errs["x"])
+			}
+			return nil
+		})
+		s.Sometimes("y times out", func(*State) bool { return errors.Is(errs["y"], ErrLockNotAvailable) })
+	})
+}

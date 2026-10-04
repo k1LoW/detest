@@ -94,6 +94,13 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 				return ErrSelfWait
 			}
 		}
+		// The timeout is decided before a deadlock victim, since a timeout
+		// that ends this wait breaks the cycle and no victim is aborted.
+		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
+			tx.aborted = true
+			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
+			return tx.db.kind.Error(sqlir.LockNotAvailable, "canceling statement due to lock timeout", relname(lk.table), "", "")
+		}
 		cycle := tx.rowWaitCycle(conflict)
 		if cycle != nil {
 			// Each waiter checks for a deadlock once deadlock_timeout passes in
@@ -117,11 +124,6 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 				tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for a lock on %s/%s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, lk.table, lk.key, o.p.name)}
 				break
 			}
-		}
-		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
-			tx.aborted = true
-			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
-			return tx.db.kind.Error(sqlir.LockNotAvailable, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
 		if tx.deadlockVictim {
