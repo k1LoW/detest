@@ -923,6 +923,72 @@ func TestIdleLoopRetriesAfterADeadlockSurvivorCommitsUnchanged(t *testing.T) {
 		})
 	})
 }
+
+// Commits of manual processes are progress, so an idle loop they wake again
+// and again is never cut, however many there are.
+func TestIdleLoopWokenByProgressIsNotCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE a (id text PRIMARY KEY); CREATE TABLE jobs (id text PRIMARY KEY)`)
+		for _, b := range []string{"x", "y"} {
+			s.Manual(b, 1, func(p *Proc) error {
+				for i := range 3 {
+					if _, err := db.ExecContext(p.Context(), `INSERT INTO a VALUES ($1)`, fmt.Sprint(b, i)); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			var n int
+			if err := db.QueryRowContext(p.Context(), `SELECT count(*) FROM jobs`).Scan(&n); err != nil {
+				return err
+			}
+			return ErrIdle
+		})
+	}, []Option{MaxPreemptions(1)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
+}
+
+// A poller that records a heartbeat on every idle tick waits for its work
+// without being cut or running out of budget.
+func TestHeartbeatPollerWaitsForWork(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE workers (id text PRIMARY KEY, beats int NOT NULL); CREATE TABLE jobs (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO workers VALUES ('w', 0)`) })
+		s.Manual("producer", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO jobs VALUES ('j1', false)`)
+			return err
+		})
+		s.Loop("poller", 1, func(p *Proc) error {
+			if _, err := db.ExecContext(p.Context(), `UPDATE workers SET beats = beats + 1 WHERE id = 'w'`); err != nil {
+				return err
+			}
+			res, err := db.ExecContext(p.Context(), `UPDATE jobs SET done = true WHERE NOT done`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "jobs", "j1"); !row.Bool("done") {
+				return errors.New("j1 not done")
+			}
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
+}
+
 // A loop whose idle tick spawns a process that changes a row is woken by it
 // with no progress in between, so its runs end, cut at MaxIdleTicks.
 func TestIdleLoopSpawningWorkIsCut(t *testing.T) {

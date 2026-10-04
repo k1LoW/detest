@@ -53,7 +53,7 @@ msgs := st.Queue(q)
 | `MaxCrashes(n)` | 0 | Any process may die at any step: its transactions roll back, mutexes free, message redelivered |
 | `MaxFailures(n)` | 1 | External-call failures per run |
 | `MaxRedeliveries(n)` | 1 | Redeliveries of a failed message |
-| `MaxIdleTicks(n)` | 3 | Idle ticks per loop and run that leave its budget unspent; a run past it is cut, not checked, and counted as `N runs cut at MaxIdleTicks` |
+| `MaxIdleTicks(n)` | 3 | Idle ticks of a loop in a row, with no progress by other processes in between, that leave its budget unspent; a run past it is cut, not checked at quiescence, and counted as `N runs cut at MaxIdleTicks`. Loops waking each other is the usual cause, rarely a need to raise it |
 | `MaxPreemptions(n)` | unbounded | Context switches away from a runnable process per run. 2 or 3 keeps large scenarios tractable and still finds most races |
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |
 | `MaxDuration(d)` | none | Wall-clock cap |
