@@ -463,6 +463,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if !ok {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
 			}
+			// Postgres sorts NaN above every number, which the comparisons
+			// do not, so a NaN would match ranges it is outside of.
+			if f, ok := toFloat(n); ok && math.IsNaN(f) {
+				return x.unsupported(fmt.Sprintf("NaN written to column %q", col))
+			}
 			if strings.HasPrefix(t, "int") {
 				if n, ok = integralNumber(n); !ok {
 					return x.unsupported(fmt.Sprintf("a number with a fraction written to the %s column %q", name, col))

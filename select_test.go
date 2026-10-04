@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -484,6 +485,12 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 		t.Errorf("numeric beyond a float: got %v, want unsupported", err)
 	}
 	mustExec(t, db, `INSERT INTO t (id, amount) VALUES (7, '1.10')`)
+	// Postgres sorts NaN above every number, which detest does not.
+	for _, v := range []any{"NaN", math.NaN()} {
+		if _, err := db.Exec(`INSERT INTO t (id, ratio) VALUES (8, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%v: got %v, want unsupported", v, err)
+		}
+	}
 	// A value of another type is not converted, where Postgres refuses it.
 	for _, v := range []any{true, time.Unix(0, 0)} {
 		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
