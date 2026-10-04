@@ -1531,6 +1531,9 @@ func (tx *Tx) Insert(table string, row Row) error {
 	if err := x.checkParents(table, row, nil); err != nil {
 		return err
 	}
+	if err := tx.claimEntries(table, row); err != nil {
+		return err
+	}
 	delete(tx.deleted, lk)
 	tx.writes[lk] = row.clone()
 	if tx.db.kind.InnoDB() {

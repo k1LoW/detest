@@ -232,6 +232,23 @@ func secondaryIndex(name string, cols []string) string {
 	return "\x00" + strings.Join(cols, "\x00")
 }
 
+// claimEntries takes the entries row, inserted into table, writes into the
+// table's plain indexes, which the writer holds implicitly.
+func (tx *Tx) claimEntries(table string, row Row) error {
+	def := tx.db.defs[table]
+	if def == nil || !tx.db.kind.InnoDB() {
+		return nil
+	}
+	for _, ix := range def.indexOrder(true) {
+		if ix.unique == nil && ix.key != nil {
+			if err := tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // uniqueHolder is the visible row other than self holding vals in the unique
 // index u, if any.
 func (x *sqlExec) uniqueHolder(table string, u *sqlir.UniqueDef, vals []any, self string) (Row, error) {
@@ -262,6 +279,20 @@ func (x *sqlExec) releaseEntries(table string, old, row Row) error {
 	for _, ix := range def.indexOrder(true) {
 		u := ix.unique
 		if u == nil {
+			// A plain index's entry moves when its key does, the primary
+			// key's columns included: the old entry is marked deleted and a
+			// new one written, both held implicitly by the writer.
+			if ix.key == nil || row != nil && sameKey(old, row, ix.key) {
+				continue
+			}
+			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, old), lockStruct{}); err != nil {
+				return err
+			}
+			if row != nil {
+				if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		ov, ok, err := x.uniqueValues(table, u, old)

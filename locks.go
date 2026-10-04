@@ -103,10 +103,7 @@ func (tx *Tx) lockImplicit(lk lockKey, wait lockStruct) error {
 // lockWith takes a lock that InnoDB keeps in the struct grant once granted,
 // none for an implicit lock, and in the struct wait while it waits.
 func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error {
-	table := lk.table
-	if name, ok := strings.CutPrefix(table, "\x00unique\x00"); ok {
-		table, _, _ = strings.Cut(name, "\x00")
-	}
+	table, _ := entryIndex(lk)
 	tx.noteTableLock(table, mode)
 	var cancelWait func()
 	for {
@@ -149,25 +146,12 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 			return err
 		}
 		if cancelWait == nil {
-			w := wait
-			if ix, ok := tx.plainIndexOf(wait); ok && !slices.ContainsFunc(conflict, func(o *Tx) bool { return o.touchedEntry(lk, ix) }) {
-				// No holder wrote the row's entry in the plain index the
-				// search goes through, so InnoDB grants the entry's lock and
-				// waits for the row on the primary key.
-				if !tx.covers(lk, grant) {
-					tx.addStruct(grant)
-				}
-				w = structKey(lk.table, "PRIMARY", mode, "record")
-			}
-			cancelWait = tx.noteWait(w)
+			cancelWait = tx.noteWait(wait)
 		}
 		// A holder that took the lock while this one waited turns its
 		// implicit lock explicit too.
 		for _, o := range conflict {
 			o.convertImplicit(lk)
-			if ix, ok := tx.plainIndexOf(wait); ok && o.touchedEntry(lk, ix) {
-				o.addStruct(structKey(lk.table, wait.index, lockUpdate, "record"))
-			}
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
@@ -289,35 +273,6 @@ func (t *Tx) heldStructs() map[lockStruct]bool {
 	return structs
 }
 
-// plainIndexOf is the plain index whose record the struct s is of, if any.
-func (tx *Tx) plainIndexOf(s lockStruct) (sqlir.IndexDef, bool) {
-	def := tx.db.defs[s.table]
-	if def == nil || s.index == "" || s.index == "PRIMARY" || s.wait != 0 {
-		return sqlir.IndexDef{}, false
-	}
-	for _, ix := range def.indexes {
-		if plainIndex(ix) == s.index {
-			return ix, true
-		}
-	}
-	return sqlir.IndexDef{}, false
-}
-
-// touchedEntry reports whether tx wrote the entry of the row lk in the
-// plain index ix, which it then holds implicitly: by inserting or deleting
-// the row, or changing a column the index holds.
-func (tx *Tx) touchedEntry(lk lockKey, ix sqlir.IndexDef) bool {
-	if tx.deleted[lk] {
-		return true
-	}
-	w, wrote := tx.writes[lk]
-	if !wrote {
-		return false
-	}
-	old, existed := tx.db.committed[lk.table][lk.key]
-	return !existed || slices.ContainsFunc(ix.Columns, func(c string) bool { return !sameValue(old[c], w[c]) })
-}
-
 // covers reports whether a lock tx holds on lk covers a request for one in
 // struct g, as InnoDB grants such a request without a lock of its own: a
 // lock of the same index at least as strong, next-key covering the record
@@ -421,22 +376,35 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 	if !tx.db.kind.InnoDB() || !tx.implicit[lk] || tx.explicit[lk] {
 		return
 	}
-	var key lockStruct
-	if name, ok := strings.CutPrefix(lk.table, "\x00unique\x00"); ok {
-		table, uname, _ := strings.Cut(name, "\x00")
+	table, index := entryIndex(lk)
+	if index == "" {
 		def := tx.db.defs[table]
 		if def == nil {
 			return
 		}
+		uname := strings.TrimPrefix(lk.table, "\x00unique\x00"+table+"\x00")
 		i := slices.IndexFunc(def.uniques, func(u sqlir.UniqueDef) bool { return u.Name == uname })
 		if i < 0 {
 			return
 		}
-		key = structKey(table, uniqueIndex(&def.uniques[i]), lockUpdate, "record")
-	} else {
-		key = structKey(lk.table, "PRIMARY", lockUpdate, "record")
+		index = uniqueIndex(&def.uniques[i])
 	}
-	tx.addStruct(key)
+	tx.addStruct(structKey(table, index, lockUpdate, "record"))
+}
+
+// entryIndex is the table a lock key is of, and the index whose record it
+// stands for: "PRIMARY" for a row, a plain index's name for its entry, and
+// "" for a unique index's value, which names the index by its constraint.
+func entryIndex(lk lockKey) (table, index string) {
+	if name, ok := strings.CutPrefix(lk.table, "\x00unique\x00"); ok {
+		table, _, _ = strings.Cut(name, "\x00")
+		return table, ""
+	}
+	if name, ok := strings.CutPrefix(lk.table, "\x00index\x00"); ok {
+		table, index, _ = strings.Cut(name, "\x00")
+		return table, index
+	}
+	return lk.table, "PRIMARY"
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

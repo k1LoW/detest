@@ -771,7 +771,27 @@ func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, e
 			return nil, err
 		}
 	}
+	defer x.pushDown(sel, table, alias, sel.Where)()
 	return stop, x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, stop)
+}
+
+// pushDown sets x.pushdown for a locking read's search of table by where,
+// when it goes through a secondary index that does not hold every column
+// the read uses of table, and returns the function that clears it.
+func (x *sqlExec) pushDown(sel *sqlir.SelectStmt, table, alias string, where sqlir.Expr) func() {
+	sr := x.searchRange(table, alias, where)
+	def := x.tx.db.defs[table]
+	if def == nil || sr.index == "" || sr.index == "PRIMARY" {
+		return func() {}
+	}
+	covered := !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
+	walkNodes(sel, func(n any) {
+		if c, ok := n.(*sqlir.ColumnRef); ok && x.searchedColumn(c, table, alias) && !slices.Contains(sr.cols, c.Column) && !slices.Contains(def.pk, c.Column) {
+			covered = false
+		}
+	})
+	x.pushdown = !covered
+	return func() { x.pushdown = false }
 }
 
 // joinLocks takes the next-key locks of a locking read joining a const table,
@@ -864,7 +884,10 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 	}
 	for _, r := range rows {
 		x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}
-		if err := x.nextKeyLocks(jtable, jalias, where, mode, sel.Lock, nil); err != nil {
+		clear := x.pushDown(sel, jtable, jalias, where)
+		err := x.nextKeyLocks(jtable, jalias, where, mode, sel.Lock, nil)
+		clear()
+		if err != nil {
 			return err
 		}
 	}

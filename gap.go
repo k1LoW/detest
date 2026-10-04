@@ -296,27 +296,9 @@ scan:
 		}
 		r := slices.MinFunc(in, func(a, b Row) int { return keyCompare(keyOf(a, sr.key), keyOf(b, sr.key)) })
 		seen[r.Key()+"\x00"+encodeKey(keyOf(r, sr.key))] = true
-		var keys []lockKey
-		var structs []lockStruct
-		if sr.def != nil {
-			vals, ok, err := x.uniqueValues(table, sr.def, r)
-			if err != nil {
-				return err
-			}
-			if ok {
-				keys = append(keys, uniqueLock(table, sr.def, vals))
-				structs = append(structs, structKey(table, sr.index, mode, "record"))
-			}
-		}
 		lk := lockKey{table, r.Key()}
-		if len(keys) == 0 {
-			// A plain index's record has no lock of its own in detest, and
-			// stands as the row's.
-			keys = append(keys, lk)
-			structs = append(structs, structKey(table, sr.index, mode, "record"))
-		}
-		keys = append(keys, lk)
-		structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
+		keys := []lockKey{x.indexEntry(table, sr, r), lk}
+		structs := []lockStruct{structKey(table, sr.index, mode, "record"), structKey(table, "PRIMARY", mode, "record")}
 		if policy != nil && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
 			if policy.SkipLocked {
 				x.skip(lk)
@@ -353,6 +335,24 @@ scan:
 			}
 		}
 	}
+}
+
+// indexEntry is the lock key of r's record in the secondary index sr
+// searches: the unique index's value, which its checks lock too, or the
+// index's key, with the primary key's columns after it.
+func (x *sqlExec) indexEntry(table string, sr indexSearch, r Row) lockKey {
+	if sr.def != nil {
+		if vals, ok, err := x.uniqueValues(table, sr.def, r); err == nil && ok {
+			return uniqueLock(table, sr.def, vals)
+		}
+	}
+	return plainEntry(table, sr.index, sr.key, r)
+}
+
+// plainEntry is the lock key of r's record in the plain index named index,
+// ordered by key, which a writer of the record holds implicitly.
+func plainEntry(table, index string, key []string, r Row) lockKey {
+	return lockKey{table: "\x00index\x00" + table + "\x00" + index, key: encodeKey(keyOf(r, key))}
 }
 
 // checkSearch refuses a locking search whose locks depend on a choice of
@@ -455,7 +455,6 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	// reads through a secondary index is locked on the primary key too;
 	// each lock's struct is recorded as it is taken.
 	scanIndex := cmp.Or(sr.index, "PRIMARY")
-	entry := sr.def
 	desc := false
 	if len(stop.order) == 1 {
 		c, ok := stop.order[0].Expr.(*sqlir.ColumnRef)
@@ -496,19 +495,7 @@ scan:
 			if scanIndex == "PRIMARY" {
 				structs[0] = structKey(table, scanIndex, mode, "next-key")
 			} else {
-				// A plain index's record has no lock of its own in detest,
-				// and stands as the row's.
-				ik := lk
-				if entry != nil {
-					vals, ok, err := x.uniqueValues(table, entry, r)
-					if err != nil {
-						return false, err
-					}
-					if ok {
-						ik = uniqueLock(table, entry, vals)
-					}
-				}
-				keys = append([]lockKey{ik}, keys...)
+				keys = append([]lockKey{x.indexEntry(table, sr, r)}, keys...)
 				structs = append([]lockStruct{structKey(table, scanIndex, mode, "next-key")}, structs...)
 			}
 			skipped := false
@@ -644,10 +631,6 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	}
 	rows := scanRows()
 	index := cmp.Or(sr.index, "PRIMARY")
-	var entry *sqlir.UniqueDef
-	if tx.db.kind.InnoDB() {
-		entry = sr.def
-	}
 	// kind is the lock InnoDB takes on the index records the search reads:
 	// the record alone for a unique equality, next-key otherwise.
 	kind := "next-key"
@@ -658,7 +641,9 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	// struct InnoDB keeps for it, as each lock is taken, so a deadlock met
 	// partway weighs the locks taken so far. A row the search matches is
 	// also locked on the primary key when the search runs on a secondary
-	// index; the record past a range is locked on the searched index only.
+	// index, and so is the record past a range, which InnoDB reads before
+	// it finds the range ended, unless a locking read pushes its condition
+	// down to the index (x.pushdown) and stops there.
 	closedStart := func(Row) bool { return false }
 	lockRecord := func(r Row, matched bool) error {
 		// The record on a unique secondary index is what a foreign key or a
@@ -671,36 +656,18 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		} else if closedStart(r) {
 			k = "record"
 		}
-		var keys []lockKey
-		var structs []lockStruct
-		if entry != nil {
-			vals, ok, err := x.uniqueValues(table, entry, r)
-			if err != nil {
-				return err
+		row := lockKey{table, r.Key()}
+		keys, structs := []lockKey{row}, []lockStruct{structKey(table, index, mode, k)}
+		if index != "PRIMARY" {
+			// The searched index's record comes first, then the row on the
+			// primary key, which InnoDB also reads for the record past the
+			// range before it finds the range ended, unless the read pushes
+			// its condition down to the index (x.pushdown).
+			keys, structs = []lockKey{x.indexEntry(table, sr, r)}, structs[:1]
+			if matched || !x.pushdown {
+				keys = append(keys, row)
+				structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
 			}
-			if ok {
-				keys = append(keys, uniqueLock(table, entry, vals))
-				structs = append(structs, structKey(table, index, mode, k))
-			}
-		}
-		if len(keys) == 0 && index != "PRIMARY" && matched {
-			// A plain index's record has no lock of its own in detest, and
-			// stands as the row's.
-			keys = append(keys, lockKey{table, r.Key()})
-			structs = append(structs, structKey(table, index, mode, k))
-		}
-		keys = append(keys, lockKey{table, r.Key()})
-		// The record past the range is locked on the searched index, and,
-		// as InnoDB reads it before it finds the range ended, on the
-		// primary key too.
-		if index == "PRIMARY" {
-			structs = append(structs, structKey(table, index, mode, k))
-		} else if !matched {
-			structs = append(structs, structKey(table, index, mode, k))
-			keys = append(keys, lockKey{table, r.Key()})
-			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
-		} else {
-			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
 		}
 		if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(lk lockKey) bool { return tx.heldByOther(lk, mode) }) {
 			if policy.SkipLocked {

@@ -111,6 +111,30 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A locking read of columns its index does not hold pushes its
+		// condition down to the index, and finds the range ended without
+		// locking the row past it.
+		Name:   "a locking read pushed down to its index leaves the row past it",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT v FROM items WHERE k BETWEEN 10 AND 15 FOR UPDATE`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 20`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
+		// One its index covers reads the row past the range, and locks it.
+		Name:   "a covering locking read locks the row past its range",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT id FROM items WHERE k BETWEEN 10 AND 15 FOR UPDATE`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 20`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
 		Name:   "read committed takes no gap lock",
 		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
 		Steps: []difftest.Step{

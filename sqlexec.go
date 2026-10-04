@@ -54,6 +54,11 @@ type sqlExec struct {
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
+	// pushdown is set while a locking read searches a secondary index it
+	// does not read all its columns from, whose condition MySQL pushes down
+	// to the index, so that it finds the range ended without reading, nor
+	// locking, the row past it.
+	pushdown bool
 	// scanned is called with each row a locking search of an UPDATE or a
 	// DELETE locks, as it locks it, to write the row then.
 	scanned func(table string, r Row) error
@@ -1416,6 +1421,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		// Last before the write, as the duplicate checks above may wait
 		// while another transaction takes a gap lock the row falls into.
 		if err := x.tx.insertIntention(table, row); err != nil {
+			return nil, err
+		}
+		if err := x.tx.claimEntries(table, row); err != nil {
 			return nil, err
 		}
 		delete(x.tx.deleted, lk)
