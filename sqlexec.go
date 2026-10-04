@@ -2933,19 +2933,21 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 	case "floor":
 		if f, ok := toFloat(d(0)); ok {
-			return asKindOf(d(0), math.Floor(f)), nil
+			return math.Floor(f), nil
 		}
 	case "ceil", "ceiling":
 		if f, ok := toFloat(d(0)); ok {
-			return asKindOf(d(0), math.Ceil(f)), nil
+			return math.Ceil(f), nil
 		}
 	case "round":
 		f, ok := toFloat(d(0))
 		if !ok {
 			break
 		}
+		// floor, ceil and round have no integer form in Postgres, so even
+		// floor(3) is a numeric, and floor(3) / 2 is 1.5.
 		if len(args) == 1 {
-			return asKindOf(d(0), math.Round(f)), nil
+			return math.Round(f), nil
 		}
 		places, ok := toFloat(d(1))
 		if !ok {

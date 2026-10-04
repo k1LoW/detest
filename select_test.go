@@ -743,6 +743,9 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
 		{`SELECT true::int + false::int`, nil, "1"},
 		{`SELECT floor(1.5) / 2`, nil, "0.5"},
+		{`SELECT floor(3) / 2`, nil, "1.5"},
+		{`SELECT round(3) / 2`, nil, "1.5"},
+		{`SELECT abs(-3) / 2`, nil, "1"},
 		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
 	} {
 		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != tc.want {
