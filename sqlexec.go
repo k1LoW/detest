@@ -584,6 +584,11 @@ func (x *sqlExec) withCTEs(ctes []sqlir.CTE, outer *env) error {
 func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []Row, base bool, err error) {
 	alias = t.Alias
 	if t.Sub != nil {
+		if dup := duplicateName(t.Columns); dup != "" {
+			// The rows are keyed by name, so the two columns would read the
+			// same value, where Postgres keeps both.
+			return "", nil, false, x.unsupported(fmt.Sprintf("column alias %q given twice", dup))
+		}
 		cols, rows, err := x.evalSelect(t.Sub, outer)
 		if err == nil && len(t.Columns) > 0 {
 			rows = renameColumns(rows, cols, t.Columns) // AS alias(a, b)
@@ -3784,4 +3789,16 @@ func intArith(op string, l, r int64) (any, error) {
 		return l % r, nil
 	}
 	return nil, errUnknownExpr{"integer operator " + op}
+}
+
+// duplicateName returns a name given more than once in names, or "".
+func duplicateName(names []string) string {
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			return n
+		}
+		seen[n] = true
+	}
+	return ""
 }

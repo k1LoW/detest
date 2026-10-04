@@ -943,3 +943,11 @@ func TestValueFormsByType(t *testing.T) {
 		t.Errorf("ALTER TYPE over a longer row: got %v", err)
 	}
 }
+
+func TestDuplicateColumnAliasIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if _, err := db.Query(`SELECT * FROM (SELECT 1, 2) s(a, a)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v", err)
+	}
+}
