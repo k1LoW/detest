@@ -4232,3 +4232,14 @@ func TestMySQLCrossedStringBounds(t *testing.T) {
 		t.Errorf("an empty range locked %d gaps and %d rows", len(store.gaps), len(store.locks))
 	}
 }
+
+// A CHECK detest cannot convert loads with the schema, and a write it would
+// guard fails as unsupported rather than pass unchecked.
+func TestMySQLUnconvertedCheck(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, s VARCHAR(10) CHECK (s REGEXP '^[a-z]+$'), CONSTRAINT c2 CHECK (SOUNDEX(s) <> ''))")
+	if _, err := db.Exec("INSERT INTO t VALUES (1, 'ABC')"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a write the check guards: %v, want unsupported", err)
+	}
+}

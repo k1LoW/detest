@@ -135,11 +135,7 @@ func (c *conv) column(ch *sqlir.SchemaChange, d *ast.ColumnDef) error {
 			if !o.Enforced {
 				continue
 			}
-			e, err := c.cond(o.Expr)
-			if err != nil {
-				continue // a check detest cannot evaluate is left out, as a default is
-			}
-			ch.Checks = append(ch.Checks, sqlir.CheckDef{Name: o.ConstraintName, Expr: e})
+			ch.Checks = append(ch.Checks, sqlir.CheckDef{Name: o.ConstraintName, Expr: c.checkExpr(o.Expr)})
 		case ast.ColumnOptionReference:
 			fk, err := c.reference(ch.Table, len(ch.ForeignKeys), "", []string{name}, o.Refer)
 			if err != nil {
@@ -150,6 +146,17 @@ func (c *conv) column(ch *sqlir.SchemaChange, d *ast.ColumnDef) error {
 	}
 	ch.Columns = append(ch.Columns, col)
 	return nil
+}
+
+// checkExpr converts a CHECK. One detest cannot convert becomes Unconverted,
+// as Postgres's does, so the schema still loads and a write the check would guard fails
+// as unsupported, rather than pass a check that is not there.
+func (c *conv) checkExpr(n ast.ExprNode) sqlir.Expr {
+	e, err := c.cond(n)
+	if err != nil {
+		return &sqlir.Unconverted{}
+	}
+	return e
 }
 
 // defaultExpr converts a column default. One detest cannot convert becomes
@@ -287,11 +294,7 @@ func (c *conv) constraint(ch *sqlir.SchemaChange, k *ast.Constraint) error {
 		if !k.Enforced {
 			return nil
 		}
-		e, err := c.cond(k.Expr)
-		if err != nil {
-			return nil // left out, as a column check detest cannot evaluate is
-		}
-		ch.Checks = append(ch.Checks, sqlir.CheckDef{Name: k.Name, Expr: e})
+		ch.Checks = append(ch.Checks, sqlir.CheckDef{Name: k.Name, Expr: c.checkExpr(k.Expr)})
 	}
 	// FULLTEXT and other index kinds constrain nothing detest checks.
 	return nil
