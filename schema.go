@@ -164,36 +164,133 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		if dup, err := x.sharedDuplicate(table, key, self); err != nil || dup != nil {
 			return dup, err
 		}
-		if err := x.tx.lock(lockKey{table, key}); err != nil {
+		// No row holds the key (sharedDuplicate locked one that does), so
+		// this is the new row's own lock, implicit in InnoDB.
+		if err := x.tx.lockImplicit(lockKey{table, key}, lockStruct{}); err != nil {
 			return nil, err
 		}
 		if ex, found := x.tx.view(table, key); found && key != self {
+			// The lock waited for a writer that committed the key.
+			x.tx.shareDuplicate(lockKey{table, key}, structKey(table, "PRIMARY", lockShare, "record"))
 			return ex, nil
 		}
 		return nil, nil
 	}
 	if x.tx.db.kind.InnoDB() {
-		// A duplicate of a row already there is checked under a shared lock
-		// on that row, as InnoDB's duplicate check takes one, so two inserts
-		// failing on the same row do not wait for each other.
-		for _, ex := range x.tx.selectNoYield(table, nil) {
-			if ex.Key() == self {
-				continue
-			}
-			evals, ok, err := x.uniqueValues(table, u, ex)
-			if err != nil {
+		// InnoDB checks a duplicate under a shared lock on the index record
+		// it finds, not on the row, so two inserts failing on the same value
+		// do not wait for each other, and a writer of the row's other columns
+		// does not wait for either.
+		dup, err := x.uniqueHolder(table, u, vals, self)
+		if err != nil {
+			return nil, err
+		}
+		if dup != nil {
+			if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockShare, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 				return nil, err
 			}
-			if ok && sameValues(evals, vals) {
-				if dup, err := x.sharedDuplicate(table, ex.Key(), self); err != nil || dup != nil {
-					return dup, err
+			dup, err := x.uniqueHolder(table, u, vals, self)
+			if err != nil || dup != nil {
+				// The shared lock is next-key, at Read Committed too, so it
+				// holds the gap before the duplicate's entry.
+				if def := x.tx.db.defs[table]; dup != nil && def != nil {
+					order := def.indexOrder(true)
+					if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
+						x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
+					}
 				}
+				return dup, err
 			}
 		}
 	}
-	if err := x.tx.lock(uniqueLock(table, u, vals)); err != nil {
+	// A writer of the same value that has not finished holds the record
+	// implicitly, and InnoDB's duplicate check waits for it in share mode.
+	if err := x.tx.lockImplicit(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 		return nil, err
 	}
+	dup, err := x.uniqueHolder(table, u, vals, self)
+	if dup != nil && x.tx.db.kind.InnoDB() {
+		// The lock waited for a writer that committed the value: the check
+		// holds the duplicate's record next-key in share mode instead.
+		x.tx.shareDuplicate(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key"))
+		if def := x.tx.db.defs[table]; def != nil {
+			order := def.indexOrder(true)
+			if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
+				x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
+			}
+		}
+	}
+	return dup, err
+}
+
+// uniqueIndex names the unique index u among a table's indexes.
+func uniqueIndex(u *sqlir.UniqueDef) string {
+	var cols []string
+	for _, e := range u.Elems {
+		for _, c := range sqlir.ColumnRefs(e) {
+			cols = append(cols, c.Column)
+		}
+	}
+	return secondaryIndex(u.Name, cols)
+}
+
+// plainIndex names the index ix among a table's indexes.
+func plainIndex(ix sqlir.IndexDef) string { return secondaryIndex(ix.Name, ix.Columns) }
+
+// secondaryIndex names a secondary index by its name, which is unique
+// within the table, or without one by its columns, apart from "PRIMARY" and
+// from each other whatever they are called, as an identifier holds no NUL.
+func secondaryIndex(name string, cols []string) string {
+	if name != "" {
+		return "\x01" + name
+	}
+	return "\x00" + strings.Join(cols, "\x00")
+}
+
+// insertEntries puts row, inserted into table's primary key, into its
+// secondary indexes, as InnoDB does after the primary key: one index at a
+// time in indexOrder, checking the foreign keys over an index before its
+// entry, the unique ones for a duplicate, and holding each entry
+// implicitly. A foreign key over no index is checked last, on the index
+// MySQL adds for it.
+func (x *sqlExec) insertEntries(table string, row Row) error {
+	def := x.tx.db.defs[table]
+	if def == nil || !x.tx.db.kind.InnoDB() {
+		if err := x.checkUniques(table, row, "", nil); err != nil {
+			return err
+		}
+		return x.checkParents(table, row, nil)
+	}
+	for _, ix := range def.indexOrder(true) {
+		x.tx.putReached(ix.name) // as far as a wait or a failure here gets
+		if err := x.checkParentsExcept(table, row, nil, "", func(fk sqlir.ForeignKey) bool { return def.fkIndex(fk) == ix.name }); err != nil {
+			return err
+		}
+		switch {
+		case ix.unique != nil:
+			ex, err := x.claimUnique(table, ix.unique, row, "")
+			if err != nil {
+				return err
+			}
+			if ex != nil {
+				return x.tx.db.duplicateKey(table, ix.unique.Name)
+			}
+			if err := x.claimNullEntry(table, ix, row); err != nil {
+				return err
+			}
+		case ix.key != nil:
+			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+				return err
+			}
+		}
+	}
+	x.tx.putReached("")
+	return x.checkParentsExcept(table, row, nil, "", func(fk sqlir.ForeignKey) bool { return def.fkIndex(fk) == "" })
+}
+
+// uniqueHolder is the visible row other than self holding vals in the unique
+// index u, if any.
+func (x *sqlExec) uniqueHolder(table string, u *sqlir.UniqueDef, vals []any, self string) (Row, error) {
 	for _, ex := range x.tx.selectNoYield(table, nil) {
 		if ex.Key() == self {
 			continue
@@ -207,6 +304,116 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		}
 	}
 	return nil, nil
+}
+
+// releaseEntries takes, on InnoDB, the entries old holds in the secondary
+// indexes of table that row gives up, row being nil for a delete, as a
+// delete or an update marks those index records, and a check holding a
+// shared lock on one waits for the writer.
+func (x *sqlExec) releaseEntries(table string, old, row Row) error {
+	def := x.tx.db.defs[table]
+	if def == nil || !x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	for _, ix := range def.indexOrder(true) {
+		if _, err := x.moveEntry(table, ix, old, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// moveEntry takes, on InnoDB, the entry old holds in the secondary index
+// ix of table, implicitly, when row (nil for a delete) gives it up, and
+// for a plain index the entry row writes there instead. It reports whether
+// the entry moved.
+func (x *sqlExec) moveEntry(table string, ix secIndex, old, row Row) (bool, error) {
+	if ix.unique == nil {
+		// A plain index's entry moves when its key does, the primary key's
+		// columns included: the old entry is marked deleted and a new one
+		// written, both held implicitly by the writer.
+		if ix.key == nil || row != nil && sameKey(old, row, ix.key) {
+			return false, nil
+		}
+		if !x.tx.db.kind.InnoDB() {
+			return true, nil
+		}
+		if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, old), lockStruct{}); err != nil {
+			return true, err
+		}
+		if row != nil {
+			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+				return true, err
+			}
+			x.tx.wroteEntry(table, ix, row)
+		}
+		return true, nil
+	}
+	u := ix.unique
+	if !x.tx.db.kind.InnoDB() {
+		// Postgres checks the value its uniqueness compares, which a
+		// partial index's predicate decides is there at all.
+		ov, ook, err := x.uniqueValues(table, u, old)
+		if err != nil || row == nil {
+			return ook, err
+		}
+		nv, nok, err := x.uniqueValues(table, u, row)
+		return err == nil && (nok != ook || nok && !sameValues(nv, ov)), err
+	}
+	// The entry moves when its physical key does, the primary key's columns
+	// included, also for a key with a NULL, which uniqueness ignores.
+	key := x.tx.indexKey(table, ix)
+	if row != nil && keyCompare(key(old), key(row)) == 0 {
+		return false, nil
+	}
+	ov, ook, err := x.uniqueValues(table, u, old)
+	if err != nil {
+		return true, err
+	}
+	entry := entryLock(table, ix.name, key(old))
+	if ook {
+		entry = uniqueLock(table, u, ov)
+	}
+	return true, x.tx.lockImplicit(entry, lockStruct{})
+}
+
+// claimNullEntry takes the entry row writes into the unique index ix when
+// its key holds a NULL, which no uniqueness claims, as the record is in the
+// index all the same, held implicitly by the writer.
+func (x *sqlExec) claimNullEntry(table string, ix secIndex, row Row) error {
+	if !x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if _, ok, err := x.uniqueValues(table, ix.unique, row); err != nil || ok {
+		return err
+	}
+	return x.tx.lockImplicit(entryLock(table, ix.name, x.tx.indexKey(table, ix)(row)), lockStruct{})
+}
+
+// indexKey orders the secondary index ix of table: by its key's columns,
+// or for an index over an expression by the values it computes, with the
+// primary key's columns after them.
+func (tx *Tx) indexKey(table string, ix secIndex) func(Row) ixKey {
+	if ix.key != nil {
+		return func(r Row) ixKey { return keyOf(r, ix.key) }
+	}
+	def := tx.db.defs[table]
+	x := tx.evaluator()
+	return func(r Row) ixKey {
+		e := rowEnv(table, r)
+		var k ixKey
+		for _, el := range ix.unique.Elems {
+			v, err := x.eval(el, e)
+			if err != nil {
+				v = nil
+			}
+			k = append(k, derefValue(v))
+		}
+		if def != nil {
+			k = append(k, keyOf(r, def.pk)...)
+		}
+		return k
+	}
 }
 
 // sharedDuplicate is, on InnoDB, the row under key that an insert duplicates,
@@ -237,21 +444,24 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 	if def == nil {
 		return nil
 	}
-	for i := range def.uniques {
-		u := &def.uniques[i]
+	// InnoDB goes through the indexes one at a time, marking the row's old
+	// entry deleted and writing the new one, so a duplicate in one comes
+	// before a wait in the next.
+	for _, ix := range def.indexOrder(x.tx.db.kind.InnoDB()) {
 		if old != nil {
-			nv, nok, err := x.uniqueValues(table, u, row)
+			moved, err := x.moveEntry(table, ix, old, row)
 			if err != nil {
 				return err
 			}
-			ov, ook, err := x.uniqueValues(table, u, old)
-			if err != nil {
-				return err
-			}
-			if nok == ook && (!nok || sameValues(nv, ov)) {
+			if !moved {
 				continue // the update leaves the row's entry in this index as it was
 			}
 		}
+		u := ix.unique
+		if u == nil {
+			continue
+		}
+		x.tx.putReached(ix.name) // as far as a wait or a failure here gets
 		ex, err := x.claimUnique(table, u, row, self)
 		if err != nil {
 			return err
@@ -259,8 +469,84 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 		if ex != nil {
 			return x.tx.db.duplicateKey(table, u.Name)
 		}
+		if err := x.claimNullEntry(table, ix, row); err != nil {
+			return err
+		}
+		if old != nil {
+			x.tx.wroteEntry(table, ix, row)
+		}
 	}
 	return nil
+}
+
+// secIndex is a secondary index in the order InnoDB writes a row's entries
+// to: its name, the unique index it is if it is one, and the key its gaps
+// are ordered by (nil for an index over an expression).
+type secIndex struct {
+	name   string
+	unique *sqlir.UniqueDef
+	key    []string
+}
+
+// fkIndex names the index InnoDB checks fk by as it writes the row's entry
+// to it: the first in indexOrder whose key leads with fk's columns, or ""
+// for the one MySQL adds for it, which goes last.
+func (def *tableDef) fkIndex(fk sqlir.ForeignKey) string {
+	for _, ix := range def.indexOrder(true) {
+		if len(ix.key) >= len(fk.Columns) && slices.Equal(ix.key[:len(fk.Columns)], fk.Columns) {
+			return ix.name
+		}
+	}
+	return ""
+}
+
+// withPK is a secondary index's key: its columns, with the primary key's
+// columns it does not hold after them, which InnoDB appends to its entries.
+func withPK(cols, pk []string) []string {
+	key := slices.Clone(cols)
+	for _, c := range pk {
+		if !slices.Contains(key, c) {
+			key = append(key, c)
+		}
+	}
+	return key
+}
+
+// indexOrder is the table's secondary indexes in the order InnoDB writes a
+// row's entries to, which MySQL sorts as unique indexes over NOT NULL
+// columns, other unique ones, then the rest, each in the order declared.
+// Without innodb it is the order declared, uniques first.
+func (def *tableDef) indexOrder(innodb bool) []secIndex {
+	var strict, nullable, plain []secIndex
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		var cols []string
+		notNull := true
+		for _, e := range u.Elems {
+			c, ok := e.(*sqlir.ColumnRef)
+			if !ok {
+				cols, notNull = nil, false
+				break
+			}
+			cols = append(cols, c.Column)
+			notNull = notNull && (def.notNull[c.Column] || slices.Contains(def.pk, c.Column))
+		}
+		ix := secIndex{name: uniqueIndex(u), unique: u}
+		if cols != nil {
+			ix.key = withPK(cols, def.pk)
+		}
+		if notNull && innodb {
+			strict = append(strict, ix)
+		} else {
+			nullable = append(nullable, ix)
+		}
+	}
+	for _, ix := range def.indexes {
+		if len(ix.Columns) > 0 {
+			plain = append(plain, secIndex{name: plainIndex(ix), key: withPK(ix.Columns, def.pk)})
+		}
+	}
+	return slices.Concat(strict, nullable, plain)
 }
 
 // defaultConstraintName is the name Postgres gives an unnamed unique
@@ -295,7 +581,7 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	if nlk == lk {
 		return lk, nil
 	}
-	if err := x.tx.lock(nlk); err != nil {
+	if err := x.tx.lockImplicit(nlk, lockStruct{}); err != nil {
 		return lk, err
 	}
 	if _, exists := x.tx.view(table, nlk.key); exists {
@@ -303,11 +589,15 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	}
 	delete(x.tx.writes, lk)
 	x.tx.deleted[lk] = true
+	x.tx.undo++ // a new primary key deletes the old entry and inserts a new one
 	delete(x.tx.deleted, nlk)
 	if x.tx.moved == nil {
 		x.tx.moved = map[lockKey]string{}
 	}
 	x.tx.moved[lk] = nlk.key
+	if x.tx.db.kind.InnoDB() {
+		x.tx.inserts = append(x.tx.inserts, putRow{table: table, row: updated.clone()})
+	}
 	return nlk, nil
 }
 

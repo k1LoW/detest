@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,6 +70,7 @@ func (tx *Tx) consistent() bool {
 // writes over them.
 func (tx *Tx) snapshotRows(table string) []Row {
 	table = tx.db.resolve(table)
+	tx.started = true
 	if tx.snap < 0 {
 		tx.snap = tx.db.seq
 	}
@@ -127,10 +129,14 @@ type stmtMark struct {
 	moved    map[lockKey]string
 	deferred int
 	locks    int
+	undo     int
+	inserts  int
+	entries  int
 }
 
 func (tx *Tx) markStatement() stmtMark {
-	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks)}
+	tx.put = nil
+	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks), undo: tx.undo, inserts: len(tx.inserts), entries: len(tx.entries)}
 	for k, v := range tx.writes {
 		m.writes[k] = v.clone()
 	}
@@ -145,7 +151,8 @@ func (tx *Tx) markStatement() stmtMark {
 func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	tx.aborted = false
 	if deadlock {
-		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil
+		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo, tx.lockStructs, tx.explicit, tx.implicit, tx.grants = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0, nil, nil, nil, nil
+		tx.inserts, tx.entries, tx.updating = nil, nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
 			tx.releaseLocks(tx.locks)
@@ -154,8 +161,156 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.locks = nil
 		return
 	}
-	tx.writes, tx.deleted, tx.moved, tx.deferred = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred]
+	// A row the statement wrote went into every index; the one it failed
+	// on, into those before the one whose check failed.
+	for i, p := range tx.put {
+		if _, whole := tx.writes[lockKey{p.table, p.row.Key()}]; whole {
+			tx.put[i].reached = -1
+		}
+	}
+	// A row the statement moved to a new primary key went into every index
+	// there, and comes out again, as one it inserted does.
+	var moved []putRow
+	if m.inserts < len(tx.inserts) {
+		for _, p := range tx.inserts[m.inserts:] {
+			if !slices.ContainsFunc(tx.put, func(q putRow) bool { return q.table == p.table && q.row.Key() == p.row.Key() }) {
+				moved = append(moved, putRow{p.table, p.row, -1})
+			}
+		}
+	}
+	tx.writes, tx.deleted, tx.moved, tx.deferred, tx.undo = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred], m.undo
+	tx.inserts = tx.inserts[:min(m.inserts, len(tx.inserts))]
 	tx.releaseInsertLocks(m.locks)
+	for _, p := range append(tx.put, moved...) {
+		tx.inheritGap(p.table, p.row, p.reached)
+	}
+	tx.put = nil
+	tx.rollEntries(m.entries)
+	tx.updating = nil
+}
+
+// beginUpdate records that tx is updating the row under lk to row, whose
+// new index entries searches meet as tx writes them.
+func (tx *Tx) beginUpdate(lk lockKey, row Row) {
+	if !tx.db.kind.InnoDB() {
+		return
+	}
+	if tx.updating == nil {
+		tx.updating = map[lockKey]Row{}
+	}
+	tx.updating[lk] = row
+}
+
+// endUpdate records that the update of the row under lk is written.
+func (tx *Tx) endUpdate(lk lockKey) { delete(tx.updating, lk) }
+
+// endUpdates records that the statement's updates are written.
+func (tx *Tx) endUpdates() { tx.updating = nil }
+
+// entryWrite is a secondary index entry an update wrote.
+type entryWrite struct {
+	table string
+	index secIndex
+	row   Row
+}
+
+// wroteEntry records the entry an update of a row to row wrote into the
+// secondary index ix of table.
+func (tx *Tx) wroteEntry(table string, ix secIndex, row Row) {
+	if tx.db.kind.InnoDB() {
+		tx.entries = append(tx.entries, entryWrite{table, ix, row.clone()})
+	}
+}
+
+// rollEntries takes out the entries written since the first from entries,
+// as a rollback of the updates that wrote them does, leaving a gap lock
+// where each was and its lock's struct, empty, at Repeatable Read, as
+// inheritGap does for a row.
+func (tx *Tx) rollEntries(from int) {
+	if from >= len(tx.entries) {
+		return
+	}
+	if tx.iso == RepeatableRead || tx.iso == Serializable {
+		for _, e := range tx.entries[from:] {
+			tx.gapAround(e.table, tx.indexKey(e.table, e.index), e.row, true)
+			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "record")
+			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "gap")
+		}
+	}
+	tx.entries = tx.entries[:from]
+}
+
+// putRow is a row a statement put into a table's primary key, and the
+// number of its secondary indexes, in indexOrder, it reached, -1 for all.
+type putRow struct {
+	table   string
+	row     Row
+	reached int
+}
+
+// putReached records that the row being inserted stopped at the secondary
+// index named index, the one whose check failed, having its entries in the
+// ones before it.
+func (tx *Tx) putReached(index string) {
+	if !tx.putting || len(tx.put) == 0 {
+		return
+	}
+	p := &tx.put[len(tx.put)-1]
+	if def := tx.db.defs[p.table]; def != nil {
+		order := def.indexOrder(true)
+		p.reached = slices.IndexFunc(order, func(ix secIndex) bool { return ix.name == index })
+		if p.reached < 0 {
+			p.reached = len(order) // an index MySQL adds for a foreign key goes last
+		}
+	}
+}
+
+// inheritGap leaves the locks InnoDB leaves when it rolls back a row put
+// into table: into its primary key and the first reached of its secondary
+// indexes in indexOrder, -1 for all. The row's records go, the lock on each
+// turns into a gap lock on the gap the record was in, which the next record
+// inherits, and the record lock's struct stays, empty. Another transaction
+// inserting into one of those gaps waits for tx to finish.
+func (tx *Tx) inheritGap(table string, row Row, reached int) {
+	def := tx.db.defs[table]
+	if def == nil || len(def.pk) == 0 || tx.db.ignored[table] {
+		return
+	}
+	if tx.iso != RepeatableRead && tx.iso != Serializable {
+		return // Read Committed turns no rolled back lock into a gap lock
+	}
+	order := def.indexOrder(true)
+	if reached < 0 || reached > len(order) {
+		reached = len(order)
+	}
+	indexes := append([]secIndex{{name: "PRIMARY", key: def.pk}}, order[:reached]...)
+	for _, ix := range indexes {
+		tx.gapAround(table, tx.indexKey(table, ix), row, true)
+		tx.noteLockStruct(table, ix.name, lockUpdate, "record")
+		tx.noteLockStruct(table, ix.name, lockUpdate, "gap")
+	}
+}
+
+// gapAround gives tx a gap lock on the index of table ordered by key: the
+// gap before row's entry, or with through, the one it falls in among the
+// other entries, which row is not one of.
+func (tx *Tx) gapAround(table string, key func(Row) ixKey, row Row, through bool) {
+	k := key(row)
+	var lo, hi ixKey
+	for _, r := range tx.lockingRows(table) {
+		v := key(r)
+		switch c := keyCompare(v, k); {
+		case c < 0 && (lo == nil || keyCompare(v, lo) > 0):
+			lo = v
+		case c > 0 && through && (hi == nil || keyCompare(v, hi) < 0):
+			hi = v
+		}
+	}
+	if !through {
+		hi = k
+	}
+	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
+	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, key: key, ranges: []valRange{gap}})
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or

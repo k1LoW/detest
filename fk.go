@@ -83,13 +83,14 @@ func rowMatches(r Row, cols []string, vals []any) bool {
 // does, so a concurrent delete of the parent waits for this transaction. old
 // is the row an UPDATE replaces; a key it leaves unchanged is not checked.
 func (x *sqlExec) checkParents(table string, row, old Row) error {
-	return x.checkParentsExcept(table, row, old, "")
+	return x.checkParentsExcept(table, row, old, "", nil)
 }
 
 // checkParentsExcept is checkParents without the foreign key named skip,
 // which a cascade is applying: its parent row is being rewritten and is not
-// visible with its new key yet.
-func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) error {
+// visible with its new key yet; only, when given, picks the foreign keys
+// to check.
+func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string, only func(sqlir.ForeignKey) bool) error {
 	if x.tx.noFKChecks {
 		return nil // FOREIGN_KEY_CHECKS=0
 	}
@@ -98,7 +99,7 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 		return nil
 	}
 	for _, fk := range def.fks {
-		if fk.Name == skip || x.tx.db.isIgnored(fk.RefTable) {
+		if fk.Name == skip || x.tx.db.isIgnored(fk.RefTable) || only != nil && !only(fk) {
 			continue
 		}
 		if fk.MatchFull && partlyNull(row, fk.Columns) {
@@ -113,6 +114,9 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 				continue
 			}
 		}
+		// An insert checks the key as it reaches the index over it, so a
+		// failure or a timeout there leaves the entries before it written.
+		x.tx.putReached(def.fkIndex(fk))
 		found, err := x.lockParent(fk, vals)
 		if err != nil {
 			return err
@@ -143,6 +147,20 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 			return false, x.lockMissingParent(parent, cols, vals)
 		}
 	}
+	if u := x.tx.db.uniqueOn(parent, cols); u != nil && x.tx.db.kind.InnoDB() {
+		// InnoDB checks a parent found on a unique secondary index with a
+		// shared lock on that index's record, which a writer of the parent
+		// row's other columns does not touch.
+		if err := x.tx.lockModeAs(uniqueLock(parent, u, vals), lockShare, structKey(parent, uniqueIndex(u), lockShare, "record")); err != nil {
+			return false, err
+		}
+		for _, r := range x.tx.selectNoYield(parent, nil) {
+			if rowMatches(r, cols, vals) {
+				return true, nil
+			}
+		}
+		return false, x.lockMissingParent(parent, cols, vals)
+	}
 	mode := lockKeyShare
 	if x.tx.db.kind.InnoDB() {
 		mode = lockShare // InnoDB checks a parent with a shared lock
@@ -155,6 +173,29 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 		return true, nil
 	}
 	return false, x.lockMissingParent(parent, cols, vals)
+}
+
+// uniqueOn is the unique index of table, other than the primary key, over
+// exactly cols, if any.
+func (db *DB) uniqueOn(table string, cols []string) *sqlir.UniqueDef {
+	def := db.defs[table]
+	if def == nil {
+		return nil
+	}
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		if u.Where != nil || len(u.Elems) != len(cols) {
+			continue
+		}
+		if !slices.EqualFunc(u.Elems, cols, func(e sqlir.Expr, c string) bool {
+			r, ok := e.(*sqlir.ColumnRef)
+			return ok && r.Column == c
+		}) {
+			continue
+		}
+		return u
+	}
+	return nil
 }
 
 // lockMissingParent takes the shared gap lock InnoDB keeps where a missing
@@ -237,6 +278,10 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 				}
 				if !ok {
 					continue
+				}
+				x.tx.undo++ // written before the secondary entries, which may wait
+				if err := x.releaseEntries(ck.table, cur, nil); err != nil {
+					return err
 				}
 				delete(x.tx.writes, lk)
 				x.tx.deleted[lk] = true
@@ -363,10 +408,12 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 		if err := x.checkRow(ck.table, updated); err != nil {
 			return err
 		}
+		x.tx.undo++ // written before the secondary indexes' checks, which may wait
+		x.tx.beginUpdate(lk, updated)
 		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {
 			return err
 		}
-		if err := x.checkParentsExcept(ck.table, updated, cur, skip); err != nil {
+		if err := x.checkParentsExcept(ck.table, updated, cur, skip, nil); err != nil {
 			return err
 		}
 		if err := x.onParentUpdate(ck.table, cur, updated); err != nil {
@@ -382,6 +429,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.writes[nlk] = updated
+		x.tx.endUpdate(lk)
 	}
 	return nil
 }

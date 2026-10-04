@@ -229,7 +229,13 @@ func renderValue(v any) string {
 	return fmt.Sprint(v)
 }
 
-func detestOutcome(err error) (string, bool) {
+// detestOutcome renders an error detest returns: as the real server's
+// driver error when the backend's server converts to it, as MySQL's does to
+// tell errors apart by their number, and otherwise by its SQLSTATE.
+func detestOutcome(b Backend, err error) (string, bool) {
+	if o, ok := b.Outcome(err); ok {
+		return o, true
+	}
 	if e, ok := errors.AsType[*detest.DBError](err); ok && e.Code != "" {
 		return "ERROR " + e.Code, true
 	}
@@ -284,7 +290,7 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 						if !ok {
 							return nil
 						}
-						res[k].text = se.run(p.Context(), c.Steps[k], detestOutcome)
+						res[k].text = se.run(p.Context(), c.Steps[k], func(err error) (string, bool) { return detestOutcome(b, err) })
 						done[k] = true
 					case <-p.Context().Done():
 						return nil
