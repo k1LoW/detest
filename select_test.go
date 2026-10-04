@@ -697,7 +697,7 @@ func TestCastToNumber(t *testing.T) {
 	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
 	}
-	for _, q := range []string{`SELECT 2.5::int`} {
+	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}

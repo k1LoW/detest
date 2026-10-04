@@ -2491,6 +2491,11 @@ func castValue(v any, typ string) (any, error) {
 			if err != nil {
 				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s)}
 			}
+			// Postgres sorts NaN above every number, which the
+			// comparisons and ORDER BY do not.
+			if math.IsNaN(f) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
 			return f, nil
 		}
 		if f, ok := toFloat(v); ok {
