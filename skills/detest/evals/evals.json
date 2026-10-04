@@ -1,0 +1,101 @@
+{
+  "skill_name": "detest",
+  "evals": [
+    {
+      "id": 1,
+      "name": "ticketing",
+      "prompt": "detestっていうのを使ってこのリポジトリでDSTをやってみたい。detestのことは何も知らないので全部任せます。どこを見るべきかも提案してほしい。",
+      "expected_output": "Proposes candidates (booking overbooking via count-then-insert is the real bug, coupon redemption is safe), writes a detest test against booking.Reserve with migrations loaded, finds overbooking with a replayable schedule, explains what was run and what it guarantees.",
+      "files": [
+        "fixtures/ticketing"
+      ],
+      "assertions": [
+        "A detest test file exists that calls detest.Explore and compiles",
+        "The schema is loaded from db/migrations/*.up.sql rather than hand-written",
+        "The overbooking of booking.Reserve (count then insert) is detected with a replayable schedule",
+        "The final response proposes several candidate flows to the user, including booking.Reserve",
+        "The final response explains what was run (scenario, faults, run count, complete or not, invariants)",
+        "The final response states what the result guarantees and what it does not cover",
+        "Production (non-test) Go files are unchanged",
+        "The test guards against unsupported SQL being silently swallowed (ObserveSQL or equivalent)",
+        "The assistant confirms the four checkpoints (target, scenario and invariant, dependency, run conditions) in questions.md even where the request already implies an answer",
+        "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
+        "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
+        "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "payments",
+      "prompt": "決済まわり (internal/checkout) のリトライ処理が本番で二重課金を起こしてないか不安です。detest を使って検証してほしい。",
+      "expected_output": "Injects detest External.Transport into provider.Client, finds double charge when a response is lost after the provider charged (and/or concurrent Pay), reports with schedule, proposes idempotency key, states guarantees and limits.",
+      "files": [
+        "fixtures/payments"
+      ],
+      "assertions": [
+        "A detest test file exists that calls detest.Explore and compiles",
+        "The provider HTTP client is driven through detest External (Transport or Do) so lost responses are explored",
+        "A double charge in checkout.Pay is detected with a replayable schedule",
+        "Only the goose Up section of the migration is applied",
+        "The final response proposes an idempotency-key style fix",
+        "The final response explains what was run (scenario, faults, run count, complete or not, invariants)",
+        "The final response states what the result guarantees and what it does not cover",
+        "Production (non-test) Go files are unchanged",
+        "The test guards against unsupported SQL being silently swallowed (ObserveSQL or equivalent)",
+        "The assistant confirms the four checkpoints (target, scenario and invariant, dependency, run conditions) in questions.md even where the request already implies an answer",
+        "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
+        "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
+        "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "wallet",
+      "prompt": "We're on MySQL + GORM. My lead asked me to try detest on our wallet service and I've never used it. Can you set it up and tell me whether anything is broken?",
+      "expected_output": "Notices go 1.25 needs bump to 1.26 (asks), wires GORM mysql with SkipInitializeWithVersion, loads db/schema.sql, handles the utf8mb4_0900_ai_ci collation honestly, finds lost update in Deposit (RR snapshot + Save) or reports it refused, and finds deadlock in opposite-direction Transfer.",
+      "files": [
+        "fixtures/wallet"
+      ],
+      "assertions": [
+        "A detest test file exists that calls detest.Explore and compiles",
+        "The go directive bump to 1.26 is raised as a question to the user",
+        "GORM is opened on the detest *sql.DB with SkipInitializeWithVersion",
+        "The schema is loaded from db/schema.sql",
+        "The utf8mb4_0900_ai_ci collation is not overridden without asking: any override is limited to the test schema, asked as a decision, and listed as not covered",
+        "A real concurrency bug of the chosen wallet target is detected with a replayable schedule (Deposit lost update or Transfer deadlock)",
+        "The final response explains what was run (scenario, faults, run count, complete or not, invariants)",
+        "The final response states what the result guarantees and what it does not cover",
+        "Production (non-test) Go files are unchanged",
+        "The test guards against unsupported SQL being silently swallowed (ObserveSQL or equivalent)",
+        "The assistant confirms the four checkpoints (target, scenario and invariant, dependency, run conditions) in questions.md even where the request already implies an answer",
+        "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
+        "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
+        "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "session-context",
+      "prompt": "[Context from earlier in this session, which the assistant should treat as its own conversation history: the user asked the assistant to change internal/fulfillment/worker.go so that RunOnce marks a fulfillment 'processing' and increments `attempts` before shipping, and resets it to 'pending' when Ship fails. The assistant made that change (it is what the file contains now), the user reviewed the diff and said it looks good.]\n\nUser: よし、detest 使ってちゃんと確認しておきたい",
+      "expected_output": "Uses the session context to pick fulfillment RunOnce as the recommended target (not checkout), confirms it, simulates worker crash (MaxCrashes) and finds the job stuck in processing, with report and guarantees.",
+      "files": [
+        "fixtures/payments"
+      ],
+      "assertions": [
+        "A detest test file exists that calls detest.Explore and compiles",
+        "The recommended target comes from the session context (fulfillment RunOnce), and the source of the candidates is stated",
+        "Worker crashes are injected (MaxCrashes) or an equivalent fault that exercises the claim-then-work gap",
+        "The stuck 'processing' fulfillment after a crash is detected with a replayable schedule",
+        "Production (non-test) Go files are unchanged",
+        "The assistant confirms the four checkpoints (target, scenario and invariant, dependency, run conditions) in questions.md even where the request already implies an answer",
+        "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
+        "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
+        "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+      ]
+    }
+  ]
+}
