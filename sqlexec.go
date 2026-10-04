@@ -1515,6 +1515,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	preview := lazyString(func() string {
 		row := Row{}
 		for _, a := range up.Set {
+			// A value computed from the row it updates is not known before
+			// the row is read, so the trace shows the expression instead.
+			if len(sqlir.ColumnRefs(a.Value)) > 0 {
+				row[a.Column] = x.exprString(a.Value)
+				continue
+			}
 			v, err := x.eval(a.Value, &env{})
 			if err != nil {
 				v = sqlir.Unknown

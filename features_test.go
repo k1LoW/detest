@@ -444,3 +444,21 @@ func TestNowait(t *testing.T) {
 		s.Sometimes("NOWAIT refused", func(*State) bool { return refused })
 	})
 }
+
+// The trace shows a SET value computed from the row as its expression, since
+// the value is not known before the row is read.
+func TestTraceShowsComputedSetValues(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL, label text)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counters VALUES ('c1', 0, 'x')`) })
+		s.Manual("bump", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = n + 1, label = $1 WHERE id = 'c1'`, "y")
+			return err
+		})
+		s.AtQuiescence(func(*State) error { return errors.New("show the trace") })
+	}, nil, nil, 0)
+	if !strings.Contains(res.Trace, "set {label=y n=n + 1}") {
+		t.Fatalf("trace does not show the computed value:\n%s", res.Trace)
+	}
+}
