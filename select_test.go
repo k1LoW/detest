@@ -492,6 +492,14 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, float64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("numeric key beyond 2^53 as a float: got %v, want a unique violation", err)
 	}
+	mustExec(t, db, `CREATE TABLE z (n numeric PRIMARY KEY, r float8)`)
+	mustExec(t, db, `INSERT INTO z (n) VALUES ('-0')`)
+	if _, err := db.Exec(`INSERT INTO z (n) VALUES (0)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric -0 and 0: got %v, want a unique violation", err)
+	}
+	if _, err := db.Exec(`INSERT INTO z VALUES (1, '-0')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("float -0: got %v, want unsupported", err)
+	}
 	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, r float8)`)
 	mustExec(t, db, `INSERT INTO f VALUES (1, 1), (2, $1)`, int64(1))
 	if got := rowsOf(t, db, `SELECT r / 2 FROM f ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5"}) {

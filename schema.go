@@ -473,6 +473,14 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 					return x.unsupported(fmt.Sprintf("a number with a fraction written to the %s column %q", name, col))
 				}
 			}
+			// A numeric has no negative zero, while a float keeps one that
+			// still equals 0, which keys made from the value tell apart.
+			if f, ok := n.(float64); ok && f == 0 && math.Signbit(f) {
+				if t != "numeric" {
+					return x.unsupported(fmt.Sprintf("a negative zero written to column %q", col))
+				}
+				n = float64(0)
+			}
 			row[col], v = n, n
 		}
 		// A number written to a text column is stored as its text, as
