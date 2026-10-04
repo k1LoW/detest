@@ -143,6 +143,21 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 			return false, x.lockMissingParent(parent, cols, vals)
 		}
 	}
+	if u := x.tx.db.uniqueOn(parent, cols); u != nil && x.tx.db.kind.InnoDB() {
+		// InnoDB checks a parent found on a unique secondary index with a
+		// shared lock on that index's record, which a writer of the parent
+		// row's other columns does not touch.
+		if err := x.tx.lockMode(uniqueLock(parent, u, vals), lockShare); err != nil {
+			return false, err
+		}
+		x.tx.noteLockStruct(parent, uniqueIndex(u), lockShare, "record")
+		for _, r := range x.tx.selectNoYield(parent, nil) {
+			if rowMatches(r, cols, vals) {
+				return true, nil
+			}
+		}
+		return false, x.lockMissingParent(parent, cols, vals)
+	}
 	mode := lockKeyShare
 	if x.tx.db.kind.InnoDB() {
 		mode = lockShare // InnoDB checks a parent with a shared lock
@@ -155,6 +170,29 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 		return true, nil
 	}
 	return false, x.lockMissingParent(parent, cols, vals)
+}
+
+// uniqueOn is the unique index of table, other than the primary key, over
+// exactly cols, if any.
+func (db *DB) uniqueOn(table string, cols []string) *sqlir.UniqueDef {
+	def := db.defs[table]
+	if def == nil {
+		return nil
+	}
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		if u.Where != nil || len(u.Elems) != len(cols) {
+			continue
+		}
+		if !slices.EqualFunc(u.Elems, cols, func(e sqlir.Expr, c string) bool {
+			r, ok := e.(*sqlir.ColumnRef)
+			return ok && r.Column == c
+		}) {
+			continue
+		}
+		return u
+	}
+	return nil
 }
 
 // lockMissingParent takes the shared gap lock InnoDB keeps where a missing
@@ -237,6 +275,9 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 				}
 				if !ok {
 					continue
+				}
+				if err := x.releaseEntries(ck.table, cur, nil); err != nil {
+					return err
 				}
 				delete(x.tx.writes, lk)
 				x.tx.deleted[lk] = true

@@ -173,27 +173,45 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		return nil, nil
 	}
 	if x.tx.db.kind.InnoDB() {
-		// A duplicate of a row already there is checked under a shared lock
-		// on that row, as InnoDB's duplicate check takes one, so two inserts
-		// failing on the same row do not wait for each other.
-		for _, ex := range x.tx.selectNoYield(table, nil) {
-			if ex.Key() == self {
-				continue
-			}
-			evals, ok, err := x.uniqueValues(table, u, ex)
-			if err != nil {
+		// InnoDB checks a duplicate under a shared lock on the index record
+		// it finds, not on the row, so two inserts failing on the same value
+		// do not wait for each other, and a writer of the row's other columns
+		// does not wait for either.
+		dup, err := x.uniqueHolder(table, u, vals, self)
+		if err != nil {
+			return nil, err
+		}
+		if dup != nil {
+			if err := x.tx.lockMode(uniqueLock(table, u, vals), lockShare); err != nil {
 				return nil, err
 			}
-			if ok && sameValues(evals, vals) {
-				if dup, err := x.sharedDuplicate(table, ex.Key(), self); err != nil || dup != nil {
-					return dup, err
-				}
+			x.tx.noteLockStruct(table, uniqueIndex(u), lockShare, "next-key")
+			if dup, err := x.uniqueHolder(table, u, vals, self); err != nil || dup != nil {
+				return dup, err
 			}
 		}
 	}
 	if err := x.tx.lock(uniqueLock(table, u, vals)); err != nil {
 		return nil, err
 	}
+	return x.uniqueHolder(table, u, vals, self)
+}
+
+// uniqueIndex names the index of u by its columns, as a search on it names
+// the index it locks.
+func uniqueIndex(u *sqlir.UniqueDef) string {
+	var cols []string
+	for _, e := range u.Elems {
+		for _, c := range sqlir.ColumnRefs(e) {
+			cols = append(cols, c.Column)
+		}
+	}
+	return strings.Join(cols, ",")
+}
+
+// uniqueHolder is the visible row other than self holding vals in the unique
+// index u, if any.
+func (x *sqlExec) uniqueHolder(table string, u *sqlir.UniqueDef, vals []any, self string) (Row, error) {
 	for _, ex := range x.tx.selectNoYield(table, nil) {
 		if ex.Key() == self {
 			continue
@@ -207,6 +225,40 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		}
 	}
 	return nil, nil
+}
+
+// releaseEntries takes, on InnoDB, the entries old holds in the unique
+// secondary indexes of table that row gives up, row being nil for a delete,
+// as a delete or an update marks those index records, and a check holding a
+// shared lock on one waits for the writer.
+func (x *sqlExec) releaseEntries(table string, old, row Row) error {
+	def := x.tx.db.defs[table]
+	if def == nil || !x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		ov, ok, err := x.uniqueValues(table, u, old)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if row != nil {
+			nv, nok, err := x.uniqueValues(table, u, row)
+			if err != nil {
+				return err
+			}
+			if nok && sameValues(nv, ov) {
+				continue
+			}
+		}
+		if err := x.tx.lock(uniqueLock(table, u, ov)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sharedDuplicate is, on InnoDB, the row under key that an insert duplicates,
@@ -236,6 +288,11 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 	def := x.tx.db.defs[table]
 	if def == nil {
 		return nil
+	}
+	if old != nil {
+		if err := x.releaseEntries(table, old, row); err != nil {
+			return err
+		}
 	}
 	for i := range def.uniques {
 		u := &def.uniques[i]

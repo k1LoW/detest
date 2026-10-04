@@ -451,8 +451,12 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	sr := x.searchRange(table, alias, where)
 	cols := sr.key
 	index := "PRIMARY"
+	var entry *sqlir.UniqueDef
 	if def := tx.db.defs[table]; len(sr.cols) > 0 && (def == nil || !slices.Equal(sr.cols, def.pk)) {
 		index = strings.Join(sr.cols, ",")
+		if tx.db.kind.InnoDB() {
+			entry = tx.db.uniqueOn(table, sr.cols)
+		}
 	}
 	// kind is the lock InnoDB takes on the index records the search reads:
 	// the record alone for a unique equality, next-key otherwise.
@@ -466,8 +470,22 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	// also locked on the primary key when the search runs on a secondary
 	// index; the record past a range is locked on the searched index only.
 	lockRecord := func(r Row, matched bool) error {
-		lk := lockKey{table, r.Key()}
-		if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
+		// The record on a unique secondary index is what a foreign key or a
+		// duplicate check locks, so a search on that index locks it too,
+		// before the row, as InnoDB goes from the secondary record to the
+		// primary one.
+		var keys []lockKey
+		if entry != nil {
+			vals, ok, err := x.uniqueValues(table, entry, r)
+			if err != nil {
+				return err
+			}
+			if ok {
+				keys = append(keys, uniqueLock(table, entry, vals))
+			}
+		}
+		keys = append(keys, lockKey{table, r.Key()})
+		if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(lk lockKey) bool { return tx.heldByOther(lk, mode) }) {
 			if policy.SkipLocked {
 				return nil
 			}
@@ -475,8 +493,10 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 				return tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
 			}
 		}
-		if err := tx.lockMode(lk, mode); err != nil {
-			return err
+		for _, lk := range keys {
+			if err := tx.lockMode(lk, mode); err != nil {
+				return err
+			}
 		}
 		k := kind
 		if !matched {

@@ -1769,6 +1769,9 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			}
 		}
 		done[key] = true
+		if err := x.releaseEntries(table, cur, nil); err != nil {
+			return nil, err
+		}
 		delete(x.tx.writes, lk)
 		x.tx.deleted[lk] = true
 		x.tx.undo++

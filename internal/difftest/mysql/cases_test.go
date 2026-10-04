@@ -221,6 +221,84 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A foreign key check on a unique secondary index locks that index's
+		// record, not the parent row, so a write of the row's other columns
+		// does not wait, and a write of the key does.
+		Name: "a foreign key check locks the parent's index record",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a')`),
+			difftest.S(1, `UPDATE p SET v = 1 WHERE id = 1`),
+			difftest.S(1, `UPDATE p SET code = 'z' WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code, v FROM p ORDER BY id`),
+		},
+	},
+	{
+		// The deadlock closes on the parent's index record, which the
+		// foreign key check holds in share mode.
+		Name: "deadlock victim weighs a foreign key check",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a')`),
+			difftest.S(1, `UPDATE p SET v = 1 WHERE id = 2`),
+			difftest.S(0, `UPDATE p SET v = 1 WHERE id = 2`),
+			difftest.S(1, `UPDATE p SET code = 'z' WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// A duplicate key is checked under a shared lock on the existing
+		// row, which weighs the failed insert's transaction.
+		Name:   "deadlock victim weighs a duplicate key check",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'a')`),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(1, `UPDATE u SET v = 2 WHERE id = 2`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// At Read Committed an UPDATE by a secondary index locks the index
+		// record and the primary key's, with no gaps.
+		Name:   "deadlock victim at read committed",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rc),
+			difftest.S(1, rc),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE k = 10`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 3 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
