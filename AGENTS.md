@@ -84,6 +84,7 @@ An approximation still has two obligations. It must be deterministic, because a 
 - Leave unchecked what cannot happen under the assumptions, such as a failed DDL statement's partial state. Rejecting it is not needed either.
 - Check a proposed rejection against the statements the existing tests run, and against what migrations and dumps routinely contain. A rejection that stops a schema from loading is wrong even when the form is out of scope.
 - When fixing how a simulated database behaves, add a case to `internal/difftest/` wherever the behavior can be written as one, so that it is checked against the real server rather than against what the fix assumes the server does.
+- In a difftest case, DDL goes in `Schema`, never in `Steps`: the schema outlives detest's exploration runs, so an `ALTER` among the steps reaches the next run's seed. Steps take no parameters and their rows are compared as rendered, so return ids, counts and booleans rather than numerics, which the server renders as text. A statement detest refuses shows as UNEXPECTED, so a refused form belongs in a unit test.
 - Ask the maintainer when it is unclear which answer something gets.
 
 ### Review comments

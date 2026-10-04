@@ -27,7 +27,7 @@ import (
 func Run(t *testing.T, b Backend, c Case) {
 	t.Helper()
 	var want []string
-	for _, pauses := range append([]map[int]time.Duration{nil}, c.Pauses...) {
+	for _, pauses := range c.Pauses {
 		w := runReal(t, b, c, pauses)
 		if t.Failed() {
 			return
@@ -35,6 +35,25 @@ func Run(t *testing.T, b Backend, c Case) {
 		if !slices.Contains(want, w) {
 			want = append(want, w)
 		}
+	}
+	// The run without pauses gives the outcome of steps issued as soon as
+	// the previous one settled. Under load a step can be issued later than
+	// that, past the server's deadlock_timeout for one, and the run then
+	// repeats a paused run's outcome and misses its own, which would report
+	// detest's as one the server never gives. Such a run is tried again.
+	for attempt := 0; ; attempt++ {
+		w := runReal(t, b, c, nil)
+		if t.Failed() {
+			return
+		}
+		if !slices.Contains(want, w) {
+			want = append(want, w)
+			break
+		}
+		if len(c.Pauses) == 0 || attempt == 2 {
+			break
+		}
+		t.Logf("the run without pauses repeated a paused run's outcome; running it again")
 	}
 	got := runDetest(t, b, c)
 	if t.Failed() {
