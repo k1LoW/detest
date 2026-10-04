@@ -380,6 +380,7 @@ type checkpoint struct {
 	Cuts     int             `json:"cuts,omitempty"` // of those runs, the ones cut at MaxIdleTicks
 	Subtrees [][]savedChoice `json:"subtrees"`
 	Reached  []string        `json:"reached,omitempty"` // Sometimes conditions met so far
+	Refused  []string        `json:"refused,omitempty"` // statements refused as unsupported so far
 }
 
 type savedChoice struct {
@@ -417,6 +418,9 @@ func (f *frontier) load(path string) error {
 	for _, n := range ck.Reached {
 		f.reach(n)
 	}
+	for _, m := range ck.Refused {
+		f.refuse(m)
+	}
 	return nil
 }
 
@@ -427,6 +431,7 @@ func (f *frontier) save(path string) error {
 		ck.Reached = append(ck.Reached, n)
 	}
 	sort.Strings(ck.Reached)
+	ck.Refused = slices.Sorted(maps.Keys(f.refused))
 	for _, p := range f.stack {
 		st := make([]savedChoice, len(p))
 		for i, c := range p {
