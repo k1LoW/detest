@@ -667,3 +667,31 @@ func TestLargeIntegersCompareExactly(t *testing.T) {
 		}
 	}
 }
+
+// A cast to a number reads text as Postgres's input function does and rounds
+// a fraction, so cast values compare as numbers.
+func TestCastToNumber(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  string
+	}{
+		{`SELECT $1::int > $2::int`, []any{"10", "9"}, "true"},
+		{`SELECT ' 01 '::int = 1`, nil, "true"},
+		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
+		{`SELECT 1.6::int`, nil, "2"},
+		{`SELECT (-1.4)::smallint`, nil, "-1"},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
+	}
+	if _, err := db.Exec(`SELECT 2.5::int`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("2.5::int: got %v, want unsupported", err)
+	}
+}

@@ -993,7 +993,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return castValue(val, v.Type), nil
+		return x.cast(val, v.Type)
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -1817,7 +1817,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return castValue(val, v.Type), nil
+		return x.cast(val, v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -2447,35 +2447,70 @@ func numeric(v float64) any {
 	return v
 }
 
-func castValue(v any, typ string) any {
+// cast is castValue with the error a cast of text that does not read as the
+// type raises.
+func (x *sqlExec) cast(v any, typ string) (any, error) {
+	out, err := castValue(v, typ)
+	if ke := (kindError{}); errors.As(err, &ke) {
+		return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
+	}
+	return out, err
+}
+
+func castValue(v any, typ string) (any, error) {
 	v = derefValue(v)
 	if v == nil {
-		return nil
+		return nil, nil
+	}
+	if b, ok := v.([]byte); ok {
+		v = string(b)
 	}
 	switch typ {
-	case "int", "int4", "int8", "bigint", "integer", "smallint":
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":
+		if s, ok := v.(string); ok {
+			n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+			if err != nil {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s)}
+			}
+			return n, nil
+		}
+		if n, ok := integer(v); ok {
+			return n, nil
+		}
+		// Postgres rounds a numeric half away from zero but a float8 half to
+		// even, which the value does not tell apart, so a half is refused.
 		if f, ok := toFloat(v); ok {
-			return int64(f)
+			if math.Abs(f-math.Trunc(f)) == 0.5 {
+				return nil, errUnknownExpr{"a cast to an integer of a number ending in .5"}
+			}
+			return int64(math.Round(f)), nil
 		}
 	case "float8", "float4", "double precision", "numeric", "real":
+		if s, ok := v.(string); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if err != nil {
+				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s)}
+			}
+			return f, nil
+		}
 		if f, ok := toFloat(v); ok {
-			return f
+			return f, nil
 		}
 	case "text", "varchar", "bpchar":
-		return fmt.Sprint(v)
+		return fmt.Sprint(v), nil
 	case "bool", "boolean":
 		if b, ok := v.(bool); ok {
-			return b
+			return b, nil
 		}
-		return fmt.Sprint(v) == "true"
+		return fmt.Sprint(v) == "true", nil
 	case "interval":
 		if s, ok := v.(string); ok {
 			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {
-				return d
+				return d, nil
 			}
 		}
 	}
-	return v
+	return v, nil
 }
 
 // rowsEqual compares two rows of values with SQL equality: unequal if any
