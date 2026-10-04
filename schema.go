@@ -170,6 +170,8 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 			return nil, err
 		}
 		if ex, found := x.tx.view(table, key); found && key != self {
+			// The lock waited for a writer that committed the key.
+			x.tx.shareDuplicate(lockKey{table, key}, structKey(table, "PRIMARY", lockShare, "record"))
 			return ex, nil
 		}
 		return nil, nil
@@ -206,7 +208,19 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 	if err := x.tx.lockImplicit(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 		return nil, err
 	}
-	return x.uniqueHolder(table, u, vals, self)
+	dup, err := x.uniqueHolder(table, u, vals, self)
+	if dup != nil && x.tx.db.kind.InnoDB() {
+		// The lock waited for a writer that committed the value: the check
+		// holds the duplicate's record next-key in share mode instead.
+		x.tx.shareDuplicate(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key"))
+		if def := x.tx.db.defs[table]; def != nil {
+			order := def.indexOrder(true)
+			if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
+				x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
+			}
+		}
+	}
+	return dup, err
 }
 
 // uniqueIndex names the unique index u among a table's indexes.

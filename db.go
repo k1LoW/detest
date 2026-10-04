@@ -1660,7 +1660,6 @@ func (tx *Tx) asStatement(f func() error) error {
 		return f()
 	}
 	m := tx.markStatement()
-	tx.started = true
 	err := f()
 	if err != nil {
 		tx.failStatement(m, errors.Is(err, sqlir.ErrDeadlock))
@@ -1694,6 +1693,9 @@ func (tx *Tx) insert(table string, row Row) error {
 		return err
 	}
 	if _, exists := tx.view(table, row.Key()); exists {
+		// The duplicate check holds the row there in share mode, as
+		// InnoDB's does.
+		tx.shareDuplicate(lk, structKey(table, "PRIMARY", lockShare, "record"))
 		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
 	}
 	tx.undo++ // written as the row goes into the primary key, before the checks
@@ -2039,6 +2041,7 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 
 func (tx *Tx) selectNoYield(table string, pred func(Row) bool) []Row {
 	table = tx.db.resolve(table)
+	tx.started = true // reading InnoDB's data starts its transaction
 	seen := map[string]bool{}
 	var keys []string
 	for k := range tx.db.committed[table] {

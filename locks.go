@@ -103,6 +103,7 @@ func (tx *Tx) lockImplicit(lk lockKey, wait lockStruct) error {
 // lockWith takes a lock that InnoDB keeps in the struct grant once granted,
 // none for an implicit lock, and in the struct wait while it waits.
 func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error {
+	tx.started = true
 	table, _ := entryIndex(lk)
 	tx.noteTableLock(table, mode)
 	var cancelWait func()
@@ -271,6 +272,36 @@ func (t *Tx) heldStructs() map[lockStruct]bool {
 		structs[tableStruct(lk.table, "IX")] = true
 	}
 	return structs
+}
+
+// shareDuplicate turns the implicit exclusive lock an insert took on lk,
+// after waiting for a writer that then committed a duplicate there, into
+// the shared lock InnoDB's duplicate check holds on that record, in struct
+// s, which a statement's rollback keeps.
+func (tx *Tx) shareDuplicate(lk lockKey, s lockStruct) {
+	if !tx.db.kind.InnoDB() || !tx.implicit[lk] {
+		return
+	}
+	holders := tx.db.locks[lk]
+	if _, held := holders[tx]; !held {
+		return
+	}
+	holders[tx] = lockShare
+	delete(tx.implicit, lk)
+	if strings.HasPrefix(lk.table, "\x00") {
+		if tx.explicit == nil {
+			tx.explicit = map[lockKey]bool{}
+		}
+		tx.explicit[lk] = true
+	}
+	if !tx.covers(lk, s) {
+		if tx.grants == nil {
+			tx.grants = map[lockKey][]lockStruct{}
+		}
+		tx.grants[lk] = append(tx.grants[lk], s)
+		tx.addStruct(s)
+	}
+	tx.wake(map[lockKey]bool{lk: true})
 }
 
 // covers reports whether a lock tx holds on lk covers a request for one in

@@ -1404,6 +1404,8 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				}
 				return nil, x.unsupported("a row equal to one already in a table without a primary key")
 			}
+			// The row lock waited for a writer that committed the key.
+			x.tx.shareDuplicate(lk, structKey(table, "PRIMARY", lockShare, "record"))
 			return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 		}
 		// InnoDB writes the undo record as it puts the row into the primary
@@ -1741,7 +1743,13 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		}
 		return x.appendReturning(out, up.Returning, updated)
 	}
-	if x.rowByRow(table, alias, up.Where, len(up.From) == 0 && len(up.OrderBy) == 0, assignedColumns(up.Set)) {
+	changed := assignedColumns(up.Set)
+	if def := x.tx.db.defs[table]; def != nil {
+		for c := range def.onUpdate {
+			changed = append(changed, c) // ON UPDATE CURRENT_TIMESTAMP changes it too
+		}
+	}
+	if x.rowByRow(table, alias, up.Where, len(up.From) == 0 && len(up.OrderBy) == 0, changed) {
 		n, err := x.count(up.Limit, "LIMIT", nil)
 		if err != nil {
 			return nil, err

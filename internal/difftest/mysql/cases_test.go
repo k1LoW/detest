@@ -1061,6 +1061,40 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A query of no table does not start the transaction in InnoDB.
+		Name:   "rollback to a savepoint after a query of no table releases every lock",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT 1`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		// An insert that waited for a writer of its value, which then
+		// committed, fails holding the duplicate check's shared lock, which
+		// a write of that value waits for.
+		Name:   "a duplicate found after a wait is held in share mode",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u VALUES (1, 'a')`},
+		Conns:  3,
+		Steps: []difftest.Step{
+			difftest.S(1, rr),
+			difftest.S(1, `INSERT INTO u VALUES (3, 'c')`),
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO u VALUES (4, 'c')`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(2, rr),
+			difftest.S(2, `UPDATE u SET code = 'z' WHERE id = 3`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(2, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

@@ -70,6 +70,7 @@ func (tx *Tx) consistent() bool {
 // writes over them.
 func (tx *Tx) snapshotRows(table string) []Row {
 	table = tx.db.resolve(table)
+	tx.started = true
 	if tx.snap < 0 {
 		tx.snap = tx.db.seq
 	}
