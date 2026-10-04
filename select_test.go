@@ -604,6 +604,12 @@ func TestTextComparedWithNumber(t *testing.T) {
 			t.Errorf("%T: got %v, want unsupported", v, err)
 		}
 	}
+	// The text a driver sends for a float parameter is not modeled.
+	for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`} {
+		if _, err := db.Exec(q, 1.5); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with 1.5: got %v, want unsupported", q, err)
+		}
+	}
 	// A byte slice parameter compared with text orders as the text it is.
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name < $1`, []byte("10")); len(got) != 1 || got[0] != "1" {
 		t.Errorf("name < []byte: got %v, want 1", got)
