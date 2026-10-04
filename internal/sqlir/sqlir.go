@@ -399,21 +399,28 @@ type CaseWhen struct{ When, Then Expr }
 // Default is the DEFAULT keyword in VALUES or SET.
 type Default struct{}
 
-func (*ColumnRef) isExpr()  {}
-func (*Param) isExpr()      {}
-func (*Const) isExpr()      {}
-func (*BinaryExpr) isExpr() {}
-func (*UnaryExpr) isExpr()  {}
-func (*InExpr) isExpr()     {}
-func (*IsNull) isExpr()     {}
-func (*FuncCall) isExpr()   {}
-func (*SubQuery) isExpr()   {}
-func (*Exists) isExpr()     {}
-func (*RowExpr) isExpr()    {}
-func (*Cast) isExpr()       {}
-func (*CaseExpr) isExpr()   {}
-func (*Default) isExpr()    {}
-func (*WindowFunc) isExpr() {}
+// Unconverted stands for a schema expression the dialect could not convert.
+// The schema loads with it, and evaluating it fails as an expression detest
+// cannot evaluate. It is a node of its own so that no literal, such as the
+// Unknown string, can be taken for it.
+type Unconverted struct{}
+
+func (*ColumnRef) isExpr()   {}
+func (*Param) isExpr()       {}
+func (*Const) isExpr()       {}
+func (*Unconverted) isExpr() {}
+func (*BinaryExpr) isExpr()  {}
+func (*UnaryExpr) isExpr()   {}
+func (*InExpr) isExpr()      {}
+func (*IsNull) isExpr()      {}
+func (*FuncCall) isExpr()    {}
+func (*SubQuery) isExpr()    {}
+func (*Exists) isExpr()      {}
+func (*RowExpr) isExpr()     {}
+func (*Cast) isExpr()        {}
+func (*CaseExpr) isExpr()    {}
+func (*Default) isExpr()     {}
+func (*WindowFunc) isExpr()  {}
 
 // ParseError is SQL the dialect's grammar rejects, which the server reports as
 // a syntax error.

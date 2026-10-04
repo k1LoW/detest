@@ -3,6 +3,7 @@ package detest
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -175,4 +176,212 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 	if err := db.QueryRow(`SELECT tags FROM d WHERE id = 1`).Scan(&tags); err != nil || tags != Unknown {
 		t.Errorf("default detest cannot convert: got %q, %v; want the Unknown marker", tags, err)
 	}
+	// The table's own key, constraints and generated columns read the
+	// column, and would be decided from the marker, so the write is refused.
+	for _, ddl := range []string{
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE CHECK (d <> 'x'))`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE UNIQUE)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE, u text GENERATED ALWAYS AS (upper(d)) STORED)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text NOT NULL DEFAULT CURRENT_DATE)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d uuid DEFAULT CURRENT_USER::uuid)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d smallint DEFAULT length(CURRENT_USER))`,
+		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
+	} {
+		mustExec(t, db, ddl)
+		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: insert leaving out a default that a key, constraint or generated column reads: got %v", ddl, err)
+		}
+		mustExec(t, db, `DROP TABLE e`)
+	}
+	// SET DEFAULT in a referential action always writes a foreign key
+	// column, so a default detest cannot compute is refused there, and the
+	// child keeps its row.
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE k (id int PRIMARY KEY, pid int DEFAULT length(CURRENT_USER) REFERENCES p (id) ON DELETE SET DEFAULT)`)
+	mustExec(t, db, `INSERT INTO p VALUES (1)`)
+	mustExec(t, db, `INSERT INTO k VALUES (1, 1)`)
+	if _, err := db.Exec(`DELETE FROM p WHERE id = 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ON DELETE SET DEFAULT with a default detest cannot compute: got %v", err)
+	}
+	var pid, parents int64
+	if err := db.QueryRow(`SELECT pid, (SELECT count(*) FROM p) FROM k WHERE id = 1`).Scan(&pid, &parents); err != nil || pid != 1 || parents != 1 {
+		t.Errorf("after the refused delete: pid=%d parents=%d err=%v; want both unchanged", pid, parents, err)
+	}
+}
+
+// A column rename reaches every reference of an expression or partial
+// unique index, not only a bare column, so the index still constrains the
+// renamed column and still counts as reading its default.
+func TestRenameColumnInUniqueExpression(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, d text, live bool)`)
+	mustExec(t, db, `CREATE UNIQUE INDEX u_lower_d ON u (lower(d)) WHERE live`)
+	mustExec(t, db, `ALTER TABLE u RENAME COLUMN d TO x`)
+	mustExec(t, db, `ALTER TABLE u RENAME COLUMN live TO active`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 'A', true)`)
+	if _, err := db.Exec(`INSERT INTO u VALUES (2, 'a', true)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("duplicate under the renamed expression index: got %v", err)
+	}
+	mustExec(t, db, `INSERT INTO u VALUES (3, 'a', false)`)
+
+	mustExec(t, db, `CREATE TABLE v (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE)`)
+	mustExec(t, db, `CREATE UNIQUE INDEX v_lower_d ON v (lower(d))`)
+	mustExec(t, db, `ALTER TABLE v RENAME COLUMN d TO x`)
+	if _, err := db.Exec(`INSERT INTO v (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("default read by a renamed expression index: got %v", err)
+	}
+}
+
+// A rename in one database leaves the unique index of another database
+// built from the same statements alone, as the parsed statements they
+// share are not rewritten.
+func TestRenameColumnLeavesOtherDatabases(t *testing.T) {
+	s := newSim(t)
+	a, _ := s.DB("a", postgres.New())
+	b, _ := s.DB("b", postgres.New())
+	for _, db := range []*sql.DB{a, b} {
+		mustExec(t, db, `CREATE TABLE shared_u (id int PRIMARY KEY, d text)`)
+		mustExec(t, db, `CREATE UNIQUE INDEX shared_u_d ON shared_u (d)`)
+		mustExec(t, db, `CREATE UNIQUE INDEX shared_u_lower_d ON shared_u (lower(d))`)
+	}
+	mustExec(t, a, `ALTER TABLE shared_u RENAME COLUMN d TO x`)
+	mustExec(t, b, `INSERT INTO shared_u VALUES (1, 'A')`)
+	for _, q := range []string{`INSERT INTO shared_u VALUES (2, 'A')`, `INSERT INTO shared_u VALUES (3, 'a')`} {
+		if _, err := b.Exec(q); !errors.Is(err, ErrUniqueViolation) {
+			t.Errorf("%s in the database that renamed nothing: got %v", q, err)
+		}
+	}
+}
+
+// SET col = DEFAULT writes the column's default, in UPDATE and in ON
+// CONFLICT DO UPDATE, and refuses one detest cannot compute that the
+// table's schema reads, as an INSERT that leaves the column out does.
+func TestSetDefault(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE sd (id int PRIMARY KEY, n int DEFAULT 7, m int, d text DEFAULT CURRENT_DATE UNIQUE)`)
+	mustExec(t, db, `INSERT INTO sd VALUES (1, 1, 1, 'x')`)
+	mustExec(t, db, `UPDATE sd SET n = DEFAULT, m = DEFAULT WHERE id = 1`)
+	var n int64
+	var m sql.NullInt64
+	if err := db.QueryRow(`SELECT n, m FROM sd WHERE id = 1`).Scan(&n, &m); err != nil || n != 7 || m.Valid {
+		t.Errorf("UPDATE SET DEFAULT: n=%d m=%v err=%v; want 7 and NULL", n, m, err)
+	}
+	mustExec(t, db, `UPDATE sd SET n = 1 WHERE id = 1`)
+	mustExec(t, db, `INSERT INTO sd VALUES (1, 2, 2, 'y') ON CONFLICT (id) DO UPDATE SET n = DEFAULT`)
+	if err := db.QueryRow(`SELECT n FROM sd WHERE id = 1`).Scan(&n); err != nil || n != 7 {
+		t.Errorf("ON CONFLICT DO UPDATE SET DEFAULT: n=%d err=%v; want 7", n, err)
+	}
+	for _, q := range []string{
+		`UPDATE sd SET d = DEFAULT WHERE id = 1`,
+		`INSERT INTO sd VALUES (1, 2, 2, 'y') ON CONFLICT (id) DO UPDATE SET d = DEFAULT`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+}
+
+// A default that is the literal Unknown string is a default like any other,
+// not one detest failed to convert.
+func TestLiteralUnknownDefault(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE lu (id int PRIMARY KEY, d text DEFAULT '<unknown expression>' UNIQUE)`)
+	mustExec(t, db, `INSERT INTO lu (id) VALUES (1)`)
+	if _, err := db.Exec(`INSERT INTO lu (id) VALUES (2)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("second row with the literal default: got %v", err)
+	}
+}
+
+// A table without a primary key tells its rows apart by their values, so a
+// second equal row, whether written or from a default detest stood in for,
+// is refused rather than reported as a duplicate key.
+func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE nk (n int, d bigint DEFAULT txid_current())`)
+	mustExec(t, db, `INSERT INTO nk (n) VALUES (1)`)
+	mustExec(t, db, `INSERT INTO nk VALUES (2, 5)`)
+	for _, q := range []string{`INSERT INTO nk (n) VALUES (1)`, `INSERT INTO nk VALUES (2, 5)`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	// A unique constraint that rejects the equal row still does, as on the
+	// server.
+	mustExec(t, db, `CREATE TABLE nku (a int UNIQUE)`)
+	mustExec(t, db, `INSERT INTO nku VALUES (1)`)
+	if _, err := db.Exec(`INSERT INTO nku VALUES (1)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("equal row under a unique constraint: got %v", err)
+	}
+	// An equal row another transaction is writing is refused without
+	// waiting on it, as Postgres has no key to wait on.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO nk VALUES (3, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nk VALUES (3, 3)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("equal row another transaction is writing: got %v", err)
+	}
+}
+
+// An equal row a unique index takes waits for the transaction writing the
+// other one, as Postgres waits on the index entry, and then fails as a
+// unique violation once that transaction commits.
+// In a table without a primary key whose rows detest keys by an id column,
+// a row another transaction is writing with the same id but other unique
+// values is refused rather than waited on, as Postgres would not wait.
+func TestEqualIDWithoutPrimaryKeyDoesNotWait(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE nki (id int, u int UNIQUE)`)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO nki VALUES (1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nki VALUES (1, 2)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("same id, other unique value, another transaction writing: got %v", err)
+	}
+}
+
+func TestEqualRowUnderUniqueWaits(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE nkw (a int UNIQUE)`)
+		var errs []error
+		s.Seed(func() { errs = nil })
+		insert := func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`INSERT INTO nkw VALUES (1)`); err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			return tx.Commit()
+		}
+		s.Manual("x", 1, insert)
+		s.Manual("y", 1, insert)
+		s.AtQuiescence(func(*State) error {
+			if len(errs) != 1 {
+				return fmt.Errorf("%d inserts failed, want 1: %v", len(errs), errs)
+			}
+			if !errors.Is(errs[0], ErrUniqueViolation) {
+				return errs[0]
+			}
+			return nil
+		})
+	})
 }

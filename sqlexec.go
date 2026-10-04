@@ -1062,9 +1062,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			updated := cur.clone()
 			for _, a := range ins.OnConflict.Set {
-				v, err := x.eval(a.Value, e)
+				v, err := x.assignedValue(table, a, e, "in ON CONFLICT DO UPDATE SET")
 				if err != nil {
-					return nil, x.unsupportedExpr(err, "in ON CONFLICT DO UPDATE SET")
+					return nil, err
 				}
 				updated[a.Column] = v
 			}
@@ -1096,10 +1096,35 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			continue
 		}
 		lk = lockKey{table, row.Key()}
+		noPK := false
+		if def := x.tx.db.defs[table]; def != nil && len(def.pk) == 0 {
+			noPK = true
+		}
+		// Waiting on a key made from the row's values would block where
+		// Postgres, with no key to wait on, takes both rows. A row a unique
+		// index takes is waited on there too, on the same transaction, so
+		// it waits here as Postgres does, but only when the key is made
+		// from every value: a key made from an id column alone can match a
+		// row with other unique values, which Postgres would not wait on.
+		_, keyedByID := row["id"]
+		if noPK && x.tx.heldByOther(lk, lockUpdate) && (keyedByID || !x.inUniqueIndex(table, row)) {
+			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
+		}
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
 		if _, exists := x.tx.view(table, row.Key()); exists {
+			// A table without a primary key tells its rows apart by their
+			// values, as detest has no row identity of its own, so a second
+			// equal row is refused rather than reported as a duplicate key
+			// Postgres would not raise, unless a unique constraint of the
+			// table rejects it, as Postgres does.
+			if noPK {
+				if err := x.checkUniques(table, row, "", nil); err != nil {
+					return nil, err
+				}
+				return nil, x.unsupported("a row equal to one already in a table without a primary key")
+			}
 			return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 		}
 		if err := x.checkUniques(table, row, "", nil); err != nil {
@@ -1298,9 +1323,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		done[key] = true
 		updated := cur.clone()
 		for _, a := range up.Set {
-			v, err := x.eval(a.Value, c2.env(nil))
+			v, err := x.assignedValue(table, a, c2.env(nil), "in SET")
 			if err != nil {
-				return nil, x.unsupportedExpr(err, "in SET")
+				return nil, err
 			}
 			updated[a.Column] = v
 		}
@@ -1389,6 +1414,21 @@ type errUnknownExpr struct{ what string }
 
 func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL expression: " + e.what }
 
+// inUniqueIndex reports whether row has an entry in one of the table's
+// unique indexes, so that an equal row is decided by that index.
+func (x *sqlExec) inUniqueIndex(table string, row Row) bool {
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return false
+	}
+	for i := range def.uniques {
+		if _, ok, err := x.uniqueValues(table, &def.uniques[i], row); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
 // unsupportedExpr turns an expression detest cannot evaluate into
 // ErrUnsupportedSQL, naming where in the statement it stood. A written value
 // or a sort key the application observes cannot be stood in for: a
@@ -1433,6 +1473,8 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		return nil, x.unsupported("window function outside the select list, ORDER BY or DISTINCT ON")
 	case *sqlir.Default:
 		return nil, nil
+	case *sqlir.Unconverted:
+		return nil, errUnknownExpr{"an expression detest could not convert"}
 	case *sqlir.Cast:
 		val, err := x.eval(v.X, en)
 		if err != nil {
