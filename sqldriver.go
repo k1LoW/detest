@@ -234,7 +234,7 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		args[i] = nv.Value
 	}
 	if p := c.current(); p != nil {
-		p.syncOutside("%s: resumes to run a statement", c.db.name)
+		p.syncOutside()
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)
 	if err != nil {

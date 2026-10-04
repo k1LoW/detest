@@ -50,6 +50,7 @@ const (
 	evYield eventKind = iota
 	evBlocked
 	evDone
+	evSync // a process back from outside detest asks to be run now (see syncOutside)
 )
 
 type procEvent struct {
@@ -599,12 +600,35 @@ func (r *run) settleOutside() {
 	for _, p := range outside {
 		select {
 		case ev := <-p.ev:
-			r.outside.Add(-1)
-			r.note(p, "resumes from the primitive it blocked on")
-			r.handleEvent(p, ev)
+			r.takeOutside(p, ev)
 		default:
 		}
 	}
+}
+
+// takeOutside handles the event of a process that was blocked outside detest.
+func (r *run) takeOutside(p *Proc, ev procEvent) {
+	r.outside.Add(-1)
+	r.note(p, "resumes from the primitive it blocked on")
+	if ev.kind != evSync {
+		r.handleEvent(p, ev)
+		return
+	}
+	// The process runs on to its next event as part of the current step, as
+	// it would have alongside the process that woke it, but alone.
+	prev := r.current
+	p.state = stateReady
+	r.current = p
+	p.resume <- struct{}{}
+	ev, ok := r.awaitEvent(p)
+	r.current = prev
+	if !ok {
+		p.state = stateBlockedOutside
+		r.outside.Add(1)
+		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+		return
+	}
+	r.handleEvent(p, ev)
 }
 
 // waitOutside blocks until a process parked outside detest reports back, when
@@ -631,11 +655,8 @@ func (r *run) waitOutside() bool {
 	if chosen == len(waiting) {
 		return false // nothing reported back in time: left to the quiescence check
 	}
-	p := waiting[chosen]
-	r.outside.Add(-1)
-	r.note(p, "resumes from the primitive it blocked on")
 	ev, _ := reflect.TypeAssert[procEvent](v) // p.ev carries only procEvent
-	r.handleEvent(p, ev)
+	r.takeOutside(waiting[chosen], ev)
 	return true
 }
 
@@ -907,14 +928,17 @@ func (p *Proc) yieldf(format string, args ...any) {
 	p.wait()
 }
 
-// syncOutside makes a process that woke from a primitive detest does not
-// model, and has not reported back since, yield before it goes on. Until it
-// does it runs alongside the process that woke it, so a statement that fails
-// before its own yield point would release locks and wake waiters while the
-// scheduler acts on the same state.
-func (p *Proc) syncOutside(format string, args ...any) {
+// syncOutside hands a process that woke from a primitive detest does not
+// model, and has not reported back since, to the scheduler before it goes on.
+// Until then it runs alongside the process that woke it, so a statement that
+// fails before its own yield point would release locks and wake waiters while
+// the scheduler acts on the same state. It is not a yield point: the scheduler
+// runs the process on at once, without a choice, so the schedules and the
+// replays of a simulation stay as they were.
+func (p *Proc) syncOutside() {
 	if p.state == stateBlockedOutside {
-		p.yieldf(format, args...)
+		p.send(procEvent{kind: evSync})
+		p.wait()
 	}
 }
 
