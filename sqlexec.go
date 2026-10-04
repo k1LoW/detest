@@ -2179,11 +2179,14 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		}
 		s = k
 	case *sqlir.Param:
-		k, ok := derefValue(v).(string)
-		if !ok {
+		switch k := derefValue(v).(type) {
+		case string:
+			s = k
+		case []byte:
+			s = string(k)
+		default:
 			return v, nil
 		}
-		s = k
 	default:
 		return v, nil
 	}

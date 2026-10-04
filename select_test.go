@@ -457,6 +457,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	}{
 		{`SELECT id FROM t WHERE id = '01'`, nil, []string{"1"}},
 		{`SELECT id FROM t WHERE id = $1`, []any{"02"}, []string{"2"}},
+		{`SELECT id FROM t WHERE id = $1`, []any{[]byte("02")}, []string{"2"}},
 		{`SELECT id FROM t WHERE ratio > 1 ORDER BY id`, nil, []string{"2"}},
 		{`SELECT id FROM t WHERE amount < 100 ORDER BY id`, nil, []string{"1", "2"}},
 		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99"}},
