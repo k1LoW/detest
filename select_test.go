@@ -592,6 +592,9 @@ func TestRowComparison(t *testing.T) {
 		{`SELECT a, b FROM p WHERE (a, b) > (9, 1) ORDER BY a, b`, []string{"9,3", "10,1"}},
 		{`SELECT a, b FROM p WHERE (a, b) <= (9, 1) ORDER BY a, b`, []string{"2,5", "9,1"}},
 		{`SELECT a, b FROM p WHERE (a, b) = ('09', 1)`, []string{"9,1"}},
+		// Numbers are equal by value, so the first pair ties and the next decides.
+		{`SELECT a, b FROM p WHERE (a * 1000000, b) > (9000000.0, 2) ORDER BY a, b`, []string{"9,3", "10,1"}},
+		{`SELECT a, b FROM p WHERE a * 1000000 = 9000000.0 ORDER BY b`, []string{"9,1", "9,3"}},
 		{`SELECT a, b FROM p WHERE (a, b) <> (9, 1) ORDER BY a, b`, []string{"2,5", "9,3", "10,1"}},
 		{`SELECT a, b FROM p WHERE (a, b) IN ((2, 5), ('10', 1)) ORDER BY a`, []string{"2,5", "10,1"}},
 		// A NULL pair makes = unknown unless another pair differs.

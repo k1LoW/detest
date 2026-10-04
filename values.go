@@ -70,6 +70,11 @@ func sameValue(a, b any) bool {
 	if bb, ok := b.([]byte); ok {
 		b = string(bb)
 	}
+	// Numbers are equal by value, as 1000000 and 1000000.0 format apart.
+	if isNumber(a) && isNumber(b) {
+		c, _ := compareValues(a, b)
+		return c == 0
+	}
 	if reflect.DeepEqual(a, b) {
 		return true
 	}
