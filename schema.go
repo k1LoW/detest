@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -455,6 +456,9 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if !isNumber(v) && !isText(v) {
 				return x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, name, col))
 			}
+			if t == "numeric" && !exactAsFloat(v) {
+				return x.unsupported(fmt.Sprintf("a numeric value with more digits than a float keeps, written to column %q", col))
+			}
 			n, ok := columnNumber(v, t)
 			if !ok {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", name, v), relname(table), col, "")
@@ -668,6 +672,31 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 
 // numberTypes are the number types by the name Postgres gives them in errors.
 var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
+
+// exactAsFloat reports whether a numeric written as text reads back as the
+// same number from the float detest keeps, so that two values Postgres tells
+// apart, such as 9007199254740992 and 9007199254740993, do not become one.
+// Text that is not a number is left to the conversion to report.
+func exactAsFloat(v any) bool {
+	s, ok := v.(string)
+	if b, isBytes := v.([]byte); isBytes {
+		s, ok = string(b), true
+	}
+	if !ok {
+		return true
+	}
+	s = strings.TrimSpace(s)
+	want, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return true
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return true
+	}
+	got, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
+	return ok && got.Cmp(want) == 0
+}
 
 // integralNumber returns a float written to an integer column as an integer.
 // Postgres rounds a numeric literal with a fraction but refuses a float

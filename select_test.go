@@ -479,6 +479,11 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT id FROM t WHERE id = '06'`); !reflect.DeepEqual(got, []string{"6"}) {
 		t.Errorf("whole float: got %v", got)
 	}
+	// A numeric a float cannot keep exactly would collapse into another value.
+	if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (7, '9007199254740993')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric beyond a float: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `INSERT INTO t (id, amount) VALUES (7, '1.10')`)
 	// A value of another type is not converted, where Postgres refuses it.
 	for _, v := range []any{true, time.Unix(0, 0)} {
 		if _, err := db.Exec(`INSERT INTO t (id, amount) VALUES (5, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
