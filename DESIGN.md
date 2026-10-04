@@ -103,9 +103,17 @@ For PostgreSQL, detest follows Read Committed, because the interleavings that ma
 - foreign keys, with `FOR KEY SHARE` on the parent, every referential action, `MATCH FULL` and deferred constraints checked at commit;
 - `CHECK` and `NOT NULL`, savepoints, sequences, views and the DDL of real migrations and schema dumps.
 
-Errors are `*DBError` values with the server's SQLSTATE, and MySQL's error number for MySQL. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`. A statement detest cannot run fails with `ErrUnsupportedSQL` instead of being approximated.
+Errors are `*DBError` values with the server's SQLSTATE, and MySQL's error number for MySQL. Production code branches on its driver's error type, so `postgres.Errors` converts them, for example into `*pgconn.PgError` with `pgxerr.Convert`.
 
-Isolation levels are implemented per kind of server, since their semantics differ between servers. A pair detest does not implement fails when the database is declared, rather than running with the wrong semantics.
+The database is not a reimplementation of the server, and it is held to one standard. A difference from the server matters when it can change an outcome the application observes under concurrency, such as which rows a statement reads or locks, whether it blocks, which error it gets or how many rows it affects. Every behavior gets one of three answers by that standard.
+
+- **Exact.** The difference can change an outcome, and detest implements the behavior. It matches the server, down to the error code and the affected-row count.
+- **Unsupported.** The difference can change an outcome, and detest does not implement the behavior exactly. The statement fails with `ErrUnsupportedSQL`, and `CheckSQL` tells in advance. Approximating is never the answer here, because a result computed from the wrong semantics looks like any other result, and it would make detest report a bug the application does not have or pass a schedule that breaks production.
+- **Approximate.** The difference cannot change an outcome, under the way the databases are used (the schema is built before the processes run, the processes run DML on default settings, and values are the ones applications hold). detest does the simplest deterministic thing, which may ignore the statement or the clause, or skip a check the server makes. Plain indexes, for example, are parsed and dropped, since detest has no planner for them to steer.
+
+AGENTS.md draws this line in detail, with the forms on each side.
+
+Isolation levels are implemented per kind of server, since their semantics differ between servers. A level detest does not implement fails when the database is declared, or when a transaction asks for it, rather than running with the wrong semantics.
 
 `DB.Ignore` takes tables out of the simulation. Real schemas contain tables no invariant looks at, such as audit logs, and their rows, locks and yield points would only enlarge the search.
 
@@ -148,4 +156,5 @@ Determinism is a precondition of the search, so detest asks a few things of a te
 - **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code.
 - **A store for shared variables.** Replacing in-memory variables of production code with detest types would make their accesses yield points, at the cost of changing the code under test more than injecting a mutex does.
 - **Static analysis of read and write sets.** With real code running through the driver, the explorer needs no declared read and write sets.
+- **A faithful database.** Reproducing the server in full, or running a real one, would remove every difference, including the ones that cannot change what the application observes. detest implements exactly what can change an outcome under concurrency, refuses what it does not implement, and approximates the rest as simply as it can, so that the engine stays small enough to be exact where it counts.
 - **Tuning the runtime from inside.** detest allocates heavily while its live heap stays small, so a higher `GOGC` speeds it up, and `GOMAXPROCS` near the worker count helps. Both are process-wide settings that would affect other tests in the same binary, so they are left to whoever runs the tests.
