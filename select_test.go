@@ -628,7 +628,8 @@ func TestTextComparedWithNumber(t *testing.T) {
 	}
 	// The text a driver sends for a float parameter is not modeled.
 	for _, v := range []any{1.5, true, time.Unix(0, 0)} {
-		for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`} {
+		for _, q := range []string{`SELECT count(*) FROM t WHERE name = $1`, `SELECT count(*) FROM t WHERE $1 = '1.5'`,
+			`SELECT count(*) FROM t WHERE name = ANY (ARRAY['x', $1])`} {
 			if _, err := db.Exec(q, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
 				t.Errorf("%s with %v: got %v, want unsupported", q, v, err)
 			}

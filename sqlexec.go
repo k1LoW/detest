@@ -1001,6 +1001,9 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.byteaCast(v, val); err != nil {
 			return nil, err
 		}
+		if err := x.paramTextCast(v, val); err != nil {
+			return nil, err
+		}
 		return x.cast(val, v.Type)
 	}
 	if hasAggregate(e) {
@@ -1828,6 +1831,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err := x.byteaCast(v, val); err != nil {
 			return nil, err
 		}
+		if err := x.paramTextCast(v, val); err != nil {
+			return nil, err
+		}
 		return x.cast(val, v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
@@ -2624,6 +2630,19 @@ func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
 		return nil
 	}
 	return x.unsupported("a cast of a bytea value to " + c.Type)
+}
+
+// paramTextCast refuses a cast to text of a parameter holding a value other
+// than text or an integer, such as one ANY (ARRAY['x', $1]) makes: the text
+// a driver sends for a float, a boolean or a time is not modeled.
+func (x *sqlExec) paramTextCast(c *sqlir.Cast, v any) error {
+	if _, ok := c.X.(*sqlir.Param); !ok || !textCast(c) || derefValue(v) == nil || isText(v) {
+		return nil
+	}
+	if _, ok := integer(derefValue(v)); ok {
+		return nil
+	}
+	return x.unsupported("a cast to text of a parameter other than text or an integer")
 }
 
 // cast is castValue with the error a cast of text that does not read as the
