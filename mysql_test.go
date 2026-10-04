@@ -4836,3 +4836,39 @@ func TestReportListsUnsupportedStatements(t *testing.T) {
 		t.Fatalf("report does not list it:\n%s", res.report())
 	}
 }
+
+// A locking join whose locks depend on MySQL's plan is refused, and the
+// refused statement leaves no lock struct behind.
+func TestLockingJoinRefusals(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT, KEY (a_id))")
+	mustExec(t, db, "INSERT INTO a VALUES (1, 0), (2, 0)")
+	for _, q := range []string{
+		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id IN (1, 2) FOR UPDATE",
+		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 LIMIT 1 FOR UPDATE",
+		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE",
+		"SELECT a.id FROM a JOIN b ON b.a_id = a.id OR b.id = a.id WHERE a.id = 1 FOR UPDATE",
+	} {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		_ = conn.Raw(func(dc any) error {
+			if sc, ok := dc.(*sqlConn); ok && sc.tx != nil && len(sc.tx.lockStructs) > 0 {
+				t.Errorf("%s: a refused statement left lock structs %v", q, sc.tx.lockStructs)
+			}
+			return nil
+		})
+		_ = tx.Rollback()
+		_ = conn.Close()
+	}
+}

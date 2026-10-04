@@ -71,14 +71,21 @@ func (x *sqlExec) outerConstant(e sqlir.Expr, table string) (any, bool) {
 	if o == nil || o.table != table {
 		return nil, false
 	}
-	def := x.tx.db.defs[table]
-	for _, c := range sqlir.ColumnRefs(e) {
-		if c.Table == o.alias || c.Table == relname(table) || c.Table == "" && def != nil && slices.Contains(def.columns, c.Column) {
-			return nil, false
-		}
+	if slices.ContainsFunc(sqlir.ColumnRefs(e), func(c *sqlir.ColumnRef) bool { return x.searchedColumn(c, table, o.alias) }) {
+		return nil, false
 	}
 	v, err := x.eval(e, o.env)
 	return v, err == nil
+}
+
+// searchedColumn reports whether c names a column of table, called alias in
+// the query, rather than of a table joined to it.
+func (x *sqlExec) searchedColumn(c *sqlir.ColumnRef, table, alias string) bool {
+	if c.Table != "" {
+		return c.Table == alias || c.Table == relname(table)
+	}
+	def := x.tx.db.defs[table]
+	return def != nil && slices.Contains(def.columns, c.Column)
 }
 
 // env is the evaluation context of an expression: the rows of the tables in

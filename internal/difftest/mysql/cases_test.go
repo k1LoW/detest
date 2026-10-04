@@ -393,6 +393,24 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// The const row failing the conditions on its table ends the join
+		// before MySQL reads the joined table, which it then leaves unlocked.
+		Name: "a locking join whose first row fails its conditions locks no joined row",
+		Schema: []string{
+			`CREATE TABLE a (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE b (id INT PRIMARY KEY, a_id INT NOT NULL, KEY (a_id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO a (id) VALUES (1), (2)`, `INSERT INTO b VALUES (1, 1), (5, 5)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 AND a.v = 5 FOR UPDATE`),
+			difftest.S(1, `INSERT INTO b VALUES (2, 1)`),
+			difftest.S(1, `UPDATE b SET a_id = 1 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
 		// A locking read over a join locks the joined table's index too.
 		Name: "deadlock victim weighs a locking join",
 		Schema: []string{

@@ -225,10 +225,30 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 	if !tx.db.kind.InnoDB() || tx.db.ignored[table] {
 		return nil
 	}
+	gaps := tx.iso == RepeatableRead || tx.iso == Serializable
+	if gaps {
+		// Checked before anything is locked, as a refused statement must
+		// leave the transaction as it was.
+		if err := x.checkSearch(table, alias, where); err != nil {
+			return err
+		}
+	}
 	tx.noteTableLock(table, mode)
-	if tx.iso != RepeatableRead && tx.iso != Serializable {
+	if !gaps {
 		return nil
 	}
+	if stop != nil {
+		done, err := x.lockScanTo(table, alias, where, mode, policy, stop)
+		if err != nil || done {
+			return err
+		}
+	}
+	return x.lockRange(table, alias, where, mode, policy)
+}
+
+// checkSearch refuses a locking search whose locks depend on a choice of
+// MySQL's optimizer, or on an index detest does not model.
+func (x *sqlExec) checkSearch(table, alias string, where sqlir.Expr) error {
 	if err := x.prefixSearch(table, alias, where); err != nil {
 		return err
 	}
@@ -249,13 +269,7 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 	case sr.descending:
 		return x.unsupported("a locking search by a descending index")
 	}
-	if stop != nil {
-		done, err := x.lockScanTo(table, alias, where, mode, policy, stop)
-		if err != nil || done {
-			return err
-		}
-	}
-	return x.lockRange(table, alias, where, mode, policy)
+	return nil
 }
 
 // scanCompare orders two rows as a scan of the index on cols meets them:
