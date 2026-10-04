@@ -4757,3 +4757,44 @@ func TestInnoDBDeadlockVictim(t *testing.T) {
 		t.Error("the lighter transaction is the victim")
 	}
 }
+
+// A secondary index search records the primary key's record lock struct only
+// for a row it reaches: one that finds nothing holds the secondary index's
+// locks alone.
+func TestInnoDBLockStructsOfASecondarySearch(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 10), (2, 20)")
+	for _, c := range []struct {
+		q       string
+		primary bool
+	}{
+		{"SELECT id FROM t WHERE k = 15 FOR UPDATE", false},
+		{"SELECT id FROM t WHERE k = 10 FOR UPDATE", true},
+	} {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(c.q); err != nil {
+			t.Fatal(err)
+		}
+		var structs map[string]bool
+		_ = conn.Raw(func(dc any) error {
+			if sc, ok := dc.(*sqlConn); ok && sc.tx != nil {
+				structs = sc.tx.lockStructs
+			}
+			return nil
+		})
+		if got := structs["R|"+store.resolve("t")+"|PRIMARY|X|record"]; got != c.primary {
+			t.Errorf("%s: primary key record struct %v, want %v (%v)", c.q, got, c.primary, structs)
+		}
+		_ = tx.Rollback()
+		_ = conn.Close()
+	}
+}

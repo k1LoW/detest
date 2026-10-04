@@ -319,6 +319,13 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	if len(cols) == 0 || len(sr.ranges) != 1 || len(stop.order) > 1 {
 		return false, nil
 	}
+	// The scan's next-key locks are on the index it follows, and a row it
+	// reads through a secondary index is locked on the primary key too;
+	// each lock's struct is recorded as it is taken.
+	scanIndex := "PRIMARY"
+	if def := tx.db.defs[table]; def == nil || !slices.Equal(sr.cols, def.pk) {
+		scanIndex = strings.Join(sr.cols, ",")
+	}
 	desc := false
 	if len(stop.order) == 1 {
 		c, ok := stop.order[0].Expr.(*sqlir.ColumnRef)
@@ -366,6 +373,10 @@ scan:
 				if err := tx.lockMode(lk, mode); err != nil {
 					return false, err
 				}
+				tx.noteLockStruct(table, scanIndex, mode, "next-key")
+				if scanIndex != "PRIMARY" {
+					tx.noteLockStruct(table, "PRIMARY", mode, "record")
+				}
 				cur, ok := tx.view(table, r.Key())
 				if !ok || !sameKey(cur, r, cols) {
 					continue scan
@@ -411,6 +422,7 @@ scan:
 			if err := tx.lockMode(lockKey{table, next.Key()}, mode); err != nil {
 				return false, err
 			}
+			tx.noteLockStruct(table, scanIndex, mode, "next-key")
 		} else {
 			gap.hasHi = false
 		}
@@ -426,12 +438,6 @@ scan:
 			}
 		}
 	}
-	scanIndex := "PRIMARY"
-	if def := tx.db.defs[table]; def == nil || !slices.Equal(sr.cols, def.pk) {
-		scanIndex = strings.Join(sr.cols, ",")
-		tx.noteLockStruct(table, "PRIMARY", mode, "record")
-	}
-	tx.noteLockStruct(table, scanIndex, mode, "next-key")
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: cols, ranges: []valRange{gap}})
 	return true, nil
 }
@@ -448,16 +454,18 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	if def := tx.db.defs[table]; len(sr.cols) > 0 && (def == nil || !slices.Equal(sr.cols, def.pk)) {
 		index = strings.Join(sr.cols, ",")
 	}
-	// note records the lock struct InnoDB keeps for the locks this search
-	// takes on its index, and on the primary key records a secondary index
-	// search reaches, which weigh a deadlock victim.
-	note := func(kind string) {
-		tx.noteLockStruct(table, index, mode, kind)
-		if index != "PRIMARY" {
-			tx.noteLockStruct(table, "PRIMARY", mode, "record")
-		}
+	// kind is the lock InnoDB takes on the index records the search reads:
+	// the record alone for a unique equality, next-key otherwise.
+	kind := "next-key"
+	if sr.unique {
+		kind = "record"
 	}
-	lockRecord := func(r Row) error {
+	// lockRecord locks a record the search reads and records the lock
+	// struct InnoDB keeps for it, as each lock is taken, so a deadlock met
+	// partway weighs the locks taken so far. A row the search matches is
+	// also locked on the primary key when the search runs on a secondary
+	// index; the record past a range is locked on the searched index only.
+	lockRecord := func(r Row, matched bool) error {
 		lk := lockKey{table, r.Key()}
 		if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
 			if policy.SkipLocked {
@@ -467,12 +475,23 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 				return tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
 			}
 		}
-		return tx.lockMode(lk, mode)
+		if err := tx.lockMode(lk, mode); err != nil {
+			return err
+		}
+		k := kind
+		if !matched {
+			k = "next-key"
+		}
+		tx.noteLockStruct(table, index, mode, k)
+		if matched && index != "PRIMARY" {
+			tx.noteLockStruct(table, "PRIMARY", mode, "record")
+		}
+		return nil
 	}
 	lockRows := func(pick func(Row) bool) error {
 		for _, r := range rows {
 			if pick(r) {
-				if err := lockRecord(r); err != nil {
+				if err := lockRecord(r, true); err != nil {
 					return err
 				}
 			}
@@ -480,10 +499,10 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		return nil
 	}
 	if len(cols) == 0 {
+		kind = "next-key" // a full scan of the primary key
 		if err := lockRows(func(Row) bool { return true }); err != nil {
 			return err
 		}
-		tx.noteLockStruct(table, "PRIMARY", mode, "next-key") // a full scan of the primary key
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table})
 		return nil
 	}
@@ -507,13 +526,10 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		}
 		point := sr.unique
 		if point && slices.ContainsFunc(rows, inRange) {
-			note("record")
 			continue // a unique equality search that finds its row locks the row only
 		}
 		if point {
-			note("gap") // one that misses locks the gap it would be in
-		} else {
-			note("next-key")
+			tx.noteLockStruct(table, index, mode, "gap") // one that misses locks the gap it would be in
 		}
 		// The gap runs from the nearest value below the range to the nearest
 		// above, whose record is locked too unless the search is a unique
@@ -543,7 +559,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		// move its value, or the record below; the bounds are taken again
 		// until they hold still.
 		for next != nil && !point {
-			if err := lockRecord(next); err != nil {
+			if err := lockRecord(next, false); err != nil {
 				return err
 			}
 			rows = tx.selectNoYield(table, nil)
