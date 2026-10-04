@@ -567,6 +567,77 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// Read Committed takes no gap locks, but a search through a unique
+		// secondary index still locks its records, so it waits for a
+		// foreign key check holding one.
+		Name: "read committed locks the unique index records it searches",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(5), FOREIGN KEY (code) REFERENCES p (code))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rc),
+			difftest.S(0, `INSERT INTO c VALUES (1, 'a')`),
+			difftest.S(1, rc),
+			difftest.S(1, `UPDATE p SET v = 1 WHERE code = 'a'`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
+		// At Read Committed, the locks of a row the search reads but WHERE
+		// does not take are released.
+		Name:   "read committed releases the rows its search does not take",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rc),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE k = 10 AND v = 99`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
+		// An insert failing on a unique index has put its entries into the
+		// indexes InnoDB writes before that one, whose gaps it then keeps,
+		// and holds the gap before the duplicate's entry with its check.
+		Name: "a failed insert keeps the gaps of the indexes it reached",
+		Schema: []string{
+			`CREATE TABLE o (id INT PRIMARY KEY, a INT NULL, b INT NOT NULL, UNIQUE KEY ua (a), UNIQUE KEY ub (b))` + binary,
+		},
+		Seed:  []string{`INSERT INTO o VALUES (1, 1, 10), (2, 2, 20)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO o VALUES (3, 1, 15)`),
+			difftest.S(1, `INSERT INTO o VALUES (-2, 6, 30)`),
+			difftest.S(1, `INSERT INTO o VALUES (-1, 5, 12)`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, a, b FROM o ORDER BY id`),
+		},
+	},
+	{
+		// The duplicate check's shared lock on a unique secondary index is
+		// next-key, at Read Committed too, so an insert into the gap before
+		// the duplicate waits.
+		Name: "a duplicate check locks the gap before the duplicate",
+		Schema: []string{
+			`CREATE TABLE o (id INT PRIMARY KEY, a INT NULL, b INT NOT NULL, UNIQUE KEY ua (a), UNIQUE KEY ub (b))` + binary,
+		},
+		Seed:  []string{`INSERT INTO o VALUES (1, 1, 10), (2, 5, 20)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rc),
+			difftest.S(0, `INSERT INTO o VALUES (3, 5, 15)`),
+			difftest.S(1, rc),
+			difftest.S(1, `INSERT INTO o VALUES (4, 9, 30)`),
+			difftest.S(1, `INSERT INTO o VALUES (5, 3, 31)`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

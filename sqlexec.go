@@ -1378,7 +1378,8 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		// keys, so a wait in those checks weighs it already.
 		x.tx.undo++
 		if x.tx.db.kind.InnoDB() {
-			x.tx.put = append(x.tx.put, putRow{table, row})
+			x.tx.put = append(x.tx.put, putRow{table: table, row: row})
+			x.tx.putting = true
 		}
 		if err := x.checkUniques(table, row, "", nil); err != nil {
 			return nil, err
@@ -1393,6 +1394,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
+		x.tx.putting = false
 		out.affected++
 		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {

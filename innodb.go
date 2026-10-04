@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // InnoDB's semantics where they differ from PostgreSQL's: consistent reads
@@ -160,80 +158,94 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		return
 	}
 	// A row the statement wrote went into every index; the one it failed
-	// on, only into the primary key so far.
-	whole := make([]bool, len(tx.put))
+	// on, into those before the one whose check failed.
 	for i, p := range tx.put {
-		_, whole[i] = tx.writes[lockKey{p.table, p.row.Key()}]
+		if _, whole := tx.writes[lockKey{p.table, p.row.Key()}]; whole {
+			tx.put[i].reached = -1
+		}
 	}
 	tx.writes, tx.deleted, tx.moved, tx.deferred, tx.undo = m.writes, m.deleted, m.moved, tx.deferred[:m.deferred], m.undo
 	tx.releaseInsertLocks(m.locks)
-	for i, p := range tx.put {
-		tx.inheritGap(p.table, p.row, whole[i])
+	for _, p := range tx.put {
+		tx.inheritGap(p.table, p.row, p.reached)
 	}
 	tx.put = nil
 }
 
-// putRow is a row a statement put into a table's primary key.
+// putRow is a row a statement put into a table's primary key, and the
+// number of its secondary indexes, in indexOrder, it reached, -1 for all.
 type putRow struct {
-	table string
-	row   Row
+	table   string
+	row     Row
+	reached int
+}
+
+// putReached records that the row being inserted stopped at the secondary
+// index named index, the one whose check failed, having its entries in the
+// ones before it.
+func (tx *Tx) putReached(index string) {
+	if !tx.putting || len(tx.put) == 0 {
+		return
+	}
+	p := &tx.put[len(tx.put)-1]
+	if def := tx.db.defs[p.table]; def != nil {
+		order := def.indexOrder(true)
+		p.reached = slices.IndexFunc(order, func(ix secIndex) bool { return ix.name == index })
+		if p.reached < 0 {
+			p.reached = len(order) // an index MySQL adds for a foreign key goes last
+		}
+	}
 }
 
 // inheritGap leaves the locks InnoDB leaves when it rolls back a row put
-// into table, into its primary key alone or, with whole, into every index:
-// the row's records go, the lock on each turns into a gap lock on the gap
-// the record was in, which the next record inherits, and the record lock's
-// struct stays, empty. Another transaction inserting into one of those gaps
-// waits for tx to finish.
-func (tx *Tx) inheritGap(table string, row Row, whole bool) {
+// into table: into its primary key and the first reached of its secondary
+// indexes in indexOrder, -1 for all. The row's records go, the lock on each
+// turns into a gap lock on the gap the record was in, which the next record
+// inherits, and the record lock's struct stays, empty. Another transaction
+// inserting into one of those gaps waits for tx to finish.
+func (tx *Tx) inheritGap(table string, row Row, reached int) {
 	def := tx.db.defs[table]
 	if def == nil || len(def.pk) == 0 || tx.db.ignored[table] {
 		return
 	}
-	type index struct {
-		name string
-		key  []string
+	if tx.iso != RepeatableRead && tx.iso != Serializable {
+		return // Read Committed turns no rolled back lock into a gap lock
 	}
-	indexes := []index{{"PRIMARY", def.pk}}
-	if whole {
-		secondary := func(cols []string) {
-			indexes = append(indexes, index{secondaryIndex(cols), append(slices.Clone(cols), def.pk...)})
-		}
-		for _, u := range def.uniques {
-			var cols []string
-			for _, e := range u.Elems {
-				if c, ok := e.(*sqlir.ColumnRef); ok {
-					cols = append(cols, c.Column)
-				}
-			}
-			if len(cols) == len(u.Elems) {
-				secondary(cols)
-			}
-		}
-		for _, ix := range def.indexes {
-			if len(ix.Columns) > 0 {
-				secondary(ix.Columns)
-			}
-		}
+	order := def.indexOrder(true)
+	if reached < 0 || reached > len(order) {
+		reached = len(order)
 	}
-	rows := tx.lockingRows(table)
+	indexes := append([]secIndex{{name: "PRIMARY", key: def.pk}}, order[:reached]...)
 	for _, ix := range indexes {
-		k := keyOf(row, ix.key)
-		var lo, hi ixKey
-		for _, r := range rows {
-			v := keyOf(r, ix.key)
-			switch c := keyCompare(v, k); {
-			case c < 0 && (lo == nil || keyCompare(v, lo) > 0):
-				lo = v
-			case c > 0 && (hi == nil || keyCompare(v, hi) < 0):
-				hi = v
-			}
+		if ix.key == nil {
+			continue // an index over an expression, whose gaps detest does not order
 		}
-		gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
-		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: ix.key, ranges: []valRange{gap}})
+		tx.gapAround(table, ix.key, row, true)
 		tx.noteLockStruct(table, ix.name, lockUpdate, "record")
 		tx.noteLockStruct(table, ix.name, lockUpdate, "gap")
 	}
+}
+
+// gapAround gives tx a gap lock on the index of table ordered by key: the
+// gap before row's entry, or with through, the one it falls in among the
+// other entries, which row is not one of.
+func (tx *Tx) gapAround(table string, key []string, row Row, through bool) {
+	k := keyOf(row, key)
+	var lo, hi ixKey
+	for _, r := range tx.lockingRows(table) {
+		v := keyOf(r, key)
+		switch c := keyCompare(v, k); {
+		case c < 0 && (lo == nil || keyCompare(v, lo) > 0):
+			lo = v
+		case c > 0 && through && (hi == nil || keyCompare(v, hi) < 0):
+			hi = v
+		}
+	}
+	if !through {
+		hi = k
+	}
+	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
+	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: key, ranges: []valRange{gap}})
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or

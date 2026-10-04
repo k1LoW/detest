@@ -188,7 +188,15 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 				return nil, err
 			}
 			x.tx.noteLockStruct(table, uniqueIndex(u), lockShare, "next-key")
-			if dup, err := x.uniqueHolder(table, u, vals, self); err != nil || dup != nil {
+			dup, err := x.uniqueHolder(table, u, vals, self)
+			if err != nil || dup != nil {
+				// The shared lock is next-key, at Read Committed too, so it
+				// holds the gap before the duplicate's entry.
+				if def := x.tx.db.defs[table]; dup != nil && def != nil {
+					if ix := slices.IndexFunc(def.indexOrder(true), func(ix secIndex) bool { return ix.unique == u }); ix >= 0 && def.indexOrder(true)[ix].key != nil {
+						x.tx.gapAround(table, def.indexOrder(true)[ix].key, dup, false)
+					}
+				}
 				return dup, err
 			}
 		}
@@ -201,8 +209,7 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 	return x.uniqueHolder(table, u, vals, self)
 }
 
-// uniqueIndex names the index of u by its columns, as a search on it names
-// the index it locks.
+// uniqueIndex names the unique index u among a table's indexes.
 func uniqueIndex(u *sqlir.UniqueDef) string {
 	var cols []string
 	for _, e := range u.Elems {
@@ -210,13 +217,21 @@ func uniqueIndex(u *sqlir.UniqueDef) string {
 			cols = append(cols, c.Column)
 		}
 	}
-	return secondaryIndex(cols)
+	return secondaryIndex(u.Name, cols)
 }
 
-// secondaryIndex names a secondary index by its columns, apart from
-// "PRIMARY" and from each other whatever the columns are called, as an
-// identifier holds no NUL.
-func secondaryIndex(cols []string) string { return "\x00" + strings.Join(cols, "\x00") }
+// plainIndex names the index ix among a table's indexes.
+func plainIndex(ix sqlir.IndexDef) string { return secondaryIndex(ix.Name, ix.Columns) }
+
+// secondaryIndex names a secondary index by its name, which is unique
+// within the table, or without one by its columns, apart from "PRIMARY" and
+// from each other whatever they are called, as an identifier holds no NUL.
+func secondaryIndex(name string, cols []string) string {
+	if name != "" {
+		return "\x01" + name
+	}
+	return "\x00" + strings.Join(cols, "\x00")
+}
 
 // uniqueHolder is the visible row other than self holding vals in the unique
 // index u, if any.
@@ -303,8 +318,11 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 			return err
 		}
 	}
-	for i := range def.uniques {
-		u := &def.uniques[i]
+	for _, ix := range def.indexOrder(x.tx.db.kind.InnoDB()) {
+		u := ix.unique
+		if u == nil {
+			continue
+		}
 		if old != nil {
 			nv, nok, err := x.uniqueValues(table, u, row)
 			if err != nil {
@@ -323,10 +341,69 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 			return err
 		}
 		if ex != nil {
+			x.tx.putReached(ix.name)
 			return x.tx.db.duplicateKey(table, u.Name)
 		}
 	}
 	return nil
+}
+
+// secIndex is a secondary index in the order InnoDB writes a row's entries
+// to: its name, the unique index it is if it is one, and the key its gaps
+// are ordered by (nil for an index over an expression).
+type secIndex struct {
+	name   string
+	unique *sqlir.UniqueDef
+	key    []string
+}
+
+// fkIndex names the index InnoDB checks fk by as it writes the row's entry
+// to it: the first in indexOrder whose key leads with fk's columns, or ""
+// for the one MySQL adds for it, which goes last.
+func (def *tableDef) fkIndex(fk sqlir.ForeignKey) string {
+	for _, ix := range def.indexOrder(true) {
+		if len(ix.key) >= len(fk.Columns) && slices.Equal(ix.key[:len(fk.Columns)], fk.Columns) {
+			return ix.name
+		}
+	}
+	return ""
+}
+
+// indexOrder is the table's secondary indexes in the order InnoDB writes a
+// row's entries to, which MySQL sorts as unique indexes over NOT NULL
+// columns, other unique ones, then the rest, each in the order declared.
+// Without innodb it is the order declared, uniques first.
+func (def *tableDef) indexOrder(innodb bool) []secIndex {
+	var strict, nullable, plain []secIndex
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		var cols []string
+		notNull := true
+		for _, e := range u.Elems {
+			c, ok := e.(*sqlir.ColumnRef)
+			if !ok {
+				cols, notNull = nil, false
+				break
+			}
+			cols = append(cols, c.Column)
+			notNull = notNull && (def.notNull[c.Column] || slices.Contains(def.pk, c.Column))
+		}
+		ix := secIndex{name: uniqueIndex(u), unique: u}
+		if cols != nil {
+			ix.key = append(cols, def.pk...)
+		}
+		if notNull && innodb {
+			strict = append(strict, ix)
+		} else {
+			nullable = append(nullable, ix)
+		}
+	}
+	for _, ix := range def.indexes {
+		if len(ix.Columns) > 0 {
+			plain = append(plain, secIndex{name: plainIndex(ix), key: append(slices.Clone(ix.Columns), def.pk...)})
+		}
+	}
+	return slices.Concat(strict, nullable, plain)
 }
 
 // defaultConstraintName is the name Postgres gives an unnamed unique

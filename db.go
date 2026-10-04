@@ -1411,6 +1411,9 @@ type Tx struct {
 	// put is the rows the running statement put into a primary key, which
 	// leave a gap lock if the statement fails.
 	put []putRow
+	// putting is set while the last of put is being inserted, before its
+	// checks have passed.
+	putting bool
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1730,7 +1733,7 @@ func (tx *Tx) savepoint(op, name string) error {
 			_, before := sp.writes[lk]
 			_, committed := tx.db.committed[lk.table][lk.key]
 			if !before && !committed {
-				inserted = append(inserted, putRow{lk.table, r})
+				inserted = append(inserted, putRow{lk.table, r, -1})
 			}
 		}
 		slices.SortFunc(inserted, func(a, b putRow) int {
@@ -1751,7 +1754,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	if tx.db.kind.InnoDB() {
 		tx.releaseInsertLocks(sp.locks)
 		for _, p := range inserted {
-			tx.inheritGap(p.table, p.row, true)
+			tx.inheritGap(p.table, p.row, -1)
 		}
 	} else {
 		tx.rollbackLocks(sp)

@@ -118,6 +118,7 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 			return err
 		}
 		if !found {
+			x.tx.putReached(def.fkIndex(fk))
 			return x.tx.childViolation(table, fk)
 		}
 	}

@@ -4799,10 +4799,14 @@ func TestInnoDBLockStructsOfASecondarySearch(t *testing.T) {
 	}
 }
 
-// Index names stay apart whatever their columns are called: a column
-// named after several others, or PRIMARY.
+// Index names stay apart whatever their columns are called, a column named
+// after several others or PRIMARY, and two indexes over the same columns.
 func TestSecondaryIndexNamesAreDistinct(t *testing.T) {
-	names := []string{"PRIMARY", secondaryIndex([]string{"PRIMARY"}), secondaryIndex([]string{"x,y"}), secondaryIndex([]string{"x", "y"}), secondaryIndex([]string{"x|y"})}
+	names := []string{
+		"PRIMARY",
+		secondaryIndex("", []string{"PRIMARY"}), secondaryIndex("", []string{"x,y"}), secondaryIndex("", []string{"x", "y"}), secondaryIndex("", []string{"x|y"}),
+		secondaryIndex("PRIMARY", nil), secondaryIndex("x", []string{"x"}), secondaryIndex("x_2", []string{"x"}),
+	}
 	for i := range names {
 		for j := range i {
 			if names[i] == names[j] {
