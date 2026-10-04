@@ -58,8 +58,10 @@ var cases = []difftest.Case{
 	{
 		// Run at once, the first waiter's deadlock check runs after the cycle
 		// closed, and it aborts itself. With a pause longer than
-		// deadlock_timeout before the cycle closes, its check finds nothing,
-		// and the session closing the cycle aborts itself.
+		// deadlock_timeout (1s by default) before the cycle closes, its check
+		// finds nothing, and the session closing the cycle aborts itself. The
+		// default is kept, as a shorter one would leave the run without the
+		// pause too little time to close the cycle under load.
 		Name:   "deadlock victim",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
@@ -72,7 +74,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `ROLLBACK`),
 			difftest.S(1, `ROLLBACK`),
 		},
-		Pauses: []map[int]time.Duration{{5: 300 * time.Millisecond}},
+		Pauses: []map[int]time.Duration{{5: 1500 * time.Millisecond}},
 	},
 	{
 		Name:   "failed statement releases the locks",

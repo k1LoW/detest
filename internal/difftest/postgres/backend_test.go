@@ -73,12 +73,6 @@ func (backend) Open(t *testing.T) *sql.DB {
 	}
 	u := *pgURL
 	u.Path = "/" + name
-	q := u.Query()
-	// Postgres breaks a deadlock only after deadlock_timeout (1s by default).
-	// A shorter one keeps the cases fast and does not change which session
-	// the server picks as the victim.
-	q.Set("deadlock_timeout", "100ms")
-	u.RawQuery = q.Encode()
 	db, err := sql.Open("pgx", u.String())
 	if err != nil {
 		t.Fatal(err)
