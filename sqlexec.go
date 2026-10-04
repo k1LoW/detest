@@ -2279,6 +2279,9 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if !isNumber(other) {
 		return v, nil
 	}
+	if isOtherNumberText(s) {
+		return nil, x.unsupported("number text in a form detest does not model, compared with a number")
+	}
 	t := strings.TrimSpace(s)
 	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
 		return n, nil
@@ -2546,6 +2549,12 @@ func castValue(v any, typ string) (any, error) {
 	// $1::bytea keeps its byte slice.
 	if b, ok := v.([]byte); ok && typ != "bytea" {
 		v = string(b)
+	}
+	switch typ {
+	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint", "numeric", "float8", "float4", "double precision", "real":
+		if isOtherNumberText(v) {
+			return nil, errUnknownExpr{"a cast of number text in a form detest does not model"}
+		}
 	}
 	switch typ {
 	case "int", "int2", "int4", "int8", "bigint", "integer", "smallint":

@@ -569,11 +569,21 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 			t.Errorf("%T: got %v, want unsupported", v, err)
 		}
 	}
+	// Postgres reads 0x10, 0x1p2 or 1_000 for some number types and not
+	// others, which detest does not model.
 	for _, q := range []string{
 		`INSERT INTO t (id, ratio) VALUES (9, '0x1p2')`,
 		`INSERT INTO t (id, amount) VALUES (9, '1_000')`,
+		`INSERT INTO t (id) VALUES ('0x10')`,
 		`SELECT '0x1p2'::numeric`,
+		`SELECT '0x10'::int`,
 		`SELECT count(*) FROM t WHERE ratio = '0x1p2'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
 		`INSERT INTO t (id) VALUES ('abc')`,
 		`INSERT INTO t (id) VALUES ('1.5')`,
 		`INSERT INTO t (id, ratio) VALUES (3, 'abc')`,

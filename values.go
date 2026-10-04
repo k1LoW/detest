@@ -126,14 +126,31 @@ func compareValues(a, b any) (int, bool) {
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)), true
 }
 
+// otherNumberText matches number text in a form Postgres reads for some
+// types but detest does not model: a non-decimal integer (0x10, 0o17, 0b101)
+// or a hexadecimal float (0x1p2), and digits grouped with underscores (1_000).
+// Postgres takes or refuses each by the target type, so detest refuses them
+// all rather than answer for one type as for another.
+var otherNumberText = regexp.MustCompile(`(?i)^\s*[+-]?0[xob]|_`)
+
+func isOtherNumberText(v any) bool {
+	switch s := derefValue(v).(type) {
+	case string:
+		return otherNumberText.MatchString(s)
+	case []byte:
+		return otherNumberText.Match(s)
+	}
+	return false
+}
+
 var (
 	decimalText = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
 	specialText = regexp.MustCompile(`(?i)^[+-]?(inf|infinity|nan)$`)
 )
 
-// parseNumber reads text as Postgres's float and numeric input does: decimal
-// or scientific notation and the special values, not the hexadecimal or
-// underscored forms strconv.ParseFloat also takes.
+// parseNumber reads text in decimal or scientific notation, or as a special
+// value, the forms Postgres's float and numeric input both take. The others
+// strconv.ParseFloat takes are refused before (isOtherNumberText).
 func parseNumber(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if !decimalText.MatchString(s) && !specialText.MatchString(s) {

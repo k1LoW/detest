@@ -456,6 +456,9 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if !isNumber(v) && !isText(v) {
 				return x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, name, col))
 			}
+			if isOtherNumberText(v) {
+				return x.unsupported(fmt.Sprintf("number text in a form detest does not model, written to column %q", col))
+			}
 			if t == "numeric" && !exactAsFloat(v) {
 				return x.unsupported(fmt.Sprintf("a numeric value with more digits than a float keeps, written to column %q", col))
 			}
