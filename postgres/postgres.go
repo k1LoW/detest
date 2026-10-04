@@ -1292,7 +1292,11 @@ func (c *pgConv) targets(list []*pg.Node) ([]sqlir.Target, error) {
 	for _, t := range list {
 		rt := t.GetResTarget()
 		if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
-			out = append(out, sqlir.Target{Star: true})
+			t := sqlir.Target{Star: true}
+			if len(cr.Fields) == 2 {
+				t.Table = cr.Fields[0].GetString_().GetSval()
+			}
+			out = append(out, t)
 			continue
 		}
 		e, err := c.expr(rt.Val)

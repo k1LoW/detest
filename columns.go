@@ -8,11 +8,19 @@ import (
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
-// colSet is the columns of a FROM item. A nil set is one whose columns
-// detest does not know, such as a table no schema declared or a function,
-// and resolves any name, so that a statement is never refused for a column
-// it may have.
+// colSet is the columns of a FROM item, each true unless the item has two
+// columns of the name, as a query's output may. A nil set is one whose
+// columns detest does not know, such as a table no schema declared or a
+// function, and resolves any name, so that a statement is never refused for
+// a column it may have.
 type colSet map[string]bool
+
+// has reports whether the set has a column of the name, and whether it has
+// only one.
+func (s colSet) has(name string) (found, once bool) {
+	once, found = s[name]
+	return found, once
+}
 
 func setOf(cols []string) colSet {
 	s := colSet{}
@@ -29,8 +37,9 @@ type colScope struct {
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
 	outputs colSet
-	// twice are the output names the select list gives more than once.
-	twice colSet
+	// anyOutput is a set operation's output whose names detest does not
+	// know, as its first query has a *, which any name may refer to.
+	anyOutput bool
 	// excluded are the columns of ON CONFLICT DO UPDATE's proposed row,
 	// with hasExcluded telling a table of unknown columns from none.
 	excluded    colSet
@@ -69,6 +78,12 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 
 func (c *columnChecker) undefined(col string) error {
 	return c.x.tx.db.kind.Error(sqlir.UndefinedColumn, fmt.Sprintf("column %q does not exist", col), "", col, "")
+}
+
+// twice refuses a name a derived table or CTE gives two of its columns,
+// which Postgres fails with 42702 and detest would read as one of them.
+func (c *columnChecker) twice(col string) error {
+	return c.x.unsupported(fmt.Sprintf("column %q, which the query it comes from gives twice", col))
 }
 
 func (c *columnChecker) missingItem(alias string) error {
@@ -118,7 +133,9 @@ func outputColumns(sel *sqlir.SelectStmt) colSet {
 		if t.Star {
 			return nil
 		}
-		s[targetName(t)] = true
+		n := targetName(t)
+		_, seen := s[n]
+		s[n] = !seen
 	}
 	return s
 }
@@ -192,8 +209,15 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if _, err := c.query(sel.Rarg, outer); err != nil {
 			return nil, err
 		}
-		sc := &colScope{items: map[string]colSet{}, outputs: out, outer: outer}
+		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
+		first := sel
+		for first.SetOp != "" && first.Larg != nil {
+			first = first.Larg
+		}
 		for _, o := range sel.OrderBy {
+			if err := c.position(first, o.Expr, "ORDER BY"); err != nil {
+				return nil, err
+			}
 			if err := c.orderExpr(o.Expr, sc); err != nil {
 				return nil, err
 			}
@@ -240,21 +264,21 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if err := c.exprs(sel.Having, sc); err != nil {
 		return nil, err
 	}
-	sc.outputs = outputColumns(sel)
-	sc.twice = colSet{}
-	seen := colSet{}
+	// The names the select list gives itself; those a * gives are the
+	// input's, which a reference resolves against anyway.
+	sc.outputs = colSet{}
 	for _, t := range sel.Targets {
 		if !t.Star {
 			n := targetName(t)
-			sc.twice[n] = seen[n]
-			seen[n] = true
+			_, seen := sc.outputs[n]
+			sc.outputs[n] = !seen
 		}
 	}
 	for _, e := range sel.GroupBy {
 		if err := c.position(sel, e, "GROUP BY"); err != nil {
 			return nil, err
 		}
-		if err := c.orderExpr(e, sc); err != nil {
+		if err := c.groupExpr(e, sc); err != nil {
 			return nil, err
 		}
 	}
@@ -309,15 +333,38 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause str
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name
 // an output column of the select list.
 func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
-	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" && sc.twice[r.Column] {
+	r, ok := e.(*sqlir.ColumnRef)
+	if !ok || r.Table != "" {
+		return c.exprs(e, sc)
+	}
+	if sc.anyOutput {
+		return nil
+	}
+	switch found, once := sc.outputs.has(r.Column); {
+	case found && !once:
 		// Postgres fails such a name with 42702 unless the columns are
 		// the same expression, a rule detest does not follow.
 		return c.x.unsupported(fmt.Sprintf("output name %q given twice and referred to", r.Column))
-	}
-	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" && (sc.outputs == nil || sc.outputs[r.Column]) {
+	case found:
 		return nil
 	}
 	return c.exprs(e, sc)
+}
+
+// groupExpr checks a GROUP BY item. Unlike ORDER BY, a name refers to a
+// column of the input first, and to an output column only when the input
+// has none of the name.
+func (c *columnChecker) groupExpr(e sqlir.Expr, sc *colScope) error {
+	r, ok := e.(*sqlir.ColumnRef)
+	if !ok || r.Table != "" {
+		return c.exprs(e, sc)
+	}
+	for _, cols := range sc.items {
+		if found, _ := cols.has(r.Column); cols == nil || found {
+			return c.resolve(r, sc)
+		}
+	}
+	return c.orderExpr(e, sc)
 }
 
 func (sc *colScope) lookupItem(alias string) (colSet, bool) {
@@ -339,7 +386,13 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		if !ok {
 			return c.missingItem(r.Table)
 		}
-		if cols == nil || cols[r.Column] {
+		if cols == nil {
+			return nil
+		}
+		switch found, once := cols.has(r.Column); {
+		case found && !once:
+			return c.twice(r.Table + "." + r.Column)
+		case found:
 			return nil
 		}
 		return c.undefined(r.Table + "." + r.Column)
@@ -347,19 +400,22 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	// The innermost scope with the name decides it; an item whose columns
 	// are unknown may have it, so it decides nothing.
 	for s := sc; s != nil; s = s.outer {
-		found, wholeRow := 0, false
+		found, twice, wholeRow := 0, false, false
 		for alias, cols := range s.items {
 			if cols == nil {
 				return nil
 			}
-			if cols[r.Column] {
+			if has, once := cols.has(r.Column); has {
 				found++
+				twice = twice || !once
 			}
 			wholeRow = wholeRow || alias == r.Column
 		}
 		switch {
 		case found > 1:
 			return c.x.tx.db.kind.Error(sqlir.AmbiguousColumn, fmt.Sprintf("column reference %q is ambiguous", r.Column), "", r.Column, "")
+		case found == 1 && twice:
+			return c.twice(r.Column)
 		case found == 1:
 			return nil
 		case wholeRow:
@@ -416,11 +472,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 
 // target is the scope of the table a write targets.
 func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
-	if alias == "" {
-		alias = relname(table)
-	}
 	cols := c.tableColumns(table)
-	return &colScope{items: map[string]colSet{alias: cols}}, cols
+	return &colScope{items: map[string]colSet{targetAlias(table, alias): cols}}, cols
+}
+
+func targetAlias(table, alias string) string {
+	if alias == "" {
+		return relname(table)
+	}
+	return alias
 }
 
 // assigned checks the columns a write assigns, which must be the table's,
@@ -439,13 +499,24 @@ func (c *columnChecker) assigned(table string, cols colSet, names []string) erro
 	return nil
 }
 
-func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope) error {
+// returning checks RETURNING, whose * detest gives the target's columns
+// for, so a * of another item, which UPDATE ... FROM and DELETE ... USING
+// may name, is refused.
+func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string) error {
 	for _, t := range ts {
 		if !t.Star {
 			if err := c.exprs(t.Expr, sc); err != nil {
 				return err
 			}
+			continue
 		}
+		if t.Table == "" || t.Table == target {
+			continue
+		}
+		if _, ok := sc.lookupItem(t.Table); !ok {
+			return c.missingItem(t.Table)
+		}
+		return c.x.unsupported(fmt.Sprintf("RETURNING %s.*, which is not the target's", t.Table))
 	}
 	return nil
 }
@@ -489,7 +560,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 			return err
 		}
 	}
-	return c.returning(ins.Returning, sc)
+	return c.returning(ins.Returning, sc, targetAlias(ins.Table, ins.Alias))
 }
 
 func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
@@ -508,7 +579,7 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if err := c.exprs(up.Where, sc); err != nil {
 		return err
 	}
-	return c.returning(up.Returning, sc)
+	return c.returning(up.Returning, sc, targetAlias(up.Table, up.Alias))
 }
 
 func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
@@ -521,5 +592,5 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	if err := c.exprs(del.Where, sc); err != nil {
 		return err
 	}
-	return c.returning(del.Returning, sc)
+	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
 }

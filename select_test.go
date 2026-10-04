@@ -1030,6 +1030,9 @@ func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
 		`SELECT a AS x, b AS x FROM t GROUP BY x`,
 		`SELECT DISTINCT ON (x) a AS x, b AS x FROM t`,
 		`SELECT *, count(*) FROM t GROUP BY 1, 2, 3`,
+		`SELECT s.a FROM (SELECT 1 AS a, 2 AS a) s`,
+		`SELECT a FROM (SELECT 1 AS a, 2 AS a) s`,
+		`UPDATE t SET a = 1 FROM t AS u WHERE u.id = t.id RETURNING u.*`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
