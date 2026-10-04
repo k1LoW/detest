@@ -487,13 +487,24 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
 		t.Errorf("numeric division: got %v", got)
 	}
+	// A numeric is kept as a float, so an integer a float cannot keep
+	// exactly is refused rather than kept as one with integer arithmetic.
 	mustExec(t, db, `CREATE TABLE k (n numeric PRIMARY KEY)`)
-	mustExec(t, db, `INSERT INTO k VALUES ($1)`, int64(9007199254740994))
-	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, float64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
-		t.Errorf("numeric key beyond 2^53 as a float: got %v, want a unique violation", err)
-	}
+	mustExec(t, db, `INSERT INTO k VALUES ($1)`, float64(9007199254740994))
 	if _, err := db.Exec(`INSERT INTO k VALUES ('9007199254740994.0')`); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("numeric key beyond 2^53 with a decimal point: got %v, want a unique violation", err)
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO k VALUES ($1)`, []any{int64(9007199254740993)}},
+		{`INSERT INTO k VALUES ('9007199254740993')`, nil},
+		{`INSERT INTO k VALUES (9007199254740993)`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", tc.query, err)
+		}
 	}
 	mustExec(t, db, `CREATE TABLE z (n numeric PRIMARY KEY, r float8)`)
 	mustExec(t, db, `INSERT INTO z (n) VALUES ('-0')`)
@@ -522,17 +533,14 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	}
 	// A whole numeric has one key however it was written.
 	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
-	mustExec(t, db, `INSERT INTO u VALUES ('9007199254740993')`)
 	mustExec(t, db, `INSERT INTO u VALUES ($1)`, 1e6)
-	mustExec(t, db, `INSERT INTO u VALUES ($1)`, int64(9007199254740994))
 	for _, tc := range []struct {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO u VALUES (9007199254740993)`, nil},
 		{`INSERT INTO u VALUES ('1000000')`, nil},
 		{`INSERT INTO u VALUES ($1)`, []any{1e6}},
-		{`INSERT INTO u VALUES ($1)`, []any{float64(9007199254740994)}},
+		{`INSERT INTO u VALUES ($1)`, []any{int64(1000000)}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrUniqueViolation) {
 			t.Errorf("%s: got %v, want a unique violation", tc.query, err)
@@ -706,14 +714,13 @@ func TestRowComparison(t *testing.T) {
 func TestLargeIntegersCompareExactly(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
-	mustExec(t, db, `CREATE TABLE t (id int8 PRIMARY KEY, amount numeric)`)
-	mustExec(t, db, `INSERT INTO t VALUES ($1, $2), ($3, $4)`, int64(1<<53), int64(1<<53), int64(1<<53+1), int64(1<<53+1))
+	mustExec(t, db, `CREATE TABLE t (id int8 PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO t VALUES ($1), ($2)`, int64(1<<53), int64(1<<53+1))
 	for _, tc := range []struct {
 		query string
 		args  []any
 	}{
 		{`SELECT id FROM t WHERE id > $1`, []any{int64(1 << 53)}},
-		{`SELECT id FROM t WHERE amount > $1`, []any{int64(1 << 53)}},
 		{`SELECT id FROM t ORDER BY id DESC LIMIT 1`, nil},
 		// An integer and a float compare exactly, even above 2^53.
 		{`SELECT id FROM t WHERE id > $1`, []any{float64(1 << 53)}},
@@ -739,7 +746,6 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
 		{`SELECT 1.6::int`, nil, "2"},
 		{`SELECT (-1.4)::smallint`, nil, "-1"},
-		{`SELECT 9007199254740993::numeric = 9007199254740993`, nil, "true"},
 		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
 		{`SELECT true::int + false::int`, nil, "1"},
 		{`SELECT floor(1.5) / 2`, nil, "0.5"},
@@ -767,7 +773,7 @@ func TestCastToNumber(t *testing.T) {
 			t.Errorf("%s: got %v, want out of range", q, err)
 		}
 	}
-	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`,
+	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
 		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)

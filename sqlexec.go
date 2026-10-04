@@ -2584,6 +2584,9 @@ func castValue(v any, typ string) (any, error) {
 			return n, nil
 		}
 		if isNumber(v) {
+			if !exactAsFloat(v) {
+				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
+			}
 			return numericValue(v), nil
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to numeric", v)}

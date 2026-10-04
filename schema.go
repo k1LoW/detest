@@ -697,11 +697,14 @@ func (x *sqlExec) mysqlMember(table, col string, l strLimit, v any) (any, error)
 // numberTypes are the number types by the name Postgres gives them in errors.
 var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8": "bigint", "float4": "real", "float8": "double precision", "numeric": "numeric"}
 
-// exactAsFloat reports whether a numeric written as text reads back as the
-// same number from the float detest keeps, so that two values Postgres tells
+// exactAsFloat reports whether a numeric, an integer or text, reads back as
+// the same number from the float detest keeps, so that two values Postgres tells
 // apart, such as 9007199254740992 and 9007199254740993, do not become one.
 // Text that is not a number is left to the conversion to report.
 func exactAsFloat(v any) bool {
+	if n, ok := integer(v); ok {
+		return n > -1<<53 && n < 1<<53
+	}
 	s, ok := v.(string)
 	if b, isBytes := v.([]byte); isBytes {
 		s, ok = string(b), true
@@ -710,9 +713,6 @@ func exactAsFloat(v any) bool {
 		return true
 	}
 	s = strings.TrimSpace(s)
-	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return true // kept as an integer, without a float
-	}
 	want, ok := new(big.Rat).SetString(s)
 	if !ok {
 		return true
@@ -782,28 +782,20 @@ func columnNumber(v any, t string) (any, bool) {
 		f, err := parseNumber(s)
 		return f, err == nil
 	}
-	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return numericValue(n), true
-	}
 	f, err := parseNumber(s)
 	return numericValue(f), err == nil
 }
 
 // numericValue is the representation of a numeric: a float, so arithmetic on
-// it is not integer arithmetic (1 / 2 is 0.5), and every value has one key
-// however it was written. A whole number beyond 2^53, which a float cannot
-// keep exactly, is an integer.
+// it is not integer arithmetic (1 / 2 is 0.5). Keeping an integer beyond 2^53
+// as an integer would make arithmetic on it integer arithmetic, so such a
+// value is refused before it gets here (exactAsFloat).
 func numericValue(v any) any {
-	if n, ok := integer(v); ok && n > -1<<53 && n < 1<<53 {
+	if n, ok := integer(v); ok {
 		return float64(n)
 	}
 	if f, ok := v.(float64); ok && f == 0 {
 		return float64(0) // a numeric has no negative zero
-	}
-	// A whole float beyond 2^53 becomes the integer it is, so it has the
-	// key of the same value written as an integer.
-	if f, ok := v.(float64); ok && f == math.Trunc(f) && math.Abs(f) >= 1<<53 && math.Abs(f) < 1<<63 {
-		return int64(f)
 	}
 	return v
 }
