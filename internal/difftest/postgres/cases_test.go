@@ -21,7 +21,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `UPDATE stock SET n = n - 1 WHERE sku = 'apple'`),
 			difftest.S(1, `UPDATE stock SET n = n - 1 WHERE sku = 'apple'`),
 			difftest.S(0, `COMMIT`),
-			difftest.S(1, `SELECT sku, n FROM stock ORDER BY sku`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
 		},
 	},
 	{
@@ -32,7 +32,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
 			difftest.S(1, `UPDATE stock SET n = n - 1 WHERE sku = 'apple' AND n > 0`),
 			difftest.S(0, `COMMIT`),
-			difftest.S(1, `SELECT sku, n FROM stock ORDER BY sku`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
 		},
 	},
 	{
@@ -51,7 +51,7 @@ var cases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
 			difftest.S(0, `INSERT INTO stock VALUES ('apple', 1)`),
-			difftest.S(0, `SELECT n FROM stock WHERE sku = 'apple'`),
+			difftest.Q(0, `SELECT n FROM stock WHERE sku = 'apple'`),
 			difftest.S(0, `COMMIT`),
 		},
 	},
@@ -85,7 +85,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `INSERT INTO stock VALUES ('pear', 1)`),
 			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
 			difftest.S(0, `ROLLBACK`),
-			difftest.S(1, `SELECT sku, n FROM stock ORDER BY sku`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
 		},
 	},
 	{
@@ -103,7 +103,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
 			difftest.S(0, `COMMIT`),
 			difftest.S(1, `COMMIT`),
-			difftest.S(1, `SELECT sku, n FROM stock ORDER BY sku`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
 		},
 	},
 	{
@@ -111,9 +111,9 @@ var cases = []difftest.Case{
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
-			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
+			difftest.Q(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
 			difftest.S(0, `SAVEPOINT s`),
-			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
+			difftest.Q(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
 			difftest.S(0, `INSERT INTO stock VALUES ('apple', 1)`),
 			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
 			difftest.S(1, `DELETE FROM stock WHERE sku = 'apple'`),
@@ -125,9 +125,9 @@ var cases = []difftest.Case{
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
-			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
+			difftest.Q(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR KEY SHARE`),
 			difftest.S(0, `SAVEPOINT s`),
-			difftest.S(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
+			difftest.Q(0, `SELECT sku FROM stock WHERE sku = 'apple' FOR UPDATE`),
 			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
 			difftest.S(1, `UPDATE stock SET n = 5 WHERE sku = 'apple'`),
 			difftest.S(1, `DELETE FROM stock WHERE sku = 'apple'`),
@@ -140,8 +140,8 @@ var cases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
 			difftest.S(1, `BEGIN`),
-			difftest.S(0, `SELECT sku FROM stock ORDER BY sku LIMIT 1 FOR UPDATE SKIP LOCKED`),
-			difftest.S(1, `SELECT sku FROM stock ORDER BY sku LIMIT 1 FOR UPDATE SKIP LOCKED`),
+			difftest.Q(0, `SELECT sku FROM stock ORDER BY sku LIMIT 1 FOR UPDATE SKIP LOCKED`),
+			difftest.Q(1, `SELECT sku FROM stock ORDER BY sku LIMIT 1 FOR UPDATE SKIP LOCKED`),
 			difftest.S(0, `COMMIT`),
 			difftest.S(1, `COMMIT`),
 		},

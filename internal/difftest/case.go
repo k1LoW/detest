@@ -27,14 +27,19 @@ type Case struct {
 
 // Step runs one statement on connection Conn (0-based). BEGIN, COMMIT and
 // ROLLBACK go through database/sql's transactions, since that is how
-// applications run them.
+// applications run them. A Query step compares the rows the statement
+// returns, and any other step the count of rows it affected.
 type Step struct {
-	Conn int
-	SQL  string
+	Conn  int
+	SQL   string
+	Query bool
 }
 
-// S is a shorthand for Step.
+// S is a step run with Exec.
 func S(conn int, sql string) Step { return Step{Conn: conn, SQL: sql} }
+
+// Q is a step run with Query.
+func Q(conn int, sql string) Step { return Step{Conn: conn, SQL: sql, Query: true} }
 
 type stepKind int
 
@@ -47,6 +52,9 @@ const (
 )
 
 func (s Step) kind() stepKind {
+	if s.Query {
+		return kindQuery
+	}
 	q := strings.ToUpper(strings.TrimSpace(s.SQL))
 	switch {
 	case q == "BEGIN" || strings.HasPrefix(q, "BEGIN ISOLATION LEVEL"):
@@ -55,8 +63,6 @@ func (s Step) kind() stepKind {
 		return kindCommit
 	case q == "ROLLBACK":
 		return kindRollback
-	case strings.HasPrefix(q, "SELECT"), strings.HasPrefix(q, "WITH"), strings.HasPrefix(q, "VALUES"), strings.Contains(q, " RETURNING "):
-		return kindQuery
 	}
 	return kindExec
 }
