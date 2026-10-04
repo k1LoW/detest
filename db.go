@@ -1689,6 +1689,14 @@ func (tx *Tx) insert(table string, row Row) error {
 	lk := lockKey{table, row.Key()}
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	tx.noteTableLock(table, lockUpdate)
+	// A row there already is checked under a shared lock, as InnoDB's
+	// duplicate check takes, which another failing insert shares.
+	if dup, err := x.sharedDuplicate(table, lk.key, ""); err != nil || dup != nil {
+		if err == nil {
+			err = tx.db.duplicateKey(table, tx.db.pkConstraint(table))
+		}
+		return err
+	}
 	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
 		return err
 	}
@@ -1702,14 +1710,17 @@ func (tx *Tx) insert(table string, row Row) error {
 	if tx.db.kind.InnoDB() {
 		// The row is in the primary key while its checks run, where
 		// another transaction's locking search meets it.
+		// A failed insert leaves put to the statement's rollback, which
+		// keeps the gaps where its entries were.
 		tx.put, tx.putting = []putRow{{table: table, row: row}}, true
-		defer func() { tx.put, tx.putting = nil, false }()
+		defer func() { tx.putting = false }()
 	}
 	if err := x.insertEntries(table, row); err != nil {
 		return err
 	}
 	delete(tx.deleted, lk)
 	tx.writes[lk] = row.clone()
+	tx.put = nil
 	if tx.db.kind.InnoDB() {
 		tx.inserts = append(tx.inserts, putRow{table: table, row: row.clone()})
 	}

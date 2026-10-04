@@ -4894,3 +4894,34 @@ func TestInnoDBTxAPIUndo(t *testing.T) {
 		})
 	})
 }
+
+// Inserts of a key already there through the transaction API fail under
+// shared duplicate-check locks, which do not wait for each other.
+func TestInnoDBTxAPIDuplicatesShare(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE t (id VARCHAR(5) PRIMARY KEY)")
+		s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES ('a')") })
+		open, shared := false, false
+		s.Seed(func() { open, shared = false, false })
+		s.Manual("first", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if err := tx.Insert("t", Row{"id": "a"}); err == nil {
+					return fmt.Errorf("a duplicate went in")
+				}
+				open = true
+				p.Step("holds its duplicate check")
+				open = false
+				return nil
+			})
+		})
+		s.Manual("second", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				err := tx.Insert("t", Row{"id": "a"})
+				shared = shared || err != nil && open
+				return nil
+			})
+		})
+		s.Sometimes("the second fails while the first holds its check", func(*State) bool { return shared })
+	})
+}
