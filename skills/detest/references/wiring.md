@@ -111,7 +111,7 @@ ORM auto-migration (`gorm.AutoMigrate`, ent's `Schema.Create`) reads system cata
 
 Statements that declare nothing detest needs (grants, comments, extensions) are accepted and ignored. Functions and triggers are accepted and ignored too, which is not harmless when a trigger fires in the flow. Its effect, such as an outbox row written on INSERT or an error raised on UPDATE, is missing from the simulation, and `failOnUnsupported` does not reveal it. Check the triggers on the tables the flow writes. When one changes rows or errors the code or the invariants observe, tell the user the flow cannot be simulated faithfully and stop, as for any blocker (see SKILL.md). If a migration fails to load, find the statement, and check the README's unsupported list. Plain DDL failing to load is worth reporting upstream (https://github.com/k1LoW/detest/issues).
 
-Tables the flow writes but no invariant reads (audit logs, event histories) can be taken out with `store.Ignore(...)`, which also shrinks the search.
+`store.Ignore(...)` takes a table out of the simulation, which shrinks the search. An ignored table reads as empty, takes no locks and checks no constraints, so that no invariant reads it is not enough. Ignore a table only when no read, affected-row count, constraint or lock on it can change what the code or the invariants observe, as for a write-only audit log or history. A table the code reads to decide, such as processed events or idempotency keys for deduplication, stays, even when no invariant reads it.
 
 ## Seeding data
 

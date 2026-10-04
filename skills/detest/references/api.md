@@ -15,7 +15,7 @@ The function declares the simulation and returns; the exploration runs after it,
 | Call | Use |
 | --- | --- |
 | `db, store := s.DB(name, postgres.New(opts...))` / `mysql.New(opts...)` | A database. `db` is a `*sql.DB` for the app, `store` a `*detest.DB` for invariants. `store.Open()` gives a second pool on the same database for a second service |
-| `store.Ignore("audit_logs", ...)` | Tables the app writes but no invariant reads. Writes are dropped, no locks, no scheduling points: shrinks the search |
+| `store.Ignore("audit_logs", ...)` | Write-only tables nothing in the flow reads back. Writes are dropped, reads find nothing, no locks, constraints or scheduling points. It shrinks the search, but only for tables whose reads, counts, constraints and locks cannot change an outcome (see `wiring.md`) |
 | `s.Seed(func(){...})` | Runs at the start of every run. Insert rows, reset Go variables |
 | `s.Manual(name, n, fn, opts...)` | A process type started at any point, up to `n` times per run, **one instance at a time** unless `detest.Instances(k)` |
 | `s.Loop(name, n, fn, opts...)` | A periodic process (sweeper, poller, reaper), up to `n` ticks per run. Return `detest.ErrIdle` from a tick that found nothing to do |

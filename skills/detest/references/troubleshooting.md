@@ -37,7 +37,7 @@ The code waits for a goroutine it started, or for something that only happens ou
 
 Replaying the same choices produced different operations. Look for:
 
-- map iteration deciding the order or set of statements (iterate sorted keys; if this is production code, tell the user it is also nondeterministic in production, then sort in a test-only path only with agreement);
+- map iteration deciding the order or set of statements. In the harness's own code, iterate sorted keys. In production code, do not sort it for the test: the order varies in production too and may be the bug itself, such as rows locked in map order deadlocking, so a sorted test path would hide it. Report it to the user as a finding, propose sorting in the production code, or stop as for a fidelity blocker;
 - `math/rand` or random IDs deciding control flow (not just values);
 - caches, `sync.Once`, package-level variables surviving from one run to the next. The declaration function runs once per worker, so building them there is not enough. Clear or rebuild them in a `Seed`, rebuilding the service there when its cache cannot be cleared;
 - goroutines the code starts and does not wait for;
@@ -56,7 +56,7 @@ These are progress violations, deadlocks the database cannot detect (through mut
 The summary line shows `complete=false` or the run takes minutes.
 
 - Fewer actors (two), fewer runs per actor (one), fewer seeded rows.
-- `store.Ignore(...)` for tables no invariant reads (audit logs, histories).
+- `store.Ignore(...)` for tables nothing in the flow reads back (see `wiring.md` for the conditions).
 - `detest.MaxPreemptions(2)`, since most races need few context switches.
 - `detest.When(...)` on loops so idle ticks do not branch.
 - `DETEST_WORKERS=$(getconf _NPROCESSORS_ONLN)` and `GOGC=400`, with `-p 1` so that explorations of different packages do not compete for the cores.
