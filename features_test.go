@@ -159,6 +159,91 @@ func TestIdleLoopRetriesARowSkipLockedPassedOver(t *testing.T) {
 	})
 }
 
+// Idle loops that lock rows the other passes over with SKIP LOCKED end, cut
+// at MaxIdleTicks rather than waking each other forever.
+func TestIdleLoopsWakingEachOtherAreCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true), ('w2', true)`) })
+		for _, ids := range [][2]string{{"w1", "w2"}, {"w2", "w1"}} {
+			s.Loop("sweeper_"+ids[0], 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = ?`, ids[0]); err != nil {
+					return err
+				}
+				rows, err := tx.QueryContext(p.Context(), `SELECT id FROM work WHERE id = ? FOR UPDATE SKIP LOCKED`, ids[1])
+				if err != nil {
+					return err
+				}
+				_ = rows.Close()
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				return ErrIdle
+			})
+		}
+	}, []Option{MaxIdleTicks(1)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns == 0 {
+		t.Fatalf("want a complete exploration with runs cut at MaxIdleTicks, got %s", res.report())
+	}
+}
+
+// A loop that went idle after SKIP LOCKED passed over a row ticks again once a
+// rollback to a savepoint lets the row go, while the holder is still open.
+func TestIdleLoopRetriesARowASavepointRollbackLetGo(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		open, idled, takenWhileOpen := false, false, false
+		s.Seed(func() { open, idled, takenWhileOpen = false, false, false })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			open = true
+			for _, q := range []string{`SAVEPOINT s`, `UPDATE work SET done = done WHERE id = 'w1'`, `ROLLBACK TO SAVEPOINT s`} {
+				if _, err := tx.ExecContext(p.Context(), q); err != nil {
+					return err
+				}
+			}
+			p.Step("works on")
+			open = false
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+			if errors.Is(err, sql.ErrNoRows) {
+				idled = true
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			if open && idled {
+				takenWhileOpen = true
+			}
+			return tx.Commit()
+		})
+		s.Sometimes("worker went idle, then took w1 after the rollback, before the toucher ended", func(*State) bool { return takenWhileOpen })
+	})
+}
+
 // When keeps a process from starting while its predicate is false.
 func TestWhenGatesTheStart(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {

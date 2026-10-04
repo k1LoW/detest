@@ -272,6 +272,9 @@ func (tx *Tx) wake(keys map[lockKey]bool) {
 	if tx.p == nil || len(keys) == 0 {
 		return
 	}
+	if tx.passedOver {
+		tx.p.r.bump(tx.p)
+	}
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
 			p.state = stateReady

@@ -153,10 +153,12 @@ type run struct {
 	prev     *State
 	version  int
 	idleAt   map[*procType]int
-	pending  *violation // raised by a simulated resource during a step
-	fp       uint64     // fingerprint of the run so far (see choice.fp)
-	tracing  bool       // keep the trace (see note)
-	snap     *State     // the latest snapshot, whose tables the next one reuses
+	idles    map[*procType]int // idle ticks that left the budget unspent
+	cut      bool              // a loop went idle more than MaxIdleTicks allows
+	pending  *violation        // raised by a simulated resource during a step
+	fp       uint64            // fingerprint of the run so far (see choice.fp)
+	tracing  bool              // keep the trace (see note)
+	snap     *State            // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
 	queuesTouched bool
 	// outside counts the processes blocked outside detest, which may wake and
@@ -346,6 +348,9 @@ func (r *run) execute() (v *violation) {
 		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
 		if r.pending != nil {
 			return r.pending
+		}
+		if r.cut {
+			return nil
 		}
 		if v := r.checkAlways(); v != nil {
 			return v
@@ -774,6 +779,11 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		case errors.Is(ev.err, ErrIdle):
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
+				if r.idles[p.pt] >= r.s.maxIdleTicks {
+					r.cut = true
+					break
+				}
+				r.idles[p.pt]++
 				r.runs[p.pt]--
 				if r.version-p.started > p.bumps {
 					r.idleAt[p.pt] = p.started
@@ -837,7 +847,8 @@ func (v *violation) same(o *violation) bool {
 
 // ErrIdle is returned by a loop process that found nothing to do. The tick
 // does not consume the loop's run budget, which encodes the fairness
-// assumption that a periodic sweep keeps ticking until it has work.
+// assumption that a periodic sweep keeps ticking until it has work, up to
+// MaxIdleTicks idle ticks per loop and run.
 var ErrIdle = errors.New("detest: idle tick")
 
 // lose drops the i-th message of q undelivered.
@@ -1180,7 +1191,7 @@ func (r *run) dbsTouched() bool {
 }
 
 func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idles: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {

@@ -226,7 +226,7 @@ For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` tha
 
 ## Options and environment variables
 
-The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
+The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxIdleTicks`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
 | Variable | Effect |
 | --- | --- |

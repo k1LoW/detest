@@ -1341,8 +1341,10 @@ type Tx struct {
 	db *DB
 	p  *Proc
 	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
-	// transaction holds. Letting the row go then changes what such a read
-	// finds, so an idle loop may tick again even if no row changed.
+	// transaction holds. Letting a lock go or weakening it then changes what
+	// such a read finds, so an idle loop may tick again even if no row
+	// changed, whether the transaction ends or a savepoint or a statement
+	// rolls back.
 	passedOver bool
 	writes     map[lockKey]Row
 	deleted    map[lockKey]bool
@@ -1956,9 +1958,6 @@ func (tx *Tx) release() {
 		// The run ended and the next one resets the simulated resources. Releasing here
 		// would race with the other cleanups running while the processes unwind.
 		return
-	}
-	if tx.passedOver && tx.p != nil {
-		tx.p.r.bump(tx.p)
 	}
 	tx.releaseLocks(tx.locks)
 	tx.releaseGaps()

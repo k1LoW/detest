@@ -263,17 +263,20 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		names[i] = c.name
 	}
 	f.declareSometimes(names)
-	runs, maxDepth := 0, 0
+	runs, cut, maxDepth := 0, 0, 0
 	for {
 		prefix, ok := f.take(worker)
 		if !ok {
-			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
+			return &result{Runs: runs, CutRuns: cut, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		runs++
 		r := s.newRun(prefix)
 		r.tracing = s.verbose
 		v := r.execute()
 		maxDepth = max(maxDepth, len(r.choices))
+		if r.cut {
+			cut++
+		}
 		if s.verbose {
 			s.printRun(runs, r)
 		}
@@ -306,6 +309,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached()}
 	for _, r := range results {
 		merged.Runs += r.Runs
+		merged.CutRuns += r.CutRuns
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
 		if r.Replay {
@@ -326,7 +330,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.MaxDepth, v.Workers = merged.Runs, merged.MaxDepth, workers
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers = merged.Runs, merged.CutRuns, merged.MaxDepth, workers
 		return &v
 	}
 	return merged
