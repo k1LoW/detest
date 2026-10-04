@@ -1,6 +1,6 @@
 ---
 name: detest
-description: Find concurrency bugs in a Go application by running its real code under detest, an In-Process DST framework (deterministic simulation testing run inside the `go test` process, with no containers or real servers) that explores every interleaving of database statements, queue deliveries, external calls, mutexes and crashes within bounds. Use this skill whenever the user wants to use detest, mentions In-Process DST or DST, deterministic simulation, model checking, or asks to hunt for race conditions, lost updates, double booking/overselling, duplicate processing, deadlocks, idempotency or retry bugs, or "what happens if two requests hit this at once" in Go code backed by PostgreSQL or MySQL, even when they do not name detest. The user does not need to know detest; this skill covers choosing targets with them, wiring their code, running the exploration and explaining what was proven.
+description: Run In-Process DST with detest on a Go application, from choosing the target with the user to a report of what was run and what it guarantees. detest runs the application's real code inside `go test`, with its PostgreSQL or MySQL database, queues, calls to other services and mutexes simulated at the client boundary, and explores the interleavings and failures within bounds under a deterministic scheduler. Use this skill only when the user has decided to use detest or In-Process DST, by asking for it or by accepting your suggestion. It adds a dependency, writes tests and runs long explorations, so do not start it on your own. Do suggest it, in one line, and wait for the answer, whenever the user is troubled by a problem it could catch in Go code backed by PostgreSQL or MySQL, such as data that is occasionally inconsistent or wrong (oversold stock, double charges, duplicate rows, negative balances, jobs stuck or run twice), a bug that happens only under load or only sometimes, a deadlock or lock timeout, a flaky test around transactions, or a review or change of code with transactions, retries, workers or message handlers.
 ---
 
 # detest, In-Process DST for Go applications
@@ -12,6 +12,8 @@ Call this In-Process DST when talking to the user, not plain DST. When you expla
 > In-Process DST runs the application's real code inside the `go test` process. The resources it shares (databases through `database/sql`, queues, calls to other services, mutexes) are replaced at their client boundary by simulations that behave as the real ones do under concurrency. A deterministic scheduler makes every decision, which operation runs next and which failure happens (a crash, a lost response, a duplicate or lost message), so any run can be replayed exactly. It explores these decisions systematically within the bounds set, and checks the invariants on every run.
 
 Do not shorten it to "simulates the database", since the real code runs and the queues, calls and mutexes are simulated too. Do not call it exhaustive without "within the bounds", and do not leave out that runs replay exactly.
+
+**Start only on the user's decision.** If the user has not asked for detest or In-Process DST, and has not accepted a suggestion to use it, do not begin the workflow. Suggest it in one or two lines, saying what it would check in their code and that it adds a test dependency, and wait. A yes to that suggestion is the decision; the checkpoints below still apply.
 
 **The user is assumed to know nothing about detest.** They decide to use it; you do everything else. Talk to them about their code and the rules it must keep, never about detest's API, unless they ask. The user is most likely the person who wrote or maintains the code and who will fix what you find, so explain in terms of the codebase, naming the functions, the `file:line`, the SQL statements and the transactions involved. Use the business story to say why it matters, not in place of the code. How much of the domain you can name depends on how much you learned from the session and the code, so say what you inferred when it is a guess. Ask only the questions whose answers you cannot get from the code, and offer a proposed answer with each so they can just confirm. Speak the user's language.
 
@@ -112,8 +114,11 @@ Do not proceed on an invariant the user has not agreed with. A wrong invariant p
 Adding detest changes `go.mod` and `go.sum`, and may raise the `go` line to 1.26. Tell the user what will change and get a yes before running:
 
 ```sh
-go get github.com/k1LoW/detest@latest
+go get github.com/k1LoW/detest/postgres@latest            # or .../mysql
+go get github.com/k1LoW/detest/postgres/pgxerr@latest     # the error converter the test uses, if any
 ```
+
+Get the packages the test imports, not only the module root. `go get` of the root records the checksums of the root's dependencies only, and the build then fails on the server package's ones (the SQL parsers). Avoid `go mod tidy` for this, since it also upgrades unrelated dependencies.
 
 The detest tests are kept out of the everyday `go test ./...` and run one package at a time, because an exploration takes seconds to minutes and uses every core.
 
