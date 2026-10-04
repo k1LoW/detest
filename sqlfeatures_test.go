@@ -322,7 +322,7 @@ func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`INSERT INTO nk VALUES (3, 3)`); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestEqualIDWithoutPrimaryKeyDoesNotWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`INSERT INTO nki VALUES (1, 1)`); err != nil {
 		t.Fatal(err)
 	}

@@ -74,7 +74,8 @@ func CloneExpr(e Expr) Expr {
 	if e == nil {
 		return nil
 	}
-	return deepCopy(reflect.ValueOf(&e).Elem()).Interface().(Expr)
+	out, _ := reflect.TypeAssert[Expr](deepCopy(reflect.ValueOf(&e).Elem()))
+	return out
 }
 
 func deepCopy(v reflect.Value) reflect.Value {
