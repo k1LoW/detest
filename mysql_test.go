@@ -4679,3 +4679,62 @@ func TestMySQLCaseInsensitiveCollation(t *testing.T) {
 	mustExec(t, db2, "INSERT INTO u VALUES (1, 'a@x')")
 	mustExec(t, db2, "SELECT id FROM u WHERE email = 'a@x'")
 }
+
+// Two inserts that fail on the same duplicate key check it under shared
+// locks on the existing row, so neither waits for the other.
+func TestMySQLDuplicateKeyTakesASharedLock(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(5), UNIQUE KEY (code))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 'a')")
+	var txs []*sql.Tx
+	for _, q := range []string{"INSERT INTO t VALUES (1, 'b')", "INSERT INTO t VALUES (2, 'a')"} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		txs = append(txs, tx)
+		if _, err := tx.Exec(q); !errors.Is(err, ErrUniqueViolation) {
+			t.Errorf("%s: %v, want a duplicate key", q, err)
+		}
+	}
+	for lk, held := range store.locks {
+		for _, m := range held {
+			if lk.key == "1" && m != lockShare {
+				t.Errorf("the duplicate check holds %v on row 1, want a shared lock", m)
+			}
+		}
+	}
+	for _, tx := range txs {
+		_ = tx.Rollback()
+	}
+}
+
+// LIMIT over a search more than one index serves is refused at any
+// isolation level, as MySQL's optimizer picks which rows it takes.
+func TestMySQLAmbiguousLimitAtReadCommitted(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin(mysql.Isolation(ReadCommitted)))
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, v INT, KEY (a), KEY (b))")
+	if _, err := db.Exec("UPDATE t SET v = 1 WHERE a = 1 AND b = 1 LIMIT 1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ambiguous LIMIT: %v, want unsupported", err)
+	}
+}
+
+// FLOAT and DOUBLE columns store a number's value however it is written, so
+// '1.0' and 1 are the same unique key; NULLIF of UUID() is refused.
+func TestMySQLDoubleColumnsAndVolatileNullif(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, d DOUBLE, f FLOAT, UNIQUE KEY (d))")
+	mustExec(t, db, "INSERT INTO t (id, d) VALUES (1, '1.0')")
+	if _, err := db.Exec("INSERT INTO t (id, d) VALUES (2, 1)"); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("1 after '1.0': %v, want a duplicate key", err)
+	}
+	if _, err := db.Exec("INSERT INTO t (id, d) VALUES (3, 'abc')"); !errors.Is(err, ErrDataTruncated) {
+		t.Errorf("'abc' into DOUBLE: %v, want data truncated", err)
+	}
+	if _, err := db.Exec("SELECT NULLIF(UUID(), '')"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("NULLIF(UUID(), ''): %v, want unsupported", err)
+	}
+}

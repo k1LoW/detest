@@ -619,7 +619,9 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) 
 	}
 	if stop != nil {
 		f := sel.From
-		x.inScanOrder(x.tx.db.resolve(f.Name), cmp.Or(f.Alias, relname(f.Name)), sel.Where, stop, rows)
+		if err := x.inScanOrder(x.tx.db.resolve(f.Name), cmp.Or(f.Alias, relname(f.Name)), sel.Where, stop, rows); err != nil {
+			return nil, nil, err
+		}
 	}
 	if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
 		// planLocking lets these through on InnoDB only, which locks the

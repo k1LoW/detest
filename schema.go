@@ -3,6 +3,7 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -159,6 +160,9 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		// The primary key's entry is the row lock itself, which a plain INSERT
 		// of the same key takes too.
 		key := encodeKey(vals)
+		if dup, err := x.sharedDuplicate(table, key, self); err != nil || dup != nil {
+			return dup, err
+		}
 		if err := x.tx.lock(lockKey{table, key}); err != nil {
 			return nil, err
 		}
@@ -166,6 +170,25 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 			return ex, nil
 		}
 		return nil, nil
+	}
+	if x.tx.db.kind.InnoDB() {
+		// A duplicate of a row already there is checked under a shared lock
+		// on that row, as InnoDB's duplicate check takes one, so two inserts
+		// failing on the same row do not wait for each other.
+		for _, ex := range x.tx.selectNoYield(table, nil) {
+			if ex.Key() == self {
+				continue
+			}
+			evals, ok, err := x.uniqueValues(table, u, ex)
+			if err != nil {
+				return nil, err
+			}
+			if ok && sameValues(evals, vals) {
+				if dup, err := x.sharedDuplicate(table, ex.Key(), self); err != nil || dup != nil {
+					return dup, err
+				}
+			}
+		}
 	}
 	if err := x.tx.lock(uniqueLock(table, u, vals)); err != nil {
 		return nil, err
@@ -183,6 +206,27 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		}
 	}
 	return nil, nil
+}
+
+// sharedDuplicate is, on InnoDB, the row under key that an insert duplicates,
+// locked in share mode as InnoDB's duplicate check locks it, or nil when no
+// such row is there, or it went while the lock waited, and the insert goes
+// on to claim the key.
+func (x *sqlExec) sharedDuplicate(table, key, self string) (Row, error) {
+	if !x.tx.db.kind.InnoDB() || key == self {
+		return nil, nil
+	}
+	if _, found := x.tx.view(table, key); !found {
+		return nil, nil
+	}
+	if err := x.tx.lockMode(lockKey{table, key}, lockShare); err != nil {
+		return nil, err
+	}
+	ex, found := x.tx.view(table, key)
+	if !found {
+		return nil, nil
+	}
+	return ex, nil
 }
 
 // checkUniques enforces the unique constraints other than the primary key for
@@ -368,7 +412,19 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 	if def == nil || len(def.types) == 0 {
 		return nil
 	}
-	for col, v := range row {
+	// In the schema's column order, so that a row wrong in two columns
+	// reports the same error in every replay.
+	cols := slices.Clone(def.columns)
+	for _, c := range slices.Sorted(maps.Keys(row)) {
+		if !slices.Contains(cols, c) {
+			cols = append(cols, c)
+		}
+	}
+	for _, col := range cols {
+		v, present := row[col]
+		if !present {
+			continue
+		}
 		v = derefValue(v)
 		if v == nil {
 			continue
@@ -393,6 +449,31 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			continue
 		}
 		switch t := def.types[col]; t {
+		case "double", "float", "decimal":
+			if !x.tx.db.kind.InnoDB() {
+				continue
+			}
+			// MySQL stores a number's value, whatever it is written as, so
+			// '1.0' and 1 are the same key; a string that is no number is
+			// refused in strict mode.
+			v = boolAsInt(v)
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			if str, ok := v.(string); ok {
+				if !mysqlNumeric.MatchString(strings.TrimSpace(str)) {
+					return x.tx.db.kind.Error(sqlir.DataTruncated, fmt.Sprintf("Data truncated for column '%s' at row 1", col), relname(table), col, "")
+				}
+				v = mysqlNumber(str)
+			}
+			f, ok := toFloat(v)
+			if !ok {
+				return x.unsupported(fmt.Sprintf("a %T stored in a %s column", v, t))
+			}
+			if t == "float" {
+				f = float64(float32(f)) // FLOAT keeps single precision
+			}
+			row[col] = numeric(f)
 		case "uuid":
 			if s, ok := v.(string); ok && !validUUID(s) {
 				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")

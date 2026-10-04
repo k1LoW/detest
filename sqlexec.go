@@ -1269,6 +1269,15 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if noPK && x.tx.heldByOther(lk, lockUpdate) && (keyedByID || !x.inUniqueIndex(table, row)) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
+		if !noPK {
+			dup, err := x.sharedDuplicate(table, lk.key, "")
+			if err != nil {
+				return nil, err
+			}
+			if dup != nil {
+				return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
+			}
+		}
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
@@ -1295,6 +1304,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		if err := x.checkParents(table, row, nil); err != nil {
+			return nil, err
+		}
+		// Last before the write, as the duplicate checks above may wait
+		// while another transaction takes a gap lock the row falls into.
+		if err := x.tx.insertIntention(table, row); err != nil {
 			return nil, err
 		}
 		delete(x.tx.deleted, lk)
@@ -1524,7 +1538,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	x.inScanOrder(table, alias, up.Where, stop, cands)
+	if err := x.inScanOrder(table, alias, up.Where, stop, cands); err != nil {
+		return nil, err
+	}
 	limit, err := x.writeLimit(cands, up.OrderBy, up.Limit)
 	if err != nil {
 		return nil, err
@@ -1675,7 +1691,9 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	x.inScanOrder(x.tx.db.resolve(del.Table), delAlias, del.Where, stop, cands)
+	if err := x.inScanOrder(x.tx.db.resolve(del.Table), delAlias, del.Where, stop, cands); err != nil {
+		return nil, err
+	}
 	limit, err := x.writeLimit(cands, del.OrderBy, del.Limit)
 	if err != nil {
 		return nil, err
@@ -2034,6 +2052,11 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 	case *sqlir.FuncCall:
 		if err := x.checkArity(v); err != nil {
 			return nil, err
+		}
+		if v.Name == "mysql_nullif" && volatile(v.Args[0]) {
+			// MySQL evaluates the first argument again to return it, which
+			// a function such as UUID() answers with another value.
+			return nil, x.unsupported("NULLIF of a function that returns another value each time")
 		}
 		args := make([]any, len(v.Args))
 		for i, a := range v.Args {

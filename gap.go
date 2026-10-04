@@ -267,16 +267,21 @@ func scanCompare(cols, pk []string, a, b Row) int {
 // no ORDER BY, in the order of the index the scan follows, which lockScanTo
 // locks along, so the rows it takes are the ones MySQL's scan reaches first
 // and, where gaps are locked, the ones whose records and gaps it locked.
-func (x *sqlExec) inScanOrder(table, alias string, where sqlir.Expr, stop *scanStop, rows []jrow) {
+func (x *sqlExec) inScanOrder(table, alias string, where sqlir.Expr, stop *scanStop, rows []jrow) error {
 	if stop == nil || len(stop.order) > 0 || !x.tx.db.kind.InnoDB() {
-		return // the scan follows the index at any isolation level, gap locks or not
+		return nil // the scan follows the index at any isolation level, gap locks or not
 	}
 	sr := x.scanSearch(table, alias, where)
+	if sr.ambiguous {
+		// Which rows LIMIT takes follows the index MySQL's optimizer picks.
+		return x.unsupported("LIMIT over a search that more than one index serves")
+	}
 	if len(sr.cols) == 0 || len(sr.ranges) != 1 {
-		return
+		return nil
 	}
 	pk := x.tx.db.defs[table].pk
 	slices.SortStableFunc(rows, func(a, b jrow) int { return scanCompare(sr.cols, pk, a.by[alias], b.by[alias]) })
+	return nil
 }
 
 // scanSearch is the index a scan that LIMIT may stop follows: the one the
