@@ -2542,7 +2542,9 @@ func castValue(v any, typ string) (any, error) {
 	if v == nil {
 		return nil, nil
 	}
-	if b, ok := v.([]byte); ok {
+	// Bytes are read as text only by the casts whose input reads text, so
+	// $1::bytea keeps its byte slice.
+	if b, ok := v.([]byte); ok && typ != "bytea" {
 		v = string(b)
 	}
 	switch typ {

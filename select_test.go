@@ -755,6 +755,13 @@ func TestCastToNumber(t *testing.T) {
 	if _, err := db.Exec(`SELECT 'abc'::int`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("'abc'::int: got %v, want invalid input syntax", err)
 	}
+	var b any
+	if err := db.QueryRow(`SELECT $1::bytea`, []byte("ab")).Scan(&b); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.([]byte); !ok {
+		t.Errorf("$1::bytea: got %T, want []byte", b)
+	}
 	for _, q := range []string{`SELECT '40000'::smallint`, `SELECT 3000000000::int`} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrNumericValueOutOfRange) {
 			t.Errorf("%s: got %v, want out of range", q, err)
