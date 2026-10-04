@@ -426,6 +426,12 @@ scan:
 			}
 		}
 	}
+	scanIndex := "PRIMARY"
+	if def := tx.db.defs[table]; def == nil || !slices.Equal(sr.cols, def.pk) {
+		scanIndex = strings.Join(sr.cols, ",")
+		tx.noteLockStruct(table, "PRIMARY", mode, "record")
+	}
+	tx.noteLockStruct(table, scanIndex, mode, "next-key")
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: cols, ranges: []valRange{gap}})
 	return true, nil
 }
@@ -438,6 +444,19 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	rows := tx.selectNoYield(table, nil)
 	sr := x.searchRange(table, alias, where)
 	cols := sr.key
+	index := "PRIMARY"
+	if def := tx.db.defs[table]; len(sr.cols) > 0 && (def == nil || !slices.Equal(sr.cols, def.pk)) {
+		index = strings.Join(sr.cols, ",")
+	}
+	// note records the lock struct InnoDB keeps for the locks this search
+	// takes on its index, and on the primary key records a secondary index
+	// search reaches, which weigh a deadlock victim.
+	note := func(kind string) {
+		tx.noteLockStruct(table, index, mode, kind)
+		if index != "PRIMARY" {
+			tx.noteLockStruct(table, "PRIMARY", mode, "record")
+		}
+	}
 	lockRecord := func(r Row) error {
 		lk := lockKey{table, r.Key()}
 		if policy != nil && (policy.SkipLocked || policy.NoWait) && tx.heldByOther(lk, mode) {
@@ -464,6 +483,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		if err := lockRows(func(Row) bool { return true }); err != nil {
 			return err
 		}
+		tx.noteLockStruct(table, "PRIMARY", mode, "next-key") // a full scan of the primary key
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table})
 		return nil
 	}
@@ -487,7 +507,13 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		}
 		point := sr.unique
 		if point && slices.ContainsFunc(rows, inRange) {
+			note("record")
 			continue // a unique equality search that finds its row locks the row only
+		}
+		if point {
+			note("gap") // one that misses locks the gap it would be in
+		} else {
+			note("next-key")
 		}
 		// The gap runs from the nearest value below the range to the nearest
 		// above, whose record is locked too unless the search is a unique

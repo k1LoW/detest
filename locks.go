@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -191,42 +192,23 @@ func innodbVictim(members []*Tx) *Tx {
 // innodbWeight is a transaction's weight as InnoDB's deadlock detector takes
 // it: the undo records it wrote and the lock structs it holds. InnoDB keeps a
 // lock struct per table and table lock mode, and per index page, mode and
-// kind of record lock (the record alone, or next-key with the gap before
-// it). detest has no pages, so a table's records count as one page; a row
-// the transaction inserted holds an implicit lock, no struct.
+// kind of record lock (the record alone, the gap alone, or next-key with the
+// gap before it). The searches record theirs as they lock (noteLockStruct);
+// a row locked otherwise, by a write or a foreign key or duplicate check,
+// holds a record lock on the primary key. detest has no pages, so an index's
+// records count as one page, and a row the transaction inserted holds an
+// implicit lock, no struct.
 func innodbWeight(t *Tx) int {
-	structs := map[string]bool{}
-	class := func(m lockMode) string {
-		if m == lockShare || m == lockKeyShare {
-			return "S"
-		}
-		return "X"
+	structs := maps.Clone(t.lockStructs)
+	if structs == nil {
+		structs = map[string]bool{}
 	}
-	tableMode := map[string]string{} // the strongest record lock on each table
-	note := func(table, mode string) {
-		if tableMode[table] != "X" {
-			tableMode[table] = mode
-		}
-	}
-	nextKey := map[string]bool{} // tables whose primary key records a range search locked
-	for _, g := range t.db.gaps {
-		if g.tx != t {
-			continue
-		}
-		def := t.db.defs[g.table]
-		primary := len(g.cols) == 0 || def != nil && slices.Equal(g.cols, def.pk)
-		mode := "X"
-		if m, ok := t.tableModes()[g.table]; ok {
-			mode = m
-		}
-		if primary {
-			structs["R|"+g.table+"|PRIMARY|"+mode+"|next-key"] = true
-			nextKey[g.table] = true
-		} else {
-			structs["R|"+g.table+"|"+strings.Join(g.cols, ",")+"|"+mode+"|next-key"] = true
-			structs["R|"+g.table+"|PRIMARY|"+mode+"|record"] = true
-		}
-		note(g.table, mode)
+	// InnoDB keeps an intention lock per table and mode, so a transaction
+	// that took shared and exclusive locks on a table holds both IS and IX.
+	note := func(table, mode string) { structs["T|"+table+"|I"+mode] = true }
+	for k := range t.lockStructs {
+		parts := strings.SplitN(k, "|", 5) // R|table|index|mode|kind
+		note(parts[1], parts[3])
 	}
 	for _, lk := range t.locks {
 		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
@@ -237,9 +219,16 @@ func innodbWeight(t *Tx) int {
 				continue // an inserted row's lock is implicit
 			}
 		}
-		mode := class(t.db.locks[lk][t])
+		mode := lockClass(t.db.locks[lk][t])
 		note(lk.table, mode)
-		if !nextKey[lk.table] {
+		searched := false
+		for k := range t.lockStructs {
+			if strings.HasPrefix(k, "R|"+lk.table+"|PRIMARY|"+mode+"|") {
+				searched = true
+				break
+			}
+		}
+		if !searched {
 			structs["R|"+lk.table+"|PRIMARY|"+mode+"|record"] = true
 		}
 	}
@@ -249,28 +238,29 @@ func innodbWeight(t *Tx) int {
 	for lk := range t.deleted {
 		note(lk.table, "X")
 	}
-	for table, mode := range tableMode {
-		structs["T|"+table+"|I"+mode] = true
-	}
 	return t.undo + len(structs)
 }
 
-// tableModes is the strongest record lock t holds on each table, X or S.
-func (t *Tx) tableModes() map[string]string {
-	out := map[string]string{}
-	for _, lk := range t.locks {
-		if lk.key == gapWaitKey {
-			continue
-		}
-		m := "S"
-		if mode := t.db.locks[lk][t]; mode != lockShare && mode != lockKeyShare {
-			m = "X"
-		}
-		if out[lk.table] != "X" {
-			out[lk.table] = m
-		}
+// lockClass is the InnoDB lock mode a row lock of detest's strength is: S
+// for the shared ones, X otherwise.
+func lockClass(m lockMode) string {
+	if m == lockShare || m == lockKeyShare {
+		return "S"
 	}
-	return out
+	return "X"
+}
+
+// noteLockStruct records the lock struct InnoDB keeps for record locks of a
+// kind ("record", "gap" or "next-key") and mode on an index of table, which
+// weighs the transaction as a deadlock victim.
+func (tx *Tx) noteLockStruct(table, index string, mode lockMode, kind string) {
+	if !tx.db.kind.InnoDB() {
+		return
+	}
+	if tx.lockStructs == nil {
+		tx.lockStructs = map[string]bool{}
+	}
+	tx.lockStructs["R|"+table+"|"+index+"|"+lockClass(mode)+"|"+kind] = true
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

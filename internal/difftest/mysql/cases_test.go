@@ -184,6 +184,43 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A lookup through a unique secondary index locks that index's record
+		// and the primary key's, two lock structs, which make the weights
+		// equal here, so the transaction that closed the cycle is the victim.
+		Name:   "deadlock victim weighs a unique secondary index lookup",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.Q(0, `SELECT id FROM u WHERE code = 'a' FOR UPDATE`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 2`),
+			difftest.S(1, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// A shared next-key range and an exclusive record lock are lock
+		// structs of their own, as are the shared and exclusive table locks.
+		Name:   "deadlock victim weighs shared and exclusive locks apart",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.Q(0, `SELECT id FROM items WHERE id BETWEEN 1 AND 15 FOR SHARE`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 10`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 3 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		Name:   "a failed statement rolls back alone and keeps its locks",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
