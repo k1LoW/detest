@@ -2094,6 +2094,11 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if x.tx.db.kind.InnoDB() {
 		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
+	// With neither side typed, as in $1 = '01', Postgres compares text, so a
+	// number the parameter holds is compared as the text it is sent as.
+	if untypedExpr(le) && untypedExpr(re) {
+		return asText(l), asText(r), nil
+	}
 	l, err := x.untyped(le, l, r)
 	if err != nil {
 		return nil, nil, err
@@ -2151,6 +2156,24 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 		return nil, nil
 	}
 	return op == "=" || op == "<=" || op == ">=", nil
+}
+
+func untypedExpr(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.Param:
+		return true
+	case *sqlir.Const:
+		_, ok := e.Value.(string)
+		return ok
+	}
+	return false
+}
+
+func asText(v any) any {
+	if isNumber(v) {
+		return fmt.Sprint(derefValue(v))
+	}
+	return v
 }
 
 func isText(v any) bool {

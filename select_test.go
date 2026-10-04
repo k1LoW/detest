@@ -523,6 +523,10 @@ func TestTextComparedWithNumber(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name = '02'`); len(got) != 1 || got[0] != "0" {
 		t.Errorf("name = '02': got %v, want 0", got)
 	}
+	// A parameter compared with an untyped literal is text, as both are.
+	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE $1 = '01'`, int64(1)); len(got) != 1 || got[0] != "0" {
+		t.Errorf("$1 = '01': got %v, want 0", got)
+	}
 	for _, q := range []string{
 		`SELECT count(*) FROM t WHERE id = 2 AND name = 2`,
 		`SELECT count(*) FROM t WHERE name = 1`,
