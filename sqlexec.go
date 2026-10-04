@@ -1290,7 +1290,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		// from every value: a key made from an id column alone can match a
 		// row with other unique values, which Postgres would not wait on.
 		_, keyedByID := row["id"]
-		if noPK && x.tx.heldByOther(lk, lockUpdate) && (keyedByID || !x.inUniqueIndex(table, row)) {
+		if noPK && len(x.tx.conflicting(lk, lockUpdate)) > 0 && (keyedByID || !x.inUniqueIndex(table, row)) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
 		if !noPK {
@@ -1539,6 +1539,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	preview := lazyString(func() string {
 		row := Row{}
 		for _, a := range up.Set {
+			// A value computed from the row it updates is not known before
+			// the row is read, so the trace shows the expression instead.
+			if len(sqlir.ColumnRefs(a.Value)) > 0 {
+				row[a.Column] = x.exprString(a.Value)
+				continue
+			}
 			v, err := x.eval(a.Value, &env{})
 			if err != nil {
 				v = sqlir.Unknown
@@ -3501,7 +3507,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			valuesKey(&kb, d(i))
 		}
 		lk := lockKey{"__advisory__", kb.String()}
-		if x.tx.heldByOther(lk, lockUpdate) && name == "pg_try_advisory_xact_lock" {
+		if name == "pg_try_advisory_xact_lock" && x.tx.heldByOther(lk, lockUpdate) {
 			return false, nil
 		}
 		if err := x.tx.lock(lk); err != nil {
@@ -3566,8 +3572,21 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 	case *sqlir.Const:
 		return fmt.Sprint(v.Value)
 	case *sqlir.BinaryExpr:
-		return x.exprString(v.L) + " " + strings.ToLower(v.Op) + " " + x.exprString(v.R)
+		// An operand that is itself an operation of another operator, or
+		// the right one of the same, is grouped, so that (n + 1) * 2 does
+		// not read as n + 1 * 2.
+		l, r := x.exprString(v.L), x.exprString(v.R)
+		if b, ok := v.L.(*sqlir.BinaryExpr); ok && b.Op != v.Op {
+			l = "(" + l + ")"
+		}
+		if _, ok := v.R.(*sqlir.BinaryExpr); ok {
+			r = "(" + r + ")"
+		}
+		return l + " " + strings.ToLower(v.Op) + " " + r
 	case *sqlir.UnaryExpr:
+		if _, ok := v.X.(*sqlir.BinaryExpr); ok {
+			return strings.ToLower(v.Op) + " (" + x.exprString(v.X) + ")"
+		}
 		return strings.ToLower(v.Op) + " " + x.exprString(v.X)
 	case *sqlir.IsNull:
 		if v.Not {

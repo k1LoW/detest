@@ -102,6 +102,7 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
 			tx.aborted = true
 			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
+			markPassedOver(conflict) // gave up on the lock, as NOWAIT does
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		if err := tx.breakCycle(conflict, what); err != nil {
@@ -143,11 +144,15 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		// one that is depends on timing, so every member may be the victim.
 		members := append([]*Tx{tx}, cycle...)
 		v := members[tx.p.Choose("deadlock victim", len(members))]
+		// The victim gives up on the locks it waited for, as NOWAIT does,
+		// so their holders' release may let an idle loop it ran in retry.
 		if v == tx {
+			markPassedOver(conflict)
 			tx.aborted = true
 			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
+		markPassedOver(v.p.waitRow.blockers())
 		v.deadlockVictim = true
 		v.p.state = stateReady
 		v.p.waitRow = nil
@@ -272,6 +277,9 @@ func (tx *Tx) wake(keys map[lockKey]bool) {
 	if tx.p == nil || len(keys) == 0 {
 		return
 	}
+	if tx.passedOver {
+		tx.p.r.bump(tx.p)
+	}
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
 			p.state = stateReady
@@ -281,7 +289,18 @@ func (tx *Tx) wake(keys map[lockKey]bool) {
 }
 
 // heldByOther reports whether another transaction holds lk in a mode that
-// conflicts with mode, for NOWAIT and SKIP LOCKED.
+// conflicts with mode, for NOWAIT, SKIP LOCKED and the try locks, which give
+// up on the lock rather than wait. It marks the holders as passed over, so a
+// read that waits instead asks conflicting directly.
 func (tx *Tx) heldByOther(lk lockKey, mode lockMode) bool {
-	return len(tx.conflicting(lk, mode)) > 0
+	holders := tx.conflicting(lk, mode)
+	markPassedOver(holders)
+	return len(holders) > 0
+}
+
+// markPassedOver marks holders whose lock an operation gave up on.
+func markPassedOver(holders []*Tx) {
+	for _, h := range holders {
+		h.passedOver = true
+	}
 }

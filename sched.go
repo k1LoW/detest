@@ -153,10 +153,12 @@ type run struct {
 	prev     *State
 	version  int
 	idleAt   map[*procType]int
-	pending  *violation // raised by a simulated resource during a step
-	fp       uint64     // fingerprint of the run so far (see choice.fp)
-	tracing  bool       // keep the trace (see note)
-	snap     *State     // the latest snapshot, whose tables the next one reuses
+	idles    map[*procType]int // idle ticks that left the budget unspent
+	cut      bool              // a loop went idle more than MaxIdleTicks allows
+	pending  *violation        // raised by a simulated resource during a step
+	fp       uint64            // fingerprint of the run so far (see choice.fp)
+	tracing  bool              // keep the trace (see note)
+	snap     *State            // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
 	queuesTouched bool
 	// outside counts the processes blocked outside detest, which may wake and
@@ -190,6 +192,14 @@ type Proc struct {
 	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
+	// started is the run's version when the process started, and bumps
+	// counts the version changes the process made itself. An idle loop tick
+	// saw no change another process made after it started, even one
+	// committed while the tick ran, so such a change lets the loop tick
+	// again. Its own writes do not, or a tick that records something every
+	// time it finds nothing to do would wake its loop forever.
+	started int
+	bumps   int
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -318,6 +328,12 @@ func (r *run) execute() (v *violation) {
 		if r.pending != nil {
 			return r.pending
 		}
+		if r.cut {
+			// A loop cut while the clock advanced or a process outside
+			// settled: its tick is checked as any step, and only the checks
+			// at quiescence are skipped.
+			return r.checkAlways()
+		}
 		opts := r.enabled()
 		if len(opts) == 0 {
 			if r.advanceClock() {
@@ -341,6 +357,9 @@ func (r *run) execute() (v *violation) {
 		}
 		if v := r.checkAlways(); v != nil {
 			return v
+		}
+		if r.cut {
+			return nil // only the checks at quiescence are skipped
 		}
 	}
 	for _, p := range r.procs {
@@ -504,7 +523,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.nextID), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
-		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg}
+		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
 	r.procs = append(r.procs, p)
 	go p.main()
 	return p
@@ -693,7 +712,16 @@ func (r *run) crash(p *Proc) {
 	if p.msg != nil {
 		r.redeliver(p)
 	}
+	r.bump(nil)
+}
+
+// bump records a change of committed state. p is the process that made it,
+// or nil for a change the scheduler made.
+func (r *run) bump(p *Proc) {
 	r.version++
+	if p != nil {
+		p.bumps++
+	}
 }
 
 // redeliver puts back the message p failed to handle, unless it was
@@ -757,8 +785,17 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		case errors.Is(ev.err, ErrIdle):
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
+				if r.idles[p.pt] >= r.s.maxIdleTicks {
+					r.cut = true
+					break
+				}
+				r.idles[p.pt]++
 				r.runs[p.pt]--
-				r.idleAt[p.pt] = r.version
+				if r.version-p.started > p.bumps {
+					r.idleAt[p.pt] = p.started
+				} else {
+					r.idleAt[p.pt] = r.version
+				}
 			}
 			ev.err = nil
 		case ev.err != nil && !errors.Is(ev.err, errNack):
@@ -816,7 +853,8 @@ func (v *violation) same(o *violation) bool {
 
 // ErrIdle is returned by a loop process that found nothing to do. The tick
 // does not consume the loop's run budget, which encodes the fairness
-// assumption that a periodic sweep keeps ticking until it has work.
+// assumption that a periodic sweep keeps ticking until it has work, up to
+// MaxIdleTicks idle ticks per loop and run.
 var ErrIdle = errors.New("detest: idle tick")
 
 // lose drops the i-th message of q undelivered.
@@ -825,7 +863,7 @@ func (r *run) lose(q *Queue, i int) {
 	q.msgs = append(q.msgs[:i:i], q.msgs[i+1:]...)
 	q.lossBudget--
 	r.queuesTouched = true
-	r.version++
+	r.bump(nil)
 	r.note(nil, "%s: %s is lost", q.name, msg)
 }
 
@@ -1174,7 +1212,7 @@ func (r *run) dbsTouched() bool {
 }
 
 func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idles: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {

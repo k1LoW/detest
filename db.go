@@ -1370,11 +1370,17 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 // held until commit or rollback; a waiting writer re-reads the row after the
 // lock is granted, as Postgres does.
 type Tx struct {
-	db      *DB
-	p       *Proc
-	writes  map[lockKey]Row
-	deleted map[lockKey]bool
-	moved   map[lockKey]string // the keys this transaction changed, as DB.moved
+	db *DB
+	p  *Proc
+	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
+	// transaction holds. Letting a lock go or weakening it then changes what
+	// such a read finds, so an idle loop may tick again even if no row
+	// changed, whether the transaction ends or a savepoint or a statement
+	// rolls back.
+	passedOver bool
+	writes     map[lockKey]Row
+	deleted    map[lockKey]bool
+	moved      map[lockKey]string // the keys this transaction changed, as DB.moved
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
 	start   time.Time
@@ -1646,7 +1652,7 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
-	tx.deferred = append(tx.deferred, func() { q.push(msg) })
+	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
 // pending applies f to the rows tx has written to table and not committed.
@@ -1943,24 +1949,35 @@ func (tx *Tx) commit() {
 	}
 	maps.Copy(tx.db.moved, tx.moved)
 	tx.recordVersions()
+	// Only a commit that changes a row counts as a change for idle loops. A
+	// MySQL UPDATE leaving its rows as they were still commits writes, and
+	// two idle loops issuing such updates would otherwise wake each other
+	// forever. The enqueues in tx.deferred count themselves.
+	changed := false
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {
 			t = map[string]Row{}
 			tx.db.committed[lk.table] = t
 		}
+		if prev, ok := t[lk.key]; !ok || !sameRow(prev, r) {
+			changed = true
+		}
 		t[lk.key] = r
 		tx.db.touched[lk.table] = true
 	}
 	for lk := range tx.deleted {
+		if _, ok := tx.db.committed[lk.table][lk.key]; ok {
+			changed = true
+		}
 		delete(tx.db.committed[lk.table], lk.key)
 		tx.db.touched[lk.table] = true
 	}
 	for _, fn := range tx.deferred {
 		fn()
 	}
-	if tx.p != nil && len(tx.writes)+len(tx.deleted)+len(tx.deferred) > 0 {
-		tx.p.r.version++
+	if tx.p != nil && changed {
+		tx.p.r.bump(tx.p)
 	}
 	tx.release()
 }

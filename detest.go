@@ -84,6 +84,15 @@ func MaxRedeliveries(n int) Option { return func(s *Sim) { s.maxRedeliveries = n
 // detest does not know which processes share a pod.
 func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
 
+// MaxIdleTicks bounds how many idle ticks of each loop per run leave its
+// budget unspent (3 by default). An idle tick is free so that a sweep keeps
+// ticking until it has work, but loops whose idle ticks lock or write rows
+// can wake each other without end, so a run whose loop goes idle once more
+// is cut there, without checking the invariants at quiescence, and the
+// result counts it. Raise it when a loop needs more idle ticks to reach its
+// work.
+func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
+
 // MaxPreemptions bounds the context switches away from a runnable process per
 // run (CHESS-style). 0 means unbounded.
 func MaxPreemptions(n int) Option {
@@ -149,6 +158,7 @@ type Sim struct {
 	maxRedeliveries  int
 	maxCrashes       int
 	maxPreemptions   int
+	maxIdleTicks     int
 	boundPreemptions bool
 	maxRuns          int
 	maxDuration      time.Duration
@@ -181,7 +191,7 @@ type Sim struct {
 }
 
 func newSimDefaults() *Sim {
-	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000}
+	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3}
 }
 
 func newSim(t *testing.T, opts ...Option) *Sim {
@@ -262,6 +272,9 @@ type result struct {
 	Kind     string
 	Err      error
 	Runs     int
+	// CutRuns are the runs cut at MaxIdleTicks, the ones before a checkpoint
+	// included.
+	CutRuns  int
 	MaxDepth int
 	Complete bool
 	Shard    string // "index/total" when DETEST_SHARD or Shard splits the exploration across machines
@@ -284,6 +297,9 @@ type result struct {
 // report formats the outcome for humans.
 func (r *result) report() string {
 	if !r.Violated && r.Replay {
+		if r.CutRuns > 0 {
+			return fmt.Sprintf("detest: replayed schedule %s without violation, but it was cut at MaxIdleTicks and its invariants at quiescence were not checked", r.Schedule)
+		}
 		return fmt.Sprintf("detest: replayed schedule %s without violation", r.Schedule)
 	}
 	if !r.Violated {
@@ -299,6 +315,9 @@ func (r *result) report() string {
 			runs = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint,", r.Runs, r.Runs+r.PriorRuns)
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
+		if r.CutRuns > 0 {
+			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
+		}
 		if r.Checkpoint != "" {
 			msg += fmt.Sprintf("; the rest is saved: run again with DETEST_CHECKPOINT=%s to continue", r.Checkpoint)
 		}
@@ -344,6 +363,9 @@ func (s *Sim) check() *result {
 		}
 		res := s.makeResult(r, v, 1, len(r.choices), true, start)
 		res.Replay = true
+		if r.cut {
+			res.CutRuns = 1
+		}
 		return res
 	}
 	f := s.frontier

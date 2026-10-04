@@ -1,11 +1,16 @@
 package detest
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
 )
 
@@ -35,6 +40,216 @@ func TestLoopIdleTicksDoNotSpendTheBudget(t *testing.T) {
 			}
 			return nil
 		})
+	})
+}
+
+// A change committed while an idle tick is still running, after the tick
+// read, lets the loop tick again: the tick did not see it.
+func TestLoopTicksAgainAfterAChangeDuringAnIdleTick(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Manual("producer", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO work VALUES ('w1', false)`)
+			return err
+		})
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE NOT done`)
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			p.Step("reports the sweep")
+			if n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not swept")
+			}
+			return nil
+		})
+	})
+}
+
+// An idle tick's own commit does not wake the loop again. On MySQL an UPDATE
+// that leaves a row as it was reports no affected rows but still commits.
+func TestLoopIdleTickIsNotWokenByItsOwnCommit(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true)`) })
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = 'w1'`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
+}
+
+// Two idle loops whose commits change nothing do not wake each other.
+func TestIdleLoopsAreNotWokenByUnchangedCommits(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true), ('w2', true)`) })
+		for _, id := range []string{"w1", "w2"} {
+			s.Loop("sweeper_"+id, 1, func(p *Proc) error {
+				res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = ?`, id)
+				if err != nil {
+					return err
+				}
+				n, _ := res.RowsAffected()
+				p.Step("reports the sweep")
+				if n == 0 {
+					return ErrIdle
+				}
+				return nil
+			})
+		}
+	}, nil, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
+	}
+}
+
+// A loop that went idle after SKIP LOCKED passed over a row ticks again
+// once the transaction holding the row lets it go, even without changing it.
+func TestIdleLoopRetriesARowSkipLockedPassedOver(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = done WHERE id = 'w1'`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not done")
+			}
+			return nil
+		})
+	})
+}
+
+// Idle loops that lock rows the other passes over with SKIP LOCKED end, cut
+// at MaxIdleTicks rather than waking each other forever.
+func TestIdleLoopsWakingEachOtherAreCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true), ('w2', true)`) })
+		for _, ids := range [][2]string{{"w1", "w2"}, {"w2", "w1"}} {
+			s.Loop("sweeper_"+ids[0], 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = ?`, ids[0]); err != nil {
+					return err
+				}
+				rows, err := tx.QueryContext(p.Context(), `SELECT id FROM work WHERE id = ? FOR UPDATE SKIP LOCKED`, ids[1])
+				if err != nil {
+					return err
+				}
+				_ = rows.Close()
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				return ErrIdle
+			})
+		}
+	}, []Option{MaxIdleTicks(1)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns == 0 {
+		t.Fatalf("want a complete exploration with runs cut at MaxIdleTicks, got %s", res.report())
+	}
+}
+
+// A loop that went idle after SKIP LOCKED passed over a row ticks again once a
+// rollback to a savepoint lets the row go, while the holder is still open.
+func TestIdleLoopRetriesARowASavepointRollbackLetGo(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		open, idled, takenWhileOpen := false, false, false
+		s.Seed(func() { open, idled, takenWhileOpen = false, false, false })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			open = true
+			for _, q := range []string{`SAVEPOINT s`, `UPDATE work SET done = done WHERE id = 'w1'`, `ROLLBACK TO SAVEPOINT s`} {
+				if _, err := tx.ExecContext(p.Context(), q); err != nil {
+					return err
+				}
+			}
+			p.Step("works on")
+			open = false
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+			if errors.Is(err, sql.ErrNoRows) {
+				idled = true
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			if open && idled {
+				takenWhileOpen = true
+			}
+			return tx.Commit()
+		})
+		s.Sometimes("worker went idle, then took w1 after the rollback, before the toucher ended", func(*State) bool { return takenWhileOpen })
 	})
 }
 
@@ -411,5 +626,300 @@ func TestNowait(t *testing.T) {
 			})
 		}
 		s.Sometimes("NOWAIT refused", func(*State) bool { return refused })
+	})
+}
+
+// The trace shows a SET value computed from the row as its expression, since
+// the value is not known before the row is read.
+func TestTraceShowsComputedSetValues(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL, m int, label text)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counters (id, n, label) VALUES ('c1', 0, 'x')`) })
+		s.Manual("bump", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = (n + 1) * 2, m = -(n + 1) * 2, label = $1 WHERE id = 'c1'`, "y")
+			return err
+		})
+		s.AtQuiescence(func(*State) error { return errors.New("show the trace") })
+	}, nil, nil, 0)
+	if !strings.Contains(res.Trace, "set {label=y m=- (n + 1) * 2 n=(n + 1) * 2}") {
+		t.Fatalf("trace does not show the computed value:\n%s", res.Trace)
+	}
+}
+
+// idleLoopModel declares a loop that goes idle at once, beside a manual
+// process, so that MaxIdleTicks(0) cuts every run the loop ticks in.
+func idleLoopModel(s *Sim, bad *bool) {
+	s.Seed(func() { *bad = false })
+	s.Manual("caller", 1, func(p *Proc) error {
+		p.Step("calls")
+		return nil
+	})
+	s.Loop("sweeper", 1, func(p *Proc) error {
+		*bad = true
+		return ErrIdle
+	})
+}
+
+// The step a run is cut at is checked as any other: only the checks at
+// quiescence are skipped.
+func TestCutRunStillChecksAlways(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		var bad bool
+		idleLoopModel(s, &bad)
+		s.Always(func(*State) error {
+			if bad {
+				return errors.New("the idle tick left bad state")
+			}
+			return nil
+		})
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if !res.Violated || !strings.Contains(res.Err.Error(), "bad state") {
+		t.Fatalf("want the Always violation of the cut step, got %s", res.report())
+	}
+}
+
+// A replayed schedule cut at MaxIdleTicks says so instead of passing.
+func TestReplayReportsACut(t *testing.T) {
+	cut := 0
+	for _, sched := range []string{"0", "1"} {
+		res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+			var bad bool
+			idleLoopModel(s, &bad)
+		}, []Option{MaxIdleTicks(0), Replay(sched)}, nil, 0)
+		if res.CutRuns > 0 {
+			cut++
+			if !strings.Contains(res.report(), "cut at MaxIdleTicks") {
+				t.Fatalf("a cut replay reports %q", res.report())
+			}
+		}
+	}
+	if cut == 0 {
+		t.Fatal("no replayed schedule was cut")
+	}
+}
+
+// Runs cut before a checkpoint are counted after it is resumed.
+func TestCheckpointKeepsCutRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ckpt")
+	f := newFrontier(1, 10)
+	f.cut()
+	if err := f.save(path); err != nil {
+		t.Fatal(err)
+	}
+	g := newFrontier(1, 10)
+	if err := g.load(path); err != nil {
+		t.Fatal(err)
+	}
+	if res := g.merge(nil, 1); res.CutRuns != 1 || !strings.Contains(res.report(), "1 runs cut at MaxIdleTicks") {
+		t.Fatalf("resumed exploration reports %q", res.report())
+	}
+}
+
+// A MySQL locking read that waits rather than skips marks no holder, so an
+// idle loop is not woken when the holder lets go of a row it did not change.
+func TestBlockingLockingReadWakesNoIdleLoop(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysql.New())
+		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', true)`) })
+		ticks := 0
+		s.Seed(func() { ticks = 0 })
+		for _, name := range []string{"a", "b"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				rows, err := tx.QueryContext(p.Context(), `SELECT id FROM work WHERE id >= 'w1' FOR UPDATE`)
+				if err != nil {
+					return err
+				}
+				_ = rows.Close()
+				return tx.Commit()
+			})
+		}
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			ticks++
+			p.Step("finds nothing")
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error {
+			if ticks > 1 {
+				return fmt.Errorf("the idle sweeper ticked %d times with no row changed", ticks)
+			}
+			return nil
+		})
+	})
+}
+
+// Explore's merge keeps the cut of a replay, which no frontier counted.
+func TestMergeKeepsAReplaysCut(t *testing.T) {
+	res := newFrontier(1, 10).merge([]*result{{Replay: true, CutRuns: 1, Schedule: "0"}}, 1)
+	if res.CutRuns != 1 || !strings.Contains(res.report(), "cut at MaxIdleTicks") {
+		t.Fatalf("merged replay reports %q", res.report())
+	}
+}
+
+// An INSERT that waits for a row equal to its own in a table without a
+// primary key marks no holder, so an idle loop is not woken when the holder
+// lets go of a row it did not change.
+func TestWaitingInsertWakesNoIdleLoop(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE t (a int UNIQUE)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO t VALUES (1)`) })
+		ticks := 0
+		s.Seed(func() { ticks = 0 })
+		s.Manual("holder", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `UPDATE t SET a = a WHERE a = 1`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Manual("inserter", 1, func(p *Proc) error {
+			_, _ = db.ExecContext(p.Context(), `INSERT INTO t VALUES (1)`)
+			return nil
+		})
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			ticks++
+			p.Step("finds nothing")
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error {
+			if ticks > 1 {
+				return fmt.Errorf("the idle sweeper ticked %d times with no row changed", ticks)
+			}
+			return nil
+		})
+	})
+}
+
+// A loop that goes idle once the clock has advanced is cut as one that goes
+// idle at a step, rather than having its run checked at quiescence.
+func TestLoopIdleAfterASleepIsCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			time.Sleep(time.Second)
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error { return errors.New("checked at quiescence") })
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if res.Violated || res.CutRuns == 0 {
+		t.Fatalf("want the run cut, got %s", res.report())
+	}
+	res, _ = exploreBubble(t, func(t *testing.T, s *Sim) {
+		// Atomic: the race detector sees no edge from the scheduler to a
+		// process the fake clock woke, though they never run at once.
+		var bad atomic.Bool
+		s.Seed(func() { bad.Store(false) })
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			time.Sleep(time.Second)
+			bad.Store(true)
+			return ErrIdle
+		})
+		s.Always(func(*State) error {
+			if bad.Load() {
+				return errors.New("the idle tick left bad state")
+			}
+			return nil
+		})
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if !res.Violated || !strings.Contains(res.Err.Error(), "bad state") {
+		t.Fatalf("want the Always violation of the cut tick, got %s", res.report())
+	}
+}
+
+// A loop that went idle after a lock timeout gave up on a row ticks again
+// once the holder lets it go, even without changing it.
+func TestIdleLoopRetriesARowALockTimeoutGaveUpOn(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('w1', false)`) })
+		s.Manual("toucher", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SELECT id FROM work WHERE id = 'w1' FOR UPDATE`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SET LOCAL lock_timeout = '1s'`); err != nil {
+				return err
+			}
+			var id string
+			err = tx.QueryRowContext(p.Context(), `SELECT id FROM work WHERE NOT done LIMIT 1 FOR UPDATE`).Scan(&id)
+			if errors.Is(err, ErrLockNotAvailable) {
+				return ErrIdle
+			} else if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE work SET done = true WHERE id = $1`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not done")
+			}
+			return nil
+		})
+	})
+}
+
+// A loop that went idle as a deadlock victim ticks again once the survivor
+// lets go of its locks, even without changing a row.
+func TestIdleLoopRetriesAfterADeadlockSurvivorCommitsUnchanged(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO work VALUES ('a', false), ('b', true)`) })
+		inTx := func(p *Proc, stmts ...string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			for _, q := range stmts {
+				if _, err := tx.ExecContext(p.Context(), q); err != nil {
+					return err
+				}
+			}
+			return tx.Commit()
+		}
+		s.Manual("toucher", 1, func(p *Proc) error {
+			_ = inTx(p, `UPDATE work SET done = done WHERE id = 'b'`, `UPDATE work SET done = done WHERE id = 'a'`)
+			return nil
+		})
+		s.Loop("worker", 1, func(p *Proc) error {
+			err := inTx(p, `UPDATE work SET done = true WHERE id = 'a' AND NOT done`, `UPDATE work SET done = done WHERE id = 'b'`)
+			if errors.Is(err, ErrDeadlock) {
+				return ErrIdle
+			}
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "a"); !row.Bool("done") {
+				return fmt.Errorf("a not done")
+			}
+			return nil
+		})
 	})
 }

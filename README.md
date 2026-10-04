@@ -10,6 +10,34 @@ In-Process Deterministic Simulation Testing for Go Applications, based on Statel
 
 Instead of virtualizing OS threads or low-level network packets, `detest` operates at Go's standard client boundaries (`database/sql`, `http.RoundTripper`) and at mutexes injected in place of `sync.Mutex`, running goroutines inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble. It injects failure scenarios and systematically explores every execution interleaving within configurable bounds, without modifying your production business logic or ORMs.
 
+## Getting started
+
+The recommended way to use detest is through its agent skill, [`skills/detest`](skills/detest). detest is meant to be applied by an AI agent that knows the code under test, and the skill lets you use it without learning it. You decide to use detest, and the agent proposes where to look, wires your real code into a simulation, runs the exploration, and reports what was run, what the result guarantees and what it leaves out. It stops for your decision on the target, on the scenario and its invariants, on adding the dependency, and on the conditions of the run. The tests it writes carry the `detest` build tag, so the everyday `go test ./...` does not run them.
+
+### Installing the skill
+
+Install it with the GitHub CLI (`gh skill` is in preview).
+
+``` console
+$ gh skill install k1LoW/detest detest
+```
+
+The command asks which agent to install it for, and whether into the current repository or for your user. `gh skill update` brings an installed skill up to date.
+
+[`skills`](https://github.com/vercel-labs/skills) installs it as well, through npx.
+
+``` console
+$ npx skills add k1LoW/detest --skill detest
+```
+
+`npx skills update` brings it up to date.
+
+### Using it
+
+Ask the agent to use detest, for example "use detest to check whether two concurrent requests can oversell in `Reserve`", or say yes when it suggests detest for a concurrency problem. It does not start on its own.
+
+The rest of this README describes the API the skill writes tests with, for reading those tests or writing them by hand.
+
 ## Usage
 
 ``` go
@@ -202,7 +230,7 @@ For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` tha
 
 ## Options and environment variables
 
-The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
+The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxIdleTicks`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
 | Variable | Effect |
 | --- | --- |
