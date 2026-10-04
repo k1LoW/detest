@@ -881,8 +881,8 @@ func (x *sqlExec) columnRanges(col, alias, table string, conjuncts []sqlir.Expr)
 				other = e.L
 				op = map[string]string{"<": ">", "<=": ">=", ">": "<", ">=": "<=", "=": "=", "<=>": "<=>"}[op]
 			}
-			if k, ok := other.(*sqlir.Const); ok && op == "<=>" && derefValue(k.Value) == nil {
-				nullOnly, found = true, true // <=> NULL is IS NULL
+			if op == "<=>" && isNullConstant(other) {
+				nullOnly, found = true, true // <=> NULL, bound or written, is IS NULL
 				continue
 			}
 			v, ok := constant(other)

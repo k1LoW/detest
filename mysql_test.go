@@ -4503,3 +4503,23 @@ func TestMySQLInsertIgnoreDowngrades(t *testing.T) {
 		t.Errorf("a plain INSERT: %v, want out of range", err)
 	}
 }
+
+// col <=> ? with a NULL argument searches the NULL keys, as <=> NULL does,
+// and locks them and the gap around them, not the whole table.
+func TestMySQLNullSafeEqualBoundNull(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, k INT, KEY (k))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, NULL), (2, 5), (3, 9)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("SELECT id FROM t WHERE k <=> ? FOR UPDATE", nil); err != nil {
+		t.Fatal(err)
+	}
+	if held := store.locks[lockKey{store.resolve("t"), "3"}]; len(held) > 0 {
+		t.Error("row 3, past the NULL keys and the next record, is locked")
+	}
+}
