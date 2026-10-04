@@ -1004,6 +1004,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			} else {
 				delete(def.nums, col.Name)
 			}
+			if def.fsp == nil {
+				def.fsp = map[string]int{}
+			}
+			def.fsp[col.Name] = col.FSP
 			// ALTER COLUMN TYPE rewrites the rows under the new type: an
 			// integer becomes a numeric's float, a numeric(p, s) rounds
 			// what they hold, and a varchar(n) refuses what is too long.
@@ -1015,10 +1019,6 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			continue
 		}
 		if col.Type != "" {
-			if def.fsp == nil {
-				def.fsp = map[string]int{}
-			}
-			def.fsp[col.Name] = col.FSP
 			// A whole column definition, which says ON UPDATE again or drops
 			// it, as MySQL's MODIFY and CHANGE do; ALTER COLUMN leaves it.
 			if col.OnUpdate != nil {

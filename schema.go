@@ -533,7 +533,7 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if x.tx.db.kind.InnoDB() || v == sqlir.Unknown {
 				continue
 			}
-			stored, err := x.pgStoredValue(table, col, t, v)
+			stored, err := x.pgStoredValue(table, col, t, v, def.fsp[col])
 			if err != nil {
 				return err
 			}
@@ -683,7 +683,7 @@ func (x *sqlExec) mysqlStoredText(t string, v any, fsp int) (any, error) {
 // pgStoredValue is v as a Postgres boolean, timestamp or timestamptz column
 // stores it. Text is read as the column's input, so 'true' and the time a
 // string spells compare like the values a driver binds.
-func (x *sqlExec) pgStoredValue(table, col, t string, v any) (any, error) {
+func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, error) {
 	if b, ok := v.([]byte); ok {
 		v = string(b)
 	}
@@ -703,13 +703,27 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any) (any, error) {
 		// does not tell the two apart.
 		return nil, x.unsupported(fmt.Sprintf("a %T written to the boolean column %q", v, col))
 	}
+	tm, err := x.pgStoredTime(t, col, v)
+	if err != nil {
+		return nil, err
+	}
+	// A timestamp(p) rounds to p digits. Six, the default, is left alone:
+	// Postgres rounds to microseconds as well, which differs only in the
+	// nanoseconds a Go time carries.
+	if fsp < 6 {
+		tm = tm.Round(time.Duration(math.Pow10(9 - fsp)))
+	}
+	return tm, nil
+}
+
+func (x *sqlExec) pgStoredTime(t, col string, v any) (time.Time, error) {
 	switch v := v.(type) {
 	case time.Time:
 		return v, nil
 	case string:
 		tm, hasZone, ok := pgParseTime(v)
 		if !ok {
-			return nil, x.unsupported(fmt.Sprintf("the %s value %q, in a format detest does not parse", t, v))
+			return time.Time{}, x.unsupported(fmt.Sprintf("the %s value %q, in a format detest does not parse", t, v))
 		}
 		if t == "timestamp" {
 			// A timestamp keeps the time as written and ignores a zone.
@@ -718,11 +732,11 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any) (any, error) {
 		if !hasZone {
 			// Postgres reads it in the session's TimeZone, which comes from
 			// the server's configuration and is not modeled.
-			return nil, x.unsupported(fmt.Sprintf("a timestamptz value %q without a time zone", v))
+			return time.Time{}, x.unsupported(fmt.Sprintf("a timestamptz value %q without a time zone", v))
 		}
 		return tm.UTC(), nil
 	}
-	return nil, x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, t, col))
+	return time.Time{}, x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, t, col))
 }
 
 // pgParseTime reads the ISO forms of a timestamp: a date, optionally with a

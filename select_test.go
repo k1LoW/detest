@@ -710,6 +710,18 @@ func TestBooleanAndTimestampColumnsStoreTheirValues(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
 		}
 	}
+	// A timestamp(p) rounds what it stores to p digits, also after
+	// ALTER COLUMN TYPE.
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY, at timestamptz(0), ts timestamp)`)
+	mustExec(t, db, `INSERT INTO p VALUES (1, $1, '2024-01-01 00:00:00.6')`, at.Add(1400*time.Millisecond))
+	mustExec(t, db, `ALTER TABLE p ALTER COLUMN ts TYPE timestamp(0)`)
+	var gotAt, gotTs time.Time
+	if err := db.QueryRow(`SELECT at, ts FROM p`).Scan(&gotAt, &gotTs); err != nil {
+		t.Fatal(err)
+	}
+	if !gotAt.Equal(at.Add(time.Second)) || !gotTs.Equal(at.Add(time.Second)) {
+		t.Errorf("timestamp(0): got %v and %v, want both %v", gotAt, gotTs, at.Add(time.Second))
+	}
 	if _, err := db.Exec(`INSERT INTO e (id, active) VALUES (4, 'maybe')`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("'maybe' to a boolean column: got %v, want invalid input", err)
 	}

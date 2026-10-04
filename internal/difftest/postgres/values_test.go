@@ -604,6 +604,22 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "timestamps rounded to their precision",
+		Schema: []string{`CREATE TABLE p (id int PRIMARY KEY, at timestamptz(0) UNIQUE, ts timestamp(3), us timestamp)`},
+		Seed: []string{
+			`INSERT INTO p VALUES (1, '2024-01-01 00:00:00.4+00', '2024-01-01 00:00:00.1234', '2024-01-01 00:00:00.1234567')`,
+			`INSERT INTO p VALUES (2, '2024-01-01 00:00:01.6+00', '2024-01-01 00:00:00.1231', '2024-01-01 00:00:00.123456')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(DISTINCT ts), count(DISTINCT us) FROM p`),
+			difftest.Q(0, `SELECT id FROM p WHERE at > (SELECT at FROM p WHERE id = 1) + interval '1 second' ORDER BY id`),
+			difftest.S(0, `INSERT INTO p (id, at) VALUES (3, '2024-01-01 00:00:00.2+00')`),
+			difftest.S(0, `UPDATE p SET ts = '2024-01-01 00:00:00.9999' WHERE id = 1`),
+			difftest.Q(0, `SELECT id FROM p WHERE ts > (SELECT us FROM p WHERE id = 1) ORDER BY id`),
+		},
+	},
+	{
 		Name:   "updates with old values and defaults",
 		Schema: []string{`CREATE TABLE d (id int PRIMARY KEY, qty int DEFAULT 0 NOT NULL CHECK (qty >= 0), price numeric DEFAULT 1.50, note text DEFAULT 'x', a int, b int)`},
 		Seed:   []string{`INSERT INTO d (id, a, b) VALUES (1, 1, 2)`},
