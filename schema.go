@@ -267,9 +267,9 @@ func (x *sqlExec) uniqueHolder(table string, u *sqlir.UniqueDef, vals []any, sel
 	return nil, nil
 }
 
-// releaseEntries takes, on InnoDB, the entries old holds in the unique
-// secondary indexes of table that row gives up, row being nil for a delete,
-// as a delete or an update marks those index records, and a check holding a
+// releaseEntries takes, on InnoDB, the entries old holds in the secondary
+// indexes of table that row gives up, row being nil for a delete, as a
+// delete or an update marks those index records, and a check holding a
 // shared lock on one waits for the writer.
 func (x *sqlExec) releaseEntries(table string, old, row Row) error {
 	def := x.tx.db.defs[table]
@@ -277,45 +277,61 @@ func (x *sqlExec) releaseEntries(table string, old, row Row) error {
 		return nil
 	}
 	for _, ix := range def.indexOrder(true) {
-		u := ix.unique
-		if u == nil {
-			// A plain index's entry moves when its key does, the primary
-			// key's columns included: the old entry is marked deleted and a
-			// new one written, both held implicitly by the writer.
-			if ix.key == nil || row != nil && sameKey(old, row, ix.key) {
-				continue
-			}
-			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, old), lockStruct{}); err != nil {
-				return err
-			}
-			if row != nil {
-				if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
-					return err
-				}
-			}
-			continue
-		}
-		ov, ok, err := x.uniqueValues(table, u, old)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		if row != nil {
-			nv, nok, err := x.uniqueValues(table, u, row)
-			if err != nil {
-				return err
-			}
-			if nok && sameValues(nv, ov) {
-				continue
-			}
-		}
-		if err := x.tx.lockImplicit(uniqueLock(table, u, ov), lockStruct{}); err != nil {
+		if _, err := x.moveEntry(table, ix, old, row); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// moveEntry takes, on InnoDB, the entry old holds in the secondary index
+// ix of table, implicitly, when row (nil for a delete) gives it up, and
+// for a plain index the entry row writes there instead. It reports whether
+// the entry moved.
+func (x *sqlExec) moveEntry(table string, ix secIndex, old, row Row) (bool, error) {
+	if ix.unique == nil {
+		// A plain index's entry moves when its key does, the primary key's
+		// columns included: the old entry is marked deleted and a new one
+		// written, both held implicitly by the writer.
+		if ix.key == nil || row != nil && sameKey(old, row, ix.key) {
+			return false, nil
+		}
+		if !x.tx.db.kind.InnoDB() {
+			return true, nil
+		}
+		if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, old), lockStruct{}); err != nil {
+			return true, err
+		}
+		if row != nil {
+			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+				return true, err
+			}
+			x.tx.wroteEntry(table, ix, row)
+		}
+		return true, nil
+	}
+	u := ix.unique
+	ov, ook, err := x.uniqueValues(table, u, old)
+	if err != nil {
+		return false, err
+	}
+	if row != nil {
+		nv, nok, err := x.uniqueValues(table, u, row)
+		if err != nil {
+			return false, err
+		}
+		if nok == ook && (!nok || sameValues(nv, ov)) {
+			return false, nil
+		}
+	} else if !ook {
+		return false, nil
+	}
+	if ook && x.tx.db.kind.InnoDB() {
+		if err := x.tx.lockImplicit(uniqueLock(table, u, ov), lockStruct{}); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 // sharedDuplicate is, on InnoDB, the row under key that an insert duplicates,
@@ -346,28 +362,22 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 	if def == nil {
 		return nil
 	}
-	if old != nil {
-		if err := x.releaseEntries(table, old, row); err != nil {
-			return err
-		}
-	}
+	// InnoDB goes through the indexes one at a time, marking the row's old
+	// entry deleted and writing the new one, so a duplicate in one comes
+	// before a wait in the next.
 	for _, ix := range def.indexOrder(x.tx.db.kind.InnoDB()) {
+		if old != nil {
+			moved, err := x.moveEntry(table, ix, old, row)
+			if err != nil {
+				return err
+			}
+			if !moved {
+				continue // the update leaves the row's entry in this index as it was
+			}
+		}
 		u := ix.unique
 		if u == nil {
 			continue
-		}
-		if old != nil {
-			nv, nok, err := x.uniqueValues(table, u, row)
-			if err != nil {
-				return err
-			}
-			ov, ook, err := x.uniqueValues(table, u, old)
-			if err != nil {
-				return err
-			}
-			if nok == ook && (!nok || sameValues(nv, ov)) {
-				continue // the update leaves the row's entry in this index as it was
-			}
 		}
 		ex, err := x.claimUnique(table, u, row, self)
 		if err != nil {
@@ -376,6 +386,9 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 		if ex != nil {
 			x.tx.putReached(ix.name)
 			return x.tx.db.duplicateKey(table, u.Name)
+		}
+		if old != nil {
+			x.tx.wroteEntry(table, ix, row)
 		}
 	}
 	return nil

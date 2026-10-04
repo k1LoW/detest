@@ -287,7 +287,7 @@ scan:
 	for {
 		var in []Row
 		for _, r := range tx.lockingRows(table) {
-			if inRange(r) && !seen[r.Key()+"\x00"+encodeKey(keyOf(r, sr.key))] {
+			if inRange(r) && x.inIndex(table, sr, r) && !seen[r.Key()+"\x00"+encodeKey(keyOf(r, sr.key))] {
 				in = append(in, r)
 			}
 		}
@@ -472,7 +472,7 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	// locks it took.
 scan:
 	for {
-		rows = tx.lockingRows(table)
+		rows = slices.DeleteFunc(tx.lockingRows(table), func(r Row) bool { return !x.inIndex(table, sr, r) })
 		var in []Row
 		for _, r := range rows {
 			if rg.contains(keyOf(r, cols)) {
@@ -561,8 +561,21 @@ scan:
 		}
 		if next != nil {
 			gap.hi, gap.hasHi, gap.hiOpen = keyOf(next, cols), true, true
-			if err := tx.lockModeAs(lockKey{table, next.Key()}, mode, structKey(table, scanIndex, mode, "next-key")); err != nil {
-				return false, err
+			// The record the scan reads past its end is the searched index's,
+			// and its row's too unless the read pushes its condition down.
+			keys := []lockKey{{table, next.Key()}}
+			structs := []lockStruct{structKey(table, scanIndex, mode, "next-key")}
+			if scanIndex != "PRIMARY" {
+				keys = []lockKey{x.indexEntry(table, sr, next)}
+				if !x.pushdown {
+					keys = append(keys, lockKey{table, next.Key()})
+					structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
+				}
+			}
+			for i, k := range keys {
+				if err := tx.lockModeAs(k, mode, structs[i]); err != nil {
+					return false, err
+				}
 			}
 		} else {
 			gap.hasHi = false
@@ -599,7 +612,14 @@ func (tx *Tx) lockingRows(table string) []Row {
 			continue
 		}
 		for o := range holders {
-			if r, ok := o.writes[lk]; ok && o != tx {
+			if o == tx {
+				continue
+			}
+			if r, ok := o.writes[lk]; ok {
+				pending = append(pending, r)
+				break
+			}
+			if r := o.inserting(lk); r != nil {
 				pending = append(pending, r)
 				break
 			}
@@ -613,6 +633,35 @@ func (tx *Tx) lockingRows(table string) []Row {
 	return rows
 }
 
+// inserting is the row tx is inserting under lk, put into the primary key
+// while its checks have not passed yet, if any.
+func (tx *Tx) inserting(lk lockKey) Row {
+	if !tx.putting || len(tx.put) == 0 {
+		return nil
+	}
+	if p := tx.put[len(tx.put)-1]; p.table == lk.table && p.row.Key() == lk.key {
+		return p.row
+	}
+	return nil
+}
+
+// inIndex reports whether r has its entry in the secondary index sr
+// searches yet: a row another transaction is inserting has it only once
+// the insert has gone that far, holding the entry.
+func (x *sqlExec) inIndex(table string, sr indexSearch, r Row) bool {
+	if sr.index == "" || sr.index == "PRIMARY" {
+		return true
+	}
+	lk := lockKey{table, r.Key()}
+	for o := range x.tx.db.locks[lk] {
+		if o != x.tx && o.inserting(lk) != nil {
+			_, held := x.tx.db.locks[x.indexEntry(table, sr, r)][o]
+			return held
+		}
+	}
+	return true
+}
+
 // lockRange takes the record and gap locks of a search of table by where,
 // at any isolation level: InnoDB's foreign key checks take them even at
 // Read Committed.
@@ -623,7 +672,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	cols := sr.key
 	// The rows as the search meets them, along the index it searches.
 	scanRows := func() []Row {
-		rs := tx.lockingRows(table)
+		rs := slices.DeleteFunc(tx.lockingRows(table), func(r Row) bool { return !x.inIndex(table, sr, r) })
 		if len(cols) > 0 {
 			slices.SortStableFunc(rs, func(a, b Row) int { return keyCompare(keyOf(a, cols), keyOf(b, cols)) })
 		}

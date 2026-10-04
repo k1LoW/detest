@@ -130,11 +130,12 @@ type stmtMark struct {
 	locks    int
 	undo     int
 	inserts  int
+	entries  int
 }
 
 func (tx *Tx) markStatement() stmtMark {
 	tx.put = nil
-	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks), undo: tx.undo, inserts: len(tx.inserts)}
+	m := stmtMark{writes: make(map[lockKey]Row, len(tx.writes)), deleted: maps.Clone(tx.deleted), moved: maps.Clone(tx.moved), deferred: len(tx.deferred), locks: len(tx.locks), undo: tx.undo, inserts: len(tx.inserts), entries: len(tx.entries)}
 	for k, v := range tx.writes {
 		m.writes[k] = v.clone()
 	}
@@ -150,7 +151,7 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 	tx.aborted = false
 	if deadlock {
 		tx.writes, tx.deleted, tx.moved, tx.deferred, tx.saves, tx.undo, tx.lockStructs, tx.explicit, tx.implicit, tx.grants = map[lockKey]Row{}, map[lockKey]bool{}, nil, nil, nil, 0, nil, nil, nil, nil
-		tx.inserts = nil
+		tx.inserts, tx.entries = nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
 			tx.releaseLocks(tx.locks)
@@ -173,6 +174,43 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.inheritGap(p.table, p.row, p.reached)
 	}
 	tx.put = nil
+	tx.rollEntries(m.entries)
+}
+
+// entryWrite is a secondary index entry an update wrote.
+type entryWrite struct {
+	table string
+	index secIndex
+	row   Row
+}
+
+// wroteEntry records the entry an update of a row to row wrote into the
+// secondary index ix of table.
+func (tx *Tx) wroteEntry(table string, ix secIndex, row Row) {
+	if tx.db.kind.InnoDB() {
+		tx.entries = append(tx.entries, entryWrite{table, ix, row.clone()})
+	}
+}
+
+// rollEntries takes out the entries written since the first from entries,
+// as a rollback of the updates that wrote them does, leaving a gap lock
+// where each was and its lock's struct, empty, at Repeatable Read, as
+// inheritGap does for a row.
+func (tx *Tx) rollEntries(from int) {
+	if from >= len(tx.entries) {
+		return
+	}
+	if tx.iso == RepeatableRead || tx.iso == Serializable {
+		for _, e := range tx.entries[from:] {
+			if e.index.key == nil {
+				continue
+			}
+			tx.gapAround(e.table, e.index.key, e.row, true)
+			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "record")
+			tx.noteLockStruct(e.table, e.index.name, lockUpdate, "gap")
+		}
+	}
+	tx.entries = tx.entries[:from]
 }
 
 // putRow is a row a statement put into a table's primary key, and the

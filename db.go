@@ -1421,6 +1421,9 @@ type Tx struct {
 	// rollback to a savepoint takes out again, also one deleted or moved
 	// since, leaving gap locks where it was.
 	inserts []putRow
+	// entries is the secondary index entries the transaction's updates
+	// wrote, whose rollback leaves a gap lock where each was.
+	entries []entryWrite
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1470,6 +1473,7 @@ type savepoint struct {
 	modes    map[lockKey]lockMode
 	deferred int
 	inserts  int // the length of the transaction's inserts
+	entries  int // and of its entries
 }
 
 // Get reads one row.
@@ -1731,7 +1735,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
-		sp.pending, sp.timeout, sp.undo, sp.inserts = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts)
+		sp.pending, sp.timeout, sp.undo, sp.inserts, sp.entries = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts), len(tx.entries)
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1775,6 +1779,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		for _, p := range inserted {
 			tx.inheritGap(p.table, p.row, -1)
 		}
+		tx.rollEntries(sp.entries)
 	} else {
 		tx.rollbackLocks(sp)
 	}
