@@ -31,6 +31,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM t WHERE id < '10' ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM t WHERE id = ANY (ARRAY[9, '10']) ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM t WHERE name = ANY (ARRAY['2', 'x']) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM t WHERE name = ANY (ARRAY['2', NULL::text]) ORDER BY id`),
 			difftest.Q(0, `SELECT CASE id WHEN '09' THEN 'nine' ELSE 'other' END FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM t WHERE NULLIF(id, '01') IS NULL`),
 			difftest.Q(0, `SELECT count(*) FROM t HAVING count(*) = '04'`),

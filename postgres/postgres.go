@@ -1497,11 +1497,23 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 	return nil, c.unsupported(fmt.Sprintf("expression %T", n.Node))
 }
 
-// untypedStrings reports whether every element is a string literal or NULL,
-// and one at least a string, the elements of an array Postgres types text[].
-func untypedStrings(elements []*pg.Node) bool {
+// textElements reports whether Postgres types an array of these elements as
+// text: each is a string literal, NULL, a parameter or a cast to text or
+// varchar, and one at least is a string or such a cast. A number among them
+// would make the array a number's instead.
+func textElements(elements []*pg.Node) bool {
 	str := false
 	for _, el := range elements {
+		if tc := el.GetTypeCast(); tc != nil {
+			if _, ok := plainTextCast(tc, false, "text", "varchar"); !ok {
+				return false
+			}
+			str = true
+			continue
+		}
+		if el.GetParamRef() != nil {
+			continue
+		}
 		k := el.GetAConst()
 		switch {
 		case k == nil:
@@ -1647,10 +1659,10 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		// An array of untyped string literals alone is a text[] in Postgres,
-		// not literals each resolved against x, so id = ANY (ARRAY['1'])
-		// compares an integer with text, which Postgres refuses.
-		if len(casts) == 0 && untypedStrings(arr.GetAArrayExpr().Elements) {
+		// An array of string literals is a text[] in Postgres, not literals
+		// each resolved against x, so id = ANY (ARRAY['1']) compares an
+		// integer with text, which Postgres refuses.
+		if len(casts) == 0 && textElements(arr.GetAArrayExpr().Elements) {
 			casts = []string{"text"}
 		}
 		// A cast of the array casts each element, so it is kept on them:
