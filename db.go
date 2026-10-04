@@ -491,9 +491,15 @@ func (def *tableDef) renameColumn(old, nw string) {
 		}
 	}
 	for _, u := range def.uniques {
-		for _, e := range u.Elems {
-			if c, ok := e.(*sqlir.ColumnRef); ok && c.Column == old {
-				c.Column = nw
+		exprs := u.Elems
+		if u.Where != nil {
+			exprs = append(slices.Clone(exprs), u.Where)
+		}
+		for _, e := range exprs {
+			for _, c := range sqlir.ColumnRefs(e) {
+				if c.Column == old {
+					c.Column = nw
+				}
 			}
 		}
 	}

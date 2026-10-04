@@ -206,3 +206,27 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		t.Errorf("after the refused delete: pid=%d parents=%d err=%v; want both unchanged", pid, parents, err)
 	}
 }
+
+// A column rename reaches every reference of an expression or partial
+// unique index, not only a bare column, so the index still constrains the
+// renamed column and still counts as reading its default.
+func TestRenameColumnInUniqueExpression(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, d text, live bool)`)
+	mustExec(t, db, `CREATE UNIQUE INDEX u_lower_d ON u (lower(d)) WHERE live`)
+	mustExec(t, db, `ALTER TABLE u RENAME COLUMN d TO x`)
+	mustExec(t, db, `ALTER TABLE u RENAME COLUMN live TO active`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 'A', true)`)
+	if _, err := db.Exec(`INSERT INTO u VALUES (2, 'a', true)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("duplicate under the renamed expression index: got %v", err)
+	}
+	mustExec(t, db, `INSERT INTO u VALUES (3, 'a', false)`)
+
+	mustExec(t, db, `CREATE TABLE v (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE)`)
+	mustExec(t, db, `CREATE UNIQUE INDEX v_lower_d ON v (lower(d))`)
+	mustExec(t, db, `ALTER TABLE v RENAME COLUMN d TO x`)
+	if _, err := db.Exec(`INSERT INTO v (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("default read by a renamed expression index: got %v", err)
+	}
+}
