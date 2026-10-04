@@ -4598,3 +4598,20 @@ func TestMySQLDoubleOfAString(t *testing.T) {
 		t.Errorf("got %v, %v", lt, q)
 	}
 }
+
+// An ALTER that leaves NULL in a NOT NULL column of rows already there is
+// refused, as MySQL refuses it or fills in a value of its own.
+func TestMySQLAlterNotNullOverRows(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO t VALUES (1, NULL)")
+	for _, q := range []string{"ALTER TABLE t ADD COLUMN w INT NOT NULL", "ALTER TABLE t MODIFY v INT NOT NULL"} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	mustExec(t, db, "ALTER TABLE t ADD COLUMN x INT NOT NULL DEFAULT 0")
+	mustExec(t, db, "CREATE TABLE e (id INT PRIMARY KEY)")
+	mustExec(t, db, "ALTER TABLE e ADD COLUMN w INT NOT NULL")
+}

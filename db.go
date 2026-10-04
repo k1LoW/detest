@@ -882,8 +882,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				return unsupported("adding an AUTO_INCREMENT column to a table that holds rows", "")
 			}
 			def.columns = append(def.columns, col.Name)
-			if !ch.Create && col.Default != nil {
+			switch {
+			case !ch.Create && col.Default != nil:
 				added = append(added, col)
+			case !ch.Create && col.NotNull && db.kind.InnoDB():
+				redefined = true // the rows are checked for the NULL they hold in it
 			}
 		}
 		if col.First || col.After != "" {
@@ -1103,6 +1106,7 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 		tx = db.newTx(nil)
 	}
 	x := tx.evaluator()
+	def := db.defs[table]
 	// A row gets one value of each default, which its versions and pending
 	// write share, so a volatile default such as UUID() reads the same from
 	// a snapshot as from the latest row.
@@ -1134,6 +1138,13 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 			return nil, err
 		}
 		if redefined {
+			// MySQL refuses an ALTER that leaves NULL in a NOT NULL column,
+			// or fills in a value of its own, rules detest does not follow.
+			for c := range def.notNull {
+				if derefValue(n[c]) == nil {
+					return nil, unsupported("an ALTER that leaves NULL in the NOT NULL column "+c, "")
+				}
+			}
 			// A converted key would file the row under another identity,
 			// which its versions and locks are not moved to.
 			k := n.clone()
