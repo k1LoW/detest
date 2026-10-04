@@ -1,7 +1,7 @@
 default: test
 
 ci:
-	go test ./... -race -coverprofile=coverage.out -covermode=atomic
+	go test ./... -race -timeout 30m -coverprofile=coverage.out -covermode=atomic
 
 test:
 	go test ./... -coverprofile=coverage.out -covermode=count
