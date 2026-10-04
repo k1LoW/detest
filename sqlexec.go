@@ -2596,6 +2596,9 @@ func castValue(v any, typ string) (any, error) {
 			if !exactAsFloat(v) {
 				return nil, errUnknownExpr{"a cast to numeric with more digits than a float keeps"}
 			}
+			if isNaN(v) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
 			return numericValue(v), nil
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to numeric", v)}
@@ -2613,6 +2616,9 @@ func castValue(v any, typ string) (any, error) {
 			return f, nil
 		}
 		if f, ok := toFloat(v); ok && isNumber(v) {
+			if math.IsNaN(f) {
+				return nil, errUnknownExpr{"a cast to NaN"}
+			}
 			return f, nil
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to %s", v, typ)}

@@ -712,7 +712,8 @@ var numberTypes = map[string]string{"int2": "smallint", "int4": "integer", "int8
 // Text that is not a number is left to the conversion to report.
 func exactAsFloat(v any) bool {
 	if n, ok := integer(v); ok {
-		return n > -1<<53 && n < 1<<53
+		f := float64(n)
+		return f < 1<<63 && int64(f) == n
 	}
 	s, ok := v.(string)
 	if b, isBytes := v.([]byte); isBytes {

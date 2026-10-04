@@ -494,6 +494,10 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO k VALUES ('9007199254740994.0')`); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("numeric key beyond 2^53 with a decimal point: got %v, want a unique violation", err)
 	}
+	// An integer a float keeps exactly is taken, even beyond 2^53.
+	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, int64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric integer a float keeps: got %v, want a unique violation", err)
+	}
 	for _, tc := range []struct {
 		query string
 		args  []any
@@ -790,6 +794,11 @@ func TestCastToNumber(t *testing.T) {
 	for _, q := range []string{`SELECT '40000'::smallint`, `SELECT 3000000000::int`} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrNumericValueOutOfRange) {
 			t.Errorf("%s: got %v, want out of range", q, err)
+		}
+	}
+	for _, q := range []string{`SELECT $1::numeric`, `SELECT $1::float8`} {
+		if _, err := db.Exec(q, math.NaN()); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with NaN: got %v, want unsupported", q, err)
 		}
 	}
 	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`, `SELECT 9007199254740993::numeric`,
