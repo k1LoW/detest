@@ -1201,6 +1201,11 @@ func (c *pgConv) fromItem(n *pg.Node) (*sqlir.TableRef, []sqlir.Join, error) {
 	case *pg.Node_RangeVar:
 		t := &sqlir.TableRef{Name: rangeVarName(f.RangeVar)}
 		if f.RangeVar.Alias != nil {
+			if len(f.RangeVar.Alias.Colnames) > 0 {
+				// The rows of a table are keyed by its column names and
+				// locked by their identity, which renaming them would lose.
+				return nil, nil, c.unsupported("a column alias list on a table, CTE or view")
+			}
 			t.Alias = f.RangeVar.Alias.Aliasname
 		}
 		return t, nil, nil
