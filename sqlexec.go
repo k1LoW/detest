@@ -1011,7 +1011,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, val), v.Type)
+		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -1841,7 +1841,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err := x.paramTextCast(v, val); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, val), v.Type)
+		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -2714,7 +2714,7 @@ func floatTyped(e sqlir.Expr) bool {
 		return slices.ContainsFunc(caseBranches(e), floatTyped)
 	case *sqlir.FuncCall:
 		switch e.Name {
-		case "floor", "ceil", "ceiling", "round", "avg":
+		case "floor", "ceil", "ceiling", "round", "avg", "power", "pow", "random":
 			return true
 		case "coalesce", "greatest", "least", "nullif", "abs", "sum", "min", "max":
 			return slices.ContainsFunc(e.Args, floatTyped)
@@ -2846,6 +2846,19 @@ func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
 		return nil
 	}
 	return x.unsupported("a cast of a bytea value to " + c.Type)
+}
+
+// paramBool is an integer parameter cast to boolean as the text the driver
+// sends it as, so that $1::bool with 2 fails as boolean input does, where
+// 2::bool is true through the integer cast.
+func paramBool(c *sqlir.Cast, v any) any {
+	if _, ok := c.X.(*sqlir.Param); !ok || (c.Type != "bool" && c.Type != "boolean") {
+		return v
+	}
+	if n, ok := integer(derefValue(v)); ok {
+		return strconv.FormatInt(n, 10)
+	}
+	return v
 }
 
 // paramTextCast refuses a cast to text of a parameter holding a value other

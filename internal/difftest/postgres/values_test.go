@@ -385,6 +385,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT (CASE WHEN false THEN 1 ELSE '3' END) / 2, (CASE WHEN false THEN 1.0 ELSE '3' END) / 2 = 1.5`),
 			difftest.Q(0, `SELECT x / 2 = 0.5 FROM (SELECT 1 AS x UNION ALL SELECT 3.0) s ORDER BY x`),
 			difftest.Q(0, `SELECT x / 2 = 0.5 FROM (SELECT 1 AS x UNION ALL SELECT 3.0 WHERE false) s`),
+			difftest.Q(0, `SELECT (CASE WHEN true THEN 1 ELSE power(2, 2) END) / 2 = 0.5, (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT 1 UNION SELECT 1.0) s`),
 			difftest.Q(0, `SELECT 'a' || true, 'a' || 1, 'a' || id FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT CASE WHEN id = 1 THEN name ELSE '2' END FROM t ORDER BY id`),

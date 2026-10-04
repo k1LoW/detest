@@ -881,6 +881,7 @@ func TestValueFormsByType(t *testing.T) {
 		`SELECT true UNION SELECT 1`, `SELECT id FROM t UNION SELECT NULL UNION SELECT now()`,
 		`SELECT true || false`, `SELECT 1 || true`, `SELECT CASE WHEN true THEN '2'::text ELSE 1 END`,
 		`SELECT '' || now()`, `SELECT now()::text`, `SELECT CASE WHEN true THEN 1 ELSE 'x'::text END`,
+		`ALTER TABLE t ALTER COLUMN v TYPE int USING length(v)`,
 		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -907,6 +908,12 @@ func TestValueFormsByType(t *testing.T) {
 	got := rowsOf(t, db, `SELECT v, c, price = 1.1, 'yes'::bool, 2::bool, CASE WHEN id = 2 THEN 1 ELSE '2' END = 1 FROM t WHERE id = 2`)
 	if want := []string{"abc,abc,true,true,true,true"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("converted values: got %v, want %v", got, want)
+	}
+	if got := rowsOf(t, db, `SELECT (CASE WHEN true THEN 1 ELSE random() END) / 2 = 0.5, $1::bool, $2::bool`, int64(1), int64(0)); !reflect.DeepEqual(got, []string{"true,true,false"}) {
+		t.Errorf("random branch and boolean parameters: got %v", got)
+	}
+	if _, err := db.Exec(`SELECT $1::bool`, int64(2)); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("$1::bool with 2: got %v, want invalid input", err)
 	}
 	// ALTER COLUMN TYPE applies the new limits to the rows and the writes
 	// after it.

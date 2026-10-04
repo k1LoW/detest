@@ -796,6 +796,11 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
+				// USING transforms the rows by an expression, which the
+				// rewrite under the new type does not run.
+				if cd.RawDefault != nil {
+					return nil, c.unsupported("ALTER COLUMN TYPE with USING")
+				}
 				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true}
 				if err := c.columnLimits(&col, cd.TypeName); err != nil {
 					return nil, err
