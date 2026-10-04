@@ -689,7 +689,10 @@ rows:
 		for _, a := range targets {
 			table := from.tables[a]
 			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
-				if x.tx.heldByOther(lk, mode) {
+				if x.skipped[lk] && sel.Lock.SkipLocked {
+					return errSkipLocked
+				}
+				if (sel.Lock.SkipLocked || sel.Lock.NoWait) && x.tx.heldByOther(lk, mode) {
 					if sel.Lock.SkipLocked {
 						return errSkipLocked
 					}
@@ -732,18 +735,21 @@ rows:
 	return locked, nil
 }
 
-// rangeLocks takes InnoDB's next-key locks of the first table's search. A
-// joined table keeps the locks on the rows the join read: InnoDB also locks
-// around each lookup into it, which only a join plan would tell, and locking
-// it whole instead would explore deadlocks MySQL does not have.
+// rangeLocks takes InnoDB's next-key locks of the first table's search, and
+// of a joined table's lookup for each row the first table's search finds.
+// Which table MySQL reads first is its optimizer's choice, except when the
+// first one is a const table, looked up by a unique key, which it reads
+// before the others; a locking join of any other shape is refused.
 func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, error) {
 	f := sel.From
 	if f == nil || f.Name == "" || x.isCTE(f.Name) {
 		return nil, nil
 	}
-	alias := f.Alias
-	if alias == "" {
-		alias = relname(f.Name)
+	alias := cmp.Or(f.Alias, relname(f.Name))
+	table := x.tx.db.resolve(f.Name)
+	mode := lockModeOf(sel.Lock)
+	if len(sel.Joins) > 0 && x.tx.db.kind.InnoDB() {
+		return nil, x.joinLocks(sel, plan, table, alias, mode)
 	}
 	if !slices.Contains(plan.targets, alias) {
 		return nil, nil // FOR UPDATE OF names other tables
@@ -755,7 +761,150 @@ func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, e
 			return nil, err
 		}
 	}
-	return stop, x.nextKeyLocks(x.tx.db.resolve(f.Name), alias, sel.Where, lockModeOf(sel.Lock), sel.Lock, stop)
+	defer x.pushDown(sel, table, alias, sel.Where)()
+	return stop, x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, stop)
+}
+
+// anyRow is a row of table with a value of its type in each column, for a
+// check that depends on the shape of a search, not on its values.
+func (x *sqlExec) anyRow(table string) Row {
+	r := Row{}
+	if def := x.tx.db.defs[table]; def != nil {
+		for _, c := range def.columns {
+			if mysqlNumericType(def.types[c]) {
+				r[c] = int64(1)
+			} else {
+				r[c] = "1"
+			}
+		}
+	}
+	return r
+}
+
+// pushDown sets x.pushdown for a locking read's search of table by where,
+// when it goes through a secondary index that does not hold every column
+// the read uses of table, and returns the function that clears it.
+func (x *sqlExec) pushDown(sel *sqlir.SelectStmt, table, alias string, where sqlir.Expr) func() {
+	sr := x.searchRange(table, alias, where)
+	def := x.tx.db.defs[table]
+	if def == nil || sr.index == "" || sr.index == "PRIMARY" {
+		return func() {}
+	}
+	covered := !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool {
+		return t.Star && (t.Table == "" || t.Table == alias || t.Table == relname(table))
+	})
+	walkNodes(sel, func(n any) {
+		if c, ok := n.(*sqlir.ColumnRef); ok && x.searchedColumn(c, table, alias) && !slices.Contains(sr.cols, c.Column) && !slices.Contains(def.pk, c.Column) {
+			covered = false
+		}
+	})
+	x.pushdown = !covered
+	return func() { x.pushdown = false }
+}
+
+// joinLocks takes the next-key locks of a locking read joining a const table,
+// first, with one more: the first table's lookup, then the joined table's
+// search by ON and WHERE with each row found, as MySQL's nested loop runs
+// them.
+func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias string, mode lockMode) error {
+	if len(sel.Joins) > 1 {
+		return x.unsupported("a locking read joining more than two tables, whose join order MySQL's optimizer chooses")
+	}
+	j := sel.Joins[0]
+	if j.Table.Name == "" || x.isCTE(j.Table.Name) {
+		return x.unsupported("a locking read joining a subquery, a CTE or a function")
+	}
+	if sel.Limit != nil || sel.Offset != nil {
+		return x.unsupported("a locking read joining tables with LIMIT or OFFSET, which stop MySQL's nested loop partway")
+	}
+	sr := x.searchRange(table, alias, sel.Where)
+	if !sr.unique || len(sr.ranges) != 1 {
+		return x.unsupported("a locking read joining tables whose first table is not looked up by one value of a unique key, so MySQL's optimizer chooses which table it reads first")
+	}
+	jalias := cmp.Or(j.Table.Alias, relname(j.Table.Name))
+	jtable := x.tx.db.resolve(j.Table.Name)
+	where := j.On
+	if sel.Where != nil {
+		where = &sqlir.BinaryExpr{Op: "AND", L: j.On, R: sel.Where}
+	}
+	// outer is the const row MySQL reads first, if it is there and passes
+	// the conditions on the first table alone; without one, MySQL reads
+	// nothing of the joined table.
+	conds := splitAnd(sel.Where)
+	if j.Kind != sqlir.LeftJoin {
+		conds = append(conds, splitAnd(j.On)...) // an inner join's ON filters the first table's rows as WHERE does
+	}
+	var own []sqlir.Expr
+	for _, c := range conds {
+		if !slices.ContainsFunc(sqlir.ColumnRefs(c), func(c *sqlir.ColumnRef) bool { return x.searchedColumn(c, jtable, jalias) }) {
+			own = append(own, c)
+		}
+	}
+	outer := func() ([]Row, error) {
+		var out []Row
+	rows:
+		for _, r := range x.tx.selectNoYield(table, nil) {
+			if !sr.ranges[0].contains(keyOf(r, sr.key)) {
+				continue
+			}
+			for _, c := range own {
+				if ok, err := x.evalBool(c, newJrow(alias, r).env(nil)); err != nil {
+					return nil, err
+				} else if !ok {
+					continue rows
+				}
+			}
+			out = append(out, r)
+		}
+		return out, nil
+	}
+	defer func() { x.searchOuter = nil }()
+	locksJoined := slices.Contains(plan.targets, jalias)
+	// Checked before anything is locked, as a refused statement must leave
+	// the transaction as it was.
+	if err := x.checkLocking(table, alias, sel.Where); err != nil {
+		return err
+	}
+	if locksJoined {
+		rows, err := outer()
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			// The first table's lock may wait for a row it cannot see yet,
+			// so the joined search is checked for a row of any values.
+			rows = []Row{x.anyRow(table)}
+		}
+		for _, r := range rows {
+			x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}
+			if err := x.checkLocking(jtable, jalias, where); err != nil {
+				return err
+			}
+		}
+	}
+	x.searchOuter = nil
+	if slices.Contains(plan.targets, alias) {
+		if err := x.nextKeyLocks(table, alias, sel.Where, mode, sel.Lock, nil); err != nil {
+			return err
+		}
+	}
+	if !locksJoined {
+		return nil
+	}
+	rows, err := outer() // as they are once the first table's lock is granted
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}
+		clear := x.pushDown(sel, jtable, jalias, where)
+		err := x.nextKeyLocks(jtable, jalias, where, mode, sel.Lock, nil)
+		clear()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // isCTE reports whether name is a CTE of the statement, which shadows a table

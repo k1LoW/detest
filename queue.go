@@ -86,12 +86,12 @@ func (s *Sim) Queue(name string, opts ...QueueOption) *Queue {
 func (q *Queue) Name() string { return q.name }
 
 // SeedMsg enqueues a message during Seed.
-func (q *Queue) SeedMsg(msg Msg) { q.push(msg) }
+func (q *Queue) SeedMsg(msg Msg) { q.push(nil, msg) }
 
 // Enqueue publishes a message immediately (outside a transaction).
 func (q *Queue) Enqueue(p *Proc, msg Msg) {
 	p.yieldf("%s: enqueue %s", q.name, msg)
-	q.push(msg)
+	q.push(p, msg)
 }
 
 func (q *Queue) reset() {
@@ -101,9 +101,10 @@ func (q *Queue) reset() {
 	q.lossBudget = q.losses
 }
 
-func (q *Queue) push(msg Msg) {
+// push enqueues msg. p is the process that published it, nil for a seed.
+func (q *Queue) push(p *Proc, msg Msg) {
 	if q.s.run != nil {
-		q.s.run.version++
+		q.s.run.bump(p)
 		q.s.run.queuesTouched = true
 	}
 	q.nextID++

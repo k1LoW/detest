@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -39,6 +41,7 @@ type frontier struct {
 	best       []int
 	bestResult *result
 	prior      int   // runs of the explorations a checkpoint resumes
+	cuts       int   // runs cut at MaxIdleTicks, the resumed explorations' too
 	fatal      error // a misuse that ends the exploration, such as a stale checkpoint
 	progress   []workerProgress
 	// sometimes holds the Sometimes conditions in the order declared, and
@@ -46,6 +49,9 @@ type frontier struct {
 	// met each.
 	sometimes []string
 	reached   map[string]bool
+	// refused is the statements detest refused as unsupported in any run,
+	// which the application saw as an error there.
+	refused map[string]bool
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -132,6 +138,19 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 	return p, true
 }
 
+// cut counts a run cut at MaxIdleTicks.
+func (f *frontier) cut() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cuts++
+}
+
+func (f *frontier) cutRuns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cuts
+}
+
 // expire stops the exploration from starting another run.
 func (f *frontier) expire() { f.expired.Store(true) }
 
@@ -167,6 +186,22 @@ func (f *frontier) reach(name string) {
 		f.reached = map[string]bool{}
 	}
 	f.reached[name] = true
+}
+
+func (f *frontier) refuse(msg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.refused == nil {
+		f.refused = map[string]bool{}
+	}
+	f.refused[msg] = true
+}
+
+// refusals returns the statements refused as unsupported, sorted.
+func (f *frontier) refusals() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(maps.Keys(f.refused))
 }
 
 // unreached returns the declared conditions no run met.
@@ -274,6 +309,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		r.tracing = s.verbose
 		v := r.execute()
 		maxDepth = max(maxDepth, len(r.choices))
+		if r.cut {
+			f.cut()
+		}
 		if s.verbose {
 			s.printRun(runs, r)
 		}
@@ -303,13 +341,15 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 // merge combines the workers' results: the best violation if one was found,
 // else the run counts with whether the exploration finished.
 func (f *frontier) merge(results []*result, workers int) *result {
-	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached()}
+	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached(), CutRuns: f.cutRuns(), Unsupported: f.refusals()}
 	for _, r := range results {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
 		if r.Replay {
+			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule
+			merged.CutRuns += r.CutRuns
 		}
 	}
 	best := f.bestResult
@@ -326,7 +366,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.MaxDepth, v.Workers = merged.Runs, merged.MaxDepth, workers
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported
 		return &v
 	}
 	return merged
@@ -336,9 +376,11 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // not explored yet, each as the choices that lead to it.
 type checkpoint struct {
 	Version  int             `json:"version"`
-	Runs     int             `json:"runs"` // explored before, in all the explorations so far
+	Runs     int             `json:"runs"`           // explored before, in all the explorations so far
+	Cuts     int             `json:"cuts,omitempty"` // of those runs, the ones cut at MaxIdleTicks
 	Subtrees [][]savedChoice `json:"subtrees"`
 	Reached  []string        `json:"reached,omitempty"` // Sometimes conditions met so far
+	Refused  []string        `json:"refused,omitempty"` // statements refused as unsupported so far
 }
 
 type savedChoice struct {
@@ -372,20 +414,24 @@ func (f *frontier) load(path string) error {
 		}
 		f.stack = append(f.stack, p)
 	}
-	f.prior = ck.Runs
+	f.prior, f.cuts = ck.Runs, ck.Cuts
 	for _, n := range ck.Reached {
 		f.reach(n)
+	}
+	for _, m := range ck.Refused {
+		f.refuse(m)
 	}
 	return nil
 }
 
 // save writes the subtrees left to path.
 func (f *frontier) save(path string) error {
-	ck := checkpoint{Version: 1, Runs: f.prior + f.runs}
+	ck := checkpoint{Version: 1, Runs: f.prior + f.runs, Cuts: f.cutRuns()}
 	for n := range f.reached {
 		ck.Reached = append(ck.Reached, n)
 	}
 	sort.Strings(ck.Reached)
+	ck.Refused = slices.Sorted(maps.Keys(f.refused))
 	for _, p := range f.stack {
 		st := make([]savedChoice, len(p))
 		for i, c := range p {

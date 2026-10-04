@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -120,5 +121,23 @@ func TestStaleCheckpointFailsTheTest(t *testing.T) {
 		if !strings.Contains(string(out), "another version of") || strings.Contains(string(out), "panic:") {
 			t.Fatalf("%v: expected a test failure naming the cause, not a panic:\n%s", env, out)
 		}
+	}
+}
+
+// A resumed exploration still lists the statements refused before the
+// checkpoint.
+func TestCheckpointKeepsRefusedStatements(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ckpt.json")
+	f := newFrontier(1, 10)
+	f.refuse("detest: unsupported SQL (x): SELECT 1")
+	if err := f.save(path); err != nil {
+		t.Fatal(err)
+	}
+	g := newFrontier(1, 10)
+	if err := g.load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := g.refusals(), []string{"detest: unsupported SQL (x): SELECT 1"}; !slices.Equal(got, want) {
+		t.Fatalf("refusals %q, want %q", got, want)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,6 +18,7 @@ import (
 	"github.com/k1LoW/detest/postgres"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 var (
@@ -31,7 +33,21 @@ var (
 func start() error {
 	pgOnce.Do(func() {
 		ctx := context.Background()
-		pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", tcpostgres.BasicWaitStrategies())
+		// BasicWaitStrategies waits 60 seconds for the server, which a
+		// machine busy with other test runs can take longer than to start it.
+		// testcontainers' own reaper container gets a fixed 60 seconds to
+		// start, so a start that fails is tried again.
+		for attempt := range 3 {
+			pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", testcontainers.WithWaitStrategyAndDeadline(10*time.Minute,
+				wait.ForLog("database system is ready to accept connections").WithOccurrence(2), wait.ForListeningPort("5432/tcp")))
+			if pgErr == nil {
+				break
+			}
+			if pgCtr != nil {
+				_ = pgCtr.Terminate(ctx)
+			}
+			pgErr = fmt.Errorf("start postgres (attempt %d): %w", attempt+1, pgErr)
+		}
 		if pgErr != nil {
 			return
 		}

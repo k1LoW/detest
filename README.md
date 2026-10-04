@@ -10,6 +10,34 @@ In-Process Deterministic Simulation Testing for Go Applications, based on Statel
 
 Instead of virtualizing OS threads or low-level network packets, `detest` operates at Go's standard client boundaries (`database/sql`, `http.RoundTripper`) and at mutexes injected in place of `sync.Mutex`, running goroutines inside a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble. It injects failure scenarios and systematically explores every execution interleaving within configurable bounds, without modifying your production business logic or ORMs.
 
+## Getting started
+
+The recommended way to use detest is through its agent skill, [`skills/detest`](skills/detest). detest is meant to be applied by an AI agent that knows the code under test, and the skill lets you use it without learning it. You decide to use detest, and the agent proposes where to look, wires your real code into a simulation, runs the exploration, and reports what was run, what the result guarantees and what it leaves out. It stops for your decision on the target, on the scenario and its invariants, on adding the dependency, and on the conditions of the run. The tests it writes carry the `detest` build tag, so the everyday `go test ./...` does not run them.
+
+### Installing the skill
+
+Install it with the GitHub CLI (`gh skill` is in preview).
+
+``` console
+$ gh skill install k1LoW/detest detest
+```
+
+The command asks which agent to install it for, and whether into the current repository or for your user. `gh skill update` brings an installed skill up to date.
+
+[`skills`](https://github.com/vercel-labs/skills) installs it as well, through npx.
+
+``` console
+$ npx skills add k1LoW/detest --skill detest
+```
+
+`npx skills update` brings it up to date.
+
+### Using it
+
+Ask the agent to use detest, for example "use detest to check whether two concurrent requests can oversell in `Reserve`", or say yes when it suggests detest for a concurrency problem. It does not start on its own.
+
+The rest of this README describes the API the skill writes tests with, for reading those tests or writing them by hand.
+
 ## Usage
 
 ``` go
@@ -152,7 +180,7 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 **Not supported**
 
-Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, `ANY (subquery)` with an operator other than `=`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), text compared with a number, except a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type, a number, or text other than a string literal or parameter, compared with a boolean or a time, a cast of a `numeric` or a float to text and `||` of one, `round` of a value ending in .5 and a cast of one to an integer when the statement does not show whether it is a `numeric` or a float, a set operation whose column holds text in one query and a number in the other, text and a number among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`, a value shorter than its `char(n)` column, a string literal or parameter compared with a timestamp, text without a time zone written to a `timestamptz` column, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, number text written as `0x10`, `0x1p2` or `1_000`, locking reads over a view, a subquery or a `LATERAL` item, a write to the columns of a `DEFERRABLE` primary key or unique constraint, a value other than `DEFAULT` for a `GENERATED ALWAYS` identity column without `OVERRIDING SYSTEM VALUE`, `nextval` of a sequence with `CACHE` above 1, `ON CONFLICT ... WHERE` with a predicate other than the partial index's own, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own; a case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs.
+Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, `ANY (subquery)` with an operator other than `=`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), text compared with a number, except a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type, a number, or text other than a string literal or parameter, compared with a boolean or a time, a cast of a `numeric` or a float to text and `||` of one, `round` of a value ending in .5 and a cast of one to an integer when the statement does not show whether it is a `numeric` or a float, a set operation whose column holds text in one query and a number in the other, text and a number among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`, a value shorter than its `char(n)` column, a string literal or parameter compared with a timestamp, text without a time zone written to a `timestamptz` column, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, number text written as `0x10`, `0x1p2` or `1_000`, locking reads over a view, a subquery or a `LATERAL` item, a write to the columns of a `DEFERRABLE` primary key or unique constraint, a value other than `DEFAULT` for a `GENERATED ALWAYS` identity column without `OVERRIDING SYSTEM VALUE`, `nextval` of a sequence with `CACHE` above 1, `ON CONFLICT ... WHERE` with a predicate other than the partial index's own, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own; a case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs. The statements refused in a run are listed after the exploration's report, as an application that drops the error hides them.
 
 A `numeric` value is kept as a float. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one with more digits than a float keeps, such as an integer beyond 2^53, fails with `detest.ErrUnsupportedSQL`.
 
@@ -162,11 +190,11 @@ A `numeric(p, s)` column rounds what it stores to `s` places, half away from zer
 
 `mysql.New()` parses with the MySQL grammar of TiDB's parser and gives InnoDB's semantics at Repeatable Read (the default), Read Committed and Serializable (`mysql.Isolation`). The statements and constraints above carry over, written in MySQL's syntax, with these differences.
 
-- Shared and exclusive row locks only (`FOR SHARE`, `LOCK IN SHARE MODE`, `FOR UPDATE`), a shared lock on the parent row for a foreign key check, and `SET innodb_lock_wait_timeout` for lock wait timeouts
+- Shared and exclusive row locks only (`FOR SHARE`, `LOCK IN SHARE MODE`, `FOR UPDATE`), a shared lock on the parent row for a foreign key check (on the referenced index's record when that is a unique secondary index, as for a duplicate key check on one), and `SET innodb_lock_wait_timeout` for lock wait timeouts
 - At Repeatable Read, plain reads come from a snapshot taken at the transaction's first read, while locking reads, `UPDATE` and `DELETE` read the latest rows. A value read from the snapshot and written back loses a concurrent update, as in MySQL
-- At Repeatable Read and Serializable, locking reads, `UPDATE` and `DELETE` take next-key locks along the index they search by, so an insert into a locked gap waits, and two transactions that lock the same gap and then insert into it deadlock (1213). Without a usable index, the whole table is locked, as a full scan locks it. Over a join, the first table's search takes next-key locks and the joined tables lock the rows the join read, as the locks InnoDB takes around each lookup into them depend on the join plan
+- At Repeatable Read and Serializable, locking reads, `UPDATE` and `DELETE` take next-key locks along the index they search by, so an insert into a locked gap waits, and two transactions that lock the same gap and then insert into it deadlock (1213). Without a usable index, the whole table is locked, as a full scan locks it. A locking search also meets the rows other transactions inserted and have not committed, and waits for them. A locking read joining two tables, the first looked up by a unique key, locks the joined table's search for each row found, as MySQL's nested loop runs it; one of another shape fails with `detest.ErrUnsupportedSQL`, as the table MySQL reads first is its optimizer's choice
 - At Serializable, plain reads in a transaction take shared locks
-- A failed statement rolls back only itself. A deadlock rolls back the whole transaction
+- A failed statement rolls back only itself, and keeps its locks; the rows it inserted, and those a rollback to a savepoint undoes, leave gap locks where they were, so an insert into such a gap waits for the transaction. A deadlock rolls back the whole transaction of the victim InnoDB picks: the lighter one by the undo records it wrote and the lock structs it holds, waits and implicit locks turned explicit included, and of equal ones the one whose wait closed the cycle. detest counts a table's records as one index page, so the weights of transactions over tables that span many pages can differ from the server's
 - `AUTO_INCREMENT` with `LastInsertId` and `LAST_INSERT_ID()`, `INSERT IGNORE` (which skips rows with a duplicate key, and refuses as unsupported a row whose other error MySQL would turn into a warning), `ON DUPLICATE KEY UPDATE` with `VALUES(col)` or a row alias, `UPDATE` and `DELETE` with `ORDER BY` and `LIMIT`, `UPDATE` of the first table joined with others, `ON UPDATE CURRENT_TIMESTAMP`, `IF`, `IFNULL` and `<=>`
 - `NULL` sorts first when ascending, and the integer types are checked against their ranges, unsigned ones too, except that `BIGINT UNSIGNED` stops at 2^63 - 1, refusing larger values as out of range. `CHAR(n)` and `VARCHAR(n)` lengths and `ENUM` and `SET` members are checked as strict mode does, and `DATE`, `DATETIME` and `TIMESTAMP` columns hold a `time.Time` (UTC) whether written as a time or as a string
 - A string compared with a number is compared as the number it converts to
@@ -203,7 +231,7 @@ For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` tha
 
 ## Options and environment variables
 
-The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
+The search space grows quickly. `detest.MaxPreemptions`, `detest.MaxFailures`, `detest.MaxRedeliveries`, `detest.MaxIdleTicks`, `detest.MaxRuns` and `detest.MaxDuration` bound it, and `detest.Workers` explores it in parallel. `detest.MaxCrashes` lets processes crash at any step (their transactions roll back, their mutexes are freed, their messages are redelivered), to check that work survives a process dying halfway.
 
 | Variable | Effect |
 | --- | --- |
