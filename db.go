@@ -800,13 +800,16 @@ type Tx struct {
 	moved   map[lockKey]string // the keys this transaction changed, as DB.moved
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
-	start    time.Time
-	locks    []lockKey
-	aborted  bool
-	closed   bool
-	deferred []func()
-	atomic   bool
-	block    bool // begun with BeginTx, so SAVEPOINT may be used
+	start   time.Time
+	locks   []lockKey
+	aborted bool
+	// deadlockVictim is set by the transaction that closed a cycle of lock
+	// waits when the explorer picked this waiting one to break it.
+	deadlockVictim bool
+	closed         bool
+	deferred       []func()
+	atomic         bool
+	block          bool // begun with BeginTx, so SAVEPOINT may be used
 	// lockTimeout is set by SET LOCAL lock_timeout: a lock wait may then fail
 	// with 55P03 instead of waiting on, which the explorer chooses.
 	lockTimeout bool

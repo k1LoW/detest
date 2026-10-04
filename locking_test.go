@@ -521,6 +521,59 @@ func TestLockingReadEvaluatesPredicateOnce(t *testing.T) {
 	}
 }
 
+// Postgres breaks a deadlock in whichever waiter's check finds the cycle
+// first, which depends on timing, so the first waiter may be the victim as
+// well as the transaction closing the cycle.
+func TestDeadlockVictimIsEitherWaiter(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			victim           string
+			aLocked, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			victim = ""
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+		})
+		// update writes first, closes locked, runs beforeSecond and writes
+		// second, in one transaction.
+		update := func(p *Proc, name, first string, locked chan struct{}, beforeSecond func(), second string) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, first); err != nil {
+				return err
+			}
+			close(locked)
+			beforeSecond()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = $1`, second); errors.Is(err, ErrDeadlock) {
+				victim = name
+				return nil
+			} else if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		// x waits for b first; y closes the cycle once nothing else can run,
+		// that is once x waits.
+		s.Manual("x", 1, func(p *Proc) error {
+			return update(p, "x", "a", aLocked, func() { <-bLocked }, "b")
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			return update(p, "y", "b", bLocked, func() { p.WaitUntil(p.Now() + 1) }, "a")
+		})
+		s.Sometimes("the first waiter is the victim", func(*State) bool { return victim == "x" })
+		s.Sometimes("the transaction closing the cycle is the victim", func(*State) bool { return victim == "y" })
+	})
+}
+
 // lockAfterFailure declares a process that writes rows in a transaction, fails a
 // statement and then waits for mu before ending the transaction, and another
 // that writes row sku while holding mu. If the failed transaction still held

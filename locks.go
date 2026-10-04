@@ -93,10 +93,20 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 				return ErrSelfWait
 			}
 		}
-		if tx.rowWaitCycle(conflict) {
-			tx.aborted = true
-			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
-			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
+		if cycle := tx.rowWaitCycle(conflict); cycle != nil {
+			// Each waiter checks for a deadlock once deadlock_timeout passes in
+			// its own wait, and the one that finds the cycle aborts itself. Which
+			// one that is depends on timing, so every member may be the victim.
+			members := append([]*Tx{tx}, cycle...)
+			v := members[tx.p.Choose("deadlock victim", len(members))]
+			if v == tx {
+				tx.aborted = true
+				tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+				return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
+			}
+			v.deadlockVictim = true
+			v.p.state = stateReady
+			v.p.waitRow = nil
 		}
 		for _, o := range conflict {
 			if tx.p.r.waitsFor(o.p, tx.p) {
@@ -110,28 +120,48 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 			return tx.db.kind.Error(sqlir.LockNotAvailable, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
+		if tx.deadlockVictim {
+			tx.deadlockVictim = false
+			tx.aborted = true
+			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
+		}
 	}
 }
 
-// rowWaitCycle reports whether one of the transactions tx would wait for is,
-// through row lock waits only, waiting for tx: a deadlock Postgres detects.
-func (tx *Tx) rowWaitCycle(conflict []*Tx) bool {
+// rowWaitCycle returns the waiting transactions through which one of the
+// transactions tx would wait for is, through row lock waits only, waiting for
+// tx: a deadlock Postgres detects. It returns nil when there is none.
+func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
+	type item struct{ w, from *Tx }
+	parent := map[*Tx]*Tx{}
 	seen := map[*Tx]bool{}
-	stack := append([]*Tx(nil), conflict...)
+	var stack []item
+	for _, c := range conflict {
+		stack = append(stack, item{c, nil})
+	}
 	for len(stack) > 0 {
-		w := stack[len(stack)-1]
+		it := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if w == tx {
-			return true
+		if it.w == tx {
+			var path []*Tx
+			for w := it.from; w != nil; w = parent[w] {
+				path = append(path, w)
+			}
+			return path
 		}
+		w := it.w
 		if seen[w] || w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil {
 			continue
 		}
 		seen[w] = true
+		parent[w] = it.from
 		wr := w.p.waitRow
-		stack = append(stack, wr.tx.conflicting(wr.key, wr.mode)...)
+		for _, o := range wr.tx.conflicting(wr.key, wr.mode) {
+			stack = append(stack, item{o, w})
+		}
 	}
-	return false
+	return nil
 }
 
 // releaseLocks drops tx's hold on the given locks and wakes the processes
