@@ -4798,3 +4798,28 @@ func TestInnoDBLockStructsOfASecondarySearch(t *testing.T) {
 		_ = conn.Close()
 	}
 }
+
+// A statement refused as unsupported is listed after the exploration, as an
+// application that drops the error would hide it.
+func TestReportListsUnsupportedStatements(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysqlBin())
+		mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY)")
+		mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)")
+		s.Manual("reader", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			_, _ = tx.Exec("SELECT a.id FROM a JOIN b ON b.a_id = a.id FOR UPDATE")
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Violated || len(res.Unsupported) != 1 || !strings.Contains(res.Unsupported[0], "a locking read joining tables") {
+		t.Fatalf("want the locking join listed as unsupported, got %q", res.Unsupported)
+	}
+	if !strings.Contains(res.report(), res.Unsupported[0]) {
+		t.Fatalf("report does not list it:\n%s", res.report())
+	}
+}

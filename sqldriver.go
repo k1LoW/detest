@@ -261,6 +261,14 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 }
 
 func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64, error) {
+	rows, affected, err := c.runQuery(query, named)
+	if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
+		c.db.s.refuse(u)
+	}
+	return rows, affected, err
+}
+
+func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, int64, error) {
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		args[i] = nv.Value
