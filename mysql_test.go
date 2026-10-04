@@ -4554,3 +4554,20 @@ func TestMySQLLikePrefixSearch(t *testing.T) {
 		t.Errorf("likePrefix: %q, %v", p, wild)
 	}
 }
+
+// A MODIFY that converts a row's primary key value is refused, as the row
+// would be filed under its old identity; one that leaves the keys as they
+// are runs.
+func TestMySQLModifyOfAPrimaryKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE a (id VARCHAR(5) PRIMARY KEY)")
+	mustExec(t, db, "INSERT INTO a VALUES ('01')")
+	if _, err := db.Exec("ALTER TABLE a MODIFY id INT"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("'01' to INT: %v, want unsupported", err)
+	}
+	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, n INT)")
+	mustExec(t, db, "INSERT INTO b VALUES (1, 2)")
+	mustExec(t, db, "ALTER TABLE b MODIFY id BIGINT")
+	mustExec(t, db, "ALTER TABLE b MODIFY n VARCHAR(5)")
+}

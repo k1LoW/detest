@@ -1126,6 +1126,18 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 		if err := x.checkTypes(table, n); err != nil {
 			return nil, err
 		}
+		if redefined {
+			// A converted key would file the row under another identity,
+			// which its versions and locks are not moved to.
+			k := n.clone()
+			delete(k, "_key")
+			if err := db.assignKey(table, k); err != nil {
+				return nil, err
+			}
+			if k.Key() != r.Key() {
+				return nil, unsupported("MODIFY or CHANGE of a column that converts a row's primary key", "")
+			}
+		}
 		return n, nil
 	}
 	// In key order, so that a volatile default numbers the rows the same in
