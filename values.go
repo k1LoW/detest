@@ -96,6 +96,20 @@ func compareValues(a, b any) (int, bool) {
 		}
 		return ta.Compare(tb), true
 	}
+	// Postgres takes NaN as equal to NaN and greater than every other
+	// number, so ORDER BY and min/max place it as Postgres does.
+	if na, nb := isNaNValue(a), isNaNValue(b); na || nb {
+		if !isNumber(a) || !isNumber(b) {
+			return 0, false
+		}
+		switch {
+		case na && nb:
+			return 0, true
+		case na:
+			return 1, true
+		}
+		return -1, true
+	}
 	// Two integers are compared as integers, and an integer with a float
 	// exactly, as a float64 cannot tell apart integers above 2^53, such as
 	// adjacent snowflake IDs.
@@ -103,11 +117,11 @@ func compareValues(a, b any) (int, bool) {
 		if ib, ok := integer(b); ok {
 			return cmp.Compare(ia, ib), true
 		}
-		if fb, ok := b.(float64); ok && !math.IsNaN(fb) {
+		if fb, ok := b.(float64); ok {
 			return new(big.Float).SetInt64(ia).Cmp(big.NewFloat(fb)), true
 		}
 	}
-	if fa, ok := a.(float64); ok && !math.IsNaN(fa) {
+	if fa, ok := a.(float64); ok {
 		if ib, ok := integer(b); ok {
 			return big.NewFloat(fa).Cmp(new(big.Float).SetInt64(ib)), true
 		}
@@ -165,6 +179,11 @@ func parseNumber(s string) (float64, error) {
 		return 0, strconv.ErrSyntax
 	}
 	return strconv.ParseFloat(s, 64)
+}
+
+func isNaNValue(v any) bool {
+	f, ok := toFloat(v)
+	return ok && math.IsNaN(f)
 }
 
 func toFloat(v any) (float64, bool) {

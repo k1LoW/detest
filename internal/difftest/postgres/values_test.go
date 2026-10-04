@@ -73,6 +73,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT floor(3) / 2 = 1.5, abs(-3) / 2`),
 			difftest.Q(0, `SELECT (1.5 * 2) / 2 = 1.5, -(1.5 * 2) / 2 = -1.5`),
 			difftest.Q(0, `SELECT id FROM t WHERE id * 1000000 = 9000000.0`),
+			difftest.Q(0, `SELECT id FROM t ORDER BY CASE WHEN id = 2 THEN 'inf'::float8 - 'inf'::float8 ELSE ratio END DESC NULLS LAST, id LIMIT 2`),
 		},
 	},
 	{
