@@ -414,3 +414,29 @@ CREATE SEQUENCE IF NOT EXISTS kept START 10;
 	mustExec(t, db, `DELETE FROM pos`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, 'a', false) ON CONFLICT (email) WHERE NOT deleted DO NOTHING`)
 }
+
+func TestSequenceOnSearchPath(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
+	mustExec(t, db, `
+CREATE SCHEMA billing;
+CREATE SEQUENCE public.s START 5;
+CREATE SEQUENCE billing.s START 50;
+CREATE SEQUENCE only_public START 7;
+`)
+	for _, c := range []struct {
+		q    string
+		want int64
+	}{
+		{`SELECT nextval('s')`, 50},
+		{`SELECT nextval('public.s')`, 5},
+		{`SELECT nextval('billing.s')`, 51},
+		{`SELECT nextval('only_public')`, 7},
+	} {
+		q, want := c.q, c.want
+		var n int64
+		if err := db.QueryRow(q).Scan(&n); err != nil || n != want {
+			t.Errorf("%s: %d %v, want %d", q, n, err, want)
+		}
+	}
+}

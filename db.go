@@ -364,6 +364,32 @@ func sequenceName(s string) string {
 	return strings.Join(parts, ".")
 }
 
+// seqName is the sequence name s refers to: one qualified by a schema as
+// written, else the first on the search path that exists, else where an
+// unqualified CREATE SEQUENCE puts it, the first schema of the path. A
+// sequence in public goes by its bare name, as sequenceName gives it.
+func (db *DB) seqName(s string) string {
+	s = sequenceName(s)
+	if strings.Contains(s, ".") {
+		return s
+	}
+	path := db.kind.SearchPath()
+	if len(path) == 0 {
+		path = defaultSearchPath
+	}
+	in := func(schema string) string { return sequenceName(schema + "." + s) }
+	for _, schema := range path {
+		q := in(schema)
+		if _, ok := db.seqDefs[q]; ok {
+			return q
+		}
+		if _, ok := db.seqs[q]; ok {
+			return q
+		}
+	}
+	return in(path[0])
+}
+
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	table = db.resolve(table)
@@ -860,7 +886,7 @@ func (db *DB) seqOptions(seq string) seqDef {
 
 // alterSequence applies CREATE SEQUENCE (create) or ALTER SEQUENCE options.
 func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
-	seq = sequenceName(seq)
+	seq = db.seqName(seq)
 	d := db.seqOptions(seq)
 	if create {
 		d = seqDef{inc: 1, cache: 1}
@@ -908,7 +934,7 @@ func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
 // of them, which detest does not do, so its values are refused rather than
 // given in another order.
 func (db *DB) nextval(seq string) (int64, string) {
-	seq = sequenceName(seq)
+	seq = db.seqName(seq)
 	d := db.seqOptions(seq)
 	if d.cache > 1 {
 		return 0, fmt.Sprintf("nextval of sequence %q, which caches %d values per session", seq, d.cache)
@@ -926,7 +952,7 @@ func (db *DB) nextval(seq string) (int64, string) {
 // setval sets a sequence so that nextval returns the value after v, or v
 // when not called.
 func (db *DB) setval(seq string, v int64, called bool) {
-	seq = sequenceName(seq)
+	seq = db.seqName(seq)
 	if !called {
 		v -= db.seqOptions(seq).inc
 	}
@@ -962,7 +988,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	switch {
 	case ch.Object == "sequence":
 		if ch.Sequence != nil {
-			if _, exists := db.seqDefs[sequenceName(ch.Table)]; exists && ch.Create && ch.IfNotExists {
+			if _, exists := db.seqDefs[db.seqName(ch.Table)]; exists && ch.Create && ch.IfNotExists {
 				return nil
 			}
 			db.alterSequence(ch.Table, ch.Sequence, ch.Create)
