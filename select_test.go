@@ -545,10 +545,13 @@ func TestTextComparedWithNumber(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name = '02'`); len(got) != 1 || got[0] != "0" {
 		t.Errorf("name = '02': got %v, want 0", got)
 	}
-	for _, v := range []any{true, time.Unix(0, 0)} {
+	for _, v := range []any{true, time.Unix(0, 0), 1.2} {
 		if _, err := db.Exec(`INSERT INTO t VALUES (3, $1)`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%T to a text column: got %v, want unsupported", v, err)
 		}
+	}
+	if _, err := db.Exec(`INSERT INTO t VALUES (3, 1.20)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("numeric literal to a text column: got %v, want unsupported", err)
 	}
 	// A parameter holding a boolean or a time cannot be sent as a number.
 	for _, v := range []any{true, time.Unix(0, 0)} {

@@ -478,6 +478,12 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		// A number written to a text column is stored as its text, as
 		// Postgres's assignment does, so it compares as text afterwards.
 		if textTypes[t] && isNumber(v) {
+			// Postgres keeps the digits of a numeric literal (1.20) and a
+			// driver sends a float parameter as it formats it, which the
+			// value does not tell apart.
+			if _, ok := integer(v); !ok {
+				return x.unsupported(fmt.Sprintf("a number with a fraction written to the text column %q", col))
+			}
 			row[col] = fmt.Sprint(v)
 			continue
 		}
