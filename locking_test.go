@@ -689,3 +689,67 @@ func TestSubtransactionAbortWeakensUpgradedLock(t *testing.T) {
 		})
 	}
 }
+
+// When two transactions sharing a row lock both wait for the one that closes
+// the cycle, all three are on a cycle, and each may be the victim.
+func TestDeadlockVictimOfBranchedCycle(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			victims         []string
+			shared, bLocked chan struct{}
+		)
+		s.Seed(func() {
+			victims = nil
+			shared, bLocked = make(chan struct{}, 2), make(chan struct{})
+		})
+		run := func(p *Proc, name string, steps func(tx *sql.Tx) error) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if err := steps(tx); errors.Is(err, ErrDeadlock) {
+				victims = append(victims, name)
+				return nil
+			} else if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		for _, name := range []string{"x", "y"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				return run(p, name, func(tx *sql.Tx) error {
+					if _, err := tx.Exec(`SELECT sku FROM stock WHERE sku = 'a' FOR SHARE`); err != nil {
+						return err
+					}
+					shared <- struct{}{}
+					<-bLocked
+					_, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`)
+					return err
+				})
+			})
+		}
+		// z closes the cycle once x and y both wait for b.
+		s.Manual("z", 1, func(p *Proc) error {
+			<-shared
+			<-shared
+			return run(p, "z", func(tx *sql.Tx) error {
+				if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+					return err
+				}
+				close(bLocked)
+				p.WaitUntil(p.Now() + 1)
+				_, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`)
+				return err
+			})
+		})
+		for _, name := range []string{"x", "y", "z"} {
+			s.Sometimes(name+" is the first victim", func(*State) bool { return len(victims) > 0 && victims[0] == name })
+		}
+	}, MaxPreemptions(0))
+}
