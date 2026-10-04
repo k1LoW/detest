@@ -314,4 +314,17 @@ func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO nku VALUES (1)`); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("equal row under a unique constraint: got %v", err)
 	}
+	// An equal row another transaction is writing is refused without
+	// waiting on it, as Postgres has no key to wait on.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO nk VALUES (3, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nk VALUES (3, 3)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("equal row another transaction is writing: got %v", err)
+	}
 }

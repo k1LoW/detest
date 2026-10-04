@@ -1096,6 +1096,15 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			continue
 		}
 		lk = lockKey{table, row.Key()}
+		noPK := false
+		if def := x.tx.db.defs[table]; def != nil && len(def.pk) == 0 {
+			noPK = true
+		}
+		// Waiting on a key made from the row's values would block where
+		// Postgres, with no key to wait on, takes both rows.
+		if noPK && x.tx.heldByOther(lk, lockUpdate) {
+			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
+		}
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
@@ -1105,7 +1114,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			// equal row is refused rather than reported as a duplicate key
 			// Postgres would not raise, unless a unique constraint of the
 			// table rejects it, as Postgres does.
-			if def := x.tx.db.defs[table]; def != nil && len(def.pk) == 0 {
+			if noPK {
 				if err := x.checkUniques(table, row, "", nil); err != nil {
 					return nil, err
 				}
