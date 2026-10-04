@@ -271,8 +271,8 @@ type ColumnDef struct {
 type IndexDef struct {
 	Name    string
 	Columns []string
-	// Prefix is the column whose first characters the index's leading part
-	// holds, as name(3) does, when Columns is empty for it.
+	// Prefix is the column whose first characters the part after Columns
+	// holds, as name(3) does.
 	Prefix string
 	// Desc is an index with a descending part, which orders its keys
 	// otherwise than detest's gap locks do.

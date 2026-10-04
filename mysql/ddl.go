@@ -273,8 +273,8 @@ func (c *conv) constraint(ch *sqlir.SchemaChange, k *ast.Constraint) error {
 			name = first
 		}
 		ix := sqlir.IndexDef{Name: name, Columns: cols, Desc: descending(k.Keys)}
-		if len(cols) == 0 && k.Keys[0].Expr == nil && k.Keys[0].Length > 0 {
-			ix.Prefix = first
+		if n := len(cols); n < len(k.Keys) && k.Keys[n].Expr == nil && k.Keys[n].Length > 0 {
+			ix.Prefix = k.Keys[n].Column.Name.L // the part after the whole columns holds a prefix
 		}
 		ch.Indexes = append(ch.Indexes, ix)
 	case ast.ConstraintForeignKey:

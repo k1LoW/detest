@@ -268,12 +268,23 @@ func (x *sqlExec) inScanOrder(table, alias string, where sqlir.Expr, stop *scanS
 	if stop == nil || len(stop.order) > 0 || !x.tx.db.kind.InnoDB() {
 		return // the scan follows the index at any isolation level, gap locks or not
 	}
-	sr := x.searchRange(table, alias, where)
+	sr := x.scanSearch(table, alias, where)
 	if len(sr.cols) == 0 || len(sr.ranges) != 1 {
 		return
 	}
 	pk := x.tx.db.defs[table].pk
 	slices.SortStableFunc(rows, func(a, b jrow) int { return scanCompare(sr.cols, pk, a.by[alias], b.by[alias]) })
+}
+
+// scanSearch is the index a scan that LIMIT may stop follows: the one the
+// WHERE searches by, or else the primary key, the clustered index InnoDB
+// scans in full, from its start.
+func (x *sqlExec) scanSearch(table, alias string, where sqlir.Expr) indexSearch {
+	sr := x.searchRange(table, alias, where)
+	if def := x.tx.db.defs[table]; len(sr.cols) == 0 && def != nil && len(def.pk) > 0 {
+		return indexSearch{cols: def.pk, key: def.pk, ranges: []valRange{{}}}
+	}
+	return sr
 }
 
 // scanStop is where a statement with LIMIT stops scanning: after n rows
@@ -295,7 +306,7 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	if stop.n == 0 {
 		return true, nil // LIMIT 0 reads nothing
 	}
-	sr := x.searchRange(table, alias, where)
+	sr := x.scanSearch(table, alias, where)
 	cols := sr.key
 	if len(cols) == 0 || len(sr.ranges) != 1 || len(stop.order) > 1 {
 		return false, nil
@@ -695,25 +706,50 @@ func (x *sqlExec) prefixSearch(table, alias string, where sqlir.Expr) error {
 	if def == nil || where == nil {
 		return nil
 	}
-	if len(x.searchRange(table, alias, where).cols) > 0 {
-		return nil
+	sr := x.searchRange(table, alias, where)
+	if sr.unique {
+		return nil // MySQL reads a unique point lookup by its index
 	}
-	var prefixed []string
+	// An index's whole leading columns and the column whose prefix follows
+	// them, as in KEY (a, b(3)).
+	type prefixed struct {
+		lead []string
+		col  string
+	}
+	var ixs []prefixed
 	for _, ix := range def.indexes {
 		if ix.Prefix != "" {
-			prefixed = append(prefixed, ix.Prefix)
+			ixs = append(ixs, prefixed{ix.Columns, ix.Prefix})
 		}
 	}
 	for _, u := range def.uniques {
-		if f, ok := u.Elems[0].(*sqlir.FuncCall); ok && f.Name == "left" && u.Where == nil {
-			if c, ok := f.Args[0].(*sqlir.ColumnRef); ok {
-				prefixed = append(prefixed, c.Column)
+		if u.Where != nil {
+			continue
+		}
+		var lead []string
+		for _, e := range u.Elems {
+			if c, ok := e.(*sqlir.ColumnRef); ok {
+				lead = append(lead, c.Column)
+				continue
 			}
+			if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "left" {
+				if c, ok := f.Args[0].(*sqlir.ColumnRef); ok {
+					ixs = append(ixs, prefixed{lead, c.Column})
+				}
+			}
+			break
 		}
 	}
 	conjuncts := splitAnd(where)
-	for _, col := range prefixed {
-		if _, ok := x.columnRanges(col, alias, table, conjuncts); ok {
+	bounded := func(col string) bool {
+		_, ok := x.columnRanges(col, alias, table, conjuncts)
+		return ok
+	}
+	for _, ix := range ixs {
+		if len(ix.lead) == 0 && len(sr.cols) > 0 {
+			continue // an index of whole columns serves the search
+		}
+		if bounded(ix.col) && !slices.ContainsFunc(ix.lead, func(c string) bool { return !bounded(c) }) {
 			return x.unsupported("a locking search by a prefix index")
 		}
 	}
