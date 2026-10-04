@@ -2204,6 +2204,22 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 	return op == "=" || op == "<=" || op == ">=", nil
 }
 
+// parseBool reads text as Postgres's boolean input does: true, yes, on or 1,
+// false, no, off or 0, or a prefix of a word that tells it apart, in any
+// case and with surrounding spaces.
+func parseBool(s string) (bool, bool) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	switch {
+	case t == "":
+		return false, false
+	case strings.HasPrefix("true", t), strings.HasPrefix("yes", t), t == "on", t == "1":
+		return true, true
+	case strings.HasPrefix("false", t), strings.HasPrefix("no", t), len(t) >= 2 && strings.HasPrefix("off", t), t == "0":
+		return false, true
+	}
+	return false, false
+}
+
 // paramText returns a parameter's bytes as the text they are, so they compare
 // and order as text rather than as a byte slice.
 func paramText(e sqlir.Expr, v any) any {
@@ -2297,6 +2313,14 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		}
 	default:
 		return v, nil
+	}
+	switch derefValue(other).(type) {
+	case bool:
+		b, ok := parseBool(s)
+		if !ok {
+			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", s), "", "", "")
+		}
+		return b, nil
 	}
 	if !isNumber(other) {
 		return v, nil

@@ -93,6 +93,20 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "untyped literal compared with a boolean",
+		Schema: []string{`CREATE TABLE e (id int PRIMARY KEY, active bool)`},
+		Seed:   []string{`INSERT INTO e VALUES (1, true), (2, false)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM e WHERE active = 't' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM e WHERE active = ' OFF ' ORDER BY id`),
+			difftest.Q(0, `SELECT true = 'yes', true = ' TRUE ', true = 'on', true = '1', false = 'of', false = 'n'`),
+			difftest.Q(0, `SELECT true = ANY (ARRAY['yes', false])`),
+			difftest.Q(0, `SELECT true = 'o'`),
+			difftest.Q(0, `SELECT true = 'maybe'`),
+		},
+	},
+	{
 		Name: "row comparison",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,
