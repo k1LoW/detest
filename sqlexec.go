@@ -874,6 +874,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 			}
 			args[i] = val
 		}
+		if v.Name == "nullif" {
+			var err error
+			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
+				return nil, err
+			}
+		}
 		return x.callFunc(v.Name, args)
 	case *sqlir.BinaryExpr:
 		l, err := x.evalAgg(v.L, g)
@@ -883,6 +889,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		r, err := x.evalAgg(v.R, g)
 		if err != nil {
 			return nil, err
+		}
+		switch v.Op {
+		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
+				return nil, err
+			}
 		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.Cast:
@@ -1490,17 +1502,23 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 			var lhs []any
-			if _, ok := v.X.(*sqlir.RowExpr); ok {
+			lhsExprs := []sqlir.Expr{v.X}
+			if row, ok := v.X.(*sqlir.RowExpr); ok {
 				if lhs, ok = l.([]any); !ok {
 					return nil, x.unsupported("row comparison")
 				}
+				lhsExprs = row.Items
 			} else {
 				lhs = []any{l}
 			}
 			for _, r := range rows {
 				match := len(cols) == len(lhs)
 				for i := 0; match && i < len(cols); i++ {
-					if !equalValues(lhs[i], r[cols[i]]) {
+					li, err := x.untyped(lhsExprs[i], lhs[i], r[cols[i]])
+					if err != nil {
+						return nil, err
+					}
+					if !equalValues(li, r[cols[i]]) {
 						match = false
 					}
 				}
@@ -1608,6 +1626,12 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 			args[i] = val
+		}
+		if v.Name == "nullif" {
+			var err error
+			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
+				return nil, err
+			}
 		}
 		return x.callFunc(v.Name, args)
 	}

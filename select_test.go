@@ -409,6 +409,10 @@ func TestUntypedLiteralComparedWithNumber(t *testing.T) {
 		{`SELECT count(*) FROM t WHERE price = '1.50'`, "1"},
 		{`SELECT count(*) FROM t WHERE price >= '1.75'`, "1"},
 		{`SELECT CASE id WHEN '09' THEN 'nine' ELSE 'other' END FROM t WHERE id = 9`, "nine"},
+		{`SELECT count(*) FROM t HAVING count(*) = '02'`, "2"},
+		{`SELECT count(*) FROM t WHERE '01' IN (SELECT id FROM t)`, "2"},
+		{`SELECT count(*) FROM t WHERE ('09', '9') IN (SELECT id, name FROM t)`, "2"},
+		{`SELECT count(*) FROM t WHERE NULLIF(id, '01') IS NULL`, "1"},
 		// A text column keeps its value: only the literal takes the other side's type.
 		{`SELECT count(*) FROM t WHERE name = '01'`, "1"},
 		{`SELECT count(*) FROM t WHERE name = '1'`, "0"},
