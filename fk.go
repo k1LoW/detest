@@ -276,12 +276,12 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 				if !ok {
 					continue
 				}
+				x.tx.undo++ // written before the secondary entries, which may wait
 				if err := x.releaseEntries(ck.table, cur, nil); err != nil {
 					return err
 				}
 				delete(x.tx.writes, lk)
 				x.tx.deleted[lk] = true
-				x.tx.undo++
 				if err := x.onParentDelete(ck.table, cur); err != nil {
 					return err
 				}
@@ -405,6 +405,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 		if err := x.checkRow(ck.table, updated); err != nil {
 			return err
 		}
+		x.tx.undo++ // written before the secondary indexes' checks, which may wait
 		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {
 			return err
 		}
@@ -424,7 +425,6 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.writes[nlk] = updated
-		x.tx.undo++
 	}
 	return nil
 }

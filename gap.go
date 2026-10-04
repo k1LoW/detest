@@ -279,10 +279,23 @@ func (x *sqlExec) recordLocks(table, alias string, where sqlir.Expr, mode lockMo
 	inRange := func(r Row) bool {
 		return slices.ContainsFunc(sr.ranges, func(rg valRange) bool { return rg.contains(keyOf(r, sr.key)) })
 	}
-	for _, r := range tx.lockingRows(table) {
-		if !inRange(r) {
-			continue
+	// The scan goes along the index, and starts over after each entry, as a
+	// wait may let another transaction move an entry into the range or out
+	// of it; an entry seen once is not locked again.
+	seen := map[string]bool{}
+scan:
+	for {
+		var in []Row
+		for _, r := range tx.lockingRows(table) {
+			if inRange(r) && !seen[r.Key()+"\x00"+encodeKey(keyOf(r, sr.key))] {
+				in = append(in, r)
+			}
 		}
+		if len(in) == 0 {
+			return nil
+		}
+		r := slices.MinFunc(in, func(a, b Row) int { return keyCompare(keyOf(a, sr.key), keyOf(b, sr.key)) })
+		seen[r.Key()+"\x00"+encodeKey(keyOf(r, sr.key))] = true
 		var keys []lockKey
 		var structs []lockStruct
 		if sr.def != nil {
@@ -296,12 +309,18 @@ func (x *sqlExec) recordLocks(table, alias string, where sqlir.Expr, mode lockMo
 			}
 		}
 		lk := lockKey{table, r.Key()}
+		if len(keys) == 0 {
+			// A plain index's record has no lock of its own in detest, and
+			// stands as the row's.
+			keys = append(keys, lk)
+			structs = append(structs, structKey(table, sr.index, mode, "record"))
+		}
 		keys = append(keys, lk)
 		structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
 		if policy != nil && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
 			if policy.SkipLocked {
 				x.skip(lk)
-				continue
+				continue scan
 			}
 			if policy.NoWait {
 				return tx.db.kind.Error(sqlir.LockNotAvailable, fmt.Sprintf("could not obtain lock on row in relation %q", relname(table)), relname(table), "", "")
@@ -326,13 +345,14 @@ func (x *sqlExec) recordLocks(table, alias string, where sqlir.Expr, mode lockMo
 		}
 		if !match && len(taken) > 0 {
 			tx.locks = slices.DeleteFunc(tx.locks, func(k lockKey) bool { return slices.Contains(taken, k) })
-			for _, k := range taken {
-				delete(tx.explicit, k)
-			}
 			tx.releaseLocks(taken)
 		}
+		if match && x.scanned != nil {
+			if err := x.scanned(table, cur); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
 }
 
 // checkSearch refuses a locking search whose locks depend on a choice of
@@ -519,6 +539,11 @@ scan:
 				}
 				if match {
 					count++
+					if x.scanned != nil {
+						if err := x.scanned(table, cur); err != nil {
+							return false, err
+						}
+					}
 				}
 			}
 			last = r
@@ -690,6 +715,11 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if pick(r) {
 				if err := lockRecord(r, true); err != nil {
 					return err
+				}
+				if x.scanned != nil {
+					if err := x.scanned(table, r); err != nil {
+						return err
+					}
 				}
 			}
 		}

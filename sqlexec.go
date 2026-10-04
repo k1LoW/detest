@@ -54,10 +54,38 @@ type sqlExec struct {
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
+	// scanned is called with each row a locking search of an UPDATE or a
+	// DELETE locks, as it locks it, and counted is the rows it counted the
+	// undo record of then.
+	scanned func(table string, r Row) error
+	counted map[string]bool
 	// skipped is the rows a locking search's SKIP LOCKED passed over, on an
 	// index record another transaction holds, which the rows the statement
 	// then locks leave out too.
 	skipped map[lockKey]bool
+}
+
+func (x *sqlExec) countUndo(key string) {
+	if x.counted == nil {
+		x.counted = map[string]bool{}
+	}
+	x.counted[key] = true
+	x.tx.undo++
+}
+
+// steadyExpr reports whether e evaluates to the same value each time, with
+// no subquery, so that it may be evaluated ahead of the statement.
+func steadyExpr(e sqlir.Expr) bool {
+	if volatile(e) {
+		return false
+	}
+	steady := true
+	walkNodes(e, func(n any) {
+		if _, ok := n.(*sqlir.SelectStmt); ok {
+			steady = false
+		}
+	})
+	return steady
 }
 
 func (x *sqlExec) skip(lk lockKey) {
@@ -1288,6 +1316,11 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if err := x.checkRow(table, updated); err != nil {
 				return nil, err
 			}
+			// InnoDB writes the undo record as it changes the clustered
+			// record, before the secondary indexes' checks, which may wait.
+			if !sameRow(cur, updated) {
+				x.tx.undo++
+			}
 			if err := x.checkUniques(table, updated, lk.key, cur); err != nil {
 				return nil, err
 			}
@@ -1307,9 +1340,6 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			x.tx.writes[lk] = updated
-			if !sameRow(cur, updated) {
-				x.tx.undo++
-			}
 			if x.tx.p != nil {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
@@ -1621,7 +1651,40 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			return nil, err
 		}
 	}
-	if err := x.nextKeyLocks(table, alias, up.Where, lockUpdate, nil, stop); err != nil {
+	if len(up.From) == 0 && !slices.ContainsFunc(up.Set, func(a sqlir.Assignment) bool { return !steadyExpr(a.Value) }) {
+		// InnoDB changes each row as its search locks it, so the undo
+		// records of the rows before weigh a wait on a later one.
+		x.scanned = func(t string, r Row) error {
+			cur, ok := x.tx.view(t, r.Key())
+			if t != table || !ok || x.counted[r.Key()] {
+				return nil
+			}
+			en := newJrow(alias, cur).env(nil)
+			if up.Where != nil {
+				if ok, err := x.evalBool(up.Where, en); err != nil || !ok {
+					return err
+				}
+			}
+			updated := cur.clone()
+			for _, a := range up.Set {
+				v, err := x.assignedValue(table, a, en, "in SET")
+				if err != nil {
+					return err
+				}
+				updated[a.Column] = v
+				if x.tx.db.kind.InnoDB() {
+					en = newJrow(alias, updated).env(nil)
+				}
+			}
+			if !sameRow(cur, updated) {
+				x.countUndo(r.Key())
+			}
+			return nil
+		}
+	}
+	err := x.nextKeyLocks(table, alias, up.Where, lockUpdate, nil, stop)
+	x.scanned = nil
+	if err != nil {
 		return nil, err
 	}
 	cands, err := x.writeCandidates(up.Table, up.Alias, up.From, up.Where)
@@ -1697,6 +1760,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		if err := x.checkRow(table, updated); err != nil {
 			return nil, err
 		}
+		// InnoDB writes the undo record as it changes the clustered record,
+		// before the secondary indexes' checks, which may wait; none for an
+		// update that changes nothing.
+		if !sameRow(cur, updated) && !x.counted[key] {
+			x.tx.undo++
+		}
 		if err := x.checkUniques(table, updated, key, cur); err != nil {
 			return nil, err
 		}
@@ -1716,9 +1785,6 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		x.tx.writes[lk] = updated
-		if !sameRow(cur, updated) {
-			x.tx.undo++ // InnoDB writes no undo record for an update that changes nothing
-		}
 		matched++
 		if !x.tx.db.kind.InnoDB() || !sameRow(cur, updated) {
 			// MySQL counts the rows an UPDATE changed, as go-sql-driver
@@ -1777,7 +1843,26 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return nil, err
 		}
 	}
-	if err := x.nextKeyLocks(x.tx.db.resolve(del.Table), delAlias, del.Where, lockUpdate, nil, stop); err != nil {
+	if len(del.Using) == 0 {
+		// InnoDB deletes each row as its search locks it, so the undo
+		// records of the rows before weigh a wait on a later one.
+		x.scanned = func(t string, r Row) error {
+			cur, ok := x.tx.view(t, r.Key())
+			if t != x.tx.db.resolve(del.Table) || !ok || x.counted[r.Key()] {
+				return nil
+			}
+			if del.Where != nil {
+				if ok, err := x.evalBool(del.Where, newJrow(delAlias, cur).env(nil)); err != nil || !ok {
+					return err
+				}
+			}
+			x.countUndo(r.Key())
+			return nil
+		}
+	}
+	err := x.nextKeyLocks(x.tx.db.resolve(del.Table), delAlias, del.Where, lockUpdate, nil, stop)
+	x.scanned = nil
+	if err != nil {
 		return nil, err
 	}
 	cands, err := x.writeCandidates(del.Table, del.Alias, del.Using, del.Where)
@@ -1825,12 +1910,14 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			}
 		}
 		done[key] = true
+		if !x.counted[key] {
+			x.tx.undo++ // written before the secondary entries, which may wait
+		}
 		if err := x.releaseEntries(table, cur, nil); err != nil {
 			return nil, err
 		}
 		delete(x.tx.writes, lk)
 		x.tx.deleted[lk] = true
-		x.tx.undo++
 		if err := x.onParentDelete(table, cur); err != nil {
 			return nil, err
 		}

@@ -150,9 +150,11 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 		}
 		if cancelWait == nil {
 			cancelWait = tx.noteWait(wait)
-			for _, o := range conflict {
-				o.convertImplicit(lk)
-			}
+		}
+		// A holder that took the lock while this one waited turns its
+		// implicit lock explicit too.
+		for _, o := range conflict {
+			o.convertImplicit(lk)
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
@@ -475,6 +477,8 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 		}
 		delete(holders, tx)
 		delete(tx.grants, lk)
+		delete(tx.implicit, lk)
+		delete(tx.explicit, lk)
 		if len(holders) == 0 {
 			delete(tx.db.locks, lk)
 		}

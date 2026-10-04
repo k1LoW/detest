@@ -652,6 +652,26 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A search through an index locks its rows in the index's order,
+		// here the reverse of the primary key's, which closes the cycle,
+		// and changes each row as it locks it, so the undo record of the
+		// first weighs the wait for the second.
+		Name:   "read committed locks along the index it searches",
+		Schema: itemsSchema,
+		Seed:   []string{`INSERT INTO items (id, k) VALUES (10, 30), (30, 10), (50, 100), (60, 110), (70, 120), (80, 130)`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rc),
+			difftest.S(1, rc),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(1, `UPDATE items SET v = 3 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE k BETWEEN 5 AND 40`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
 		// At Read Committed, the locks of a row the search reads but WHERE
 		// does not take are released.
 		Name:   "read committed releases the rows its search does not take",
