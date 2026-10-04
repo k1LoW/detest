@@ -151,7 +151,6 @@ func (x *sqlExec) lockParent(fk sqlir.ForeignKey, vals []any) (bool, error) {
 		if err := x.tx.lockModeAs(uniqueLock(parent, u, vals), lockShare, structKey(parent, uniqueIndex(u), lockShare, "record")); err != nil {
 			return false, err
 		}
-		x.tx.noteLockStruct(parent, uniqueIndex(u), lockShare, "record")
 		for _, r := range x.tx.selectNoYield(parent, nil) {
 			if rowMatches(r, cols, vals) {
 				return true, nil

@@ -81,6 +81,36 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A range of the primary key starting at a row, closed, locks that
+		// row alone, and the row past its end as a gap alone, so neither
+		// the gap below nor the row past it waits.
+		Name:   "a primary key range locks the gap before the next row only",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT v FROM items WHERE id BETWEEN 10 AND 15 FOR UPDATE`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 20`),
+			difftest.S(1, `INSERT INTO items (id, k) VALUES (5, 5)`),
+			difftest.S(1, `INSERT INTO items (id, k) VALUES (15, 15)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, v FROM items ORDER BY id`),
+		},
+	},
+	{
+		// An equality on a plain index locks the entry past it as a gap
+		// alone.
+		Name:   "an index equality locks the gap before the next entry only",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT v FROM items WHERE k = 20 FOR UPDATE`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(1, `INSERT INTO items (id, k) VALUES (25, 25)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, v FROM items ORDER BY id`),
+		},
+	},
+	{
 		Name:   "read committed takes no gap lock",
 		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
 		Steps: []difftest.Step{
@@ -294,6 +324,41 @@ var cases = []difftest.Case{
 			difftest.S(1, `UPDATE items SET v = 3 WHERE id = 30`),
 			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
 			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// An update of a row a range read already locked next-key needs no
+		// lock of its own, so it adds no lock struct.
+		Name:   "deadlock victim weighs a lock a held one covers as none",
+		Schema: itemsSchema, Seed: itemsSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.Q(0, `SELECT id FROM items WHERE id BETWEEN 10 AND 15 FOR UPDATE`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 10`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 30`),
+			difftest.S(1, `UPDATE items SET v = 2 WHERE id = 10`),
+			difftest.S(0, `UPDATE items SET v = 1 WHERE id = 30`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+		},
+	},
+	{
+		// An insert takes the table's IX before its duplicate check, whose
+		// shared lock then adds no IS.
+		Name:   "deadlock victim weighs an insert's intention lock as IX",
+		Schema: stockSchema, Seed: []string{`INSERT INTO stock VALUES ('apple', 1), ('pear', 1), ('plum', 1)`}, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(0, `INSERT IGNORE INTO stock VALUES ('apple', 1)`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'pear'`),
+			difftest.S(1, `UPDATE stock SET n = 2 WHERE sku = 'plum'`),
+			difftest.S(1, `UPDATE stock SET n = 3 WHERE sku = 'plum'`),
+			difftest.S(1, `UPDATE stock SET n = 2 WHERE sku = 'pear'`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'plum'`),
 			difftest.S(0, `ROLLBACK`),
 			difftest.S(1, `ROLLBACK`),
 		},

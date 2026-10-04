@@ -129,7 +129,11 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 				}
 				tx.implicit[lk] = true
 			}
-			if grant != (lockStruct{}) && tx.db.kind.InnoDB() {
+			if grant != (lockStruct{}) && tx.db.kind.InnoDB() && !tx.covers(lk, grant) {
+				if tx.grants == nil {
+					tx.grants = map[lockKey][]lockStruct{}
+				}
+				tx.grants[lk] = append(tx.grants[lk], grant)
 				tx.addStruct(grant)
 				if strings.HasPrefix(lk.table, "\x00") {
 					if tx.explicit == nil {
@@ -268,6 +272,23 @@ func (t *Tx) heldStructs() map[lockStruct]bool {
 		structs[tableStruct(lk.table, "IX")] = true
 	}
 	return structs
+}
+
+// covers reports whether a lock tx holds on lk covers a request for one in
+// struct g, as InnoDB grants such a request without a lock of its own: a
+// lock of the same index at least as strong, next-key covering the record
+// and the gap alone, or tx's implicit lock as the record's writer.
+func (tx *Tx) covers(lk lockKey, g lockStruct) bool {
+	if tx.implicit[lk] && g.kind != "gap" {
+		return true
+	}
+	for _, h := range tx.grants[lk] {
+		if h.table == g.table && h.index == g.index && (h.mode == "X" || h.mode == g.mode) &&
+			(h.kind == g.kind || h.kind == "next-key" && (g.kind == "record" || g.kind == "gap")) {
+			return true
+		}
+	}
+	return false
 }
 
 // lockClass is the InnoDB lock mode a row lock of detest's strength is: S
@@ -453,6 +474,7 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 			continue
 		}
 		delete(holders, tx)
+		delete(tx.grants, lk)
 		if len(holders) == 0 {
 			delete(tx.db.locks, lk)
 		}

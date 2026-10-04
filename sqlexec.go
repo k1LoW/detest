@@ -1175,6 +1175,8 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			ids[i].id, ids[i].generated = x.autoIncrement(table, row)
 		}
 	}
+	// InnoDB takes the table's IX before any of the rows' duplicate checks.
+	x.tx.noteTableLock(table, lockUpdate)
 	for i, row := range rows {
 		// The counter moves even when the row then collides and is not
 		// inserted, as MySQL's does; only an inserted row's value is reported.

@@ -226,18 +226,11 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 	if !tx.db.kind.InnoDB() || tx.db.ignored[table] {
 		return nil
 	}
-	gaps := tx.iso == RepeatableRead || tx.iso == Serializable
-	secondary := false
-	if !gaps {
-		sr := x.searchRange(table, alias, where)
-		secondary = sr.index != "" && sr.index != "PRIMARY"
-	}
-	if gaps || secondary {
-		// Checked before anything is locked, as a refused statement must
-		// leave the transaction as it was.
-		if err := x.checkSearch(table, alias, where); err != nil {
-			return err
-		}
+	gaps, secondary := x.searchLocks(table, alias, where)
+	// Checked before anything is locked, as a refused statement must leave
+	// the transaction as it was.
+	if err := x.checkLocking(table, alias, where); err != nil {
+		return err
 	}
 	tx.noteTableLock(table, mode)
 	if !gaps {
@@ -253,6 +246,26 @@ func (x *sqlExec) nextKeyLocks(table, alias string, where sqlir.Expr, mode lockM
 		}
 	}
 	return x.lockRange(table, alias, where, mode, policy)
+}
+
+// searchLocks reports whether a locking search of table takes gap locks,
+// at Repeatable Read and Serializable, and otherwise whether it takes the
+// record locks of a secondary index it searches through.
+func (x *sqlExec) searchLocks(table, alias string, where sqlir.Expr) (gaps, secondary bool) {
+	if x.tx.iso == RepeatableRead || x.tx.iso == Serializable {
+		return true, false
+	}
+	sr := x.searchRange(table, alias, where)
+	return false, sr.index != "" && sr.index != "PRIMARY"
+}
+
+// checkLocking refuses a locking search of table whose locks detest does
+// not model, as checkSearch does, where the search takes index locks.
+func (x *sqlExec) checkLocking(table, alias string, where sqlir.Expr) error {
+	if gaps, secondary := x.searchLocks(table, alias, where); gaps || secondary {
+		return x.checkSearch(table, alias, where)
+	}
+	return nil
 }
 
 // recordLocks takes the locks a locking search through a secondary index
@@ -462,15 +475,21 @@ scan:
 			keys, structs := []lockKey{lk}, []lockStruct{structKey(table, "PRIMARY", mode, "record")}
 			if scanIndex == "PRIMARY" {
 				structs[0] = structKey(table, scanIndex, mode, "next-key")
-			} else if entry != nil {
-				vals, ok, err := x.uniqueValues(table, entry, r)
-				if err != nil {
-					return false, err
+			} else {
+				// A plain index's record has no lock of its own in detest,
+				// and stands as the row's.
+				ik := lk
+				if entry != nil {
+					vals, ok, err := x.uniqueValues(table, entry, r)
+					if err != nil {
+						return false, err
+					}
+					if ok {
+						ik = uniqueLock(table, entry, vals)
+					}
 				}
-				if ok {
-					keys = append([]lockKey{uniqueLock(table, entry, vals)}, keys...)
-					structs = append([]lockStruct{structKey(table, scanIndex, mode, "next-key")}, structs...)
-				}
+				keys = append([]lockKey{ik}, keys...)
+				structs = append([]lockStruct{structKey(table, scanIndex, mode, "next-key")}, structs...)
 			}
 			skipped := false
 			if policy != nil && (policy.SkipLocked || policy.NoWait) && slices.ContainsFunc(keys, func(k lockKey) bool { return tx.heldByOther(k, mode) }) {
@@ -487,10 +506,6 @@ scan:
 					if err := tx.lockModeAs(k, mode, structs[i]); err != nil {
 						return false, err
 					}
-				}
-				tx.noteLockStruct(table, scanIndex, mode, "next-key")
-				if scanIndex != "PRIMARY" {
-					tx.noteLockStruct(table, "PRIMARY", mode, "record")
 				}
 				cur, ok := tx.view(table, r.Key())
 				if !ok || !sameKey(cur, r, cols) {
@@ -537,7 +552,6 @@ scan:
 			if err := tx.lockModeAs(lockKey{table, next.Key()}, mode, structKey(table, scanIndex, mode, "next-key")); err != nil {
 				return false, err
 			}
-			tx.noteLockStruct(table, scanIndex, mode, "next-key")
 		} else {
 			gap.hasHi = false
 		}
@@ -612,6 +626,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	// partway weighs the locks taken so far. A row the search matches is
 	// also locked on the primary key when the search runs on a secondary
 	// index; the record past a range is locked on the searched index only.
+	closedStart := func(Row) bool { return false }
 	lockRecord := func(r Row, matched bool) error {
 		// The record on a unique secondary index is what a foreign key or a
 		// duplicate check locks, so a search on that index locks it too,
@@ -620,6 +635,8 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		k := kind
 		if !matched {
 			k = "next-key"
+		} else if closedStart(r) {
+			k = "record"
 		}
 		var keys []lockKey
 		var structs []lockStruct
@@ -633,10 +650,22 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 				structs = append(structs, structKey(table, index, mode, k))
 			}
 		}
-		keys = append(keys, lockKey{table, r.Key()})
-		// The record past the range is locked on the searched index alone.
-		if index == "PRIMARY" || !matched {
+		if len(keys) == 0 && index != "PRIMARY" && matched {
+			// A plain index's record has no lock of its own in detest, and
+			// stands as the row's.
+			keys = append(keys, lockKey{table, r.Key()})
 			structs = append(structs, structKey(table, index, mode, k))
+		}
+		keys = append(keys, lockKey{table, r.Key()})
+		// The record past the range is locked on the searched index, and,
+		// as InnoDB reads it before it finds the range ended, on the
+		// primary key too.
+		if index == "PRIMARY" {
+			structs = append(structs, structKey(table, index, mode, k))
+		} else if !matched {
+			structs = append(structs, structKey(table, index, mode, k))
+			keys = append(keys, lockKey{table, r.Key()})
+			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
 		} else {
 			structs = append(structs, structKey(table, "PRIMARY", mode, "record"))
 		}
@@ -653,10 +682,6 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			if err := tx.lockModeAs(lk, mode, structs[i]); err != nil {
 				return err
 			}
-		}
-		tx.noteLockStruct(table, index, mode, k)
-		if matched && index != "PRIMARY" {
-			tx.noteLockStruct(table, "PRIMARY", mode, "record")
 		}
 		return nil
 	}
@@ -681,6 +706,19 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	g := &gapLock{tx: tx, table: table, cols: cols}
 	for _, rg := range sr.ranges {
 		inRange := func(r Row) bool { return rg.contains(keyOf(r, cols)) }
+		// A range of a unique index starting at an entry, closed, locks that
+		// entry alone, not the gap before it.
+		closedStart = func(r Row) bool {
+			if !sr.uniqueIndex || !rg.hasLo || rg.loOpen {
+				return false
+			}
+			c, ok := boundCompare(keyOf(r, cols), rg.lo)
+			return ok && c == 0
+		}
+		// The entry past the range is locked as a gap alone when nothing
+		// past it can match: on a unique index, or past an equality over
+		// all of a plain index's columns.
+		gapOnly := sr.uniqueIndex || rg.point() && sr.eq == len(sr.cols)
 		// A record lock may wait, and its holder may delete a row, move it
 		// out of the range or into it. Lock and read again until the rows in
 		// the range hold still, so the point check and the gap below see
@@ -727,6 +765,15 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			return gap, next
 		}
 		gap, next := bounds(rows)
+		for _, r := range rows {
+			if inRange(r) && closedStart(r) {
+				gap.lo, gap.hasLo, gap.loOpen = keyOf(r, cols), true, true
+			}
+		}
+		if next != nil && !point && gapOnly {
+			tx.noteLockStruct(table, index, mode, "gap")
+			next = nil
+		}
 		// Locking the next record may wait, and its holder may delete it or
 		// move its value, or the record below; the bounds are taken again
 		// until they hold still.
@@ -792,6 +839,9 @@ type indexSearch struct {
 	// is one other than the primary key, whose records checks lock too.
 	index string
 	def   *sqlir.UniqueDef
+	// uniqueIndex is a search of a unique index, the primary key included,
+	// over all its columns.
+	uniqueIndex bool
 }
 
 // maxSearchKeys bounds the keys equalities on several columns multiply into,
@@ -877,7 +927,7 @@ func (x *sqlExec) searchRange(table, alias string, where sqlir.Expr) indexSearch
 				key = append(key, c)
 			}
 		}
-		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc, index: ix.name, def: ix.def}
+		sr := indexSearch{cols: ix.cols, key: key, eq: eq, unique: ix.unique && eq == len(ix.cols) && !nullKey, descending: ix.desc, index: ix.name, def: ix.def, uniqueIndex: ix.unique}
 		for _, p := range prefixes {
 			if last == nil {
 				sr.ranges = append(sr.ranges, valRange{lo: p, hi: p, hasLo: true, hasHi: true})

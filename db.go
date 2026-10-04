@@ -1408,6 +1408,9 @@ type Tx struct {
 	// writer: rows it put into a primary key and index entries it wrote or
 	// removed, which turn explicit when another transaction waits for one.
 	implicit map[lockKey]bool
+	// grants is the lock structs each of the transaction's locks was
+	// granted in, which a request a granted lock covers does not add to.
+	grants map[lockKey][]lockStruct
 	// put is the rows the running statement put into a primary key, which
 	// leave a gap lock if the statement fails.
 	put []putRow
@@ -1510,6 +1513,7 @@ func (tx *Tx) Insert(table string, row Row) error {
 	}
 	lk := lockKey{table, row.Key()}
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
+	tx.noteTableLock(table, lockUpdate)
 	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
 		return err
 	}

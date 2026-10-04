@@ -758,7 +758,7 @@ func (x *sqlExec) rangeLocks(sel *sqlir.SelectStmt, plan lockPlan) (*scanStop, e
 	alias := cmp.Or(f.Alias, relname(f.Name))
 	table := x.tx.db.resolve(f.Name)
 	mode := lockModeOf(sel.Lock)
-	if len(sel.Joins) > 0 && (x.tx.iso == RepeatableRead || x.tx.iso == Serializable) {
+	if len(sel.Joins) > 0 && x.tx.db.kind.InnoDB() {
 		return nil, x.joinLocks(sel, plan, table, alias, mode)
 	}
 	if !slices.Contains(plan.targets, alias) {
@@ -834,7 +834,7 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 	locksJoined := slices.Contains(plan.targets, jalias)
 	// Checked before anything is locked, as a refused statement must leave
 	// the transaction as it was.
-	if err := x.checkSearch(table, alias, sel.Where); err != nil {
+	if err := x.checkLocking(table, alias, sel.Where); err != nil {
 		return err
 	}
 	if locksJoined {
@@ -844,7 +844,7 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 		}
 		for _, r := range rows {
 			x.searchOuter = &searchOuter{table: jtable, alias: jalias, env: newJrow(alias, r).env(nil)}
-			if err := x.checkSearch(jtable, jalias, where); err != nil {
+			if err := x.checkLocking(jtable, jalias, where); err != nil {
 				return err
 			}
 		}

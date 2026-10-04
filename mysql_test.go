@@ -4060,8 +4060,8 @@ func TestMySQLCompositeIndexSearch(t *testing.T) {
 	if _, err := tx.Exec("SELECT v FROM t WHERE tenant = 1 AND id > 4 AND id < 8 FOR UPDATE"); err != nil {
 		t.Fatal(err)
 	}
-	if !locked(keyOfRow(1, 5)) || !locked(keyOfRow(1, 9)) || locked(keyOfRow(1, 1)) || locked(keyOfRow(2, 1)) {
-		t.Error("a range on the second column should lock (1, 5) and the next record (1, 9) only")
+	if !locked(keyOfRow(1, 5)) || locked(keyOfRow(1, 9)) || locked(keyOfRow(1, 1)) || locked(keyOfRow(2, 1)) {
+		t.Error("a range on the second column should lock (1, 5) only, and the gap before the next record (1, 9)")
 	}
 	covered := func(tenant, id int64) bool {
 		r := Row{"tenant": tenant, "id": id}
@@ -4849,17 +4849,22 @@ func TestLockingJoinRefusals(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE a (id INT PRIMARY KEY, v INT)")
 	mustExec(t, db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT, KEY (a_id))")
 	mustExec(t, db, "INSERT INTO a VALUES (1, 0), (2, 0)")
-	for _, q := range []string{
-		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id IN (1, 2) FOR UPDATE",
-		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 LIMIT 1 FOR UPDATE",
-		"SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE",
-		"SELECT a.id FROM a JOIN b ON b.a_id = a.id OR b.id = a.id WHERE a.id = 1 FOR UPDATE",
+	for _, c := range []struct {
+		level sql.IsolationLevel
+		q     string
+	}{
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id IN (1, 2) FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.id = 1 LIMIT 1 FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE"},
+		{sql.LevelDefault, "SELECT a.id FROM a JOIN b ON b.a_id = a.id OR b.id = a.id WHERE a.id = 1 FOR UPDATE"},
+		{sql.LevelReadCommitted, "SELECT a.id FROM a JOIN b ON b.a_id = a.id WHERE a.v = 0 FOR UPDATE"},
 	} {
+		q := c.q
 		conn, err := db.Conn(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		tx, err := conn.BeginTx(context.Background(), nil)
+		tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{Isolation: c.level})
 		if err != nil {
 			t.Fatal(err)
 		}

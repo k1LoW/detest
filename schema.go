@@ -187,7 +187,6 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 			if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockShare, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 				return nil, err
 			}
-			x.tx.noteLockStruct(table, uniqueIndex(u), lockShare, "next-key")
 			dup, err := x.uniqueHolder(table, u, vals, self)
 			if err != nil || dup != nil {
 				// The shared lock is next-key, at Read Committed too, so it
