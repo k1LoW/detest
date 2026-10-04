@@ -481,6 +481,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			row[col] = fmt.Sprint(v)
 			continue
 		}
+		// The text a driver sends for a boolean or a time depends on the
+		// driver, which detest does not model.
+		if textTypes[t] && isOther(v) && v != sqlir.Unknown {
+			return x.unsupported(fmt.Sprintf("a %T written to the text column %q", v, col))
+		}
 		switch t {
 		case "double", "float", "decimal":
 			if !x.tx.db.kind.InnoDB() {
