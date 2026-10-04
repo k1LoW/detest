@@ -28,9 +28,12 @@ type colScope struct {
 	items map[string]colSet
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
-	outputs  colSet
-	excluded colSet
-	outer    *colScope
+	outputs colSet
+	// excluded are the columns of ON CONFLICT DO UPDATE's proposed row,
+	// with hasExcluded telling a table of unknown columns from none.
+	excluded    colSet
+	hasExcluded bool
+	outer       *colScope
 }
 
 // columnChecker resolves the column references of a statement against the
@@ -64,6 +67,10 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 
 func (c *columnChecker) undefined(col string) error {
 	return c.x.tx.db.kind.Error(sqlir.UndefinedColumn, fmt.Sprintf("column %q does not exist", col), "", col, "")
+}
+
+func (c *columnChecker) missingItem(alias string) error {
+	return c.x.tx.db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("missing FROM-clause entry for table %q", alias), alias, "", "")
 }
 
 func (c *columnChecker) undefinedIn(table, col string) error {
@@ -216,7 +223,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if t.Star {
 			if t.Table != "" {
 				if _, ok := sc.lookupItem(t.Table); !ok {
-					return nil, c.x.tx.db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("missing FROM-clause entry for table %q", t.Table), t.Table, "", "")
+					return nil, c.missingItem(t.Table)
 				}
 			}
 			continue
@@ -267,7 +274,7 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 
 func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	for s := sc; s != nil; s = s.outer {
-		if alias == "excluded" && s.excluded != nil {
+		if alias == "excluded" && s.hasExcluded {
 			return s.excluded, true
 		}
 		if cols, ok := s.items[alias]; ok {
@@ -281,9 +288,10 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	if r.Table != "" {
 		cols, ok := sc.lookupItem(r.Table)
-		if !ok || cols == nil || cols[r.Column] {
-			// A qualifier detest does not tell apart, such as a schema, is
-			// let through.
+		if !ok {
+			return c.missingItem(r.Table)
+		}
+		if cols == nil || cols[r.Column] {
 			return nil
 		}
 		return c.undefined(r.Table + "." + r.Column)
@@ -409,7 +417,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set)); err != nil {
 			return err
 		}
-		up := &colScope{items: sc.items, excluded: cols}
+		up := &colScope{items: sc.items, excluded: cols, hasExcluded: true}
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
