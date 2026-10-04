@@ -175,4 +175,18 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 	if err := db.QueryRow(`SELECT tags FROM d WHERE id = 1`).Scan(&tags); err != nil || tags != Unknown {
 		t.Errorf("default detest cannot convert: got %q, %v; want the Unknown marker", tags, err)
 	}
+	// The table's own key, constraints and generated columns read the
+	// column, and would be decided from the marker, so the write is refused.
+	for _, ddl := range []string{
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE CHECK (d <> 'x'))`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE UNIQUE)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d text DEFAULT CURRENT_DATE, u text GENERATED ALWAYS AS (upper(d)) STORED)`,
+		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT now() * 2 REFERENCES c (id))`,
+	} {
+		mustExec(t, db, ddl)
+		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: insert leaving out a default a key, constraint or generated column reads: got %v", ddl, err)
+		}
+		mustExec(t, db, `DROP TABLE e`)
+	}
 }

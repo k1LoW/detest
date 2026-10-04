@@ -302,14 +302,16 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 				updated[c] = parent[x.tx.db.refColumns(ck.fk)[i]]
 				skip = ck.fk.Name // the parent's new key is not written yet
 			case action == "set default" && def != nil && def.defaults[c] != nil:
-				// The Unknown marker, as applyDefaults writes for a
-				// default detest cannot compute.
+				// The column is a foreign key column, which the key reads,
+				// so a default detest cannot compute is refused as
+				// applyDefaults refuses one a key reads: the marker would be
+				// matched against the parent's keys.
 				v, err := x.eval(def.defaults[c], &env{})
-				if err != nil {
-					if !errors.As(err, new(errUnknownExpr)) {
-						return err
-					}
-					v = sqlir.Unknown
+				if err != nil && !errors.As(err, new(errUnknownExpr)) {
+					return err
+				}
+				if err != nil || unconverted(def.defaults[c]) {
+					return x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute, for ON ... SET DEFAULT", c))
 				}
 				updated[c] = v
 			default:

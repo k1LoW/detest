@@ -515,6 +515,42 @@ func refersTo(u sqlir.UniqueDef, col string) bool {
 	return false
 }
 
+// reads reports whether the table's own primary key, a unique constraint or
+// index, a foreign key, a CHECK or a generated column reads col, so that a
+// value stood in for the column would decide one of them.
+func (def *tableDef) reads(col string) bool {
+	if slices.Contains(def.pk, col) {
+		return true
+	}
+	for _, u := range def.uniques {
+		exprs := u.Elems
+		if u.Where != nil {
+			exprs = append(slices.Clone(exprs), u.Where)
+		}
+		for _, e := range exprs {
+			if slices.ContainsFunc(sqlir.ColumnRefs(e), func(r *sqlir.ColumnRef) bool { return r.Column == col }) {
+				return true
+			}
+		}
+	}
+	for _, fk := range def.fks {
+		if slices.Contains(fk.Columns, col) {
+			return true
+		}
+	}
+	for _, c := range def.checks {
+		if slices.Contains(c.columns(), col) {
+			return true
+		}
+	}
+	for _, g := range def.generated {
+		if slices.Contains(g.columns(), col) {
+			return true
+		}
+	}
+	return false
+}
+
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
 func (db *DB) SeedRowNow(table string, row Row) { db.SeedRow(table, row) }

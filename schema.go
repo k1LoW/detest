@@ -59,11 +59,16 @@ func (x *sqlExec) applyDefaults(table string, row Row) error {
 		// leaves the column out unsupported, while dumps routinely hold
 		// such defaults (ARRAY[]::text[]). One a process does read comes
 		// back as a value the server never produces, where NULL would pass
-		// for a real one.
+		// for a real one. The table's own key, constraints and generated
+		// columns are readers too, and would be decided from the marker, so
+		// a column one of them reads is refused instead.
 		v, err := x.eval(d, &env{})
-		if err != nil {
-			if !errors.As(err, new(errUnknownExpr)) {
-				return err
+		if err != nil && !errors.As(err, new(errUnknownExpr)) {
+			return err
+		}
+		if err != nil || unconverted(d) {
+			if def.reads(col) {
+				return x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint or generated column reads", col))
 			}
 			v = sqlir.Unknown
 		}
