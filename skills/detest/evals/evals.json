@@ -22,7 +22,10 @@
         "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
         "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
         "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
-        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out",
+        "When a violation is found, it is explained in execution order with the process, file:line and SQL statement or call for each step, and the root cause points at specific lines",
+        "The proposed fix is a concrete code diff, with why it closes the found interleaving and what it costs",
+        "Any explanation of In-Process DST says the real code runs, the shared resources are simulated at the client boundary, runs replay exactly, and exploration is within bounds (no 'simulates the DB' or unbounded 'exhaustive')"
       ]
     },
     {
@@ -47,7 +50,10 @@
         "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
         "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
         "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
-        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out",
+        "When a violation is found, it is explained in execution order with the process, file:line and SQL statement or call for each step, and the root cause points at specific lines",
+        "The proposed fix is a concrete code diff, with why it closes the found interleaving and what it costs",
+        "Any explanation of In-Process DST says the real code runs, the shared resources are simulated at the client boundary, runs replay exactly, and exploration is within bounds (no 'simulates the DB' or unbounded 'exhaustive')"
       ]
     },
     {
@@ -73,7 +79,10 @@
         "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
         "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
         "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
-        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out",
+        "When a violation is found, it is explained in execution order with the process, file:line and SQL statement or call for each step, and the root cause points at specific lines",
+        "The proposed fix is a concrete code diff, with why it closes the found interleaving and what it costs",
+        "Any explanation of In-Process DST says the real code runs, the shared resources are simulated at the client boundary, runs replay exactly, and exploration is within bounds (no 'simulates the DB' or unbounded 'exhaustive')"
       ]
     },
     {
@@ -94,7 +103,27 @@
         "Exactly one target flow is simulated in this round; other candidates are offered as next rounds",
         "Each new detest test is in a new file named after the target and the scenario, and no existing test file was edited",
         "Every detest test file (helpers included) has the //go:build detest constraint, and run commands use -tags detest",
-        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out"
+        "The report says plainly whether the exploration covered every interleaving, and if not, what was left out",
+        "When a violation is found, it is explained in execution order with the process, file:line and SQL statement or call for each step, and the root cause points at specific lines",
+        "The proposed fix is a concrete code diff, with why it closes the found interleaving and what it costs",
+        "Any explanation of In-Process DST says the real code runs, the shared resources are simulated at the client boundary, runs replay exactly, and exploration is within bounds (no 'simulates the DB' or unbounded 'exhaustive')"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "not-applicable",
+      "prompt": "在庫引当 (internal/stock) でたまに在庫がマイナスになるという報告があります。detest で調べてもらえますか?",
+      "expected_output": "Finds that the code uses pgxpool/pgx directly, so detest cannot intercept it. Stops before adding detest, reports blocker with evidence (stock.go imports, NewAllocator signature), the smallest change to make it applicable with cost, asks before changing, and offers alternatives; still points at the read-then-write race in code terms.",
+      "files": [
+        "fixtures/stock-pgx"
+      ],
+      "assertions": [
+        "No detest dependency is added and no detest harness is written before the user agrees to a change",
+        "The blocker (pgx native pool, not database/sql) is named with evidence at file:line",
+        "The smallest change that would make detest applicable is stated with its cost, and it is asked rather than done",
+        "Alternatives are offered (such as an integration test with concurrent clients against a real database, or a review of the race)",
+        "The likely race (SELECT stock then UPDATE with a computed value, no lock) is pointed out in code terms",
+        "Production (non-test) Go files are unchanged"
       ]
     }
   ]
