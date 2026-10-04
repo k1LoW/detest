@@ -142,7 +142,9 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 // order on every run. It returns nil when there is no cycle.
 func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
 	waitsFor := func(w *Tx) []*Tx {
-		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil {
+		// The process's wait may be another transaction's of the same process:
+		// one it keeps open while a second connection waits.
+		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil || w.p.waitRow.tx != w {
 			return nil
 		}
 		wr := w.p.waitRow

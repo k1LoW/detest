@@ -809,3 +809,67 @@ func TestLockTimeoutBreaksDeadlock(t *testing.T) {
 		s.Sometimes("y times out", func(*State) bool { return errors.Is(errs["y"], ErrLockNotAvailable) })
 	})
 }
+
+// A transaction its process keeps open while a second connection of the same
+// process waits is idle, not waiting, so a cycle through it is not a deadlock
+// Postgres detects but a hang.
+func TestIdleTransactionIsNoDeadlock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.ExpectViolation("closing a cycle of waits the database cannot detect")
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+		})
+		var (
+			aLocked, bLocked chan struct{}
+			deadlocked       bool
+		)
+		s.Seed(func() {
+			aLocked, bLocked = make(chan struct{}), make(chan struct{})
+			deadlocked = false
+		})
+		s.Always(func(*State) error {
+			if deadlocked {
+				return errors.New("a deadlock was reported")
+			}
+			return nil
+		})
+		fail := func(err error) error {
+			if errors.Is(err, ErrDeadlock) {
+				deadlocked = true
+				return nil
+			}
+			return err
+		}
+		s.Manual("x", 1, func(p *Proc) error {
+			idle, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = idle.Rollback() }()
+			if _, err := idle.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+				return err
+			}
+			close(aLocked)
+			<-bLocked
+			_, err = db.ExecContext(p.Context(), `UPDATE stock SET n = 0 WHERE sku = 'b'`)
+			return fail(err)
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			<-aLocked
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+				return err
+			}
+			close(bLocked)
+			p.WaitUntil(p.Now() + 1)
+			_, err = tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`)
+			return fail(err)
+		})
+	})
+}
