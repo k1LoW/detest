@@ -807,6 +807,16 @@ func TestCastToNumber(t *testing.T) {
 			t.Errorf("%s: got %v, want out of range", q, err)
 		}
 	}
+	mustExec(t, db, `CREATE TABLE bin (id int PRIMARY KEY, b bytea)`)
+	mustExec(t, db, `INSERT INTO bin VALUES (1, $1)`, []byte("10"))
+	for _, q := range []string{`SELECT b::int FROM bin`, `SELECT b::text FROM bin`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	if got := rowsOf(t, db, `SELECT $1::int`, []byte("10")); !reflect.DeepEqual(got, []string{"10"}) {
+		t.Errorf("$1::int with bytes: got %v", got)
+	}
 	for _, q := range []string{`SELECT $1::numeric`, `SELECT $1::float8`} {
 		if _, err := db.Exec(q, math.NaN()); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s with NaN: got %v, want unsupported", q, err)
