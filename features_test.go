@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -808,15 +809,17 @@ func TestLoopIdleAfterASleepIsCut(t *testing.T) {
 		t.Fatalf("want the run cut, got %s", res.report())
 	}
 	res, _ = exploreBubble(t, func(t *testing.T, s *Sim) {
-		bad := false
-		s.Seed(func() { bad = false })
+		// Atomic: the race detector sees no edge from the scheduler to a
+		// process the fake clock woke, though they never run at once.
+		var bad atomic.Bool
+		s.Seed(func() { bad.Store(false) })
 		s.Loop("sweeper", 1, func(p *Proc) error {
 			time.Sleep(time.Second)
-			bad = true
+			bad.Store(true)
 			return ErrIdle
 		})
 		s.Always(func(*State) error {
-			if bad {
+			if bad.Load() {
 				return errors.New("the idle tick left bad state")
 			}
 			return nil
