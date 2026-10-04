@@ -520,3 +520,67 @@ func TestLockingReadEvaluatesPredicateOnce(t *testing.T) {
 		t.Errorf("nextval after one locking read of one row: %d, %v, want 2", n, err)
 	}
 }
+
+// lockAfterFailure declares a process that writes rows in a transaction, fails a
+// statement and then waits for mu before ending the transaction, and another
+// that writes row sku while holding mu. If the failed transaction still held
+// the row lock, the two would wait for each other.
+func lockAfterFailure(t *testing.T, s *Sim, savepoint bool, sku string) {
+	t.Helper()
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+	s.Seed(func() {
+		mustExec(t, db, `INSERT INTO stock VALUES ('a', 1), ('b', 1)`)
+	})
+	mu := s.Mutex("mu")
+	s.Manual("x", 1, func(p *Proc) error {
+		tx, err := db.BeginTx(p.Context(), nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+			return err
+		}
+		if savepoint {
+			if _, err := tx.Exec(`SAVEPOINT s`); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'b'`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO stock VALUES ('a', 1)`); !errors.Is(err, ErrUniqueViolation) {
+			return fmt.Errorf("insert: got %w", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return nil
+	})
+	s.Manual("y", 1, func(p *Proc) error {
+		mu.Lock()
+		defer mu.Unlock()
+		_, err := db.ExecContext(p.Context(), `UPDATE stock SET n = 5 WHERE sku = $1`, sku)
+		return err
+	})
+}
+
+// A failed statement aborts the transaction, and Postgres releases its row
+// locks then rather than at ROLLBACK.
+func TestFailedStatementReleasesLocks(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		lockAfterFailure(t, s, false, "a")
+	})
+}
+
+// After a savepoint, a failed statement aborts only the subtransaction: the
+// locks taken since the savepoint are released, the ones before are kept.
+func TestFailedStatementAfterSavepointReleasesItsLocks(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		lockAfterFailure(t, s, true, "b")
+	})
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.ExpectViolation("closing a cycle of waits the database cannot detect")
+		lockAfterFailure(t, s, true, "a")
+	})
+}

@@ -1078,6 +1078,22 @@ func (tx *Tx) savepoint(op, name string) error {
 	return nil
 }
 
+// abort puts the transaction in the failed state after a statement error.
+// Postgres releases the locks of the aborted subtransaction at once, not at
+// ROLLBACK: those taken since the innermost savepoint, or all of them.
+func (tx *Tx) abort() {
+	tx.aborted = true
+	if tx.p != nil && tx.p.r.over() {
+		return // as release, while the processes of an ended run unwind
+	}
+	from := 0
+	if n := len(tx.saves); n > 0 {
+		from = tx.saves[n-1].locks
+	}
+	tx.releaseLocks(tx.locks[from:])
+	tx.locks = tx.locks[:from]
+}
+
 func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return

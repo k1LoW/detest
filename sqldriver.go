@@ -238,7 +238,7 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		if pe, ok := errors.AsType[*sqlir.ParseError](err); ok {
 			err = c.db.kind.Error(sqlir.SyntaxError, pe.Err.Error(), "", "", "")
 			if c.tx != nil {
-				c.tx.aborted = true // as any failed statement does
+				c.tx.abort() // as any failed statement does
 			}
 		}
 		if c.db.s.sqlObserver != nil {
@@ -262,7 +262,7 @@ func (c *sqlConn) run(query string, named []driver.NamedValue) (*sqlRows, int64,
 		}
 	} else if err != nil {
 		// A failed statement aborts the Postgres transaction.
-		tx.aborted = true
+		tx.abort()
 	}
 	if err != nil {
 		return nil, 0, err
