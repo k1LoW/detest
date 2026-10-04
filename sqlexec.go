@@ -971,7 +971,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
-		return x.callFunc(v.Name, args)
+		out, err := x.callFunc(v.Name, args)
+		switch v.Name {
+		case "coalesce", "greatest", "least":
+			out = commonNumber(v.Args, out)
+		}
+		return out, err
 	case *sqlir.BinaryExpr:
 		l, err := x.evalAgg(v.L, g)
 		if err != nil {
@@ -2064,11 +2069,13 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				hit, _ = derefValue(cond).(bool)
 			}
 			if hit {
-				return x.eval(w.Then, en)
+				out, err := x.eval(w.Then, en)
+				return commonNumber(caseBranches(v), out), err
 			}
 		}
 		if v.Else != nil {
-			return x.eval(v.Else, en)
+			out, err := x.eval(v.Else, en)
+			return commonNumber(caseBranches(v), out), err
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -2094,7 +2101,12 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
-		return x.callFunc(v.Name, args)
+		out, err := x.callFunc(v.Name, args)
+		switch v.Name {
+		case "coalesce", "greatest", "least":
+			out = commonNumber(v.Args, out)
+		}
+		return out, err
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
 }
@@ -2529,6 +2541,43 @@ func arith(op string, l, r any) (any, error) {
 	// A float or numeric operand makes a float result even when it is whole,
 	// so a later division is not integer division ((1.5 * 2) / 2 is 1.5).
 	return v, nil
+}
+
+// commonNumber returns v, the result of one of exprs, as the type Postgres
+// gives all of them: a float when one of them is a float, as CASE WHEN ...
+// THEN 1 ELSE 1.5 END is a numeric, so a later division is not integer
+// division. Only literals and casts show their type before they run.
+func commonNumber(exprs []sqlir.Expr, v any) any {
+	n, ok := integer(derefValue(v))
+	if !ok || !slices.ContainsFunc(exprs, floatTyped) {
+		return v
+	}
+	return float64(n)
+}
+
+func floatTyped(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		_, ok := e.Value.(float64)
+		return ok
+	case *sqlir.Cast:
+		switch e.Type {
+		case "numeric", "float8", "float4", "double precision", "real":
+			return true
+		}
+	}
+	return false
+}
+
+func caseBranches(c *sqlir.CaseExpr) []sqlir.Expr {
+	out := make([]sqlir.Expr, 0, len(c.Whens)+1)
+	for _, w := range c.Whens {
+		out = append(out, w.Then)
+	}
+	if c.Else != nil {
+		out = append(out, c.Else)
+	}
+	return out
 }
 
 // asKindOf returns f as an integer when v is one and as a float otherwise, so

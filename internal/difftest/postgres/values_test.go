@@ -78,6 +78,9 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM (SELECT 1 FROM t GROUP BY CASE WHEN id = 1 THEN 1000000 ELSE 1000000.0 END) s`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT 1000000 UNION SELECT 1000000.0) s`),
 			difftest.Q(0, `SELECT count(DISTINCT CASE WHEN id = 1 THEN 1000000 ELSE 1000000.0 END) FROM t`),
+			difftest.Q(0, `SELECT (CASE WHEN id > 0 THEN 1 ELSE 1.5 END) / 2 = 0.5 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT sum(CASE WHEN id > 0 THEN 1 ELSE 1.5 END) / 2 = 0.5 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT COALESCE(NULL, 1, 1.5) / 2 = 0.5, greatest(1, 0.5) / 2 = 0.5`),
 		},
 	},
 	{
