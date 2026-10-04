@@ -1461,6 +1461,12 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		switch v.Op {
+		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
+				return nil, err
+			}
+		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.IsNull:
 		val, err := x.eval(v.X, en)
@@ -1511,6 +1517,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				}
 				if derefValue(val) == nil {
 					sawNull = true
+				}
+				l, val, err := x.untypedPair(v.X, l, it, val)
+				if err != nil {
+					return nil, err
 				}
 				if equalValues(l, val) {
 					in = true
@@ -1571,6 +1581,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			hit := false
 			if v.Arg != nil {
+				arg, cond, err := x.untypedPair(v.Arg, arg, w.When, cond)
+				if err != nil {
+					return nil, err
+				}
 				hit = equalValues(arg, cond)
 			} else {
 				hit, _ = derefValue(cond).(bool)
@@ -1598,6 +1612,56 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		return x.callFunc(v.Name, args)
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
+}
+
+// untypedPair resolves the operands of a comparison as Postgres resolves an
+// untyped string literal: to the type of the other operand when that is a
+// number, so '01' = 1 holds. Only a literal is resolved. A text column or a
+// cast compared with a number is an error in Postgres, not a coercion.
+func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, any, error) {
+	l, err := x.untyped(le, l, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err = x.untyped(re, r, l)
+	if err != nil {
+		return nil, nil, err
+	}
+	return l, r, nil
+}
+
+func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
+	k, ok := e.(*sqlir.Const)
+	if !ok {
+		return v, nil
+	}
+	s, ok := k.Value.(string)
+	if !ok {
+		return v, nil
+	}
+	other = derefValue(other)
+	if _, ok := toFloat(other); !ok {
+		return v, nil
+	}
+	t := strings.TrimSpace(s)
+	switch other.(type) {
+	case float32, float64:
+		if f, err := strconv.ParseFloat(t, 64); err == nil {
+			return f, nil
+		}
+		return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type double precision: %q", s), "", "", "")
+	}
+	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+		return n, nil
+	}
+	if f, err := strconv.ParseFloat(t, 64); err == nil {
+		// Values do not carry their column's type, and a float8 or numeric
+		// column keeps a whole number as an integer. Postgres rejects the
+		// literal only for an integer column, so rejecting it here would
+		// fail a numeric column depending on the data it holds.
+		return f, nil
+	}
+	return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
 }
 
 func (x *sqlExec) binary(op string, l, r any) (any, error) {
