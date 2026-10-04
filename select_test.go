@@ -564,7 +564,23 @@ func TestRowComparison(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
 		}
 	}
+	// Each subquery row is compared in three-valued logic, so a NULL pair
+	// makes NOT IN unknown, while a subquery with no rows is false for NULL.
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{`SELECT count(*) FROM p WHERE (a, name) NOT IN (SELECT 9, NULL)`, "2"},
+		{`SELECT count(*) FROM p WHERE a NOT IN (SELECT NULL::int)`, "0"},
+		{`SELECT count(*) FROM p WHERE NULL::int NOT IN (SELECT a FROM p WHERE a < 0)`, "4"},
+	} {
+		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
 	for _, q := range []string{
+		`SELECT count(*) FROM p WHERE 1 IN ((1, 2))`,
+		`SELECT count(*) FROM p WHERE a IN (SELECT a, b FROM p)`,
 		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
 	} {

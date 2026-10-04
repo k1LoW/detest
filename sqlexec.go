@@ -1918,31 +1918,22 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				lhs = []any{l}
 			}
 			if len(cols) != len(lhs) {
-				return nil, x.unsupported("IN with a subquery of another number of columns")
+				return nil, x.unsupported("IN (subquery) whose columns do not match the left side")
 			}
 			for _, r := range rows {
-				// SQL equality per column: a NULL on either side makes the
-				// row's comparison unknown unless another column differs.
-				match, unknown := len(cols) == len(lhs), false
-				for i := 0; match && i < len(cols); i++ {
-					li, ri, err := x.untypedPair(lhsExprs[i], lhs[i], nil, r[cols[i]])
-					if err != nil {
-						return nil, err
-					}
-					a, b := x.comparable(li, ri)
-					switch {
-					case derefValue(a) == nil || derefValue(b) == nil:
-						unknown = true
-					case !equalValues(a, b):
-						match = false
-					}
+				vals := make([]any, len(cols))
+				for i, c := range cols {
+					vals[i] = r[c]
 				}
-				if match && !unknown {
+				eq, err := x.compareRows("=", lhsExprs, lhs, make([]sqlir.Expr, len(cols)), vals)
+				if err != nil {
+					return nil, err
+				}
+				if eq == nil {
+					sawNull = true
+				} else if b, _ := eq.(bool); b {
 					in = true
 					break
-				}
-				if match {
-					sawNull = true
 				}
 			}
 		} else {
@@ -1969,6 +1960,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 					}
 					continue
 				}
+				if _, ok := it.(*sqlir.RowExpr); ok {
+					return nil, x.unsupported("row comparison")
+				}
 				if _, row := derefValue(val).([]any); row {
 					return nil, x.unsupported("IN of a value among rows")
 				}
@@ -1987,8 +1981,9 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 		}
 		// x IN (...) is NULL for a NULL x, or when it matches nothing and
-		// the list holds a NULL; NOT IN negates only a known answer.
-		if !in && (sawNull || derefValue(l) == nil) {
+		// the list holds a NULL; NOT IN negates only a known answer. A
+		// subquery with no rows is false whatever x is.
+		if !in && (sawNull || v.Sub == nil && derefValue(l) == nil) {
 			return nil, nil
 		}
 		if v.Not {
