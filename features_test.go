@@ -38,6 +38,37 @@ func TestLoopIdleTicksDoNotSpendTheBudget(t *testing.T) {
 	})
 }
 
+// A change committed while an idle tick is still running, after the tick
+// read, lets the loop tick again: the tick did not see it.
+func TestLoopTicksAgainAfterAChangeDuringAnIdleTick(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE work (id text PRIMARY KEY, done bool NOT NULL)`)
+		s.Manual("producer", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO work VALUES ('w1', false)`)
+			return err
+		})
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE work SET done = true WHERE NOT done`)
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			p.Step("reports the sweep")
+			if n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "work", "w1"); !row.Bool("done") {
+				return fmt.Errorf("w1 not swept")
+			}
+			return nil
+		})
+	})
+}
+
 // When keeps a process from starting while its predicate is false.
 func TestWhenGatesTheStart(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {

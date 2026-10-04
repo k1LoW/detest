@@ -190,6 +190,10 @@ type Proc struct {
 	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
+	// started is the run's version when the process started. An idle loop
+	// tick saw no change made after it, so the loop may tick again once the
+	// version moves past it, even through a commit made while the tick ran.
+	started int
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -504,7 +508,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.nextID), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
-		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg}
+		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
 	r.procs = append(r.procs, p)
 	go p.main()
 	return p
@@ -758,7 +762,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
 				r.runs[p.pt]--
-				r.idleAt[p.pt] = r.version
+				r.idleAt[p.pt] = p.started
 			}
 			ev.err = nil
 		case ev.err != nil && !errors.Is(ev.err, errNack):
