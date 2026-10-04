@@ -1355,11 +1355,11 @@ type errUnknownExpr struct{ what string }
 
 func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL expression: " + e.what }
 
-// unsupportedExpr turns an expression detest cannot evaluate, in the place
-// where of a statement, into ErrUnsupportedSQL. A written value or a sort key
-// the application observes cannot be stood in for: a placeholder value would
-// be read back as the column's, and a dropped sort key would return other
-// rows under LIMIT. Any other error passes through.
+// unsupportedExpr turns an expression detest cannot evaluate into
+// ErrUnsupportedSQL, naming where in the statement it stood. A written value
+// or a sort key the application observes cannot be stood in for: a
+// placeholder value would be read back as the column's, and a dropped sort
+// key would return other rows under LIMIT. Any other error passes through.
 func (x *sqlExec) unsupportedExpr(err error, where string) error {
 	var u errUnknownExpr
 	if errors.As(err, &u) {
