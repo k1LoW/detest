@@ -307,4 +307,11 @@ func TestEqualRowsWithoutPrimaryKey(t *testing.T) {
 			t.Errorf("%s: got %v", q, err)
 		}
 	}
+	// A unique constraint that rejects the equal row still does, as on the
+	// server.
+	mustExec(t, db, `CREATE TABLE nku (a int UNIQUE)`)
+	mustExec(t, db, `INSERT INTO nku VALUES (1)`)
+	if _, err := db.Exec(`INSERT INTO nku VALUES (1)`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("equal row under a unique constraint: got %v", err)
+	}
 }
