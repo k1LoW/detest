@@ -1417,6 +1417,10 @@ type Tx struct {
 	// putting is set while the last of put is being inserted, before its
 	// checks have passed.
 	putting bool
+	// inserts is every row the transaction put into a primary key, which a
+	// rollback to a savepoint takes out again, also one deleted or moved
+	// since, leaving gap locks where it was.
+	inserts []putRow
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
 	// commits, and which ROLLBACK TO a savepoint before it undoes.
@@ -1465,6 +1469,7 @@ type savepoint struct {
 	// before the savepoint may be strengthened after it.
 	modes    map[lockKey]lockMode
 	deferred int
+	inserts  int // the length of the transaction's inserts
 }
 
 // Get reads one row.
@@ -1528,6 +1533,9 @@ func (tx *Tx) Insert(table string, row Row) error {
 	}
 	delete(tx.deleted, lk)
 	tx.writes[lk] = row.clone()
+	if tx.db.kind.InnoDB() {
+		tx.inserts = append(tx.inserts, putRow{table: table, row: row.clone()})
+	}
 	return nil
 }
 
@@ -1712,7 +1720,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
-		sp.pending, sp.timeout, sp.undo = tx.pendingLockTimeout, tx.lockTimeout, tx.undo
+		sp.pending, sp.timeout, sp.undo, sp.inserts = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts)
 		tx.saves = append(tx.saves, sp)
 		return nil
 	}
@@ -1732,17 +1740,13 @@ func (tx *Tx) savepoint(op, name string) error {
 	sp := &tx.saves[i]
 	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
 	var inserted []putRow
-	if tx.db.kind.InnoDB() {
-		for lk, r := range tx.writes {
-			_, before := sp.writes[lk]
-			_, committed := tx.db.committed[lk.table][lk.key]
-			if !before && !committed {
-				inserted = append(inserted, putRow{lk.table, r, -1})
+	if tx.db.kind.InnoDB() && sp.inserts <= len(tx.inserts) {
+		for _, p := range tx.inserts[sp.inserts:] {
+			if _, committed := tx.db.committed[p.table][p.row.Key()]; !committed {
+				inserted = append(inserted, putRow{p.table, p.row, -1})
 			}
 		}
-		slices.SortFunc(inserted, func(a, b putRow) int {
-			return cmp.Or(strings.Compare(a.table, b.table), strings.Compare(a.row.Key(), b.row.Key()))
-		})
+		tx.inserts = tx.inserts[:sp.inserts]
 	}
 	tx.writes, tx.deleted = map[lockKey]Row{}, map[lockKey]bool{}
 	for k, v := range sp.writes {

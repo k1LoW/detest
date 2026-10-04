@@ -1421,6 +1421,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		x.tx.putting = false
+		if x.tx.db.kind.InnoDB() {
+			x.tx.inserts = append(x.tx.inserts, putRow{table: table, row: row})
+		}
 		out.affected++
 		inserted()
 		if err := x.appendReturning(out, ins.Returning, row); err != nil {

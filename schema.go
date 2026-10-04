@@ -259,8 +259,11 @@ func (x *sqlExec) releaseEntries(table string, old, row Row) error {
 	if def == nil || !x.tx.db.kind.InnoDB() {
 		return nil
 	}
-	for i := range def.uniques {
-		u := &def.uniques[i]
+	for _, ix := range def.indexOrder(true) {
+		u := ix.unique
+		if u == nil {
+			continue
+		}
 		ov, ok, err := x.uniqueValues(table, u, old)
 		if err != nil {
 			return err
@@ -451,6 +454,9 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 		x.tx.moved = map[lockKey]string{}
 	}
 	x.tx.moved[lk] = nlk.key
+	if x.tx.db.kind.InnoDB() {
+		x.tx.inserts = append(x.tx.inserts, putRow{table: table, row: updated.clone()})
+	}
 	return nlk, nil
 }
 

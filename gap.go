@@ -738,6 +738,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		if err := lockRows(func(Row) bool { return true }); err != nil {
 			return err
 		}
+		tx.noteLockStruct(table, "PRIMARY", mode, "next-key") // the supremum's, also of an empty table
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table})
 		return nil
 	}
@@ -808,7 +809,11 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 				gap.lo, gap.hasLo, gap.loOpen = keyOf(r, cols), true, true
 			}
 		}
-		if next != nil && !point && gapOnly {
+		switch {
+		case point:
+		case next == nil:
+			tx.noteLockStruct(table, index, mode, "next-key") // the supremum's, past the last entry
+		case gapOnly:
 			tx.noteLockStruct(table, index, mode, "gap")
 			next = nil
 		}

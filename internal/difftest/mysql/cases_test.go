@@ -792,6 +792,26 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A row inserted and deleted again since the savepoint goes too,
+		// leaving its gap locks where it was.
+		Name:   "rollback to a savepoint leaves the gap of a row inserted and deleted",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(0, `UPDATE u SET v = 1 WHERE id = 1`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `INSERT INTO u (id, code) VALUES (3, 'c')`),
+			difftest.S(0, `DELETE FROM u WHERE id = 3`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (0, '0')`),
+			difftest.S(1, `INSERT INTO u (id, code) VALUES (4, '1')`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.Q(1, `SELECT id, code FROM u ORDER BY id`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
