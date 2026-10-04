@@ -33,7 +33,7 @@ Anything that changes the outcome of concurrent execution in the application.
 
 - DDL beyond building the schema. This covers DDL inside a transaction and its implicit commit, DDL running alongside other statements, metadata locks, and the state left by a DDL statement that fails halfway. A failed DDL statement fails the test's setup, so what it leaves behind does not matter.
 - DDL and administrative details that do not affect the schema the processes see, for example `RENAME` across databases, `ENGINE=MyISAM`, `TRUNCATE` inside a transaction, a standalone `LOCK TABLES`, and `USE`.
-- Server-wide and non-default settings, such as `SET GLOBAL`, non-strict `sql_mode` and case-insensitive collations.
+- Server-wide settings, and session settings other than the ones detest lists as supported, such as `SET GLOBAL`, non-strict `sql_mode` and case-insensitive collations.
 - Values at the edges of a type's range, such as integers near 2^63, precision lost in float conversion, and temporal strings in formats other than the ISO forms.
 - Functions, clauses and syntax that applications rarely write in request handling, and exact reproduction of rare syntax (such as type coercion in array casts).
 - Changes that need a large rework of the engine (such as row version IDs).
