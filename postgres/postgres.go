@@ -451,7 +451,10 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		col.Default = c.defaultExpr(d.RawDefault)
 	}
 	if isSerial(d.TypeName) {
+		// A serial column owns a sequence of its own, as an identity
+		// column does, which CREATE SEQUENCE IF NOT EXISTS then finds.
 		col.Default = sequenceDefault(table, d.Colname)
+		col.Sequence = &sqlir.SequenceOptions{}
 	}
 	var cons []sqlir.UniqueDef
 	var checks []sqlir.CheckDef
@@ -811,11 +814,9 @@ func (c *pgConv) sequenceOptions(opts []*pg.Node) (*sqlir.SequenceOptions, strin
 // sequenceDefault is the default of a serial or identity column. Postgres
 // names the sequence table_column_seq.
 func sequenceDefault(table, column string) sqlir.Expr {
-	rel := table
-	if i := strings.LastIndex(rel, "."); i >= 0 {
-		rel = rel[i+1:]
-	}
-	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: rel + "_" + column + "_seq"}}}
+	// The sequence goes to the table's schema, which an unqualified name
+	// leaves to the search path as it does the table's.
+	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: table + "_" + column + "_seq"}}}
 }
 
 // constraintDef converts a PRIMARY KEY or UNIQUE constraint. cols are the
