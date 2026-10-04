@@ -1497,6 +1497,24 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 	return nil, c.unsupported(fmt.Sprintf("expression %T", n.Node))
 }
 
+// untypedStrings reports whether every element is a string literal or NULL,
+// and one at least a string, the elements of an array Postgres types text[].
+func untypedStrings(elements []*pg.Node) bool {
+	str := false
+	for _, el := range elements {
+		k := el.GetAConst()
+		switch {
+		case k == nil:
+			return false
+		case k.GetSval() != nil:
+			str = true
+		case !k.Isnull:
+			return false
+		}
+	}
+	return str
+}
+
 // isConstElement reports whether an array element is a constant or a
 // parameter, possibly cast to text or varchar as pg_dump writes it, whose
 // evaluation cannot fail and keeps its value. A number that becomes text,
@@ -1628,6 +1646,12 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		list, err := c.exprs(arr.GetAArrayExpr().Elements)
 		if err != nil {
 			return nil, err
+		}
+		// An array of untyped string literals alone is a text[] in Postgres,
+		// not literals each resolved against x, so id = ANY (ARRAY['1'])
+		// compares an integer with text, which Postgres refuses.
+		if len(casts) == 0 && untypedStrings(arr.GetAArrayExpr().Elements) {
+			casts = []string{"text"}
 		}
 		// A cast of the array casts each element, so it is kept on them:
 		// x = ANY ((ARRAY['1'])::text[]) compares x with the text '1'.
