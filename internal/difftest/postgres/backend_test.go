@@ -103,6 +103,10 @@ func (backend) Blockers(ctx context.Context, db *sql.DB, sessions []int64) (map[
 			}
 			out[id] = append(out[id], pid)
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
