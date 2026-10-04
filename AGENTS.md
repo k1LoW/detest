@@ -22,7 +22,7 @@ Every behavior of the simulated databases gets exactly one of three answers. Dec
 
 **Approximate.** The answer is no. detest does the simplest thing that keeps the application's outcomes the same, and that may differ from the server as much as it likes, including ignoring the statement or the clause, or skipping a check the server makes. Rejecting it is also allowed when that is less code, but neither rejecting nor modelling it is required.
 
-The question is asked about the application's concurrent execution, not about the SQL. A form that only shows up when one of the assumptions in the next section is broken cannot change the outcome, and is answered Approximate, however much the server does for it.
+The question is asked about the application's concurrent execution, not about the SQL. A form that only shows up when one of the assumptions in the next section is broken is answered Approximate when it leaves the schema, the settings and the values the processes see as the server would have left them, however much the server does for it. One that would change what the processes then see, such as a setting that alters how later DML matches rows, or DDL whose result detest cannot reproduce, is answered Unsupported, because accepting it would run the application against other semantics.
 
 ### How the databases are used
 
