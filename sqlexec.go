@@ -2504,6 +2504,12 @@ func castInteger(v any) (any, error) {
 	if n, ok := integer(v); ok {
 		return n, nil
 	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	}
 	// Postgres rounds a numeric half away from zero but a float8 half to
 	// even, which the value does not tell apart, so a half is refused.
 	if f, ok := toFloat(v); ok && isNumber(v) {
@@ -2533,7 +2539,7 @@ func castValue(v any, typ string) (any, error) {
 			return nil, err
 		}
 		if n == nil {
-			break
+			return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to an integer", v)}
 		}
 		lim, name := int64(math.MaxInt64), "bigint"
 		switch typ {
@@ -2565,6 +2571,7 @@ func castValue(v any, typ string) (any, error) {
 		if isNumber(v) {
 			return numericValue(v), nil
 		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to numeric", v)}
 	case "float8", "float4", "double precision", "real":
 		if s, ok := v.(string); ok {
 			f, err := parseNumber(s)
@@ -2578,9 +2585,10 @@ func castValue(v any, typ string) (any, error) {
 			}
 			return f, nil
 		}
-		if f, ok := toFloat(v); ok {
+		if f, ok := toFloat(v); ok && isNumber(v) {
 			return f, nil
 		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to %s", v, typ)}
 	case "text", "varchar", "bpchar":
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":

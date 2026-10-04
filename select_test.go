@@ -735,6 +735,7 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT (-1.4)::smallint`, nil, "-1"},
 		{`SELECT 9007199254740993::numeric = 9007199254740993`, nil, "true"},
 		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
+		{`SELECT true::int + false::int`, nil, "1"},
 		{`SELECT floor(1.5) / 2`, nil, "0.5"},
 		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
 	} {
@@ -750,7 +751,8 @@ func TestCastToNumber(t *testing.T) {
 			t.Errorf("%s: got %v, want out of range", q, err)
 		}
 	}
-	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`} {
+	for _, q := range []string{`SELECT 2.5::int`, `SELECT 'NaN'::float8`, `SELECT '0.12345678901234567890'::numeric`,
+		`SELECT CURRENT_TIMESTAMP::int`, `SELECT CURRENT_TIMESTAMP::numeric`, `SELECT true::float8`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
