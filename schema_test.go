@@ -230,7 +230,10 @@ DROP INDEX exporters_legacy_idx;
 DROP VIEW IF EXISTS exports;
 ALTER TABLE exporters DROP COLUMN legacy;
 `)
-	mustExec(t, db, `INSERT INTO exporters (id, workspace_id, title, legacy) VALUES ('e2', 'w1', 'a', 'x')`) // both constraints are gone
+	if _, err := db.Exec(`INSERT INTO exporters (id, workspace_id, title, legacy) VALUES ('e2', 'w1', 'a', 'x')`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Fatalf("the dropped column must be gone: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO exporters (id, workspace_id, title) VALUES ('e2', 'w1', 'a')`) // both constraints are gone
 	if _, err := db.Query(`SELECT * FROM exports`); err == nil {
 		t.Fatal("the dropped view must be gone")
 	}

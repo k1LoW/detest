@@ -694,6 +694,8 @@ const (
 	// reference through an ON DELETE or ON UPDATE RESTRICT foreign key, which
 	// Postgres reports apart from NO ACTION.
 	RestrictViolation
+	// UndefinedColumn is a column reference no table in scope has.
+	UndefinedColumn
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -721,6 +723,7 @@ var (
 	ErrCardinalityViolation      = errors.New("detest: more than one row returned by a subquery used as an expression")
 	ErrStringDataRightTruncation = errors.New("detest: value too long for the column")
 	ErrDataTruncated             = errors.New("detest: data truncated for the column")
+	ErrUndefinedColumn           = errors.New("detest: column does not exist")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -729,7 +732,7 @@ var (
 		InvalidRowCountInLimit: ErrInvalidParameterValue, InvalidRowCountInOffset: ErrInvalidParameterValue,
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
-		RestrictViolation: ErrForeignKeyViolation}
+		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers

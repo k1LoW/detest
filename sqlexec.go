@@ -205,6 +205,9 @@ func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
 
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
+	if err := x.checkColumns(stmt); err != nil {
+		return nil, err
+	}
 	switch st := stmt.(type) {
 	case *sqlir.Script:
 		res := &sqlResult{}

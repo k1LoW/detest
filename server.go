@@ -64,6 +64,7 @@ const (
 	StringDataRightTruncation = sqlir.StringDataRightTruncation
 	DataTruncated             = sqlir.DataTruncated
 	RestrictViolation         = sqlir.RestrictViolation
+	UndefinedColumn           = sqlir.UndefinedColumn
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

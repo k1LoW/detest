@@ -129,6 +129,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`
 - Common functions, among them `coalesce`, `nullif`, `greatest`, `least`, `lower`, `upper`, `length`, `concat`, `now`, `nextval`, `setval`, `gen_random_uuid`, `generate_series` and the transaction advisory locks
 - Expressions follow SQL's three-valued logic
+- Column references are resolved against the schema before a statement runs, so a column no table in scope has fails with 42703 as on the server
 
 **Schema**
 

@@ -47,6 +47,7 @@ var (
 	ErrCheckViolation            = sqlir.ErrCheckViolation
 	ErrInvalidParameterValue     = sqlir.ErrInvalidParameterValue
 	ErrCardinalityViolation      = sqlir.ErrCardinalityViolation
+	ErrUndefinedColumn           = sqlir.ErrUndefinedColumn
 	ErrStringDataRightTruncation = sqlir.ErrStringDataRightTruncation
 	ErrDataTruncated             = sqlir.ErrDataTruncated
 	ErrUnavailable               = errors.New("detest: external call failed (transport)")
