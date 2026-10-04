@@ -1398,7 +1398,7 @@ type Tx struct {
 	// lockStructs the lock structs its statements and waits took, which
 	// InnoDB weighs a deadlock victim by.
 	undo        int
-	lockStructs map[string]bool
+	lockStructs map[lockStruct]bool
 	// waits counts the lock waits, each a lock struct of its own.
 	waits int
 	// put is the rows the running statement put into a primary key, which

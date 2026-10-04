@@ -208,8 +208,13 @@ func uniqueIndex(u *sqlir.UniqueDef) string {
 			cols = append(cols, c.Column)
 		}
 	}
-	return strings.Join(cols, ",")
+	return secondaryIndex(cols)
 }
+
+// secondaryIndex names a secondary index by its columns, apart from
+// "PRIMARY" and from each other whatever the columns are called, as an
+// identifier holds no NUL.
+func secondaryIndex(cols []string) string { return "\x00" + strings.Join(cols, "\x00") }
 
 // uniqueHolder is the visible row other than self holding vals in the unique
 // index u, if any.

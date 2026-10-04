@@ -197,7 +197,7 @@ func (tx *Tx) inheritGap(table string, row Row, whole bool) {
 	indexes := []index{{"PRIMARY", def.pk}}
 	if whole {
 		secondary := func(cols []string) {
-			indexes = append(indexes, index{strings.Join(cols, ","), append(slices.Clone(cols), def.pk...)})
+			indexes = append(indexes, index{secondaryIndex(cols), append(slices.Clone(cols), def.pk...)})
 		}
 		for _, u := range def.uniques {
 			var cols []string

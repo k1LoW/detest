@@ -4784,18 +4784,31 @@ func TestInnoDBLockStructsOfASecondarySearch(t *testing.T) {
 		if _, err := tx.Exec(c.q); err != nil {
 			t.Fatal(err)
 		}
-		var structs map[string]bool
+		var structs map[lockStruct]bool
 		_ = conn.Raw(func(dc any) error {
 			if sc, ok := dc.(*sqlConn); ok && sc.tx != nil {
 				structs = sc.tx.lockStructs
 			}
 			return nil
 		})
-		if got := structs["R|"+store.resolve("t")+"|PRIMARY|X|record"]; got != c.primary {
+		if got := structs[structKey(store.resolve("t"), "PRIMARY", lockUpdate, "record")]; got != c.primary {
 			t.Errorf("%s: primary key record struct %v, want %v (%v)", c.q, got, c.primary, structs)
 		}
 		_ = tx.Rollback()
 		_ = conn.Close()
+	}
+}
+
+// Index names stay apart whatever their columns are called: a column
+// named after several others, or PRIMARY.
+func TestSecondaryIndexNamesAreDistinct(t *testing.T) {
+	names := []string{"PRIMARY", secondaryIndex([]string{"PRIMARY"}), secondaryIndex([]string{"x,y"}), secondaryIndex([]string{"x", "y"}), secondaryIndex([]string{"x|y"})}
+	for i := range names {
+		for j := range i {
+			if names[i] == names[j] {
+				t.Errorf("index names %d and %d collide: %q", j, i, names[i])
+			}
+		}
 	}
 }
 

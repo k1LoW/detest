@@ -79,7 +79,7 @@ func (tx *Tx) lock(lk lockKey) error { return tx.lockMode(lk, lockUpdate) }
 // a deadlock error, as Postgres's detector does; a cycle through a mutex or
 // another transaction of this process hangs in Postgres and is reported.
 func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
-	key := ""
+	var key lockStruct
 	if !strings.HasPrefix(lk.table, "\x00") {
 		key = structKey(lk.table, "PRIMARY", mode, "record")
 	}
@@ -88,7 +88,7 @@ func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
 
 // lockModeAs is lockMode for a lock InnoDB keeps in the lock struct named
 // key, which a wait for it weighs.
-func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key string) error {
+func (tx *Tx) lockModeAs(lk lockKey, mode lockMode, key lockStruct) error {
 	table := lk.table
 	if name, ok := strings.CutPrefix(table, "\x00unique\x00"); ok {
 		table, _, _ = strings.Cut(name, "\x00")
@@ -225,15 +225,15 @@ func innodbVictim(members []*Tx) *Tx {
 func innodbWeight(t *Tx) int { return t.undo + len(t.heldStructs()) }
 
 // heldStructs is the set of lock structs innodbWeight counts.
-func (t *Tx) heldStructs() map[string]bool {
+func (t *Tx) heldStructs() map[lockStruct]bool {
 	structs := maps.Clone(t.lockStructs)
 	if structs == nil {
-		structs = map[string]bool{}
+		structs = map[lockStruct]bool{}
 	}
 	// A table's intention locks are recorded as they are taken
 	// (noteTableLock), as which ones InnoDB keeps depends on their order; a
 	// write holds IX all the same.
-	note := func(table string) { structs["T|"+table+"|IX"] = true }
+	note := func(table string) { structs[tableStruct(table, "IX")] = true }
 	for _, lk := range t.locks {
 		if lk.key == gapWaitKey || strings.HasPrefix(lk.table, "\x00") {
 			continue
@@ -243,16 +243,16 @@ func (t *Tx) heldStructs() map[string]bool {
 				continue // an inserted row's lock is implicit
 			}
 		}
-		mode := lockClass(t.db.locks[lk][t])
+		mode := t.db.locks[lk][t]
 		searched := false
 		for k := range t.lockStructs {
-			if strings.HasPrefix(k, "R|"+lk.table+"|PRIMARY|"+mode+"|") {
+			if k.table == lk.table && k.index == "PRIMARY" && k.mode == lockClass(mode) && k.wait == 0 {
 				searched = true
 				break
 			}
 		}
 		if !searched {
-			structs["R|"+lk.table+"|PRIMARY|"+mode+"|record"] = true
+			structs[structKey(lk.table, "PRIMARY", mode, "record")] = true
 		}
 	}
 	for lk := range t.writes {
@@ -280,16 +280,33 @@ func (tx *Tx) noteLockStruct(table, index string, mode lockMode, kind string) {
 	if !tx.db.kind.InnoDB() {
 		return
 	}
-	if tx.lockStructs == nil {
-		tx.lockStructs = map[string]bool{}
-	}
-	tx.lockStructs[structKey(table, index, mode, kind)] = true
+	tx.addStruct(structKey(table, index, mode, kind))
 }
 
-// structKey names the lock struct of record locks of a kind and mode on an
+// lockStruct identifies a lock struct InnoDB keeps: of a table lock (kind
+// "table", mode IS or IX), of record locks of a kind and mode (S or X) on an
+// index of table, or of a lock that waited (wait, numbered from 1), which
+// joins no other.
+type lockStruct struct {
+	table, index, mode, kind string
+	wait                     int
+}
+
+// structKey is the lock struct of record locks of a kind and mode on an
 // index of table.
-func structKey(table, index string, mode lockMode, kind string) string {
-	return "R|" + table + "|" + index + "|" + lockClass(mode) + "|" + kind
+func structKey(table, index string, mode lockMode, kind string) lockStruct {
+	return lockStruct{table: table, index: index, mode: lockClass(mode), kind: kind}
+}
+
+func tableStruct(table, mode string) lockStruct {
+	return lockStruct{table: table, mode: mode, kind: "table"}
+}
+
+func (tx *Tx) addStruct(k lockStruct) {
+	if tx.lockStructs == nil {
+		tx.lockStructs = map[lockStruct]bool{}
+	}
+	tx.lockStructs[k] = true
 }
 
 // noteTableLock records the intention lock InnoDB takes on table before it
@@ -300,35 +317,28 @@ func (tx *Tx) noteTableLock(table string, mode lockMode) {
 	if !tx.db.kind.InnoDB() || strings.HasPrefix(table, "\x00") {
 		return
 	}
-	if tx.lockStructs == nil {
-		tx.lockStructs = map[string]bool{}
-	}
-	k := "T|" + table + "|I" + lockClass(mode)
-	if lockClass(mode) == "S" && tx.lockStructs["T|"+table+"|IX"] {
+	if lockClass(mode) == "S" && tx.lockStructs[tableStruct(table, "IX")] {
 		return
 	}
-	tx.lockStructs[k] = true
+	tx.addStruct(tableStruct(table, "I"+lockClass(mode)))
 }
 
 // noteWait records the lock struct InnoDB creates for a lock that has to
-// wait, of the struct named key ("" when the lock has none of its own). A
+// wait, of the struct key (the zero one when the lock has none of its own). A
 // waiting lock never joins a struct the transaction holds, and it stays once
 // the lock is granted, so a wait for a kind of lock already held adds a
 // struct, and one for a new kind is that kind's struct. It returns a
 // function to drop the struct again when the wait ends in a timeout, which
 // removes the waiting lock.
-func (tx *Tx) noteWait(key string) (cancel func()) {
+func (tx *Tx) noteWait(key lockStruct) (cancel func()) {
 	if !tx.db.kind.InnoDB() {
 		return func() {}
 	}
-	if key == "" || tx.heldStructs()[key] {
+	if key == (lockStruct{}) || tx.heldStructs()[key] {
 		tx.waits++
-		key = fmt.Sprintf("W|%d", tx.waits)
+		key = lockStruct{wait: tx.waits}
 	}
-	if tx.lockStructs == nil {
-		tx.lockStructs = map[string]bool{}
-	}
-	tx.lockStructs[key] = true
+	tx.addStruct(key)
 	return func() { delete(tx.lockStructs, key) }
 }
 
@@ -340,7 +350,7 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 	if !tx.db.kind.InnoDB() {
 		return
 	}
-	var key string
+	var key lockStruct
 	if name, ok := strings.CutPrefix(lk.table, "\x00unique\x00"); ok {
 		table, uname, _ := strings.Cut(name, "\x00")
 		def := tx.db.defs[table]
@@ -353,7 +363,7 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 		}
 		index := uniqueIndex(&def.uniques[i])
 		for k := range tx.lockStructs {
-			if strings.HasPrefix(k, "R|"+table+"|"+index+"|X|") {
+			if k.table == table && k.index == index && k.mode == "X" && k.wait == 0 {
 				return // a search on the index locked it explicitly
 			}
 		}
@@ -367,10 +377,7 @@ func (tx *Tx) convertImplicit(lk lockKey) {
 		}
 		key = structKey(lk.table, "PRIMARY", lockUpdate, "record")
 	}
-	if tx.lockStructs == nil {
-		tx.lockStructs = map[string]bool{}
-	}
-	tx.lockStructs[key] = true
+	tx.addStruct(key)
 }
 
 // victim ends a wait that another transaction's deadlock check broke by

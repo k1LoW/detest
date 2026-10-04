@@ -177,7 +177,7 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 			return err
 		}
 		if cancelWait == nil {
-			cancelWait = tx.noteWait(structKey(table, "insert intention", lockUpdate, "gap"))
+			cancelWait = tx.noteWait(structKey(table, "", lockUpdate, "insert intention"))
 		}
 		if tx.lockTimeout && tx.p.Choose("lock timeout on "+table, 2) == 1 {
 			cancelWait()
@@ -333,7 +333,7 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	// each lock's struct is recorded as it is taken.
 	scanIndex := "PRIMARY"
 	if def := tx.db.defs[table]; def == nil || !slices.Equal(sr.cols, def.pk) {
-		scanIndex = strings.Join(sr.cols, ",")
+		scanIndex = secondaryIndex(sr.cols)
 	}
 	desc := false
 	if len(stop.order) == 1 {
@@ -500,7 +500,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	index := "PRIMARY"
 	var entry *sqlir.UniqueDef
 	if def := tx.db.defs[table]; len(sr.cols) > 0 && (def == nil || !slices.Equal(sr.cols, def.pk)) {
-		index = strings.Join(sr.cols, ",")
+		index = secondaryIndex(sr.cols)
 		if tx.db.kind.InnoDB() {
 			entry = tx.db.uniqueOn(table, sr.cols)
 		}
@@ -526,7 +526,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			k = "next-key"
 		}
 		var keys []lockKey
-		var structs []string
+		var structs []lockStruct
 		if entry != nil {
 			vals, ok, err := x.uniqueValues(table, entry, r)
 			if err != nil {
