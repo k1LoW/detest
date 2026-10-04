@@ -153,6 +153,10 @@ s.DB("app", postgres.New(postgres.Errors(pqerr.Convert)))  // *pq.Error
 
 Isolation levels other than Read Committed, recursive CTEs, `RIGHT` and `FULL` joins, `JOIN ... USING` and `NATURAL JOIN`, `ANY (subquery)` with an operator other than `=`, window frames other than the two above, `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates, `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, writes to an array element or a field (`SET tags[1] = ...`), text compared with a number, except a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type, a number compared with a boolean or a time, a cast of a `numeric` or a float to text and `||` of one, `round` of a value ending in .5 and a cast of one to an integer when the statement does not show whether it is a `numeric` or a float, a set operation whose column holds text in one query and a number in the other, text and a number among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`, a value shorter than its `char(n)` column, a string literal or parameter compared with a timestamp, number text written as `0x10`, `0x1p2` or `1_000`, locking reads over a view, a subquery or a `LATERAL` item, `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions). Such statements fail with `detest.ErrUnsupportedSQL` rather than being approximated, and `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own; a case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs.
 
+A `numeric` value is kept as a float. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one with more digits than a float keeps, such as an integer beyond 2^53, fails with `detest.ErrUnsupportedSQL`.
+
+A `numeric(p, s)` column rounds what it stores to `s` places, half away from zero, and refuses a value of more than `p - s` digits before the point (22003). A `varchar(n)` or `char(n)` column refuses a longer value (22001), after dropping the spaces past `n` as Postgres does.
+
 **MySQL**
 
 `mysql.New()` parses with the MySQL grammar of TiDB's parser and gives InnoDB's semantics at Repeatable Read (the default), Read Committed and Serializable (`mysql.Isolation`). The statements and constraints above carry over, written in MySQL's syntax, with these differences.
@@ -174,10 +178,6 @@ s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert))) // *mysql.MySQLError
 ```
 
 For MySQL, these are not supported besides the above. `REPLACE`, an `UPDATE` that sets columns of a joined table, multi-table `DELETE`, a locking read, `UPDATE` or `DELETE` that searches by a prefix index (`KEY (name(3))`), or that more than one index serves without a unique point lookup among them (MySQL's optimizer picks one by its statistics), or that a descending index serves, or with `OR` (write it as `IN`), `<>`, `!=` or `NOT IN` on an indexed column, at Repeatable Read or Serializable, descending primary keys and unique indexes, a `sql_mode` without strict mode (other than the `NO_AUTO_VALUE_ON_ZERO` a dump sets), a `time_zone` other than UTC (`'+00:00'` as a dump sets it), `RETURNING`, temporal strings in formats other than `YYYY-MM-DD[ HH:MM:SS[.ffffff]]`, values of `TIME` columns, generated columns, and exact DECIMAL arithmetic (DECIMAL values are kept as float64, so sums like 0.1 + 0.2 are approximate).
-
-A `numeric` value is kept as a float. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one with more digits than a float keeps, such as an integer beyond 2^53, fails with `detest.ErrUnsupportedSQL`.
-
-A `numeric(p, s)` column rounds what it stores to `s` places, half away from zero, and refuses a value of more than `p - s` digits before the point (22003). A `varchar(n)` or `char(n)` column refuses a longer value (22001), after dropping the spaces past `n` as Postgres does.
 
 ### Queue
 

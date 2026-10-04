@@ -518,6 +518,15 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	return x.finish(sel, cols, rows, outer)
 }
 
+// setColumnFloat reports whether column i of a set operation is a numeric
+// or a float by one of the queries' select lists, as floatTyped tells.
+func setColumnFloat(sel *sqlir.SelectStmt, i int) bool {
+	if sel.SetOp != "" {
+		return setColumnFloat(sel.Larg, i) || setColumnFloat(sel.Rarg, i)
+	}
+	return i < len(sel.Targets) && !sel.Targets[i].Star && floatTyped(sel.Targets[i].Expr)
+}
+
 // evalSetOp combines two queries by column position, with the left one's
 // column names. UNION, INTERSECT and EXCEPT remove duplicates; with ALL they
 // keep them as a multiset.
@@ -544,7 +553,7 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 	// an integer column is the integer 1, and text or a boolean under it is
 	// an error. detest keeps values, which compare as they are here, so a
 	// column that holds values of two kinds is refused.
-	for _, c := range lcols {
+	for i, c := range lcols {
 		kinds := map[string]bool{}
 		for _, r := range slices.Concat(lrows, rrows) {
 			if k := valueKind(r[c]); k != "" {
@@ -555,9 +564,10 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 			return nil, nil, x.unsupported("a set operation over a column of values of two types")
 		}
 		// An integer under a numeric or a float takes the column's type,
-		// so 1 UNION ALL 3.0 gives numerics and x / 2 is 0.5 for both.
+		// so 1 UNION ALL 3.0 gives numerics and x / 2 is 0.5 for both. The
+		// type is the queries' whether or not a float row survives them.
 		rows := slices.Concat(lrows, rrows)
-		if kinds["number"] && slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) }) {
+		if kinds["number"] && (setColumnFloat(sel, i) || slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) })) {
 			for _, r := range rows {
 				if n, ok := integer(derefValue(r[c])); ok {
 					r[c] = float64(n)

@@ -2619,11 +2619,27 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 	if x.tx.db.kind.InnoDB() || !slices.ContainsFunc(exprs, numberTyped) {
 		return commonNumber(exprs, v), nil
 	}
+	refuse := x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
+	float := slices.ContainsFunc(exprs, floatTyped)
+	// The branches' types are resolved before any is evaluated, so a
+	// branch typed as text, or a literal that reads as no number, fails
+	// the statement whichever branch a row takes.
+	for _, e := range exprs {
+		if textCast(e) {
+			return nil, refuse
+		}
+		if k, ok := e.(*sqlir.Const); ok {
+			if s, ok := k.Value.(string); ok {
+				if _, err := x.branchNumber(s, float); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	s, ok := derefValue(v).(string)
 	if !ok {
 		return commonNumber(exprs, v), nil
 	}
-	refuse := x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
 	for _, e := range exprs {
 		switch e.(type) {
 		case *sqlir.Const, *sqlir.Param:
@@ -2633,10 +2649,20 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 			}
 		}
 	}
-	if isOtherNumberText(s) {
-		return nil, refuse
+	n, err := x.branchNumber(s, float)
+	if err != nil {
+		return nil, err
 	}
-	if !slices.ContainsFunc(exprs, floatTyped) {
+	return commonNumber(exprs, n), nil
+}
+
+// branchNumber reads a string literal among number branches as the branches'
+// type does: an integer, or a numeric when float.
+func (x *sqlExec) branchNumber(s string, float bool) (any, error) {
+	if isOtherNumberText(s) {
+		return nil, x.unsupported("number text in a form detest does not model among the branches of CASE or COALESCE")
+	}
+	if !float {
 		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 		if err != nil {
 			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
@@ -2647,7 +2673,7 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, v any) (any, error) {
 	if err != nil {
 		return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type numeric: %q", s), "", "", "")
 	}
-	return commonNumber(exprs, numericValue(f)), nil
+	return numericValue(f), nil
 }
 
 // numberTyped reports whether e is a number by its own form, before any value
