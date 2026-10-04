@@ -802,7 +802,7 @@ func TestLockTimeoutBreaksDeadlock(t *testing.T) {
 		})
 		s.AtQuiescence(func(*State) error {
 			if errors.Is(errs["y"], ErrLockNotAvailable) && errs["x"] != nil {
-				return fmt.Errorf("y timed out, and x still failed: %v", errs["x"])
+				return fmt.Errorf("y timed out, and x still failed: %w", errs["x"])
 			}
 			return nil
 		})
