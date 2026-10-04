@@ -717,7 +717,7 @@ func exactAsFloat(v any) bool {
 	if !ok {
 		return true
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	f, err := parseNumber(s)
 	if err != nil {
 		// A number beyond a float's range, such as 1e400, is valid input
 		// that the float cannot keep, not a syntax error.
@@ -779,13 +779,13 @@ func columnNumber(v any, t string) (any, bool) {
 		n, err := strconv.ParseInt(s, 10, 64)
 		return n, err == nil
 	case "float4", "float8":
-		f, err := strconv.ParseFloat(s, 64)
+		f, err := parseNumber(s)
 		return f, err == nil
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return numericValue(n), true
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	f, err := parseNumber(s)
 	return numericValue(f), err == nil
 }
 

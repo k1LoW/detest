@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,6 +124,22 @@ func compareValues(a, b any) (int, bool) {
 		return 0, true
 	}
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)), true
+}
+
+var (
+	decimalText = regexp.MustCompile(`^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
+	specialText = regexp.MustCompile(`(?i)^[+-]?(inf|infinity|nan)$`)
+)
+
+// parseNumber reads text as Postgres's float and numeric input does: decimal
+// or scientific notation and the special values, not the hexadecimal or
+// underscored forms strconv.ParseFloat also takes.
+func parseNumber(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if !decimalText.MatchString(s) && !specialText.MatchString(s) {
+		return 0, strconv.ErrSyntax
+	}
+	return strconv.ParseFloat(s, 64)
 }
 
 func toFloat(v any) (float64, bool) {

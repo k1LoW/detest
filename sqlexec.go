@@ -2252,7 +2252,7 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
 		return n, nil
 	}
-	if _, err := strconv.ParseFloat(t, 64); err == nil {
+	if _, err := parseNumber(t); err == nil {
 		// Postgres refuses '1.5' for an integer and compares it with a
 		// float8 or numeric, but values do not carry their column's type,
 		// and a float8 column keeps a whole number written as one as an
@@ -2491,7 +2491,7 @@ func castValue(v any, typ string) (any, error) {
 		}
 	case "float8", "float4", "double precision", "numeric", "real":
 		if s, ok := v.(string); ok {
-			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			f, err := parseNumber(s)
 			if err != nil {
 				return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s)}
 			}
