@@ -487,6 +487,11 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
 		t.Errorf("numeric division: got %v", got)
 	}
+	mustExec(t, db, `CREATE TABLE k (n numeric PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO k VALUES ($1)`, int64(9007199254740994))
+	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, float64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric key beyond 2^53 as a float: got %v, want a unique violation", err)
+	}
 	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, r float8)`)
 	mustExec(t, db, `INSERT INTO f VALUES (1, 1), (2, $1)`, int64(1))
 	if got := rowsOf(t, db, `SELECT r / 2 FROM f ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5"}) {
@@ -496,6 +501,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE u (n numeric UNIQUE)`)
 	mustExec(t, db, `INSERT INTO u VALUES ('9007199254740993')`)
 	mustExec(t, db, `INSERT INTO u VALUES ($1)`, 1e6)
+	mustExec(t, db, `INSERT INTO u VALUES ($1)`, int64(9007199254740994))
 	for _, tc := range []struct {
 		query string
 		args  []any
@@ -503,6 +509,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 		{`INSERT INTO u VALUES (9007199254740993)`, nil},
 		{`INSERT INTO u VALUES ('1000000')`, nil},
 		{`INSERT INTO u VALUES ($1)`, []any{1e6}},
+		{`INSERT INTO u VALUES ($1)`, []any{float64(9007199254740994)}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrUniqueViolation) {
 			t.Errorf("%s: got %v, want a unique violation", tc.query, err)

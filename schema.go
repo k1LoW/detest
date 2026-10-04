@@ -783,11 +783,16 @@ func columnNumber(v any, t string) (any, bool) {
 
 // numericValue is the representation of a numeric: a float, so arithmetic on
 // it is not integer arithmetic (1 / 2 is 0.5), and every value has one key
-// however it was written. An integer a float cannot keep exactly, beyond
-// 2^53, stays an integer.
+// however it was written. A whole number beyond 2^53, which a float cannot
+// keep exactly, is an integer.
 func numericValue(v any) any {
 	if n, ok := integer(v); ok && n > -1<<53 && n < 1<<53 {
 		return float64(n)
+	}
+	// A whole float beyond 2^53 becomes the integer it is, so it has the
+	// key of the same value written as an integer.
+	if f, ok := v.(float64); ok && f == math.Trunc(f) && math.Abs(f) >= 1<<53 && math.Abs(f) < 1<<63 {
+		return int64(f)
 	}
 	return v
 }
