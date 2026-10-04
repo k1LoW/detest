@@ -786,7 +786,7 @@ func columnNumber(v any, t string) (any, bool) {
 		return numericValue(n), true
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	return f, err == nil
+	return numericValue(f), err == nil
 }
 
 // numericValue is the representation of a numeric: a float, so arithmetic on

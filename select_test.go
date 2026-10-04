@@ -492,6 +492,9 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO k VALUES ($1)`, float64(9007199254740994)); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("numeric key beyond 2^53 as a float: got %v, want a unique violation", err)
 	}
+	if _, err := db.Exec(`INSERT INTO k VALUES ('9007199254740994.0')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("numeric key beyond 2^53 with a decimal point: got %v, want a unique violation", err)
+	}
 	mustExec(t, db, `CREATE TABLE z (n numeric PRIMARY KEY, r float8)`)
 	mustExec(t, db, `INSERT INTO z (n) VALUES ('-0')`)
 	if _, err := db.Exec(`INSERT INTO z (n) VALUES (0)`); !errors.Is(err, ErrUniqueViolation) {
