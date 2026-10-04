@@ -55,6 +55,9 @@ type sqlExec struct {
 	// fkChecks are the foreign key checks it holds back to its end.
 	inWrite  bool
 	fkChecks []func() error
+	// frozen are the rows of the tables a statement reads, as they were
+	// when it began, which its queries read instead of the latest.
+	frozen map[string][]Row
 }
 
 // env is the evaluation context of an expression: the rows of the tables in
@@ -185,7 +188,7 @@ func (x *sqlExec) ddlInTransaction() error {
 // to its end.
 func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
 	x.inWrite, x.fkChecks = true, nil
-	defer func() { x.inWrite, x.fkChecks = false, nil }()
+	defer func() { x.inWrite, x.fkChecks, x.frozen = false, nil, nil }()
 	res, err := run()
 	if err != nil {
 		return nil, err
@@ -202,7 +205,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
-			x.ctes = map[string][]Row{}
+			x.ctes, x.frozen = map[string][]Row{}, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
@@ -514,6 +517,10 @@ func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
 	}
 	x.inSelect, x.selectStmt = true, true
 	x.tx.yieldf("%s: %s", x.tx.db.name, lazyString(func() string { return x.summarize(sel) }))
+	if sel.Lock != nil {
+		x.freeze(sel)
+		defer func() { x.frozen = nil }()
+	}
 	cols, rows, err := x.evalSelect(sel, nil)
 	if err != nil {
 		return nil, err
@@ -602,7 +609,42 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	if x.consistent {
 		return alias, x.tx.snapshotRows(t.Name), true, nil
 	}
+	if rows, ok := x.frozen[x.tx.db.resolve(t.Name)]; ok {
+		return alias, rows, true, nil
+	}
 	return alias, x.tx.selectNoYield(t.Name, nil), true, nil
+}
+
+// freeze keeps the rows of the tables stmt reads as they are now, its start.
+// Postgres reads them from the statement's snapshot, so a subquery, a joined
+// table or a row re-checked after a lock wait sees neither the rows other
+// transactions committed during the wait nor those the statement wrote
+// itself. Only the row a write or a locking read takes is read at its latest.
+// InnoDB reads the latest rows.
+func (x *sqlExec) freeze(stmt any) {
+	if x.tx.db.kind.InnoDB() {
+		return
+	}
+	x.frozen = map[string][]Row{}
+	seen := map[string]bool{}
+	var add func(n any)
+	add = func(n any) {
+		for _, name := range sqlir.TableNames(n) {
+			table := x.tx.db.resolve(name)
+			if seen[table] {
+				continue
+			}
+			seen[table] = true
+			if v := x.tx.db.views[table]; v != nil {
+				add(v.View)
+				continue
+			}
+			if x.tx.db.defs[table] != nil {
+				x.frozen[table] = x.tx.selectNoYield(table, nil)
+			}
+		}
+	}
+	add(stmt)
 }
 
 // fromItems describes the FROM items of a query, for locking reads.
@@ -1052,6 +1094,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if err := x.tx.db.checkTable(table); err != nil {
 		return nil, err
 	}
+	x.freeze(ins)
 	cols := ins.Columns
 	for _, exprs := range ins.Rows {
 		// Postgres refuses VALUES lists of different lengths before any of
@@ -1576,6 +1619,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		return row.String()
 	})
 	x.tx.yieldf("%s: update %s set %s where %s", x.tx.db.name, up.Table, preview, lazyString(func() string { return x.exprString(up.Where) }))
+	x.freeze(up)
 	var stop *scanStop
 	if len(up.From) == 0 {
 		var err error
@@ -1725,6 +1769,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		return &sqlResult{cols: x.returningCols(del.Returning, nil)}, nil // nothing to delete
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
+	x.freeze(del)
 	delAlias := del.Alias
 	if delAlias == "" {
 		delAlias = relname(del.Table)

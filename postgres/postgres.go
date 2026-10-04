@@ -1205,6 +1205,18 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		}
 		out.Select = q
 	}
+	if s.WithClause != nil {
+		// WITH ... INSERT puts the CTEs on the INSERT, where the query reads
+		// them as it would its own.
+		if out.Select == nil {
+			return nil, c.unsupported("CTE on INSERT ... VALUES")
+		}
+		with, err := c.with(s.WithClause)
+		if err != nil {
+			return nil, err
+		}
+		out.Select.With = append(with, out.Select.With...)
+	}
 	if oc := s.OnConflictClause; oc != nil {
 		conf := &sqlir.OnConflict{}
 		if oc.Infer != nil {
