@@ -1290,7 +1290,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		// from every value: a key made from an id column alone can match a
 		// row with other unique values, which Postgres would not wait on.
 		_, keyedByID := row["id"]
-		if noPK && x.tx.heldByOther(lk, lockUpdate) && (keyedByID || !x.inUniqueIndex(table, row)) {
+		if noPK && len(x.tx.conflicting(lk, lockUpdate)) > 0 && (keyedByID || !x.inUniqueIndex(table, row)) {
 			return nil, x.unsupported("a row equal to one another transaction is writing in a table without a primary key")
 		}
 		if !noPK {

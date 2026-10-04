@@ -745,3 +745,50 @@ func TestBlockingLockingReadWakesNoIdleLoop(t *testing.T) {
 		})
 	})
 }
+
+// Explore's merge keeps the cut of a replay, which no frontier counted.
+func TestMergeKeepsAReplaysCut(t *testing.T) {
+	res := newFrontier(1, 10).merge([]*result{{Replay: true, CutRuns: 1, Schedule: "0"}}, 1)
+	if res.CutRuns != 1 || !strings.Contains(res.report(), "cut at MaxIdleTicks") {
+		t.Fatalf("merged replay reports %q", res.report())
+	}
+}
+
+// An INSERT that waits for a row equal to its own in a table without a
+// primary key marks no holder, so an idle loop is not woken when the holder
+// lets go of a row it did not change.
+func TestWaitingInsertWakesNoIdleLoop(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE t (a int UNIQUE)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO t VALUES (1)`) })
+		ticks := 0
+		s.Seed(func() { ticks = 0 })
+		s.Manual("holder", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `UPDATE t SET a = a WHERE a = 1`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Manual("inserter", 1, func(p *Proc) error {
+			_, _ = db.ExecContext(p.Context(), `INSERT INTO t VALUES (1)`)
+			return nil
+		})
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			ticks++
+			p.Step("finds nothing")
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error {
+			if ticks > 1 {
+				return fmt.Errorf("the idle sweeper ticked %d times with no row changed", ticks)
+			}
+			return nil
+		})
+	})
+}
