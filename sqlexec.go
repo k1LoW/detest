@@ -874,6 +874,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 			}
 			args[i] = val
 		}
+		if v.Name == "nullif" {
+			var err error
+			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
+				return nil, err
+			}
+		}
 		return x.callFunc(v.Name, args)
 	case *sqlir.BinaryExpr:
 		l, err := x.evalAgg(v.L, g)
@@ -883,6 +889,12 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		r, err := x.evalAgg(v.R, g)
 		if err != nil {
 			return nil, err
+		}
+		switch v.Op {
+		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
+				return nil, err
+			}
 		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.Cast:
@@ -1461,6 +1473,12 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		switch v.Op {
+		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
+				return nil, err
+			}
+		}
 		return x.binary(v.Op, l, r)
 	case *sqlir.IsNull:
 		val, err := x.eval(v.X, en)
@@ -1484,17 +1502,23 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 			var lhs []any
-			if _, ok := v.X.(*sqlir.RowExpr); ok {
+			lhsExprs := []sqlir.Expr{v.X}
+			if row, ok := v.X.(*sqlir.RowExpr); ok {
 				if lhs, ok = l.([]any); !ok {
 					return nil, x.unsupported("row comparison")
 				}
+				lhsExprs = row.Items
 			} else {
 				lhs = []any{l}
 			}
 			for _, r := range rows {
 				match := len(cols) == len(lhs)
 				for i := 0; match && i < len(cols); i++ {
-					if !equalValues(lhs[i], r[cols[i]]) {
+					li, err := x.untyped(lhsExprs[i], lhs[i], r[cols[i]])
+					if err != nil {
+						return nil, err
+					}
+					if !equalValues(li, r[cols[i]]) {
 						match = false
 					}
 				}
@@ -1511,6 +1535,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 				}
 				if derefValue(val) == nil {
 					sawNull = true
+				}
+				l, val, err := x.untypedPair(v.X, l, it, val)
+				if err != nil {
+					return nil, err
 				}
 				if equalValues(l, val) {
 					in = true
@@ -1571,6 +1599,10 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			hit := false
 			if v.Arg != nil {
+				arg, cond, err := x.untypedPair(v.Arg, arg, w.When, cond)
+				if err != nil {
+					return nil, err
+				}
 				hit = equalValues(arg, cond)
 			} else {
 				hit, _ = derefValue(cond).(bool)
@@ -1595,9 +1627,63 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			args[i] = val
 		}
+		if v.Name == "nullif" {
+			var err error
+			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
+				return nil, err
+			}
+		}
 		return x.callFunc(v.Name, args)
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
+}
+
+// untypedPair resolves the operands of a comparison as Postgres resolves an
+// untyped string literal: to the type of the other operand when that is a
+// number, so '01' = 1 holds. Only a literal is resolved, as Postgres
+// coerces nothing else. A text column or a cast compared with a number is an
+// error there, which detest does not raise, since a value does not carry its
+// column's type.
+func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, any, error) {
+	l, err := x.untyped(le, l, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err = x.untyped(re, r, l)
+	if err != nil {
+		return nil, nil, err
+	}
+	return l, r, nil
+}
+
+func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
+	k, ok := e.(*sqlir.Const)
+	if !ok {
+		return v, nil
+	}
+	s, ok := k.Value.(string)
+	if !ok {
+		return v, nil
+	}
+	other = derefValue(other)
+	if _, ok := toFloat(other); !ok {
+		return v, nil
+	}
+	t := strings.TrimSpace(s)
+	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+		return n, nil
+	}
+	if _, err := strconv.ParseFloat(t, 64); err == nil {
+		// Postgres refuses '1.5' for an integer and compares it with a
+		// float8 or numeric, but values do not carry their column's type,
+		// and a float8 column keeps a whole number as an integer.
+		return nil, x.unsupported("a string literal with a fraction compared with a number")
+	}
+	typ := "integer"
+	if _, ok := other.(float64); ok {
+		typ = "double precision"
+	}
+	return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s), "", "", "")
 }
 
 func (x *sqlExec) binary(op string, l, r any) (any, error) {

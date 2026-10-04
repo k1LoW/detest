@@ -387,3 +387,55 @@ func TestOffsetBeforeLimit(t *testing.T) {
 		t.Errorf("nextval after a refused LIMIT: %d, %v", n, err)
 	}
 }
+
+// Postgres gives an untyped string literal compared with a number the
+// number's type, so '01' matches 1 wherever the comparison is written.
+func TestUntypedLiteralComparedWithNumber(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, price float8, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1.5, '01'), (9, 2, '9')`)
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{`SELECT count(*) FROM t WHERE '01' = 1`, "2"},
+		{`SELECT count(*) FROM t WHERE '01' IN (1, 2)`, "2"},
+		{`SELECT count(*) FROM t WHERE '01' = ANY (ARRAY[1, 2])`, "2"},
+		{`SELECT count(*) FROM t WHERE id = '01'`, "1"},
+		{`SELECT count(*) FROM t WHERE id IN ('01')`, "1"},
+		{`SELECT count(*) FROM t WHERE id <> ' 1 '`, "1"},
+		{`SELECT count(*) FROM t WHERE id < '10'`, "2"},
+		{`SELECT count(*) FROM t WHERE price < '2'`, "1"},
+		{`SELECT CASE id WHEN '09' THEN 'nine' ELSE 'other' END FROM t WHERE id = 9`, "nine"},
+		{`SELECT count(*) FROM t HAVING count(*) = '02'`, "2"},
+		{`SELECT count(*) FROM t WHERE '01' IN (SELECT id FROM t)`, "2"},
+		{`SELECT count(*) FROM t WHERE ('09', '9') IN (SELECT id, name FROM t)`, "2"},
+		{`SELECT count(*) FROM t WHERE NULLIF(id, '01') IS NULL`, "1"},
+		// A text column keeps its value: only the literal takes the other side's type.
+		{`SELECT count(*) FROM t WHERE name = '01'`, "1"},
+		{`SELECT count(*) FROM t WHERE name = '1'`, "0"},
+	} {
+		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
+		}
+	}
+	// Postgres compares '1.5' with a float8 and refuses it for an integer,
+	// and detest cannot tell the two apart by the value.
+	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE price = '1.50'`,
+		`SELECT count(*) FROM t WHERE id = '1.5'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM t WHERE id = 'abc'`,
+		`SELECT count(*) FROM t WHERE price = 'abc'`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input syntax", q, err)
+		}
+	}
+}
