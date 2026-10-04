@@ -498,6 +498,12 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			row[col] = fmt.Sprint(v)
 			continue
 		}
+		// Bytes written to a text column are the text they hold, so they
+		// order as text.
+		if b, ok := v.([]byte); ok && textTypes[t] {
+			row[col] = string(b)
+			continue
+		}
 		// The text a driver sends for a boolean or a time depends on the
 		// driver, which detest does not model.
 		if textTypes[t] && isOther(v) && v != sqlir.Unknown {

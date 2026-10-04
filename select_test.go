@@ -628,6 +628,12 @@ func TestTextComparedWithNumber(t *testing.T) {
 			t.Errorf("%s with 1.5: got %v, want unsupported", q, err)
 		}
 	}
+	// Bytes written to a text column order as the text they hold.
+	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, s text)`)
+	mustExec(t, db, `INSERT INTO b VALUES (1, $1), (2, '2')`, []byte("10"))
+	if got := rowsOf(t, db, `SELECT id FROM b ORDER BY s LIMIT 1`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("bytes in a text column: got %v, want [1]", got)
+	}
 	// A byte slice parameter compared with text orders as the text it is.
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name < $1`, []byte("10")); len(got) != 1 || got[0] != "1" {
 		t.Errorf("name < []byte: got %v, want 1", got)
