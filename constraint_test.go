@@ -463,3 +463,27 @@ CREATE SEQUENCE IF NOT EXISTS public.w_id_seq START 40;
 		}
 	}
 }
+
+func TestSequenceNameOfATable(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
+	mustExec(t, db, `
+CREATE SCHEMA billing;
+CREATE TABLE billing.s (id int PRIMARY KEY);
+CREATE SEQUENCE public.s START 5;
+CREATE SEQUENCE IF NOT EXISTS billing.s;
+`)
+	// billing.s, a table, comes first on the path, as in Postgres.
+	for _, q := range []string{`SELECT nextval('s')`, `SELECT setval('s', 3)`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrWrongObjectType) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE SEQUENCE billing.s`); !errors.Is(err, ErrDuplicateTable) {
+		t.Errorf("CREATE SEQUENCE of a table's name: %v", err)
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('public.s')`).Scan(&n); err != nil || n != 5 {
+		t.Errorf("public.s: %d %v", n, err)
+	}
+}

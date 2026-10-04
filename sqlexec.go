@@ -3615,6 +3615,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if len(args) != 1 {
 			return nil, x.unsupported("nextval with other than one argument")
 		}
+		if name := x.tx.db.seqName(fmt.Sprint(derefValue(args[0]))); x.tx.db.isRelation(name) {
+			return nil, x.tx.db.notSequence(name)
+		}
 		v, refused := x.tx.db.nextval(fmt.Sprint(derefValue(args[0])))
 		if refused != "" {
 			return nil, x.unsupported(refused)
@@ -3634,6 +3637,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		called := true
 		if len(args) == 3 {
 			called, _ = derefValue(args[2]).(bool)
+		}
+		if name := x.tx.db.seqName(fmt.Sprint(derefValue(args[0]))); x.tx.db.isRelation(name) {
+			return nil, x.tx.db.notSequence(name)
 		}
 		x.tx.db.setval(fmt.Sprint(derefValue(args[0])), v, called)
 		return v, nil

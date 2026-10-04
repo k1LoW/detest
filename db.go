@@ -860,6 +860,8 @@ func (db *DB) seqName(s string) string {
 	}
 	path := db.searchPath()
 	for _, schema := range path {
+		// Tables, views and sequences share one namespace, so the first
+		// relation of the name is the one meant, sequence or not.
 		q := sequenceName(schema + "." + s)
 		if _, ok := db.seqDefs[q]; ok {
 			return q
@@ -867,8 +869,28 @@ func (db *DB) seqName(s string) string {
 		if _, ok := db.seqs[q]; ok {
 			return q
 		}
+		if db.isRelation(q) {
+			return q
+		}
 	}
 	return db.newSeqName(s)
+}
+
+// isRelation reports whether a table or view, rather than a sequence,
+// goes by the sequence name seq.
+func (db *DB) isRelation(seq string) bool {
+	table := seq
+	if !strings.Contains(table, ".") {
+		table = "public." + table
+	}
+	_, isView := db.views[table]
+	return db.defs[table] != nil || isView
+}
+
+// notSequence is the error of a sequence function or DDL given a table or
+// view.
+func (db *DB) notSequence(seq string) error {
+	return db.kind.Error(sqlir.WrongObjectType, fmt.Sprintf("%q is not a sequence", relname(seq)), relname(seq), "", "")
 }
 
 // newSeqName is the name CREATE SEQUENCE s gives a sequence: in the first
@@ -1008,15 +1030,29 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "sequence" && ch.Drop:
-		db.dropSequence(db.seqName(ch.Table))
+		name := db.seqName(ch.Table)
+		if db.isRelation(name) {
+			return db.notSequence(name)
+		}
+		db.dropSequence(name)
 		return nil
 	case ch.Object == "sequence":
-		if ch.Sequence != nil {
-			if _, exists := db.seqDefs[db.newSeqName(ch.Table)]; exists && ch.Create && ch.IfNotExists {
+		if ch.Sequence == nil {
+			return nil
+		}
+		if ch.Create {
+			name := db.newSeqName(ch.Table)
+			_, exists := db.seqDefs[name]
+			if (exists || db.isRelation(name)) && ch.IfNotExists {
 				return nil
 			}
-			db.alterSequence(ch.Table, ch.Sequence, ch.Create)
+			if db.isRelation(name) {
+				return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(name)), relname(name), "", "")
+			}
+		} else if db.isRelation(db.seqName(ch.Table)) {
+			return db.notSequence(db.seqName(ch.Table))
 		}
+		db.alterSequence(ch.Table, ch.Sequence, ch.Create)
 		return nil
 	case ch.Object == "index":
 		return db.indexChange(table, ch)
