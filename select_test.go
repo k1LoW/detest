@@ -656,6 +656,8 @@ func TestLargeIntegersCompareExactly(t *testing.T) {
 		{`SELECT id FROM t WHERE id > $1`, []any{int64(1 << 53)}},
 		{`SELECT id FROM t WHERE amount > $1`, []any{int64(1 << 53)}},
 		{`SELECT id FROM t ORDER BY id DESC LIMIT 1`, nil},
+		// An integer and a float compare exactly, even above 2^53.
+		{`SELECT id FROM t WHERE id > $1`, []any{float64(1 << 53)}},
 	} {
 		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, []string{"9007199254740993"}) {
 			t.Errorf("%s: got %v", tc.query, got)

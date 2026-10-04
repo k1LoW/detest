@@ -3,6 +3,8 @@ package detest
 import (
 	"cmp"
 	"fmt"
+	"math"
+	"math/big"
 	"reflect"
 	"regexp"
 	"strings"
@@ -93,10 +95,20 @@ func compareValues(a, b any) (int, bool) {
 		}
 		return ta.Compare(tb), true
 	}
-	// Integers compare exactly: as float64 two BIGINTs above 2^53 may be equal.
+	// Two integers are compared as integers, and an integer with a float
+	// exactly, as a float64 cannot tell apart integers above 2^53, such as
+	// adjacent snowflake IDs.
 	if ia, ok := integer(a); ok {
 		if ib, ok := integer(b); ok {
 			return cmp.Compare(ia, ib), true
+		}
+		if fb, ok := b.(float64); ok && !math.IsNaN(fb) {
+			return new(big.Float).SetInt64(ia).Cmp(big.NewFloat(fb)), true
+		}
+	}
+	if fa, ok := a.(float64); ok && !math.IsNaN(fa) {
+		if ib, ok := integer(b); ok {
+			return big.NewFloat(fa).Cmp(new(big.Float).SetInt64(ib)), true
 		}
 	}
 	fa, oka := toFloat(a)
