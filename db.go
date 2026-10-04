@@ -1530,15 +1530,8 @@ func (tx *Tx) Insert(table string, row Row) error {
 		return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
 	}
 	tx.undo++ // written as the row goes into the primary key, before the checks
-	if err := x.checkUniques(table, row, "", nil); err != nil {
+	if err := x.insertEntries(table, row); err != nil {
 		tx.undo-- // the failed insert's, rolled back
-		return err
-	}
-	if err := x.checkParents(table, row, nil); err != nil {
-		tx.undo--
-		return err
-	}
-	if err := tx.claimEntries(table, row); err != nil {
 		return err
 	}
 	delete(tx.deleted, lk)

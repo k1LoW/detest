@@ -917,6 +917,62 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A limited update writes each row as its search locks it too.
+		Name:   "a limited update fails on a row before it waits for a later one",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, code VARCHAR(5), v INT NOT NULL DEFAULT 0, UNIQUE KEY (code))` + binary},
+		Seed:   []string{`INSERT INTO u (id, code) VALUES (1, 'a'), (2, 'b'), (3, 'c')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE u SET v = 9 WHERE id = 3`),
+			difftest.S(0, `UPDATE u SET code = 'b' WHERE id >= 1 LIMIT 3`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		// And so does a limited delete.
+		Name: "a limited delete fails on a row before it waits for a later one",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, p_id INT, FOREIGN KEY (p_id) REFERENCES p (id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id) VALUES (1), (2), (3)`, `INSERT INTO c VALUES (1, 1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE p SET v = 9 WHERE id = 3`),
+			difftest.S(0, `DELETE FROM p WHERE id >= 1 LIMIT 3`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `ROLLBACK`),
+		},
+	},
+	{
+		// An insert writes its entries in the indexes before the one its
+		// foreign key check goes with, so while that check waits, a search
+		// along an earlier index meets the row and waits for it.
+		Name: "an insert waiting on its foreign key holds its earlier index entries",
+		Schema: []string{
+			`CREATE TABLE p (id INT PRIMARY KEY, v INT NOT NULL DEFAULT 0)` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY, a INT, p_id INT, KEY ka (a), KEY kp (p_id), FOREIGN KEY (p_id) REFERENCES p (id))` + binary,
+		},
+		Seed:  []string{`INSERT INTO p (id) VALUES (1), (2)`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(1, rr),
+			difftest.S(1, `UPDATE p SET v = 1 WHERE id = 1`),
+			difftest.S(0, rr),
+			difftest.S(0, `INSERT INTO c VALUES (10, 7, 1)`),
+			difftest.S(2, rr),
+			difftest.Q(2, `SELECT id FROM c WHERE a = 7 FOR UPDATE`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(2, `COMMIT`),
+		},
+	},
+	{
 		Name:   "inserts failing on the same key do not wait for each other",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

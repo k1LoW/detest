@@ -232,22 +232,42 @@ func secondaryIndex(name string, cols []string) string {
 	return "\x00" + strings.Join(cols, "\x00")
 }
 
-// claimEntries takes the entries row, inserted into table, writes into the
-// table's plain indexes, which the writer holds implicitly.
-func (tx *Tx) claimEntries(table string, row Row) error {
-	def := tx.db.defs[table]
-	if def == nil || !tx.db.kind.InnoDB() {
-		return nil
+// insertEntries puts row, inserted into table's primary key, into its
+// secondary indexes, as InnoDB does after the primary key: one index at a
+// time in indexOrder, checking the foreign keys over an index before its
+// entry, the unique ones for a duplicate, and holding each entry
+// implicitly. A foreign key over no index is checked last, on the index
+// MySQL adds for it.
+func (x *sqlExec) insertEntries(table string, row Row) error {
+	def := x.tx.db.defs[table]
+	if def == nil || !x.tx.db.kind.InnoDB() {
+		if err := x.checkUniques(table, row, "", nil); err != nil {
+			return err
+		}
+		return x.checkParents(table, row, nil)
 	}
 	for _, ix := range def.indexOrder(true) {
-		if ix.unique == nil && ix.key != nil {
-			tx.putReached(ix.name) // as far as a wait here gets
-			if err := tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
+		x.tx.putReached(ix.name) // as far as a wait or a failure here gets
+		if err := x.checkParentsExcept(table, row, nil, "", func(fk sqlir.ForeignKey) bool { return def.fkIndex(fk) == ix.name }); err != nil {
+			return err
+		}
+		switch {
+		case ix.unique != nil:
+			ex, err := x.claimUnique(table, ix.unique, row, "")
+			if err != nil {
+				return err
+			}
+			if ex != nil {
+				return x.tx.db.duplicateKey(table, ix.unique.Name)
+			}
+		case ix.key != nil:
+			if err := x.tx.lockImplicit(plainEntry(table, ix.name, ix.key, row), lockStruct{}); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	x.tx.putReached("")
+	return x.checkParentsExcept(table, row, nil, "", func(fk sqlir.ForeignKey) bool { return def.fkIndex(fk) == "" })
 }
 
 // uniqueHolder is the visible row other than self holding vals in the unique
@@ -380,12 +400,12 @@ func (x *sqlExec) checkUniques(table string, row Row, self string, old Row) erro
 		if u == nil {
 			continue
 		}
+		x.tx.putReached(ix.name) // as far as a wait or a failure here gets
 		ex, err := x.claimUnique(table, u, row, self)
 		if err != nil {
 			return err
 		}
 		if ex != nil {
-			x.tx.putReached(ix.name)
 			return x.tx.db.duplicateKey(table, u.Name)
 		}
 		if old != nil {

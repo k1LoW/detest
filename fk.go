@@ -83,13 +83,14 @@ func rowMatches(r Row, cols []string, vals []any) bool {
 // does, so a concurrent delete of the parent waits for this transaction. old
 // is the row an UPDATE replaces; a key it leaves unchanged is not checked.
 func (x *sqlExec) checkParents(table string, row, old Row) error {
-	return x.checkParentsExcept(table, row, old, "")
+	return x.checkParentsExcept(table, row, old, "", nil)
 }
 
 // checkParentsExcept is checkParents without the foreign key named skip,
 // which a cascade is applying: its parent row is being rewritten and is not
-// visible with its new key yet.
-func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) error {
+// visible with its new key yet; only, when given, picks the foreign keys
+// to check.
+func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string, only func(sqlir.ForeignKey) bool) error {
 	if x.tx.noFKChecks {
 		return nil // FOREIGN_KEY_CHECKS=0
 	}
@@ -98,7 +99,7 @@ func (x *sqlExec) checkParentsExcept(table string, row, old Row, skip string) er
 		return nil
 	}
 	for _, fk := range def.fks {
-		if fk.Name == skip || x.tx.db.isIgnored(fk.RefTable) {
+		if fk.Name == skip || x.tx.db.isIgnored(fk.RefTable) || only != nil && !only(fk) {
 			continue
 		}
 		if fk.MatchFull && partlyNull(row, fk.Columns) {
@@ -411,7 +412,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 		if err := x.checkUniques(ck.table, updated, lk.key, cur); err != nil {
 			return err
 		}
-		if err := x.checkParentsExcept(ck.table, updated, cur, skip); err != nil {
+		if err := x.checkParentsExcept(ck.table, updated, cur, skip, nil); err != nil {
 			return err
 		}
 		if err := x.onParentUpdate(ck.table, cur, updated); err != nil {

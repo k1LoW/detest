@@ -74,7 +74,7 @@ type sqlExec struct {
 // reads all the rows first when it sorts them, and when the update changes
 // a column of the index it searches by or of the primary key, which it then
 // holds apart; detest locks and writes them so otherwise too, and here also
-// for a LIMIT and a write joining other tables, which it keeps whole.
+// for a write joining other tables, which it keeps whole.
 func (x *sqlExec) rowByRow(table, alias string, where sqlir.Expr, simple bool, set []string) bool {
 	if !x.tx.db.kind.InnoDB() || !simple {
 		return false
@@ -1412,18 +1412,12 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			x.tx.put = append(x.tx.put, putRow{table: table, row: row})
 			x.tx.putting = true
 		}
-		if err := x.checkUniques(table, row, "", nil); err != nil {
-			return nil, err
-		}
-		if err := x.checkParents(table, row, nil); err != nil {
+		if err := x.insertEntries(table, row); err != nil {
 			return nil, err
 		}
 		// Last before the write, as the duplicate checks above may wait
 		// while another transaction takes a gap lock the row falls into.
 		if err := x.tx.insertIntention(table, row); err != nil {
-			return nil, err
-		}
-		if err := x.tx.claimEntries(table, row); err != nil {
 			return nil, err
 		}
 		delete(x.tx.deleted, lk)
@@ -1743,9 +1737,13 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		}
 		return x.appendReturning(out, up.Returning, updated)
 	}
-	if x.rowByRow(table, alias, up.Where, len(up.From) == 0 && up.Limit == nil && len(up.OrderBy) == 0, assignedColumns(up.Set)) {
+	if x.rowByRow(table, alias, up.Where, len(up.From) == 0 && len(up.OrderBy) == 0, assignedColumns(up.Set)) {
+		n, err := x.count(up.Limit, "LIMIT", nil)
+		if err != nil {
+			return nil, err
+		}
 		x.scanned = func(t string, r Row) error {
-			if t != table || done[r.Key()] {
+			if t != table || done[r.Key()] || up.Limit != nil && matched >= int64(n) {
 				return nil
 			}
 			return apply(newJrow(alias, r))
@@ -1860,9 +1858,13 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		out.affected++
 		return x.appendReturning(out, del.Returning, cur)
 	}
-	if x.rowByRow(table, alias, del.Where, len(del.Using) == 0 && del.Limit == nil && len(del.OrderBy) == 0, nil) {
+	if x.rowByRow(table, alias, del.Where, len(del.Using) == 0 && len(del.OrderBy) == 0, nil) {
+		n, err := x.count(del.Limit, "LIMIT", nil)
+		if err != nil {
+			return nil, err
+		}
 		x.scanned = func(t string, r Row) error {
-			if t != table || done[r.Key()] {
+			if t != table || done[r.Key()] || del.Limit != nil && out.affected >= int64(n) {
 				return nil
 			}
 			return apply(newJrow(alias, r))
