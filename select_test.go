@@ -661,6 +661,7 @@ func TestTextComparedWithNumber(t *testing.T) {
 		`SELECT count(*) FROM t WHERE name::text < 2`,
 		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
 		`SELECT count(*) FROM t WHERE id = true`,
+		`SELECT count(*) FROM t WHERE now() > '2024-01-01'`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', '2'])`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', NULL::text])`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY[NULL])`,

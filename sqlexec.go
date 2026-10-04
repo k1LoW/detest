@@ -2321,6 +2321,11 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", s), "", "", "")
 		}
 		return b, nil
+	case time.Time:
+		// Postgres reads the text as the other side's timestamp type, in
+		// the session's time zone when it has none, and a value does not
+		// tell timestamp from timestamptz.
+		return nil, x.unsupported("a string literal or parameter compared with a timestamp")
 	}
 	if !isNumber(other) {
 		return v, nil
