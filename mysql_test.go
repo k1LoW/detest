@@ -556,7 +556,9 @@ func TestMySQLSavepointKeepsLocks(t *testing.T) {
 				return err
 			}
 			defer func() { _ = tx.Rollback() }()
-			for _, q := range []string{"SAVEPOINT sp", "SELECT id FROM t WHERE id = 1 FOR UPDATE", "ROLLBACK TO SAVEPOINT sp"} {
+			// A read first starts the transaction in InnoDB: a rollback to a
+			// savepoint taken before that rolls back every lock.
+			for _, q := range []string{"SELECT v FROM t", "SAVEPOINT sp", "SELECT id FROM t WHERE id = 1 FOR UPDATE", "ROLLBACK TO SAVEPOINT sp"} {
 				if _, err := tx.Exec(q); err != nil {
 					return err
 				}
