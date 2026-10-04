@@ -58,7 +58,7 @@ type columnChecker struct {
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
-	if x.tx.db.kind.InnoDB() || x.tx.db.defs == nil {
+	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
 	c := &columnChecker{x: x}

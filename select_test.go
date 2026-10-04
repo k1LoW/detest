@@ -1043,3 +1043,11 @@ func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
 	}
 	mustExec(t, db, `SELECT * FROM t ORDER BY 2`)
 }
+
+func TestColumnCheckWithoutSchema(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if _, err := db.Query(`SELECT typo FROM (SELECT 1 AS a) s`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Errorf("a derived table's columns are known without a schema: %v", err)
+	}
+}
