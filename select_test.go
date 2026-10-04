@@ -877,7 +877,9 @@ func TestValueFormsByType(t *testing.T) {
 		`SELECT 1 || 2`, `SELECT 'a' || 1.5`, `SELECT 1.5::text`, `SELECT ratio::text FROM t`,
 		`SELECT coalesce(name, 1) FROM t`, `SELECT CASE WHEN id = 1 THEN name ELSE 2 END FROM t`, `SELECT greatest(name, 1) FROM t`,
 		`SELECT id FROM t UNION SELECT '1'`, `SELECT id FROM t INTERSECT SELECT '1'`,
-		`SELECT round(ratio) FROM t`, `INSERT INTO t (id, c) VALUES (2, 'ab')`,
+		`SELECT round(ratio) FROM t`, `INSERT INTO t (id, c) VALUES (2, 'ab')`, `INSERT INTO t (id, c) VALUES (2, 'a  ')`,
+		`SELECT true UNION SELECT 1`, `SELECT id FROM t UNION SELECT NULL UNION SELECT now()`,
+		`CREATE TABLE n (id int PRIMARY KEY, v numeric(2, -3))`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -901,5 +903,19 @@ func TestValueFormsByType(t *testing.T) {
 	got := rowsOf(t, db, `SELECT v, c, price = 1.1, 'yes'::bool, 2::bool, CASE WHEN id = 2 THEN 1 ELSE '2' END = 1 FROM t WHERE id = 2`)
 	if want := []string{"abc,abc,true,true,true,true"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("converted values: got %v, want %v", got, want)
+	}
+	// ALTER COLUMN TYPE applies the new limits to the rows and the writes
+	// after it.
+	mustExec(t, db, `ALTER TABLE t ALTER COLUMN price TYPE numeric(4,2)`)
+	mustExec(t, db, `ALTER TABLE t ALTER COLUMN v TYPE varchar(4)`)
+	mustExec(t, db, `INSERT INTO t (id, price, v) VALUES (3, 1.005, 'abcd')`)
+	if got := rowsOf(t, db, `SELECT price = 1.01 FROM t WHERE id = 3`); !reflect.DeepEqual(got, []string{"true"}) {
+		t.Errorf("after ALTER TYPE: got %v", got)
+	}
+	if _, err := db.Exec(`INSERT INTO t (id, v) VALUES (4, 'abcde')`); !errors.Is(err, ErrStringDataRightTruncation) {
+		t.Errorf("varchar(4) after ALTER TYPE: got %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN v TYPE varchar(3)`); !errors.Is(err, ErrStringDataRightTruncation) {
+		t.Errorf("ALTER TYPE over a longer row: got %v", err)
 	}
 }

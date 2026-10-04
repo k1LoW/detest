@@ -281,6 +281,22 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "limits set by ALTER COLUMN TYPE",
+		Schema: []string{`CREATE TABLE m (id int PRIMARY KEY, price numeric, v text)`},
+		Seed:   []string{`INSERT INTO m VALUES (1, 1.05, 'abc ')`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.S(0, `ALTER TABLE m ALTER COLUMN price TYPE numeric(4,1)`),
+			difftest.S(0, `ALTER TABLE m ALTER COLUMN v TYPE varchar(3)`),
+			difftest.Q(0, `SELECT price = 1.1, v, length(v) FROM m WHERE id = 1`),
+			difftest.S(0, `INSERT INTO m VALUES (2, 2.25, 'abcd')`),
+			difftest.S(0, `INSERT INTO m VALUES (3, 999.95, 'x')`),
+			difftest.S(0, `INSERT INTO m VALUES (4, 2.25, 'xy')`),
+			difftest.Q(0, `SELECT price = 2.3 FROM m WHERE id = 4`),
+			difftest.Q(0, `SELECT id FROM m ORDER BY id`),
+		},
+	},
+	{
 		Name:   "NULL semantics",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{

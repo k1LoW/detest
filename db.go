@@ -987,14 +987,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		case col.DropAutoIncrement:
 			delete(def.autoInc, col.Name)
 		}
-		if col.TypeOnly {
-			continue
-		}
 		if col.Type != "" {
-			if def.fsp == nil {
-				def.fsp = map[string]int{}
-			}
-			def.fsp[col.Name] = col.FSP
 			if col.MaxLen > 0 || col.Members != nil {
 				if def.strs == nil {
 					def.strs = map[string]strLimit{}
@@ -1011,6 +1004,21 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			} else {
 				delete(def.nums, col.Name)
 			}
+			// ALTER COLUMN TYPE rewrites the rows under the new type, so a
+			// numeric(p, s) rounds what they hold and a varchar(n) refuses
+			// what is too long for it.
+			if col.TypeOnly && (col.MaxLen > 0 || col.Precision > 0) {
+				redefined = true
+			}
+		}
+		if col.TypeOnly {
+			continue
+		}
+		if col.Type != "" {
+			if def.fsp == nil {
+				def.fsp = map[string]int{}
+			}
+			def.fsp[col.Name] = col.FSP
 			// A whole column definition, which says ON UPDATE again or drops
 			// it, as MySQL's MODIFY and CHANGE do; ALTER COLUMN leaves it.
 			if col.OnUpdate != nil {

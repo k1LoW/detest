@@ -284,3 +284,25 @@ func likeMatch(v any, pattern any, caseInsensitive bool) (match, dangling bool) 
 	}
 	return re.MatchString(fmt.Sprint(v)), dangling
 }
+
+// valueKind names the kind of a value as the types of a set operation's
+// column tell them apart: text, number, boolean, time or other, and nothing
+// for NULL.
+func valueKind(v any) string {
+	v = derefValue(v)
+	switch {
+	case v == nil:
+		return ""
+	case isText(v):
+		return "text"
+	case isNumber(v):
+		return "number"
+	}
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case time.Time:
+		return "time"
+	}
+	return "other"
+}

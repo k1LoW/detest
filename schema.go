@@ -683,7 +683,7 @@ type strLimit struct {
 // Characters past n are dropped when they are spaces and refused otherwise.
 // A char(n) pads a shorter value with spaces and then compares it without
 // them, which detest's plain strings do not follow, so only values of the
-// declared length are supported there.
+// declared length are supported there, and 'a  ' in a char(3) is short too.
 func (x *sqlExec) pgTextLimit(table, col, t, s string, n int) (string, error) {
 	if utf8.RuneCountInString(s) > n {
 		if utf8.RuneCountInString(strings.TrimRight(s, " ")) > n {
@@ -695,7 +695,7 @@ func (x *sqlExec) pgTextLimit(table, col, t, s string, n int) (string, error) {
 		}
 		s = string([]rune(s)[:n])
 	}
-	if t == "bpchar" && utf8.RuneCountInString(s) < n {
+	if t == "bpchar" && utf8.RuneCountInString(strings.TrimRight(s, " ")) < n {
 		return "", x.unsupported(fmt.Sprintf("a value shorter than the char(%d) column %q, which Postgres pads with spaces", n, col))
 	}
 	return s, nil

@@ -426,25 +426,8 @@ func unqualify(e sqlir.Expr) {
 // columnDef converts a column with the constraints written on it.
 func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
 	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
-	mods := typmods(d.TypeName)
-	switch col.Type {
-	case "varchar":
-		if len(mods) == 1 {
-			col.MaxLen = mods[0]
-		}
-	case "bpchar":
-		// char without a length is char(1).
-		col.MaxLen = 1
-		if len(mods) == 1 {
-			col.MaxLen = mods[0]
-		}
-	case "numeric":
-		if len(mods) >= 1 {
-			col.Precision = mods[0]
-		}
-		if len(mods) == 2 {
-			col.Scale = mods[1]
-		}
+	if err := c.columnLimits(&col, d.TypeName); err != nil {
+		return col, nil, nil, err
 	}
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
@@ -656,6 +639,36 @@ func typeName(t *pg.TypeName) string {
 	return n
 }
 
+// columnLimits sets the length a varchar(n) or char(n) column holds and the
+// precision and scale of a numeric(p, s), from the type's modifiers. A
+// negative scale, which rounds to the left of the point, is not modeled.
+func (c *pgConv) columnLimits(col *sqlir.ColumnDef, t *pg.TypeName) error {
+	mods := typmods(t)
+	switch col.Type {
+	case "varchar":
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "bpchar":
+		// char without a length is char(1).
+		col.MaxLen = 1
+		if len(mods) == 1 {
+			col.MaxLen = mods[0]
+		}
+	case "numeric":
+		if len(mods) >= 1 {
+			col.Precision = mods[0]
+		}
+		if len(mods) == 2 {
+			col.Scale = mods[1]
+		}
+		if col.Scale < 0 {
+			return c.unsupported("a numeric column with a negative scale")
+		}
+	}
+	return nil
+}
+
 // typmods are the integers a type is declared with, as varchar(255) and
 // numeric(10, 2) carry them.
 func typmods(t *pg.TypeName) []int {
@@ -783,7 +796,11 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
-				ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true})
+				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true}
+				if err := c.columnLimits(&col, cd.TypeName); err != nil {
+					return nil, err
+				}
+				ch.Columns = append(ch.Columns, col)
 			}
 		case pg.AlterTableType_AT_SetNotNull:
 			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, NotNull: true, TypeOnly: true})
