@@ -29,6 +29,15 @@ func (tx *Tx) evaluator() *sqlExec {
 	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string][]Row{}, start: time.Now()}
 }
 
+// unconverted reports whether e stands for a schema expression the dialect
+// could not convert, which it loads as the Unknown constant so that a dump
+// still builds. It is told apart by the expression and not by the value,
+// which a real expression can equal.
+func unconverted(e sqlir.Expr) bool {
+	k, ok := e.(*sqlir.Const)
+	return ok && k.Value == sqlir.Unknown
+}
+
 // applyDefaults fills the columns a new row leaves out with their declared
 // defaults, in declaration order so sequences advance deterministically.
 func (x *sqlExec) applyDefaults(table string, row Row) error {
@@ -44,12 +53,19 @@ func (x *sqlExec) applyDefaults(table string, row Row) error {
 		if _, set := row[col]; set {
 			continue
 		}
+		// A default detest cannot compute is written as the Unknown marker,
+		// not refused and not NULL. A default no process reads cannot
+		// change the outcome, and refusing it would make every INSERT that
+		// leaves the column out unsupported, while dumps routinely hold
+		// such defaults (ARRAY[]::text[]). One a process does read comes
+		// back as a value the server never produces, where NULL would pass
+		// for a real one.
 		v, err := x.eval(d, &env{})
 		if err != nil {
-			if errors.As(err, new(errUnknownExpr)) {
-				continue // a default detest cannot evaluate leaves the column NULL
+			if !errors.As(err, new(errUnknownExpr)) {
+				return err
 			}
-			return err
+			v = sqlir.Unknown
 		}
 		row[col] = v
 	}
@@ -289,12 +305,12 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 		}
 	}
 	for _, c := range def.checks {
+		if unconverted(c.Expr) {
+			return x.unsupported(fmt.Sprintf("check constraint %q, whose expression detest cannot convert", c.Name))
+		}
 		v, err := x.eval(c.Expr, c.env(table, row))
 		if err != nil {
-			if errors.As(err, new(errUnknownExpr)) {
-				continue // a check detest cannot evaluate passes, as an unknown default does
-			}
-			return err
+			return x.unsupportedExpr(err, fmt.Sprintf("in check constraint %q", c.Name))
 		}
 		// NULL passes a CHECK, as in Postgres; only false fails it.
 		if b, ok := derefValue(v).(bool); ok && !b {
@@ -365,16 +381,12 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 		}
 		// The schema loads with an expression detest cannot convert or
 		// evaluate, but a value it cannot compute must not be stored as if
-		// it were the column's. One it could not convert is the Unknown
-		// constant, told apart by the expression and not by the value, which
-		// a real expression can equal.
-		k, unconverted := g.Expr.(*sqlir.Const)
-		unconverted = unconverted && k.Value == sqlir.Unknown
+		// it were the column's.
 		v, err := x.eval(g.Expr, g.env(table, row))
 		if err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
 		}
-		if err != nil || unconverted {
+		if err != nil || unconverted(g.Expr) {
 			return x.unsupported(fmt.Sprintf("generated column %q, whose expression detest cannot evaluate", col))
 		}
 		row[col] = v

@@ -16,6 +16,11 @@ import (
 // CheckSQL reports whether detest can execute a statement on a database of
 // kind d, without executing it. Collect the SQL a service emits and run it
 // through CheckSQL to measure coverage before modeling the service.
+//
+// The check runs against a database with no schema, so it reports the cases
+// the statement decides on its own. A case that depends on the schema, such
+// as a write that needs a generated column detest cannot compute, passes here
+// and fails with ErrUnsupportedSQL when the statement runs.
 func CheckSQL(d Server, query string) error {
 	kind := sqlir.ImplOf(d)
 	if kind == nil {

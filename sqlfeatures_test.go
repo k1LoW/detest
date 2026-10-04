@@ -2,6 +2,7 @@ package detest
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,5 +126,53 @@ func TestSQLExecutorFeatures(t *testing.T) {
 	// The MySQL dialect exists as an interface but has no frontend yet.
 	if err := CheckSQL(mysql.New(), "SELECT 1"); err == nil {
 		t.Fatal("mysql frontend should report not implemented")
+	}
+}
+
+// An expression detest cannot evaluate where the application observes its
+// value is refused, so that no placeholder is written in place of the value
+// and no sort key is silently dropped.
+func TestUnevaluableExpressionIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, v text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'a')`)
+	for _, q := range []string{
+		`INSERT INTO t VALUES (2, now() * 2)`,
+		`UPDATE t SET v = now() * 2 WHERE id = 1`,
+		`INSERT INTO t VALUES (1, 'b') ON CONFLICT (id) DO UPDATE SET v = now() * 2`,
+		`SELECT id FROM t ORDER BY now() * 2`,
+		`SELECT id, now() * 2 FROM t`,
+		`INSERT INTO t VALUES (2, 'b') RETURNING now() * 2`,
+		`SELECT id FROM t WHERE now() * 2 IS NULL`,
+		`SELECT id FROM t WHERE id = 1 AND now() * 2 IS NULL FOR UPDATE`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	var n int64
+	var v string
+	if err := db.QueryRow(`SELECT count(*), min(v) FROM t`).Scan(&n, &v); err != nil || n != 1 || v != "a" {
+		t.Fatalf("got %d rows, v=%q, err=%v; want the table untouched", n, v, err)
+	}
+}
+
+// A CHECK detest cannot convert loads with the schema, and a write to its
+// table is refused rather than checked against nothing. A default detest
+// cannot convert loads as well, and a write that leaves the column out
+// stores the Unknown marker, so the INSERTs a dump's tables take still run.
+func TestUnconvertedSchemaExpressions(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE c (id int PRIMARY KEY, v text, CONSTRAINT c_v_check CHECK (v <> CURRENT_USER))`)
+	if _, err := db.Exec(`INSERT INTO c VALUES (1, 'a')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("insert into a table with an unconverted CHECK: got %v", err)
+	}
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, tags text[] DEFAULT ARRAY[]::text[])`)
+	mustExec(t, db, `INSERT INTO d (id) VALUES (1)`)
+	var tags string
+	if err := db.QueryRow(`SELECT tags FROM d WHERE id = 1`).Scan(&tags); err != nil || tags != Unknown {
+		t.Errorf("default detest cannot convert: got %q, %v; want the Unknown marker", tags, err)
 	}
 }

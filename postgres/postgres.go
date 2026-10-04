@@ -366,15 +366,17 @@ func (c *pgConv) createTable(s *pg.CreateStmt) (sqlir.SchemaChange, error) {
 	return ch, nil
 }
 
-// check converts a CHECK constraint. One detest cannot evaluate is dropped,
-// as a default it cannot evaluate becomes unknown: the schema still loads.
+// check converts a CHECK constraint. One detest cannot convert is kept as
+// the unknown constant, as a default it cannot convert is: the schema still
+// loads, and a write to the table fails as unsupported instead of passing a
+// constraint the server would have checked.
 func (c *pgConv) check(k *pg.Constraint, table string) (sqlir.CheckDef, bool, error) {
 	if k == nil || k.Contype != pg.ConstrType_CONSTR_CHECK {
 		return sqlir.CheckDef{}, false, nil
 	}
 	e, err := c.expr(k.RawExpr)
 	if err != nil {
-		return sqlir.CheckDef{}, false, nil
+		return sqlir.CheckDef{Name: k.Conname, Expr: &sqlir.Const{Value: sqlir.Unknown}}, true, nil
 	}
 	if err := c.ownColumns(e, table); err != nil {
 		return sqlir.CheckDef{}, false, err

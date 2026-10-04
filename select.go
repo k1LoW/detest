@@ -230,7 +230,7 @@ func (x *sqlExec) projectItems(sel *sqlir.SelectStmt, items []*selItem, rows []j
 			}
 			v, err := x.value(it, t.Expr)
 			if err != nil {
-				return nil, err
+				return nil, x.unsupportedExpr(err, "in the select list")
 			}
 			o[keys[i]] = v
 		}
@@ -291,10 +291,7 @@ func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []stri
 		for j, k := range keys {
 			v, err := x.outputValue(it, k.Expr, cols)
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					continue // order by an expression detest cannot evaluate: keep the order
-				}
-				return err
+				return x.unsupportedExpr(err, "in ORDER BY")
 			}
 			vals[i][j] = v
 		}

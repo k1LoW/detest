@@ -139,7 +139,15 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if !tx.block && !tx.start.IsZero() {
 		x.start = tx.start // the statement is its own transaction, begun at the same instant
 	}
-	return x.execStatement(s.stmt)
+	res, err := x.execStatement(s.stmt)
+	if err != nil {
+		// Every path that evaluates an expression ends here, so an
+		// expression detest cannot evaluate that no path named on its own
+		// still leaves as ErrUnsupportedSQL, which callers and CheckSQL
+		// branch on.
+		return nil, x.unsupportedExpr(err, "in the statement")
+	}
+	return res, nil
 }
 
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
@@ -622,10 +630,7 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 		for j, k := range keys {
 			v, err := x.eval(k.Expr, r.env(outer))
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					continue // order by an expression detest cannot evaluate: keep key order
-				}
-				return err
+				return x.unsupportedExpr(err, "in ORDER BY")
 			}
 			vals[i][j] = v
 		}
@@ -964,11 +969,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for i, e := range exprs {
 				v, err := x.eval(e, &env{})
 				if err != nil {
-					if errors.As(err, new(errUnknownExpr)) {
-						v = sqlir.Unknown
-					} else {
-						return nil, err
-					}
+					return nil, x.unsupportedExpr(err, "in VALUES")
 				}
 				if _, isDefault := e.(*sqlir.Default); isDefault {
 					continue
@@ -999,7 +1000,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		if x.tx.db.ignored[table] {
 			out.affected++
-			x.appendReturning(out, ins.Returning, row)
+			if err := x.appendReturning(out, ins.Returning, row); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
@@ -1061,11 +1064,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			for _, a := range ins.OnConflict.Set {
 				v, err := x.eval(a.Value, e)
 				if err != nil {
-					if errors.As(err, new(errUnknownExpr)) {
-						v = sqlir.Unknown
-					} else {
-						return nil, err
-					}
+					return nil, x.unsupportedExpr(err, "in ON CONFLICT DO UPDATE SET")
 				}
 				updated[a.Column] = v
 			}
@@ -1091,7 +1090,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
 			}
 			out.affected++
-			x.appendReturning(out, ins.Returning, updated)
+			if err := x.appendReturning(out, ins.Returning, updated); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		lk = lockKey{table, row.Key()}
@@ -1110,7 +1111,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		out.affected++
-		x.appendReturning(out, ins.Returning, row)
+		if err := x.appendReturning(out, ins.Returning, row); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1165,9 +1168,9 @@ func (x *sqlExec) returningCols(ret []sqlir.Target, all []string) []string {
 	return cols
 }
 
-func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) {
+func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) error {
 	if len(ret) == 0 {
-		return
+		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
 	e := &env{merged: row}
@@ -1178,10 +1181,14 @@ func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) {
 			}
 			break
 		}
-		v, _ := x.eval(t.Expr, e)
+		v, err := x.eval(t.Expr, e)
+		if err != nil {
+			return x.unsupportedExpr(err, "in RETURNING")
+		}
 		vals = append(vals, toDriverValue(v))
 	}
 	out.rows = append(out.rows, vals)
+	return nil
 }
 
 // --- UPDATE / DELETE ---
@@ -1293,11 +1300,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		for _, a := range up.Set {
 			v, err := x.eval(a.Value, c2.env(nil))
 			if err != nil {
-				if errors.As(err, new(errUnknownExpr)) {
-					v = sqlir.Unknown
-				} else {
-					return nil, err
-				}
+				return nil, x.unsupportedExpr(err, "in SET")
 			}
 			updated[a.Column] = v
 		}
@@ -1320,7 +1323,9 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		}
 		x.tx.writes[lk] = updated
 		out.affected++
-		x.appendReturning(out, up.Returning, updated)
+		if err := x.appendReturning(out, up.Returning, updated); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1371,7 +1376,9 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return nil, err
 		}
 		out.affected++
-		x.appendReturning(out, del.Returning, cur)
+		if err := x.appendReturning(out, del.Returning, cur); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1381,6 +1388,19 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 type errUnknownExpr struct{ what string }
 
 func (e errUnknownExpr) Error() string { return "detest: cannot evaluate SQL expression: " + e.what }
+
+// unsupportedExpr turns an expression detest cannot evaluate into
+// ErrUnsupportedSQL, naming where in the statement it stood. A written value
+// or a sort key the application observes cannot be stood in for: a
+// placeholder value would be read back as the column's, and a dropped sort
+// key would return other rows under LIMIT. Any other error passes through.
+func (x *sqlExec) unsupportedExpr(err error, where string) error {
+	var u errUnknownExpr
+	if errors.As(err, &u) {
+		return x.unsupported("an expression " + where + " detest cannot evaluate (" + u.what + ")")
+	}
+	return err
+}
 
 func (x *sqlExec) evalBool(e sqlir.Expr, en *env) (bool, error) {
 	v, err := x.eval(e, en)
