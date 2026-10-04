@@ -31,7 +31,7 @@ var (
 func start() error {
 	pgOnce.Do(func() {
 		ctx := context.Background()
-		pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:17-alpine", tcpostgres.BasicWaitStrategies())
+		pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", tcpostgres.BasicWaitStrategies())
 		if pgErr != nil {
 			return
 		}
