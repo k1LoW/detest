@@ -490,18 +490,17 @@ func (def *tableDef) renameColumn(old, nw string) {
 			def.pk[i] = nw
 		}
 	}
-	for _, u := range def.uniques {
-		exprs := u.Elems
-		if u.Where != nil {
-			exprs = append(slices.Clone(exprs), u.Where)
+	for i := range def.uniques {
+		u := &def.uniques[i]
+		// The expressions are the parsed statement's, which every database
+		// running the same query shares, so they are copied before the
+		// rename rather than rewritten where they are.
+		elems := make([]sqlir.Expr, len(u.Elems))
+		for j, e := range u.Elems {
+			elems[j] = renameRefs(e, old, nw)
 		}
-		for _, e := range exprs {
-			for _, c := range sqlir.ColumnRefs(e) {
-				if c.Column == old {
-					c.Column = nw
-				}
-			}
-		}
+		u.Elems = elems
+		u.Where = renameRefs(u.Where, old, nw)
 	}
 	for i := range def.fks {
 		for j, c := range def.fks[i].Columns {
@@ -510,6 +509,21 @@ func (def *tableDef) renameColumn(old, nw string) {
 			}
 		}
 	}
+}
+
+// renameRefs returns e with its references to the column old renamed to
+// nw, copying e first when it has one.
+func renameRefs(e sqlir.Expr, old, nw string) sqlir.Expr {
+	if e == nil || !slices.ContainsFunc(sqlir.ColumnRefs(e), func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+		return e
+	}
+	e = sqlir.CloneExpr(e)
+	for _, r := range sqlir.ColumnRefs(e) {
+		if r.Column == old {
+			r.Column = nw
+		}
+	}
+	return e
 }
 
 func refersTo(u sqlir.UniqueDef, col string) bool {

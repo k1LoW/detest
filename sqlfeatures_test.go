@@ -230,3 +230,24 @@ func TestRenameColumnInUniqueExpression(t *testing.T) {
 		t.Errorf("default read by a renamed expression index: got %v", err)
 	}
 }
+
+// A rename in one database leaves the unique index of another database
+// built from the same statements alone, as the parsed statements they
+// share are not rewritten.
+func TestRenameColumnLeavesOtherDatabases(t *testing.T) {
+	s := newSim(t)
+	a, _ := s.DB("a", postgres.New())
+	b, _ := s.DB("b", postgres.New())
+	for _, db := range []*sql.DB{a, b} {
+		mustExec(t, db, `CREATE TABLE shared_u (id int PRIMARY KEY, d text)`)
+		mustExec(t, db, `CREATE UNIQUE INDEX shared_u_d ON shared_u (d)`)
+		mustExec(t, db, `CREATE UNIQUE INDEX shared_u_lower_d ON shared_u (lower(d))`)
+	}
+	mustExec(t, a, `ALTER TABLE shared_u RENAME COLUMN d TO x`)
+	mustExec(t, b, `INSERT INTO shared_u VALUES (1, 'A')`)
+	for _, q := range []string{`INSERT INTO shared_u VALUES (2, 'A')`, `INSERT INTO shared_u VALUES (3, 'a')`} {
+		if _, err := b.Exec(q); !errors.Is(err, ErrUniqueViolation) {
+			t.Errorf("%s in the database that renamed nothing: got %v", q, err)
+		}
+	}
+}
