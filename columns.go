@@ -29,6 +29,8 @@ type colScope struct {
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
 	outputs colSet
+	// twice are the output names the select list gives more than once.
+	twice colSet
 	// excluded are the columns of ON CONFLICT DO UPDATE's proposed row,
 	// with hasExcluded telling a table of unknown columns from none.
 	excluded    colSet
@@ -239,6 +241,15 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	sc.outputs = outputColumns(sel)
+	sc.twice = colSet{}
+	seen := colSet{}
+	for _, t := range sel.Targets {
+		if !t.Star {
+			n := targetName(t)
+			sc.twice[n] = seen[n]
+			seen[n] = true
+		}
+	}
 	for _, e := range sel.GroupBy {
 		if err := c.position(sel, e, "GROUP BY"); err != nil {
 			return nil, err
@@ -278,7 +289,15 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause str
 		return nil
 	}
 	n, ok := k.Value.(int64)
-	if !ok || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+	if !ok {
+		return nil
+	}
+	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		if clause == "GROUP BY" {
+			// The position may point into the columns of the *, which
+			// grouping does not expand.
+			return c.x.unsupported("a GROUP BY position in a select list with *")
+		}
 		return nil
 	}
 	if n < 1 || n > int64(len(sel.Targets)) {
@@ -290,6 +309,11 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause str
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name
 // an output column of the select list.
 func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
+	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" && sc.twice[r.Column] {
+		// Postgres fails such a name with 42702 unless the columns are
+		// the same expression, a rule detest does not follow.
+		return c.x.unsupported(fmt.Sprintf("output name %q given twice and referred to", r.Column))
+	}
 	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" && (sc.outputs == nil || sc.outputs[r.Column]) {
 		return nil
 	}

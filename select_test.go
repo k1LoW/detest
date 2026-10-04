@@ -960,3 +960,20 @@ func TestWholeRowValueIsUnsupported(t *testing.T) {
 		t.Errorf("got %v", err)
 	}
 }
+
+func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int, b int)`)
+	for _, q := range []string{
+		`SELECT a AS x, b AS x FROM t ORDER BY x`,
+		`SELECT a AS x, b AS x FROM t GROUP BY x`,
+		`SELECT DISTINCT ON (x) a AS x, b AS x FROM t`,
+		`SELECT *, count(*) FROM t GROUP BY 1, 2, 3`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	mustExec(t, db, `SELECT * FROM t ORDER BY 2`)
+}
