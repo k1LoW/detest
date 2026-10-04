@@ -202,12 +202,12 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			return nil, err
 		}
 	}
+	// A join's ON sees the items before it and its own, not those joined
+	// after it.
 	for _, j := range sel.Joins {
 		if err := c.item(j.Table, sc); err != nil {
 			return nil, err
 		}
-	}
-	for _, j := range sel.Joins {
 		if err := c.exprs(j.On, sc); err != nil {
 			return nil, err
 		}
