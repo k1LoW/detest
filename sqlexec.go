@@ -973,7 +973,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		out, err := x.callFunc(v.Name, args)
 		switch v.Name {
-		case "coalesce", "greatest", "least":
+		case "coalesce", "greatest", "least", "nullif":
 			out = commonNumber(v.Args, out)
 		}
 		return out, err
@@ -2109,7 +2109,7 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		}
 		out, err := x.callFunc(v.Name, args)
 		switch v.Name {
-		case "coalesce", "greatest", "least":
+		case "coalesce", "greatest", "least", "nullif":
 			out = commonNumber(v.Args, out)
 		}
 		return out, err
@@ -2584,7 +2584,7 @@ func floatTyped(e sqlir.Expr) bool {
 		switch e.Name {
 		case "floor", "ceil", "ceiling", "round", "avg":
 			return true
-		case "coalesce", "greatest", "least", "abs", "sum", "min", "max":
+		case "coalesce", "greatest", "least", "nullif", "abs", "sum", "min", "max":
 			return slices.ContainsFunc(e.Args, floatTyped)
 		}
 	}

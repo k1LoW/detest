@@ -83,6 +83,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT COALESCE(NULL, 1, 1.5) / 2 = 0.5, greatest(1, 0.5) / 2 = 0.5`),
 			difftest.Q(0, `SELECT (CASE WHEN true THEN 1 ELSE -1.5 END) / 2 = 0.5, (CASE WHEN true THEN 1 ELSE 2 * 0.5 END) / 2 = 0.5`),
 			difftest.Q(0, `SELECT (CASE WHEN true THEN 1 ELSE CASE WHEN false THEN 2.5 END END) / 2 = 0.5, COALESCE(1, round(2.5)) / 2 = 0.5`),
+			difftest.Q(0, `SELECT NULLIF(1, 2.5) / 2 = 0.5`),
+			difftest.Q(0, `SELECT count(*) FROM t HAVING NULLIF(count(*), 2.5) / 8 = 0.5`),
 		},
 	},
 	{
