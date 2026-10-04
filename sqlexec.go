@@ -526,10 +526,10 @@ func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
 	}
 	x.inSelect, x.selectStmt = true, true
 	x.tx.yieldf("%s: %s", x.tx.db.name, lazyString(func() string { return x.summarize(sel) }))
-	if sel.Lock != nil {
-		x.freeze(sel)
-		defer func() { x.frozen = nil }()
-	}
+	// A plain SELECT waits too, in pg_advisory_xact_lock or a locking
+	// subquery, and reads from its snapshot after the wait all the same.
+	x.freeze(sel)
+	defer func() { x.frozen = nil }()
 	cols, rows, err := x.evalSelect(sel, nil)
 	if err != nil {
 		return nil, err
