@@ -4482,3 +4482,24 @@ func TestMySQLOnUpdateComparesStoredValues(t *testing.T) {
 		t.Errorf("at = %v, want NULL as nothing changed", at)
 	}
 }
+
+// INSERT IGNORE skips a duplicate key, and refuses as unsupported a row whose
+// other error MySQL would turn into a warning and store coerced or skip.
+func TestMySQLInsertIgnoreDowngrades(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", mysql.New())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, n TINYINT, s VARCHAR(2))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 0, 'a')")
+	mustExec(t, db, "INSERT IGNORE INTO t VALUES (1, 0, 'b')")
+	if got := peekRows(store, "t", "id", "s"); got != "1:a" {
+		t.Errorf("rows %s", got)
+	}
+	for _, q := range []string{"INSERT IGNORE INTO t VALUES (2, 300, 'a')", "INSERT IGNORE INTO t VALUES (3, 0, 'abc')"} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES (4, 300, 'a')"); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("a plain INSERT: %v, want out of range", err)
+	}
+}

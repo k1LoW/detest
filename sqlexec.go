@@ -220,7 +220,18 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.SelectStmt:
 		return x.execSelect(st)
 	case *sqlir.InsertStmt:
-		return x.execInsert(st)
+		res, err := x.execInsert(st)
+		if de, ok := errors.AsType[*sqlir.DBError](err); ok && x.tx.db.kind.InnoDB() && st.OnConflict != nil && st.OnConflict.DoNothing {
+			switch de.Kind {
+			case sqlir.UniqueViolation, sqlir.Deadlock, sqlir.LockWaitTimeout, sqlir.LockNotAvailable:
+			default:
+				// INSERT IGNORE turns this error into a warning and stores
+				// the row coerced or skips it, by rules detest does not
+				// follow, where it would otherwise fail the statement.
+				return nil, x.unsupported("INSERT IGNORE of a row MySQL would store or skip with a warning")
+			}
+		}
+		return res, err
 	case *sqlir.UpdateStmt:
 		return x.execUpdate(st)
 	case *sqlir.DeleteStmt:
