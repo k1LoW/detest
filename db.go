@@ -582,6 +582,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.ci, col)
 	delete(def.fsp, col)
 	delete(def.generated, col)
+	delete(def.identityAlways, col)
 	delete(def.types, col)
 	delete(def.notNull, col)
 	delete(def.autoInc, col)
