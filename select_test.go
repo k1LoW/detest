@@ -596,6 +596,7 @@ func TestTextComparedWithNumber(t *testing.T) {
 		`SELECT count(*) FROM t WHERE name::text < 2`,
 		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
 		`SELECT count(*) FROM t WHERE id = true`,
+		`SELECT count(*) FROM t WHERE 1000000000 = '1 second'::interval`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)

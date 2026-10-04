@@ -2213,7 +2213,11 @@ func isText(v any) bool {
 }
 
 func isNumber(v any) bool {
-	_, ok := toFloat(derefValue(v))
+	v = derefValue(v)
+	if _, ok := v.(time.Duration); ok {
+		return false // an interval, though its kind is an integer
+	}
+	_, ok := toFloat(v)
 	return ok
 }
 
