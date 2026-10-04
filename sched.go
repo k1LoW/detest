@@ -328,6 +328,9 @@ func (r *run) execute() (v *violation) {
 		if r.pending != nil {
 			return r.pending
 		}
+		if r.cut {
+			return nil // a loop cut while the clock advanced or a process outside settled
+		}
 		opts := r.enabled()
 		if len(opts) == 0 {
 			if r.advanceClock() {

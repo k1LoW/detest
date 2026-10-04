@@ -3567,7 +3567,17 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 	case *sqlir.Const:
 		return fmt.Sprint(v.Value)
 	case *sqlir.BinaryExpr:
-		return x.exprString(v.L) + " " + strings.ToLower(v.Op) + " " + x.exprString(v.R)
+		// An operand that is itself an operation of another operator, or
+		// the right one of the same, is grouped, so that (n + 1) * 2 does
+		// not read as n + 1 * 2.
+		l, r := x.exprString(v.L), x.exprString(v.R)
+		if b, ok := v.L.(*sqlir.BinaryExpr); ok && b.Op != v.Op {
+			l = "(" + l + ")"
+		}
+		if _, ok := v.R.(*sqlir.BinaryExpr); ok {
+			r = "(" + r + ")"
+		}
+		return l + " " + strings.ToLower(v.Op) + " " + r
 	case *sqlir.UnaryExpr:
 		return strings.ToLower(v.Op) + " " + x.exprString(v.X)
 	case *sqlir.IsNull:

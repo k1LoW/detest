@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
@@ -629,12 +630,12 @@ func TestTraceShowsComputedSetValues(t *testing.T) {
 		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL, label text)`)
 		s.Seed(func() { mustExec(t, db, `INSERT INTO counters VALUES ('c1', 0, 'x')`) })
 		s.Manual("bump", 1, func(p *Proc) error {
-			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = n + 1, label = $1 WHERE id = 'c1'`, "y")
+			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = (n + 1) * 2, label = $1 WHERE id = 'c1'`, "y")
 			return err
 		})
 		s.AtQuiescence(func(*State) error { return errors.New("show the trace") })
 	}, nil, nil, 0)
-	if !strings.Contains(res.Trace, "set {label=y n=n + 1}") {
+	if !strings.Contains(res.Trace, "set {label=y n=(n + 1) * 2}") {
 		t.Fatalf("trace does not show the computed value:\n%s", res.Trace)
 	}
 }
@@ -791,4 +792,19 @@ func TestWaitingInsertWakesNoIdleLoop(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+// A loop that goes idle once the clock has advanced is cut as one that goes
+// idle at a step, rather than having its run checked at quiescence.
+func TestLoopIdleAfterASleepIsCut(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		s.Loop("sweeper", 1, func(p *Proc) error {
+			time.Sleep(time.Second)
+			return ErrIdle
+		})
+		s.AtQuiescence(func(*State) error { return errors.New("checked at quiescence") })
+	}, []Option{MaxIdleTicks(0)}, nil, 0)
+	if res.Violated || res.CutRuns == 0 {
+		t.Fatalf("want the run cut, got %s", res.report())
+	}
 }
