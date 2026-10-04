@@ -644,6 +644,12 @@ func TestTextComparedWithNumber(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE name < $1`, []byte("10")); len(got) != 1 || got[0] != "1" {
 		t.Errorf("name < []byte: got %v, want 1", got)
 	}
+	// A parameter compared with a text cast takes the text type too.
+	for _, q := range []string{`SELECT '1'::text = $1`, `SELECT $1 = ANY (ARRAY['1'])`} {
+		if got := rowsOf(t, db, q, int64(1)); !reflect.DeepEqual(got, []string{"true"}) {
+			t.Errorf("%s with 1: got %v, want true", q, got)
+		}
+	}
 	// A parameter compared with an untyped literal is text, as both are.
 	if got := rowsOf(t, db, `SELECT count(*) FROM t WHERE $1 = '01'`, int64(1)); len(got) != 1 || got[0] != "0" {
 		t.Errorf("$1 = '01': got %v, want 0", got)

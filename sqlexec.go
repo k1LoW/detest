@@ -2113,7 +2113,10 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	}
 	// A cast to text is text by its type even when its value is NULL, which
 	// Postgres refuses to compare with a number before any value is seen.
-	if textCast(le) && isNumber(r) || isNumber(l) && textCast(re) {
+	// A parameter there takes the text type, as it does against any text.
+	_, lParam := le.(*sqlir.Param)
+	_, rParam := re.(*sqlir.Param)
+	if textCast(le) && isNumber(r) && !rParam || isNumber(l) && !lParam && textCast(re) {
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
 	// A parameter compared with text is sent as text, and the text a driver
