@@ -40,6 +40,11 @@ type colScope struct {
 	// anyOutput is a set operation's output whose names detest does not
 	// know, as its first query has a *, which any name may refer to.
 	anyOutput bool
+	// star is a select list with a *, whose columns are output names too,
+	// and plain the output names whose item is the column of the name, the
+	// same expression a * gives.
+	star  bool
+	plain colSet
 	// hidden is the target of an UPDATE or a DELETE, which its FROM or
 	// USING items may not refer to.
 	hidden string
@@ -294,8 +299,12 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	}
 	// The names the select list gives itself; those a * gives are the
 	// input's, which a reference resolves against anyway.
-	sc.outputs = colSet{}
+	sc.outputs, sc.plain = colSet{}, colSet{}
 	for _, t := range sel.Targets {
+		sc.star = sc.star || t.Star
+		if r, ok := t.Expr.(*sqlir.ColumnRef); ok && !t.Star && targetName(t) == r.Column {
+			sc.plain[r.Column] = true
+		}
 		if !t.Star {
 			n := targetName(t)
 			_, seen := sc.outputs[n]
@@ -373,10 +382,25 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 		// Postgres fails such a name with 42702 unless the columns are
 		// the same expression, a rule detest does not follow.
 		return c.x.unsupported(fmt.Sprintf("output name %q given twice and referred to", r.Column))
+	case found && sc.star && !sc.plain[r.Column] && sc.inputMay(r.Column):
+		// A column of the * may give the name as well, which Postgres
+		// fails as ambiguous unless the two are the same expression.
+		return c.x.unsupported(fmt.Sprintf("output name %q, which a * may give too", r.Column))
 	case found:
 		return nil
 	}
 	return c.exprs(e, sc)
+}
+
+// inputMay reports whether an item of the scope has, or may have, a column
+// of the name.
+func (sc *colScope) inputMay(name string) bool {
+	for _, cols := range sc.items {
+		if found, _ := cols.has(name); cols == nil || found {
+			return true
+		}
+	}
+	return false
 }
 
 // groupExpr checks a GROUP BY item. Unlike ORDER BY, a name refers to a
