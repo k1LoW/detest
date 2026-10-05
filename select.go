@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"reflect"
 	"slices"
 	"sort"
@@ -1213,7 +1214,14 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 					vals = append(vals, x.aggOperand(name, a))
 				}
 			}
-			v = foldAggregate(name, w.Func.Star, vals, n)
+			kind := unknownKind
+			if len(w.Func.Args) > 0 {
+				kind = exprNumberKind(w.Func.Args[0])
+			}
+			var err error
+			if v, err = x.foldAggregate(name, w.Func.Star, vals, n, kind); err != nil {
+				return err
+			}
 		case "first_value", "last_value":
 			at := 0
 			if name == "last_value" {
@@ -1269,38 +1277,70 @@ func (x *sqlExec) aggOperand(name string, v any) any {
 }
 
 // foldAggregate folds the non-NULL values of an aggregate's argument; n is
-// the row count, which count(*) returns.
-func foldAggregate(name string, star bool, vals []any, n int) any {
+// the row count, which count(*) returns, and kind the argument's number
+// kind, by which a sum or an average of floats is kept as it is computed.
+func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind numberKind) (any, error) {
 	switch name {
 	case "count":
 		if star {
-			return int64(n)
+			return int64(n), nil
 		}
-		return int64(len(vals))
+		return int64(len(vals)), nil
 	case "sum", "avg":
 		if len(vals) == 0 {
-			return nil
+			return nil, nil
 		}
-		total, ints := 0.0, true
+		total, ints, ranged := 0.0, true, false
+		lo, hi, known := new(big.Rat), new(big.Rat), kind != floatKind
 		for _, val := range vals {
-			f, _ := toFloat(derefValue(val))
-			total += f
-			if _, ok := integer(derefValue(val)); !ok {
+			// The values of one column are all DECIMALs or all DOUBLEs, so
+			// a plain one adds as the decimal it prints as, and the float
+			// total stands for the DOUBLEs.
+			r, ok := numBounds(val)
+			if q, exact := exactRat(val); exact {
+				r, ok = numRange{q, q, r.flt}, true
+			}
+			if _, isInt := integer(derefValue(val)); !isInt {
 				ints = false
 			}
+			if isRange(val) {
+				ranged = true
+			}
+			if !ok {
+				f, _ := toFloat(derefValue(val))
+				total += f
+				known = false
+				continue
+			}
+			total += r.flt
+			lo.Add(lo, r.lo)
+			hi.Add(hi, r.hi)
+		}
+		if ranged && !known {
+			return nil, x.errInexact()
 		}
 		if name == "avg" {
-			return total / float64(len(vals))
+			avg := total / float64(len(vals))
+			if !known {
+				return avg, nil
+			}
+			n := new(big.Rat).SetInt64(int64(len(vals)))
+			lo, _ = x.quotientBounds(lo.Quo(lo, n))
+			_, hi = x.quotientBounds(hi.Quo(hi, n))
+			return rangeValue(lo, hi, avg), nil
 		}
 		// The sum of floats or numerics stays a float, so dividing it is
 		// not integer division.
-		if !ints {
-			return total
+		if ints {
+			return numeric(total), nil
 		}
-		return numeric(total)
+		if !known {
+			return total, nil
+		}
+		return rangeValue(lo, hi, total), nil
 	default:
 		if len(vals) == 0 {
-			return nil
+			return nil, nil
 		}
 		best := vals[0]
 		for _, val := range vals[1:] {
@@ -1309,7 +1349,7 @@ func foldAggregate(name string, star bool, vals []any, n int) any {
 				best = val
 			}
 		}
-		return best
+		return best, nil
 	}
 }
 
