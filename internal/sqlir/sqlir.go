@@ -461,6 +461,18 @@ type UnaryExpr struct {
 	X  Expr
 }
 
+// ArrayCmp is X = ANY (Array) or, with All, X <> ALL (Array), over an array
+// that is a value rather than written out as ARRAY[...]: a parameter, or a
+// string literal in Postgres's array syntax. ElemType is the element type of
+// the array's cast, such as int8 for ::bigint[], or "" when the elements take
+// X's type, as an untyped literal or parameter does.
+type ArrayCmp struct {
+	X        Expr
+	Array    Expr // *Param, or *Const holding a string
+	ElemType string
+	All      bool
+}
+
 // InExpr is x [NOT] IN (list | subquery).
 type InExpr struct {
 	X    Expr
@@ -527,6 +539,7 @@ func (*Unconverted) isExpr() {}
 func (*BinaryExpr) isExpr()  {}
 func (*UnaryExpr) isExpr()   {}
 func (*InExpr) isExpr()      {}
+func (*ArrayCmp) isExpr()    {}
 func (*IsNull) isExpr()      {}
 func (*FuncCall) isExpr()    {}
 func (*SubQuery) isExpr()    {}

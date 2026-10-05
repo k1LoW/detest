@@ -45,6 +45,9 @@ type sqlExec struct {
 	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
 	// before each query runs anything.
 	bounds map[*sqlir.SelectStmt][2]int
+	// arrays are the arrays the statement's = ANY and <> ALL read, read
+	// before it runs anything.
+	arrays map[*sqlir.ArrayCmp]*arrayElems
 	// consistent makes the statement's table reads InnoDB consistent reads,
 	// from the transaction's snapshot: a plain SELECT at Repeatable Read.
 	consistent bool
@@ -242,6 +245,9 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 		x.start = tx.start // the statement is its own transaction, begun at the same instant
 	}
 	if err := x.collationCheck(s.stmt); err != nil {
+		return nil, err
+	}
+	if err := x.checkArrays(s.stmt); err != nil {
 		return nil, err
 	}
 	res, err := x.execStatement(s.stmt)
@@ -1077,6 +1083,8 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.InExpr:
 		return hasAggregate(v.X) || slices.ContainsFunc(v.List, hasAggregate)
+	case *sqlir.ArrayCmp:
+		return hasAggregate(v.X)
 	case *sqlir.RowExpr:
 		return slices.ContainsFunc(v.Items, hasAggregate)
 	case *sqlir.CaseExpr:

@@ -79,6 +79,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if v.Index < 0 || v.Index >= len(x.args) {
 			return nil, x.tx.db.kind.Error(sqlir.UndefinedParameter, fmt.Sprintf("there is no parameter $%d", v.Index+1), "", "", "")
 		}
+		if _, ok := x.args[v.Index].(arrayParam); ok {
+			return nil, x.unsupported("an array parameter anywhere but the right side of = ANY or <> ALL")
+		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
 		return v.Value, nil
@@ -298,6 +301,45 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			return !in, nil
 		}
 		return in, nil
+	case *sqlir.ArrayCmp:
+		l, err := x.eval(v.X, en)
+		if err != nil {
+			return nil, err
+		}
+		arr, err := x.arrayElems(v)
+		if err != nil {
+			return nil, err
+		}
+		if arr.null {
+			return nil, nil
+		}
+		// Every element is typed against x before any is compared, as
+		// Postgres reads the whole array as x's type first, so one that does
+		// not read as it fails whatever the others match.
+		ls, rs := make([]any, len(arr.vals)), make([]any, len(arr.vals))
+		for i := range arr.vals {
+			li, ri, err := x.untypedPair(v.X, l, arr.exprs[i], arr.vals[i])
+			if err != nil {
+				return nil, err
+			}
+			ls[i], rs[i] = li, ri
+		}
+		// = ANY is true on a match and <> ALL false; without one, a NULL on
+		// either side makes it NULL. An empty array decides it whatever x is.
+		sawNull := false
+		for i := range ls {
+			if derefValue(ls[i]) == nil || derefValue(rs[i]) == nil {
+				sawNull = true
+				continue
+			}
+			if equalValues(x.comparable(ls[i], rs[i])) {
+				return !v.All, nil
+			}
+		}
+		if sawNull {
+			return nil, nil
+		}
+		return v.All, nil
 	case *sqlir.Exists:
 		_, rows, err := x.evalSelect(v.Select, en)
 		if err != nil {
@@ -1599,6 +1641,12 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 			return x.exprString(v.X) + " not in " + rhs
 		}
 		return x.exprString(v.X) + " in " + rhs
+	case *sqlir.ArrayCmp:
+		op := " = any "
+		if v.All {
+			op = " <> all "
+		}
+		return x.exprString(v.X) + op + "(" + x.exprString(v.Array) + ")"
 	case *sqlir.Cast:
 		return x.exprString(v.X)
 	case *sqlir.FuncCall:

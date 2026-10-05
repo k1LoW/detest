@@ -107,7 +107,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 		if e.Select != nil && len(e.Select.Targets) == 1 {
 			return expressionType(e.Select.Targets[0].Expr, column)
 		}
-	case *sqlir.Exists, *sqlir.InExpr, *sqlir.IsNull:
+	case *sqlir.Exists, *sqlir.InExpr, *sqlir.ArrayCmp, *sqlir.IsNull:
 		return "bool"
 	}
 	return ""

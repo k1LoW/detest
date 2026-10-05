@@ -42,7 +42,6 @@ func TestUnsupportedRatherThanApproximated(t *testing.T) {
 		`SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t`,
 		`SELECT * FROM t WHERE a > ANY (ARRAY[1, 2])`,
 		`SELECT * FROM t WHERE a = ALL (ARRAY[1, 2])`,
-		`SELECT * FROM t WHERE a = ANY ($1)`,
 		`SELECT * FROM t WHERE a <> ANY (SELECT b FROM u)`,
 		`SELECT * FROM t WHERE a > ANY (SELECT b FROM u)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[]::int[])`,
@@ -95,6 +94,9 @@ func TestStillSupported(t *testing.T) {
 		`CREATE TABLE t (a int, b numeric GENERATED ALWAYS AS (a::numeric * 2) STORED)`,
 		`CREATE TABLE t (a int, b int GENERATED ALWAYS AS (t.a + 1) STORED)`,
 		`SELECT * FROM t WHERE a = ANY (ARRAY[$1, -1, 'x'::text])`,
+		`SELECT * FROM t WHERE a = ANY ($1)`,
+		`SELECT * FROM t WHERE a <> ALL ($1::bigint[])`,
+		`SELECT * FROM t WHERE a = ANY ('{1,2}')`,
 	} {
 		if _, err := (parser{}).Parse(q); err != nil {
 			t.Errorf("%s: %v", q, err)
