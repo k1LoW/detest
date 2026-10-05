@@ -105,31 +105,35 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 }
 
 // reachableCTEs are the CTEs of sel the query reads, directly or through
-// another CTE it reads, the ones Postgres runs.
+// another CTE it reads, the ones Postgres runs. A CTE's body sees only the
+// CTEs declared before it, so a name it shares with a later one reads
+// whatever that name means outside.
 func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
+	index := map[string]int{}
+	for i, cte := range sel.With {
+		index[cte.Name] = i
+	}
 	body := *sel
 	body.With = nil
 	reached := map[string]bool{}
-	queue := freeNames(&body)
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		if reached[name] {
-			continue
-		}
-		for _, cte := range sel.With {
-			if cte.Name == name {
-				reached[name] = true
-				queue = append(queue, freeNames(cte.Select)...)
+	var visit func(names []string, before int)
+	visit = func(names []string, before int) {
+		for _, name := range names {
+			i, ok := index[name]
+			if !ok || i >= before || reached[name] {
+				continue
 			}
+			reached[name] = true
+			visit(freeNames(sel.With[i].Select), i)
 		}
 	}
+	visit(freeNames(&body), len(sel.With))
 	return reached
 }
 
 // freeNames are the names the FROM items under n read that no WITH inside
-// n declares, so that a nested WITH of an outer CTE's name hides it from
-// the parts it covers, as in Postgres.
+// n declares where they are read: a WITH's CTE sees the ones declared
+// before it, and its query all of them, as in Postgres.
 func freeNames(n any) []string {
 	var out []string
 	var walk func(v reflect.Value, hidden map[string]bool)
@@ -142,9 +146,14 @@ func freeNames(n any) []string {
 			if s, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok && len(s.With) > 0 {
 				inner := maps.Clone(hidden)
 				for _, cte := range s.With {
+					walk(reflect.ValueOf(cte.Select), inner)
+					inner = maps.Clone(inner)
 					inner[cte.Name] = true
 				}
-				hidden = inner
+				body := *s
+				body.With = nil
+				walk(reflect.ValueOf(body), inner)
+				return
 			}
 			walk(v.Elem(), hidden)
 		case reflect.Struct:
