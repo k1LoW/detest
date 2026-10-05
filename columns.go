@@ -452,14 +452,17 @@ func (c *columnChecker) partlyRun(with []sqlir.CTE, item sqlir.TableRef, items [
 			sel = cte.Select
 		}
 	}
-	tables := sqlir.TableNames(sel)
-	if len(tables) == 0 {
-		return "reading no table"
+	// Its rows must come from the target's rows alone, so that it has none
+	// when the target has none. A table merely named in a branch, a nested
+	// WITH or a subquery does not make that so, and an aggregate gives a row
+	// over no rows.
+	if f := sel.From; sel.With != nil || sel.SetOp != "" || sel.Values != nil || len(sel.Joins) > 0 ||
+		f == nil || f.Sub != nil || f.Func != nil || c.x.tx.db.resolve(f.Name) != c.x.tx.db.resolve(target) ||
+		slices.ContainsFunc(with, func(cte sqlir.CTE) bool { return cte.Name == f.Name }) {
+		return "reading other rows than the target's alone"
 	}
-	for _, name := range tables {
-		if c.x.tx.db.resolve(name) != c.x.tx.db.resolve(target) || slices.ContainsFunc(with, func(cte sqlir.CTE) bool { return cte.Name == name }) {
-			return "reading another table than the target"
-		}
+	if len(sel.GroupBy) > 0 || sel.Having != nil || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return "aggregating the target's rows"
 	}
 	itemAlias := item.Alias
 	if itemAlias == "" {

@@ -141,6 +141,11 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT id FROM others FOR UPDATE) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH n AS (SELECT nextval('s') AS id) DELETE FROM jobs USING n WHERE jobs.id = n.id`},
 		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE) DELETE FROM jobs USING c WHERE jobs.id = c.id OR jobs.id = 1`},
+		{postgres.New(), `WITH c AS (WITH unused AS (SELECT id FROM jobs) SELECT nextval('s') AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT nextval('s') AS id WHERE EXISTS (SELECT 1 FROM jobs)) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs UNION ALL SELECT nextval('s')) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT count(*) + nextval('s') AS id FROM jobs) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT j.id FROM jobs j JOIN jobs k ON k.id = j.id FOR UPDATE OF j) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		// A CTE sees only the ones before it.
 		{postgres.New(), `WITH p AS (SELECT id FROM q), q AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM p, q WHERE jobs.id = p.id`},
 		{postgres.New(), `WITH p AS (SELECT id FROM p) DELETE FROM jobs USING p WHERE jobs.id = p.id`},
