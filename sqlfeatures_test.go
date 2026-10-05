@@ -420,6 +420,8 @@ func TestTransactionSettingsSetBySQL(t *testing.T) {
 		`SET default_transaction_read_only = 1`,
 		`SET default_transaction_isolation = ''`,
 		`SET default_transaction_read_only = ''`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, READ WRITE`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, ISOLATION LEVEL READ COMMITTED`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -665,10 +667,11 @@ func TestResetAllClearsLockTimeout(t *testing.T) {
 			mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
 			s.Seed(func() { mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`) })
 			var (
-				locked   chan struct{}
-				timedOut bool
+				locked     chan struct{}
+				timedOut   bool
+				unexpected error
 			)
-			s.Seed(func() { locked, timedOut = make(chan struct{}), false })
+			s.Seed(func() { locked, timedOut, unexpected = make(chan struct{}), false, nil })
 			s.Manual("holder", 1, func(p *Proc) error {
 				tx, err := db.BeginTx(p.Context(), nil)
 				if err != nil {
@@ -703,19 +706,25 @@ func TestResetAllClearsLockTimeout(t *testing.T) {
 				}
 				defer func() { _ = tx.Rollback() }()
 				if _, err := tx.Exec(`UPDATE stock SET n = 2 WHERE sku = 'a'`); err != nil {
-					timedOut = errors.Is(err, ErrLockNotAvailable)
+					if errors.Is(err, ErrLockNotAvailable) {
+						timedOut = true
+					} else {
+						unexpected = err
+					}
 					return nil
 				}
 				return tx.Commit()
 			})
-			if reset {
-				s.AtQuiescence(func(*State) error {
-					if timedOut {
-						return errors.New("the wait timed out after RESET ALL")
-					}
-					return nil
-				})
-			} else {
+			s.AtQuiescence(func(*State) error {
+				if unexpected != nil {
+					return fmt.Errorf("the update failed: %w", unexpected)
+				}
+				if reset && timedOut {
+					return errors.New("the wait timed out after RESET ALL")
+				}
+				return nil
+			})
+			if !reset {
 				s.Sometimes("the wait times out", func(*State) bool { return timedOut })
 			}
 		})

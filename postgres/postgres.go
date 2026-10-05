@@ -190,8 +190,15 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 		default:
 			return nil
 		}
+		seen := map[string]bool{}
 		for _, a := range v.Args {
 			d := a.GetDefElem()
+			if seen[d.GetDefname()] {
+				// Postgres refuses a mode given twice (42601), rather than
+				// letting the last one win.
+				return c.unsupported("a transaction mode given twice (" + d.GetDefname() + ")")
+			}
+			seen[d.GetDefname()] = true
 			switch d.GetDefname() {
 			case "transaction_isolation":
 				level = d.Arg.GetAConst().GetSval().GetSval()
