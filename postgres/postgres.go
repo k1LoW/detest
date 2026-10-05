@@ -159,30 +159,136 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 type pgConv struct {
 	query   string
 	windows map[string]*pg.WindowDef // the WINDOW clause of the query being converted
+	// lockKey is set while the arguments of an advisory lock function are
+	// converted, where hashtext may stand.
+	lockKey bool
 }
 
 func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what, c.query) }
 
+// transactionSet refuses the SETs that change what a transaction is. SET
+// TRANSACTION, SET TRANSACTION SNAPSHOT and the transaction_isolation and
+// transaction_read_only settings are refused in every form, as MySQL's SET
+// TRANSACTION is: Postgres fails them with 25001 once the transaction has
+// run a query, which detest does not track, and the level and the read-only
+// state they set are the driver's to take from BeginTx. The session defaults,
+// SET SESSION CHARACTERISTICS AS TRANSACTION and default_transaction_*, have
+// no such timing rule and run when they ask for what detest runs anyway, Read
+// Committed (Read Uncommitted is Read Committed in Postgres) and READ WRITE.
+// A read-only default would fail every write with 25006, which detest does
+// not model. DEFERRABLE changes nothing outside Serializable and is ignored.
+func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
+	var level, readOnly string
+	switch v.Kind {
+	case pg.VariableSetKind_VAR_SET_MULTI:
+		switch v.Name {
+		case "TRANSACTION":
+			return c.unsupported("SET TRANSACTION (use database/sql's BeginTx)")
+		case "TRANSACTION SNAPSHOT":
+			return c.unsupported("SET TRANSACTION SNAPSHOT")
+		case "SESSION CHARACTERISTICS":
+		default:
+			return nil
+		}
+		seen := map[string]bool{}
+		for _, a := range v.Args {
+			d := a.GetDefElem()
+			if seen[d.GetDefname()] {
+				// Postgres refuses a mode given twice (42601), rather than
+				// letting the last one win.
+				return c.unsupported("a transaction mode given twice (" + d.GetDefname() + ")")
+			}
+			seen[d.GetDefname()] = true
+			switch d.GetDefname() {
+			case "transaction_isolation":
+				level = d.Arg.GetAConst().GetSval().GetSval()
+			case "transaction_read_only":
+				readOnly = strconv.FormatInt(int64(d.Arg.GetAConst().GetIval().GetIval()), 10)
+			}
+		}
+	case pg.VariableSetKind_VAR_SET_VALUE, pg.VariableSetKind_VAR_RESET, pg.VariableSetKind_VAR_SET_DEFAULT, pg.VariableSetKind_VAR_SET_CURRENT:
+		switch v.Name {
+		case "transaction_isolation", "transaction_read_only":
+			return c.unsupported("SET " + v.Name + " (use database/sql's BeginTx)")
+		case "default_transaction_isolation", "default_transaction_read_only":
+		default:
+			return nil
+		}
+		if v.Kind == pg.VariableSetKind_VAR_SET_CURRENT {
+			// Takes the session's value, which detest does not track.
+			return c.unsupported("SET " + v.Name + " FROM CURRENT")
+		}
+		var val string
+		if len(v.Args) > 0 {
+			// The constant as written: a string, or the integer or boolean
+			// a boolean setting also takes (= 1, = on, = 'true').
+			if e, err := c.expr(v.Args[0]); err == nil {
+				if k, ok := e.(*sqlir.Const); ok && k.Value != nil {
+					val = fmt.Sprint(k.Value)
+				}
+			}
+			if val == "" {
+				// Postgres refuses an empty value for these settings
+				// (22023), where RESET and TO DEFAULT, which carry no
+				// value, restore the default.
+				return c.unsupported("SET " + v.Name + " to an empty value")
+			}
+		}
+		if v.Name == "default_transaction_isolation" {
+			level = val
+		} else {
+			readOnly = val
+		}
+	default:
+		return nil
+	}
+	switch strings.ToLower(level) {
+	case "", "read committed", "read uncommitted":
+	default:
+		return c.unsupported("an isolation level other than Read Committed set by SQL (" + strings.ToUpper(level) + ")")
+	}
+	switch strings.ToLower(readOnly) {
+	case "", "0", "off", "false", "no":
+		return nil
+	}
+	return c.unsupported("a read-only transaction set by SQL (READ ONLY)")
+}
+
 func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 	switch s := n.Node.(type) {
 	case *pg.Node_SelectStmt:
-		if isSetConfig(s.SelectStmt) {
-			// A schema dump sets search_path with SELECT pg_catalog.set_config(...).
-			return &sqlir.SchemaStmt{}, nil
+		if path, ok := setConfigSearchPath(s.SelectStmt); ok {
+			// A schema dump sets search_path with SELECT pg_catalog.set_config(...),
+			// which is checked as SET search_path is. The row it returns
+			// carries the alias when the SELECT gives one.
+			col := s.SelectStmt.TargetList[0].GetResTarget().GetName()
+			return &sqlir.SetStmt{Name: "search_path", Value: path, Returns: true, Column: col}, nil
 		}
 		return c.selectStmt(s.SelectStmt)
 	case *pg.Node_CreateTableAsStmt:
 		return c.createTableAs(s.CreateTableAsStmt)
 	case *pg.Node_VariableSetStmt:
 		v := s.VariableSetStmt
+		if err := c.transactionSet(v); err != nil {
+			return nil, err
+		}
+		if v.Kind == pg.VariableSetKind_VAR_RESET_ALL {
+			// Resets every setting, among them lock_timeout, the one
+			// detest acts on; "all" is no setting's name.
+			return &sqlir.SetStmt{Name: "all"}, nil
+		}
 		out := &sqlir.SetStmt{Name: v.Name, Local: v.IsLocal}
-		if len(v.Args) > 0 {
-			if e, err := c.expr(v.Args[0]); err == nil {
-				if k, ok := e.(*sqlir.Const); ok {
-					out.Value = fmt.Sprint(k.Value)
+		// The constants as written, joined as a list setting such as
+		// search_path is (SET search_path TO app, public).
+		var vals []string
+		for _, a := range v.Args {
+			if e, err := c.expr(a); err == nil {
+				if k, ok := e.(*sqlir.Const); ok && k.Value != nil {
+					vals = append(vals, fmt.Sprint(k.Value))
 				}
 			}
 		}
+		out.Value = strings.Join(vals, ", ")
 		return out, nil
 	case *pg.Node_ConstraintsSetStmt:
 		out := &sqlir.SetConstraintsStmt{Deferred: s.ConstraintsSetStmt.Deferred}
@@ -348,15 +454,35 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 	return nil, false, nil
 }
 
-func isSetConfig(sel *pg.SelectStmt) bool {
-	if sel == nil || sel.FromClause != nil || len(sel.TargetList) != 1 {
-		return false
+// setConfigSearchPath recognizes SELECT [pg_catalog.]set_config('search_path',
+// <value>, ...), which a schema dump writes to set the path, and returns the
+// value. Any other call of set_config is a function call, which detest does
+// not run and refuses, so that a setting it would change is not ignored.
+func setConfigSearchPath(sel *pg.SelectStmt) (string, bool) {
+	// The bare SELECT of the call and nothing else: a clause such as
+	// WHERE false would decide whether the server evaluates it at all.
+	if sel == nil || len(sel.TargetList) != 1 || sel.FromClause != nil || sel.WhereClause != nil ||
+		sel.GroupClause != nil || sel.HavingClause != nil || sel.WindowClause != nil || sel.SortClause != nil ||
+		sel.LimitCount != nil || sel.LimitOffset != nil || sel.DistinctClause != nil || sel.WithClause != nil ||
+		sel.LockingClause != nil || sel.ValuesLists != nil || sel.IntoClause != nil || sel.Op != pg.SetOperation_SETOP_NONE {
+		return "", false
 	}
 	fc := sel.TargetList[0].GetResTarget().GetVal().GetFuncCall()
-	if fc == nil || len(fc.Funcname) == 0 {
-		return false
+	if fc == nil || len(fc.Funcname) == 0 || len(fc.Funcname) > 2 || len(fc.Args) != 3 ||
+		fc.AggDistinct || fc.AggStar || fc.Over != nil || fc.AggFilter != nil || len(fc.AggOrder) > 0 || fc.AggWithinGroup {
+		return "", false
 	}
-	return fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval() == "set_config"
+	if len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
+		return "", false
+	}
+	if fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval() != "set_config" {
+		return "", false
+	}
+	name, value := fc.Args[0].GetAConst().GetSval(), fc.Args[1].GetAConst().GetSval()
+	if name == nil || name.GetSval() != "search_path" || value == nil || fc.Args[2].GetAConst().GetBoolval() == nil {
+		return "", false
+	}
+	return value.GetSval(), true
 }
 
 // rangeVarName is the table name as written, schema-qualified when it is.
@@ -538,9 +664,6 @@ var mutableFuncs = map[string]bool{
 	"statement_timestamp": true, "random": true, "concat": true,
 	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
 	"count": true, "sum": true, "min": true, "max": true, "avg": true,
-	// Immutable in Postgres, but detest returns its input rather than the
-	// int4 hash, which a stored value must not differ from.
-	"hashtext": true,
 }
 
 // immutable refuses what Postgres does not allow in a generation expression:
@@ -1598,6 +1721,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		return nil, c.unsupported("constant")
 	case *pg.Node_TypeCast:
+		if len(e.TypeCast.TypeName.GetArrayBounds()) > 0 {
+			// Dropping array bounds would run scalar casts and operators
+			// instead of PostgreSQL's array overloads. ANY handles its own
+			// supported array casts before reaching this conversion.
+			return nil, c.unsupported("an array cast")
+		}
 		x, err := c.expr(e.TypeCast.Arg)
 		if err != nil {
 			return nil, err
@@ -1667,14 +1796,65 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		case fc.AggWithinGroup:
 			return nil, c.unsupported("aggregate WITHIN GROUP")
 		}
-		args, err := c.exprs(fc.Args)
-		if err != nil {
-			return nil, err
+		fname := ""
+		if len(fc.Funcname) > 0 {
+			fname = strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
 		}
 		if len(fc.Funcname) > 2 || len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
 			// A function of another schema is the user's, which detest
 			// would otherwise take for the built-in of the same name.
 			return nil, c.unsupported("function " + fc.Funcname[0].GetString_().GetSval() + "." + fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
+		}
+		if fname == "hashtext" && !c.lockKey {
+			// The executor returns hashtext's input, which keys an advisory
+			// lock as the int4 hash would, equal for equal strings, but is
+			// not the value Postgres gives anywhere the application reads
+			// or compares it. Two keys whose 32-bit hashes collide on the
+			// server, which detest tells apart, are not modeled: among
+			// the keys an application holds the chance is 2^-32 a pair,
+			// and modeling it needs the server's hash function.
+			return nil, c.unsupported("hashtext anywhere but as the key of an advisory lock")
+		}
+		if fname == "hashtext" {
+			// The allowance is for this call alone: a hashtext inside its
+			// argument would be read as the string on the way to the key.
+			c.lockKey = false
+		}
+		if fname == "pg_advisory_xact_lock" || fname == "pg_try_advisory_xact_lock" {
+			// hashtext may stand only as a key itself, not inside an
+			// expression that reads its value on the way to the key.
+			args := make([]sqlir.Expr, 0, len(fc.Args))
+			for _, a := range fc.Args {
+				inner := a.GetFuncCall()
+				c.lockKey = inner != nil && len(inner.Funcname) > 0 && strings.EqualFold(inner.Funcname[len(inner.Funcname)-1].GetString_().GetSval(), "hashtext")
+				e, err := c.expr(a)
+				c.lockKey = false
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, e)
+			}
+			if fc.AggDistinct {
+				return nil, c.unsupported("DISTINCT in a call to " + fname)
+			}
+			call := &sqlir.FuncCall{Name: fname, Args: args, Star: fc.AggStar}
+			if fc.Over != nil {
+				return c.window(call, fc.Over)
+			}
+			return call, nil
+		}
+		if fname == "make_interval" {
+			// The executor takes make_interval's one argument as seconds,
+			// which is the named form backoff SQL writes. Postgres reads a
+			// positional first argument as years and has six other names,
+			// which the executor would also take for seconds.
+			if len(fc.Args) != 1 || fc.Args[0].GetNamedArgExpr().GetName() != "secs" {
+				return nil, c.unsupported("make_interval with an argument other than secs => n")
+			}
+		}
+		args, err := c.exprs(fc.Args)
+		if err != nil {
+			return nil, err
 		}
 		call := &sqlir.FuncCall{Name: strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval()), Args: args, Star: fc.AggStar, Distinct: fc.AggDistinct}
 		if sqlir.OtherAggregates[call.Name] {
@@ -1863,6 +2043,11 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			return nil, err
 		}
 		switch op {
+		case "<=>":
+			// MySQL's null-safe equality, which the executor evaluates for
+			// its converter. Postgres has no such operator and fails the
+			// statement with 42883.
+			return nil, c.unsupported("operator <=>")
 		case "~~":
 			op = "LIKE"
 		case "!~~":

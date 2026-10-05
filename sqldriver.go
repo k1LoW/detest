@@ -17,9 +17,17 @@ import (
 // through CheckSQL to measure coverage before modeling the service.
 //
 // The check runs against a database with no schema, so it reports the cases
-// the statement decides on its own. A case that depends on the schema, such
-// as a write that needs a generated column detest cannot compute, passes here
-// and fails with ErrUnsupportedSQL when the statement runs.
+// the statement decides on its own, and refuses a function or an operator
+// detest does not evaluate, or a call with other arguments than the function
+// takes, wherever it stands in a SELECT, INSERT, UPDATE or DELETE, where a
+// run reaches only the expressions it evaluates. A case that depends on the
+// schema, such as a write that needs a generated column detest cannot
+// compute, or a comparison whose outcome depends on the column's type,
+// passes here and fails with ErrUnsupportedSQL when the statement runs. So
+// does an expression in a CHECK or a generated column, which loads with the
+// schema and is refused by the write that evaluates it, and a default detest
+// cannot evaluate, which a write that leaves the column out stores as the
+// Unknown marker unless the table's own schema reads the column.
 func CheckSQL(d Server, query string) error {
 	kind := sqlir.ImplOf(d)
 	if kind == nil {
@@ -27,6 +35,9 @@ func CheckSQL(d Server, query string) error {
 	}
 	s, err := parseWith(kind.Parser(), query)
 	if err != nil {
+		return err
+	}
+	if err := checkStatic(s.stmt, query, kind.InnoDB()); err != nil {
 		return err
 	}
 	pdb := &DB{name: "probe", kind: kind}
@@ -339,16 +350,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 	if err == nil && res.hasLastID {
 		c.lastInsertID = res.lastID
 	}
-	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && set.Name == "lock_timeout" && !set.Local {
-		// A session setting outlives the statement's transaction. MySQL's
-		// takes effect at once; Postgres's, run in a transaction, only
-		// when the transaction commits.
-		if c.db.kind.InnoDB() || auto {
-			c.lockTimeout = tx.lockTimeout
-		} else {
-			v := tx.lockTimeout
-			tx.pendingLockTimeout = &v
-		}
+	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
+		// MySQL session settings take effect immediately, even in a transaction.
+		c.lockTimeout = tx.lockTimeout
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
 		switch set.Name {
@@ -379,6 +383,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 			tx.rollback()
 		} else {
 			tx.commit()
+			if tx.pendingLockTimeout != nil {
+				c.lockTimeout = *tx.pendingLockTimeout
+			}
 		}
 	case err != nil:
 		// A failed statement aborts the Postgres transaction.

@@ -185,6 +185,9 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		`CREATE TABLE e (id int PRIMARY KEY, d uuid DEFAULT CURRENT_USER::uuid)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d smallint DEFAULT length(CURRENT_USER))`,
 		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
+		// hashtext is refused outside an advisory lock's key, so the
+		// generated column loads unconverted and the write is refused.
+		`CREATE TABLE e (id int PRIMARY KEY, a text, h int GENERATED ALWAYS AS (hashtext(a)) STORED)`,
 	} {
 		mustExec(t, db, ddl)
 		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -383,4 +386,372 @@ func TestEqualRowUnderUniqueWaits(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+// SET TRANSACTION and the transaction_isolation and transaction_read_only
+// settings are refused in every form, as MySQL's are, since Postgres fails
+// them once the transaction has run a query and the level is BeginTx's to
+// set. The session defaults run when they ask for Read Committed (Read
+// Uncommitted is Read Committed in Postgres) and READ WRITE, and are
+// refused for another level or for READ ONLY, under which the server fails
+// every write.
+func TestTransactionSettingsSetBySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
+		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
+		`SET TRANSACTION READ ONLY`,
+		`SET TRANSACTION READ WRITE`,
+		`SET TRANSACTION SNAPSHOT '00000003-0000001B-1'`,
+		`SET transaction_isolation = 'read committed'`,
+		`SET LOCAL transaction_isolation = 'repeatable read'`,
+		`SET transaction_read_only = on`,
+		`SET transaction_read_only = 1`,
+		`RESET transaction_isolation`,
+		`SET transaction_isolation TO DEFAULT`,
+		`SET transaction_read_only FROM CURRENT`,
+		`SET default_transaction_isolation FROM CURRENT`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
+		`SET default_transaction_isolation TO 'repeatable read'`,
+		`SET default_transaction_read_only TO 'true'`,
+		`SET default_transaction_read_only = 1`,
+		`SET default_transaction_isolation = ''`,
+		`SET default_transaction_read_only = ''`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, READ WRITE`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, ISOLATION LEVEL READ COMMITTED`,
+	} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		_ = tx.Rollback()
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ UNCOMMITTED, READ WRITE, NOT DEFERRABLE`,
+		`SET default_transaction_isolation TO 'read committed'`,
+		`SET default_transaction_read_only = off`,
+		`SET default_transaction_read_only = 0`,
+		`RESET default_transaction_isolation`,
+		`SET default_transaction_read_only TO DEFAULT`,
+	} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); err != nil {
+			t.Errorf("%s: got %v, want nil", q, err)
+		}
+		_ = tx.Rollback()
+	}
+}
+
+// make_interval's one argument is taken as seconds, which is the named form
+// backoff SQL writes; Postgres reads a positional argument as years and has
+// six other names, so every other form is refused.
+func TestMakeIntervalArguments(t *testing.T) {
+	for _, q := range []string{
+		`SELECT make_interval(1)`,
+		`SELECT make_interval(days => 1)`,
+		`SELECT make_interval(secs => 1, mins => 1)`,
+		`SELECT make_interval()`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	if err := CheckSQL(postgres.New(), `SELECT now() - make_interval(secs => 30)`); err != nil {
+		t.Errorf("make_interval(secs => 30): got %v", err)
+	}
+}
+
+// A window function called with other arguments than it takes is refused,
+// by CheckSQL and by the run alike, rather than computed with a missing
+// argument read as NULL or an extra one ignored.
+func TestWindowFunctionArity(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1), (2, 1)`)
+	mustExec(t, db, `CREATE TABLE empty_t (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SELECT row_number(1) OVER () FROM t`,
+		`SELECT lag() OVER (ORDER BY id) FROM t`,
+		`SELECT lag(id, 1, 0, 9) OVER (ORDER BY id) FROM t`,
+		`SELECT first_value() OVER (ORDER BY id) FROM t`,
+		`SELECT sum(id, k) OVER () FROM t`,
+		`SELECT ntile(2) OVER (ORDER BY id) FROM t`,
+		`SELECT row_number(1) OVER () FROM empty_t`,
+		`SELECT row_number(*) OVER () FROM t`,
+		`SELECT now(*) FROM t`,
+		`SELECT count(DISTINCT k) OVER () FROM t`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT count(*) OVER () FROM t LIMIT 1`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("count(*) OVER (): got %d, %v", n, err)
+	}
+	if err := db.QueryRow(`SELECT lag(id, 1, 0) OVER (ORDER BY id) FROM t ORDER BY id LIMIT 1`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("lag(id, 1, 0): got %d, %v", n, err)
+	}
+}
+
+// SET search_path, and the set_config('search_path', ...) a dump writes, run
+// when they name the whole path postgres.SearchPath declares or the empty
+// path, and are refused for any other path, since detest resolves every name
+// on the declared path and would read and write other tables than the
+// server. Any other call of set_config is a function detest does not run.
+func TestSearchPathSetBySQL(t *testing.T) {
+	for _, tc := range []struct {
+		srv       Server
+		path      string
+		setConfig string // SELECT set_config of the declared path, aliased p
+		accepted  []string
+		refused   []string
+	}{
+		{
+			postgres.New(),
+			"public",
+			`SELECT set_config('search_path', 'public', true) AS p`,
+			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`,
+				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
+			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
+				`SET search_path TO pg_catalog`, `SET search_path TO "$user"`, `SELECT set_config('search_path', 'pg_catalog', false)`,
+				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`,
+				`SELECT set_config('search_path', 'public', 1)`, `SELECT set_config('search_path', 'public', $1)`,
+				`SELECT set_config(DISTINCT 'search_path', 'public', true)`, `SELECT set_config('search_path', 'public', true) OVER ()`},
+		},
+		{
+			postgres.New(postgres.SearchPath("app", "public")),
+			"app, public",
+			`SELECT set_config('search_path', 'app, public', true) AS p`,
+			[]string{`SET search_path TO app, public`, `SET search_path TO "$user", app, public, pg_catalog`},
+			[]string{`SET search_path TO public`, `SET search_path TO app`, `SET search_path TO app, tenant`, `SET search_path TO public, app`},
+		},
+	} {
+		s := newSim(t)
+		db, _ := s.DB("app", tc.srv)
+		for _, q := range tc.accepted {
+			if _, err := db.Exec(q); err != nil {
+				t.Errorf("%s: got %v, want nil", q, err)
+			}
+		}
+		// set_config returns the value it set as one row, under the alias,
+		// as the server does.
+		rows, err := db.Query(tc.setConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if cols, _ := rows.Columns(); len(cols) != 1 || cols[0] != "p" {
+			t.Errorf("%s: columns %v", tc.setConfig, cols)
+		}
+		if !rows.Next() {
+			t.Errorf("%s: no row", tc.setConfig)
+		} else if err := rows.Scan(&got); err != nil || got != tc.path {
+			t.Errorf("%s: returned %q, %v; want %q", tc.setConfig, got, err, tc.path)
+		}
+		rows.Close()
+		if res, err := db.Exec(tc.setConfig); err != nil {
+			t.Errorf("%s: %v", tc.setConfig, err)
+		} else if n, _ := res.RowsAffected(); n != 1 {
+			t.Errorf("%s: %d rows affected, want 1", tc.setConfig, n)
+		}
+		// With a clause, the statement is an ordinary SELECT of a function
+		// detest does not run: with WHERE false the server never evaluates
+		// it and returns no rows, and so does detest, while CheckSQL
+		// refuses the call wherever it stands.
+		rows, err = db.Query(`SELECT set_config('search_path', 'tenant_1', true) WHERE false`)
+		if err != nil {
+			t.Errorf("set_config WHERE false: %v", err)
+		} else {
+			if rows.Next() {
+				t.Error("set_config WHERE false: got a row, want none")
+			}
+			rows.Close()
+		}
+		if err := CheckSQL(tc.srv, `SELECT set_config('search_path', 'public', true) WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL set_config WHERE false: got %v, want ErrUnsupportedSQL", err)
+		}
+		// RESET and TO DEFAULT go back to the declared path, which is the
+		// session's default, so they change nothing and run.
+		for _, q := range []string{`RESET search_path`, `SET search_path TO DEFAULT`, `RESET ALL`} {
+			if _, err := db.Exec(q); err != nil {
+				t.Errorf("%s: got %v, want nil", q, err)
+			}
+		}
+		for _, q := range tc.refused {
+			if _, err := db.Exec(q, "tenant_1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+			}
+			if err := CheckSQL(tc.srv, q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+			}
+		}
+	}
+}
+
+// hashtext runs only as the key of an advisory lock, where the executor's
+// value, the input string, locks as Postgres's int4 hash would: equal for
+// equal strings. Anywhere else the application would read or compare a
+// value Postgres never gives.
+func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'a')`)
+	for _, q := range []string{
+		`SELECT hashtext(name) FROM t`,
+		`SELECT * FROM t WHERE hashtext(name) = 1`,
+		`SELECT id FROM t ORDER BY hashtext(name)`,
+		`SELECT pg_advisory_xact_lock(1), hashtext(name) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(name)::text::bigint) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(name) + 1) FROM t`,
+		`SELECT pg_advisory_xact_lock(abs(hashtext(name))) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(left(hashtext(name)::text, 1))) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(hashtext(name)::text)) FROM t`,
+		`SELECT app.pg_advisory_xact_lock(1)`,
+		`SELECT pg_advisory_xact_lock(DISTINCT 1)`,
+		`SELECT pg_advisory_xact_lock(1) OVER ()`,
+		`SELECT pg_advisory_xact_lock(*)`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT pg_advisory_xact_lock(hashtext($1))`,
+		`SELECT pg_try_advisory_xact_lock(hashtext('k'))`,
+		`SELECT pg_advisory_xact_lock(hashtext(name)) FROM t`,
+		`SELECT pg_advisory_xact_lock(1, hashtext($1))`,
+		`SELECT pg_catalog.pg_advisory_xact_lock(hashtext($1))`,
+	} {
+		if err := CheckSQL(postgres.New(), q); err != nil {
+			t.Errorf("CheckSQL %s: got %v, want nil", q, err)
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q, "k"); err != nil {
+			t.Errorf("%s: got %v, want nil", q, err)
+		}
+		_ = tx.Rollback()
+	}
+}
+
+// RESET ALL clears a lock_timeout set for the session, so a lock wait after
+// it waits as the server's does, with no timeout to choose; without the
+// reset the wait may time out.
+func TestResetAllClearsLockTimeout(t *testing.T) {
+	for _, reset := range []string{`RESET ALL`, `RESET ALL; SELECT 1`, ""} {
+		Explore(t, func(t *testing.T, s *Sim) {
+			db, _ := s.DB("app", postgres.New())
+			mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+			s.Seed(func() { mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`) })
+			var (
+				locked     chan struct{}
+				timedOut   bool
+				unexpected error
+			)
+			s.Seed(func() { locked, timedOut, unexpected = make(chan struct{}), false, nil })
+			s.Manual("holder", 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+					return err
+				}
+				close(locked)
+				p.WaitUntil(p.Now() + 1)
+				return tx.Commit()
+			})
+			s.Manual("waiter", 1, func(p *Proc) error {
+				<-locked
+				conn, err := db.Conn(p.Context()) // the session settings live on one connection
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				if _, err := conn.ExecContext(p.Context(), `SET lock_timeout = '1s'`); err != nil {
+					return err
+				}
+				if reset != "" {
+					if _, err := conn.ExecContext(p.Context(), reset); err != nil {
+						return err
+					}
+				}
+				tx, err := conn.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.Exec(`UPDATE stock SET n = 2 WHERE sku = 'a'`); err != nil {
+					if errors.Is(err, ErrLockNotAvailable) {
+						timedOut = true
+					} else {
+						unexpected = err
+					}
+					return nil
+				}
+				return tx.Commit()
+			})
+			s.AtQuiescence(func(*State) error {
+				if unexpected != nil {
+					return fmt.Errorf("the update failed: %w", unexpected)
+				}
+				if reset != "" && timedOut {
+					return errors.New("the wait timed out after RESET ALL")
+				}
+				return nil
+			})
+			if reset == "" {
+				s.Sometimes("the wait times out", func(*State) bool { return timedOut })
+			}
+		})
+	}
+}
+
+// A function detest does not run is refused before its arguments are
+// evaluated, as the server resolves the function first, so an argument with
+// an effect, such as nextval, leaves no trace.
+func TestUnknownFunctionRefusedBeforeItsArguments(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1)`)
+	for _, q := range []string{
+		`SELECT md5(nextval('s')::text)`,
+		`SELECT md5(nextval('s')::text) FROM t`,
+		`SELECT k, md5(max(nextval('s'))::text) FROM t GROUP BY k`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after the refused calls: %d, %v; want 1, the sequence untouched", n, err)
+	}
 }

@@ -11,6 +11,70 @@ import (
 	"github.com/k1LoW/detest/postgres"
 )
 
+func TestPostgresScriptSessionLockTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		initial bool
+		query   string
+		finish  string
+		want    bool
+		wantErr bool
+	}{
+		{name: "autocommit reset", initial: true, query: `RESET ALL; SELECT 1`},
+		{name: "autocommit set", query: `SET lock_timeout = '1s'; SELECT 1`, want: true},
+		{name: "commit reset", initial: true, query: `RESET ALL; SELECT 1`, finish: "commit"},
+		{name: "rollback reset", initial: true, query: `RESET ALL; SELECT 1`, finish: "rollback", want: true},
+		{name: "failed script", initial: true, query: `RESET ALL; SELECT 1 / 0`, want: true, wantErr: true},
+		{name: "local after session", query: `SET lock_timeout = '1s'; SET LOCAL lock_timeout = '0'`, finish: "commit", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSim(t)
+			db, _ := s.DB("app", postgres.New())
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if tc.initial {
+				if _, err := conn.ExecContext(context.Background(), `SET lock_timeout = '1s'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.finish == "" {
+				_, err = conn.ExecContext(context.Background(), tc.query)
+			} else {
+				tx, beginErr := conn.BeginTx(context.Background(), nil)
+				if beginErr != nil {
+					t.Fatal(beginErr)
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err = tx.Exec(tc.query); err == nil {
+					if tc.finish == "commit" {
+						err = tx.Commit()
+					} else {
+						err = tx.Rollback()
+					}
+				}
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("got %v, want error: %v", err, tc.wantErr)
+			}
+			if err := conn.Raw(func(dc any) error {
+				c, ok := dc.(*sqlConn)
+				if !ok {
+					return fmt.Errorf("unexpected connection type %T", dc)
+				}
+				if got := c.lockTimeout; got != tc.want {
+					t.Errorf("session lock timeout: %v, want %v", got, tc.want)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // Two processes read-check-write the same row through database/sql with
 // Postgres-dialect SQL. Under Read Committed the plain UPDATE loses an update;
 // the CAS form (status in the WHERE) does not.

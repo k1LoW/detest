@@ -27,6 +27,7 @@ func (s colSet) has(name string) (found, once bool) {
 // blocks around it.
 type colScope struct {
 	items map[string]colSet
+	types map[string]map[string]string
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
 	outputs colSet
@@ -210,7 +211,65 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		return c.x.unsupported(fmt.Sprintf("FROM items with the same name %q", alias))
 	}
 	sc.items[alias] = cols
+	if sc.types == nil {
+		sc.types = map[string]map[string]string{}
+	}
+	if t.Sub != nil || t.Func != nil || c.x.tx.db.views[c.x.tx.db.resolve(t.Name)] != nil {
+		// Derived outputs keep their names but not their SQL types. Refuse
+		// overloaded concatenation rather than guess its text signature.
+		sc.types[alias] = map[string]string{}
+	}
+	if t.Sub == nil && t.Func == nil && len(t.Columns) == 0 {
+		if def := c.x.tx.db.defs[c.x.tx.db.resolve(t.Name)]; def != nil {
+			// A CTE shadows a table of the same name.
+			shadowed := false
+			for _, m := range c.ctes {
+				_, found := m[t.Name]
+				shadowed = shadowed || found
+			}
+			if !shadowed {
+				sc.types[alias] = def.types
+			}
+		}
+	}
 	return nil
+}
+
+func (sc *colScope) columnType(r *sqlir.ColumnRef) string {
+	for s := sc; s != nil; s = s.outer {
+		found, unknown, unresolved, typ := 0, false, false, ""
+		for alias, cols := range s.items {
+			if r.Table != "" && alias != r.Table {
+				continue
+			}
+			if has, _ := cols.has(r.Column); has {
+				found++
+				typ = s.types[alias][r.Column]
+			} else if cols == nil {
+				if s.types[alias] != nil {
+					unresolved = true
+				} else {
+					unknown = true
+				}
+			}
+		}
+		if unknown {
+			return ""
+		}
+		if unresolved {
+			return "unresolved column type"
+		}
+		if found > 0 {
+			if found == 1 && typ != "" {
+				return typ
+			}
+			return "unresolved column type"
+		}
+		if r.Table == "excluded" && s.hasExcluded {
+			return s.types["excluded"][r.Column]
+		}
+	}
+	return ""
 }
 
 // query checks a query block and returns its output columns.
@@ -550,6 +609,16 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			}
 			switch e := v.Interface().(type) {
+			case *sqlir.BinaryExpr:
+				if what := concatTypeMismatch(e, sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
+			case *sqlir.FuncCall:
+				if what := textArgumentMismatch(e, sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 			case *sqlir.ColumnRef:
 				err = c.resolve(e, sc)
 				return
@@ -577,7 +646,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 // target is the scope of the table a write targets.
 func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	cols := c.tableColumns(table)
-	return &colScope{items: map[string]colSet{targetAlias(table, alias): cols}}, cols
+	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
+	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
+		sc.types[targetAlias(table, alias)] = def.types
+	}
+	return sc, cols
 }
 
 func targetAlias(table, alias string) string {
@@ -676,7 +749,8 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set), false); err != nil {
 			return err
 		}
-		up := &colScope{items: sc.items, excluded: cols, hasExcluded: true}
+		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
+		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
@@ -723,6 +797,7 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 			return c.x.unsupported(fmt.Sprintf("FROM items with the same name %q", alias))
 		}
 		sc.items[alias] = cols
+		sc.types[alias] = own.types[alias]
 	}
 	return nil
 }

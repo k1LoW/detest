@@ -312,6 +312,15 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// matter, as detest's waits have no length.
 			x.tx.lockTimeout = st.Value != "" && st.Value != "0" && st.Value != "0ms" && st.Value != "0s"
 		}
+		if st.Name == "all" {
+			x.tx.lockTimeout = false // RESET ALL
+		}
+		if !tx.db.kind.InnoDB() && !st.Local && (st.Name == "lock_timeout" || st.Name == "all") {
+			// Record each script substatement, before a later SET LOCAL can
+			// change the transaction's timeout without changing the session's.
+			v := tx.lockTimeout
+			tx.pendingLockTimeout = &v
+		}
 		if st.Name == "no_auto_value_on_zero" {
 			x.tx.noAutoZero = st.Value == "true"
 		}
@@ -323,6 +332,38 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// so a script that switches to another would run against the
 			// wrong one.
 			return nil, x.unsupported("USE of a database other than " + x.tx.db.kind.SearchPath()[0])
+		}
+		if st.Name == "search_path" {
+			// Names resolve on the path postgres.SearchPath declares, for
+			// every connection, so a SET of another path would read and
+			// write other tables than the server, or find a table the
+			// server does not. One that names the declared path again,
+			// as a migration does, changes nothing. An empty path, as
+			// pg_dump sets, leaves the server only qualified names,
+			// which resolve the same either way; a dump writes nothing
+			// else after it, and refusing it would stop dumps loading.
+			var path []string
+			for s := range strings.SplitSeq(st.Value, ",") {
+				// "$user" names a schema no test declares, and pg_catalog
+				// is on every path whether written or not.
+				if s = strings.Trim(strings.TrimSpace(s), `"`); s != "" && s != "$user" && s != "pg_catalog" {
+					path = append(path, s)
+				}
+			}
+			// The empty path is the one written empty; a path of "$user"
+			// or pg_catalog alone leaves the server no schema to find an
+			// application table in, where detest would still find it.
+			if strings.TrimSpace(st.Value) != "" && !slices.Equal(path, x.tx.db.kind.SearchPath()) {
+				return nil, x.unsupported("SET search_path to a path other than postgres.SearchPath's (" + strings.Join(x.tx.db.kind.SearchPath(), ", ") + ")")
+			}
+		}
+		if st.Returns {
+			// set_config returns the value it set, as text.
+			col := st.Column
+			if col == "" {
+				col = "set_config"
+			}
+			return &sqlResult{cols: []string{col}, rows: [][]driver.Value{{st.Value}}, affected: 1}, nil
 		}
 		return &sqlResult{}, nil
 	case *sqlir.SetConstraintsStmt:
@@ -527,6 +568,14 @@ func (x *sqlExec) unsupported(what string) error { return unsupported(what, x.qu
 
 // functionRows evaluates a set-returning function in FROM.
 func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
+	// PostgreSQL resolves the function signature before evaluating arguments,
+	// so a refused call must not advance sequences or acquire advisory locks.
+	if t.Func.Name != "generate_series" {
+		return nil, x.unsupported("set-returning function " + t.Func.Name + " in FROM")
+	}
+	if len(t.Func.Args) != 2 && len(t.Func.Args) != 3 {
+		return nil, x.unsupported("generate_series with other than two or three arguments")
+	}
 	// The functions detest runs in FROM give one column, and the ordinality
 	// one more.
 	width := 1
@@ -562,9 +611,6 @@ func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
 	var vals []any
 	switch t.Func.Name {
 	case "generate_series":
-		if len(args) < 2 || len(args) > 3 {
-			return nil, x.unsupported("generate_series with other than two or three arguments")
-		}
 		for _, a := range args {
 			if a == nil {
 				return nil, nil // generate_series with a NULL bound returns no rows
@@ -1105,6 +1151,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
+		}
+		if !knownFunc(v.Name, x.tx.db.kind.InnoDB()) {
+			return nil, errUnknownExpr{v.Name + "(...)"} // as in evalRaw, before the arguments
 		}
 		if err := x.checkArity(v); err != nil {
 			return nil, err
@@ -2399,6 +2448,12 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
+		if !knownFunc(v.Name, x.tx.db.kind.InnoDB()) {
+			// Before the arguments, which may have effects (nextval),
+			// where the server resolves the function first and runs none
+			// of them.
+			return nil, errUnknownExpr{v.Name + "(...)"}
+		}
 		if err := x.checkArity(v); err != nil {
 			return nil, err
 		}
@@ -3524,12 +3579,31 @@ var otherArity = map[string][]int{
 }
 
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
+	if what := arityMismatch(f); what != "" {
+		return x.unsupported(what)
+	}
+	if !x.tx.db.kind.InnoDB() {
+		if what := textArgumentMismatch(f, nil); what != "" {
+			return x.unsupported(what)
+		}
+	}
+	return nil
+}
+
+// arityMismatch names what is wrong with a call's arguments, or returns ""
+// when the call has the arguments its function takes. The statement alone
+// decides it, so CheckSQL asks it too.
+func arityMismatch(f *sqlir.FuncCall) string {
+	if f.Star && f.Name != "count" {
+		// now(*): no function but count takes a star.
+		return f.Name + "(*)"
+	}
 	arity, known := strictFuncs[f.Name]
 	if !known {
 		arity, known = otherArity[f.Name]
 	}
 	if known && !slices.Contains(arity, len(f.Args)) {
-		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
+		return fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args))
 	}
 	// round with a scale exists only for numeric; detest keeps no type for
 	// its argument but can see a cast to a float or a call of random.
@@ -3539,10 +3613,10 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 		c, cast := f.Args[0].(*sqlir.Cast)
 		r, call := f.Args[0].(*sqlir.FuncCall)
 		if cast && (c.Type == "float4" || c.Type == "float8") || call && r.Name == "random" {
-			return x.unsupported("round of a float with a scale")
+			return "round of a float with a scale"
 		}
 	}
-	return nil
+	return ""
 }
 
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {
@@ -3552,6 +3626,12 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if b, ok := derefValue(a).([]byte); ok {
 			args[i] = string(b)
 		}
+	}
+	if !knownFunc(name, x.tx.db.kind.InnoDB()) {
+		// Refused here so that knownFuncs and mysqlFuncs, which CheckSQL
+		// reads, are the one list of what runs; a name the switch below
+		// lacks is refused too.
+		return nil, errUnknownExpr{name + "(...)"}
 	}
 	if _, strict := strictFuncs[name]; (strict || mysqlNullIfAnyNull[name]) && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
 		return nil, nil // a strict function of NULL is NULL
