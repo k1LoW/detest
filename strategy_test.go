@@ -1,6 +1,9 @@
 package detest
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRandomFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
@@ -62,5 +65,24 @@ func TestStrategyPassedLastApplies(t *testing.T) {
 	res, _ = exploreBubble(t, model, []Option{DepthFirst(), Random(1), MaxRuns(10)}, nil, 0)
 	if res.Complete || res.Runs != 10 {
 		t.Fatalf("want 10 random runs, got %s", res.report())
+	}
+}
+
+// A random run replays no prefix, so state a seed does not reset is caught
+// by comparing it with the previous run.
+func TestRandomDetectsNondeterminism(t *testing.T) {
+	res, _ := exploreBubble(t, ticketModel(false), []Option{Random(1)}, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "the operations before choice") {
+		t.Fatalf("got %v, want a nondeterminism error", res.Fatal)
+	}
+}
+
+func TestRandomAcceptsDeterministicRuns(t *testing.T) {
+	res, _ := exploreBubble(t, ticketModel(true), []Option{Random(1), MaxRuns(50)}, nil, 0)
+	if res.Fatal != nil {
+		t.Fatal(res.Fatal)
+	}
+	if res.Runs != 50 {
+		t.Fatalf("explored %d runs, want 50", res.Runs)
 	}
 }

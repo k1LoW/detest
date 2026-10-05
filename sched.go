@@ -138,7 +138,9 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 
 type run struct {
 	s        *Sim
-	rng      *rand.Rand // the Random strategy's draws past the prefix; nil picks the first option
+	rng      *rand.Rand  // the Random strategy's draws past the prefix; nil picks the first option
+	seen     seenChoices // under Random, the worker's earlier runs' shallow choices
+	path     uint64      // under Random, a hash of the picks so far, which keys seen
 	prefix   []choice
 	choices  []choice
 	pos      int
@@ -268,7 +270,9 @@ func (r *run) choose(label string, n int) int {
 			picked = c.picked
 		}
 	} else if r.rng != nil {
+		r.checkSeen(label, n, fp)
 		picked = r.rng.IntN(n)
+		r.path = hashInt(r.path, int64(picked))
 	}
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
 	r.pos++

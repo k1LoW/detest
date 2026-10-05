@@ -340,6 +340,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 	}
 	f.declareSometimes(names)
 	runs, maxDepth := 0, 0
+	seen := seenChoices{}
 	for {
 		prefix, index, ok := f.take(worker)
 		if !ok {
@@ -348,7 +349,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		runs++
 		r := s.newRun(prefix)
 		if f.random {
-			r.rng = s.rngFor(index)
+			r.rng, r.seen, r.path = s.rngFor(index), seen, fnvOffset
 		}
 		r.tracing = s.verbose
 		v := r.execute()
