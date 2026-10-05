@@ -51,6 +51,10 @@ A process opened a transaction and then, while it is open, used the pool (`db` r
 
 These are progress violations, deadlocks the database cannot detect (through mutexes, or a process blocked by a lock nobody will release). Real findings unless the harness created the mutex wrongly.
 
+## `took N steps in a row without changing committed state while nothing else could run`
+
+A process kept stepping, through `p.Step`, a mutex or a query, without a commit or an enqueue, while every other process was done or blocked. It is usually a busy-wait whose condition only a process that cannot run any more would make true, which spins for ever in production too. If the process does that much real work alone, such as a long transaction with the others waiting on its locks, raise `detest.MaxSpins`.
+
 ## The exploration is too large or slow
 
 The summary line shows `complete=false` or the run takes minutes.

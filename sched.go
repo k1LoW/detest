@@ -179,6 +179,11 @@ type run struct {
 	// measuring marks the run Prioritized measures k on, which is no run of
 	// the exploration and so reports nothing of what it reached or refused.
 	measuring bool
+	// spinProc took the last spinCount steps in a row, with committed state
+	// at spinVersion throughout (see MaxSpins).
+	spinProc    *Proc
+	spinCount   int
+	spinVersion int
 	// outside counts the processes blocked outside detest, which may wake and
 	// call into detest without being resumed. Those calls run concurrently with
 	// the resumed process, hence atomic.
@@ -370,6 +375,9 @@ func (r *run) execute() (v *violation) {
 			if r.waitOutside() {
 				continue
 			}
+			if p := r.spinner(); p != nil {
+				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps in a row without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, r.spinCount)}
+			}
 			break
 		}
 		r.steps++
@@ -390,6 +398,7 @@ func (r *run) execute() (v *violation) {
 		o := opts[i]
 		cur := r.current
 		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
+		r.countSpin(o)
 		if r.pending != nil {
 			return r.pending
 		}
@@ -413,6 +422,28 @@ func (r *run) execute() (v *violation) {
 		if err := fn(st); err != nil {
 			return &violation{kind: "quiescence invariant", err: err}
 		}
+	}
+	return nil
+}
+
+// countSpin counts the steps one process takes in a row without changing
+// committed state, for MaxSpins.
+func (r *run) countSpin(o option) {
+	switch {
+	case o.kind != optResume:
+		r.spinProc = nil
+	case o.p == r.spinProc && r.version == r.spinVersion:
+		r.spinCount++
+	default:
+		r.spinProc, r.spinCount, r.spinVersion = o.p, 1, r.version
+	}
+}
+
+// spinner returns the process that took MaxSpins steps in a row without
+// changing committed state and can still run, or nil.
+func (r *run) spinner() *Proc {
+	if p := r.spinProc; p != nil && r.spinCount >= r.s.maxSpins && p.state == stateReady {
+		return p
 	}
 	return nil
 }
@@ -476,9 +507,12 @@ func (r *run) enabled() []option {
 	// the current process keeps running while it is runnable.
 	cur := r.current
 	curRunnable := cur != nil && cur.state == stateReady
-	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable
+	// A spinning process gives way, spent preemption budget or not, as the
+	// switch is the scheduler's fairness rather than a choice to explore.
+	spinner := r.spinner()
+	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable && cur != spinner
 	for _, p := range r.procs {
-		if p.state != stateReady {
+		if p.state != stateReady || p == spinner {
 			continue
 		}
 		if bounded && p != cur {
