@@ -61,7 +61,7 @@ The summary line shows `complete=false` or the run takes minutes.
 - `detest.When(...)` on loops so idle ticks do not branch.
 - `DETEST_WORKERS=$(getconf _NPROCESSORS_ONLN)` and `GOGC=400`, with `-p 1` so that explorations of different packages do not compete for the cores.
 - For long explorations, `MaxDuration` with `DETEST_CHECKPOINT=<file>` to resume across runs, or `DETEST_SHARD` across CI jobs.
-- When the scenario cannot be cut down and a depth-first exploration capped by `MaxRuns` would only vary its last choices, `detest.Random(seed)` with `MaxRuns` or `MaxDuration` draws runs over the whole tree instead. It never completes, so use it after the smaller scenario has passed completely, not instead of it, and ask the user before switching.
+- When the scenario cannot be cut down and a depth-first exploration capped by `MaxRuns` would only vary its last choices, `detest.Prioritized(seed, 2)` or `(seed, 3)` with `MaxRuns` or `MaxDuration` draws runs over the whole tree instead. It runs each actor on and switches at a few random steps, as PCT does, which is the shape most races need. `detest.Random(seed)` switches at almost every step, which suits only a bug that needs the actors to alternate closely. Neither completes, so use them after the smaller scenario has passed completely, not instead of it, and ask the user before switching.
 
 Report an incomplete exploration as incomplete, with the run count and the bounds.
 
