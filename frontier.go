@@ -31,9 +31,15 @@ type frontier struct {
 	busy       int        // workers running a prefix taken from the stack
 	stopped    bool
 	incomplete bool // MaxRuns or MaxDuration cut the exploration short
-	runs       int
-	maxRuns    int
-	expired    atomic.Bool // MaxDuration has passed
+	// random hands out run indexes instead of subtrees, under the Random
+	// strategy, with next the index of the next run and bestIndex the
+	// index of the best violation's run.
+	random    bool
+	next      int
+	bestIndex int
+	runs      int
+	maxRuns   int
+	expired   atomic.Bool // MaxDuration has passed
 	// best is the choices of the earliest violating run found so far, in the
 	// depth-first order one worker explores in, with its result. Subtrees
 	// after it are dropped and the ones before it still explored, so the
@@ -102,10 +108,14 @@ func (f *frontier) settled(pushed int) {
 }
 
 // take returns the next prefix to run, waiting while other workers may still
-// add some. It reports false once the exploration is over.
-func (f *frontier) take(worker int) ([]choice, bool) {
+// add some, and under the Random strategy the index of the run instead. It
+// reports false once the exploration is over.
+func (f *frontier) take(worker int) ([]choice, int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.random {
+		return f.takeRandom(worker)
+	}
 	for {
 		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1]) {
 			f.stack = f.stack[:len(f.stack)-1] // after the best violation
@@ -123,19 +133,40 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 	if f.stopped || len(f.stack) == 0 {
 		f.progress[worker].idle.Store(true)
 		f.wakeAll() // the exploration is over: let the others see it
-		return nil, false
+		return nil, 0, false
 	}
 	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
 		f.wakeAll()
-		return nil, false
+		return nil, 0, false
 	}
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
 	f.busy++
 	f.runs++
-	return p, true
+	return p, 0, true
+}
+
+// takeRandom is take under the Random strategy. Indexes are handed out in
+// order, so once a violation is found every run before it has been taken,
+// and no other is needed to report the violation of the lowest index. f.mu
+// is held.
+func (f *frontier) takeRandom(worker int) ([]choice, int, bool) {
+	if f.stopped || f.bestResult != nil {
+		f.progress[worker].idle.Store(true)
+		return nil, 0, false
+	}
+	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
+		f.incomplete, f.stopped = true, true
+		f.progress[worker].idle.Store(true)
+		return nil, 0, false
+	}
+	i := f.next
+	f.next++
+	f.busy++
+	f.runs++
+	return nil, i, true
 }
 
 // cut counts a run cut at MaxIdleTicks.
@@ -229,10 +260,20 @@ func (f *frontier) fail(err error) {
 	f.wakeAll()
 }
 
-// found records a violating run, keeping the earliest one.
-func (f *frontier) found(choices []choice, res *result) {
+// found records a violating run, keeping the earliest one: the first in
+// depth-first order, or the one of the lowest index under the Random
+// strategy.
+func (f *frontier) found(choices []choice, index int, res *result) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.random {
+		if f.bestResult == nil || index < f.bestIndex {
+			f.bestIndex, f.bestResult = index, res
+		}
+		f.busy--
+		f.settled(0)
+		return
+	}
 	picks := make([]int, len(choices))
 	for i, c := range choices {
 		picks[i] = c.picked
@@ -300,12 +341,15 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 	f.declareSometimes(names)
 	runs, maxDepth := 0, 0
 	for {
-		prefix, ok := f.take(worker)
+		prefix, index, ok := f.take(worker)
 		if !ok {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		runs++
 		r := s.newRun(prefix)
+		if f.random {
+			r.rng = s.rngFor(index)
+		}
 		r.tracing = s.verbose
 		v := r.execute()
 		maxDepth = max(maxDepth, len(r.choices))
@@ -331,7 +375,11 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, s.makeResult(r, v, runs, maxDepth, false, start))
+			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start))
+			continue
+		}
+		if f.random {
+			f.finish(nil)
 			continue
 		}
 		f.finish(s.children(r.choices, len(prefix)))
@@ -346,6 +394,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
+		merged.strategy = r.strategy
 		if r.Replay {
 			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule

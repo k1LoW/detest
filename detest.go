@@ -172,6 +172,7 @@ type Sim struct {
 	shardTotal       int
 	shardDepth       int
 	workers          int
+	strategy         strategy
 	frontier         *frontier // shared with the other workers, when Workers splits the exploration
 	worker           int
 
@@ -282,6 +283,7 @@ type result struct {
 	MaxDepth int
 	Complete bool
 	Shard    string // "index/total" when DETEST_SHARD or Shard splits the exploration across machines
+	strategy strategy
 	Workers  int
 	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
@@ -333,6 +335,9 @@ func (r *result) outcome() string {
 		runs := fmt.Sprintf("%d runs", r.Runs)
 		if r.PriorRuns > 0 {
 			runs = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint,", r.Runs, r.Runs+r.PriorRuns)
+		}
+		if r.strategy.random {
+			workers += fmt.Sprintf(", random seed %d", r.strategy.seed)
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		if r.CutRuns > 0 {
@@ -400,6 +405,7 @@ func (s *Sim) check() *result {
 		// A lone exploration, as the package's own tests start one; Explore
 		// always passes the frontier it saves and resumes.
 		f = newFrontier(1, s.maxRuns)
+		f.random = s.strategy.random
 		s.frontier = f
 		return f.merge([]*result{s.checkShared(f, 0)}, 1)
 	}
