@@ -1721,6 +1721,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		return nil, c.unsupported("constant")
 	case *pg.Node_TypeCast:
+		if len(e.TypeCast.TypeName.GetArrayBounds()) > 0 {
+			// Dropping array bounds would run scalar casts and operators
+			// instead of PostgreSQL's array overloads. ANY handles its own
+			// supported array casts before reaching this conversion.
+			return nil, c.unsupported("an array cast")
+		}
 		x, err := c.expr(e.TypeCast.Arg)
 		if err != nil {
 			return nil, err

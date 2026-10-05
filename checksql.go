@@ -304,6 +304,11 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		if what := arityMismatch(v); what != "" {
 			return unsupported(what, c.query)
 		}
+		if !c.innodb {
+			if what := textArgumentMismatch(v, nil); what != "" {
+				return c.refuse(what)
+			}
+		}
 		return c.exprs(v.Args)
 	case *sqlir.WindowFunc:
 		if what := windowArityMismatch(v.Func); what != "" {
@@ -317,6 +322,11 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		}
 		return c.orderKeys(v.Order)
 	case *sqlir.BinaryExpr:
+		if !c.innodb {
+			if what := concatTypeMismatch(v, nil); what != "" {
+				return c.refuse(what)
+			}
+		}
 		if !knownBinaryOps[v.Op] {
 			return c.refuse("operator " + v.Op)
 		}

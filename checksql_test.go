@@ -19,6 +19,13 @@ import (
 func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 	refused := map[Server][]string{
 		postgres.New(): {
+			`SELECT '{}'::jsonb || '{}'::jsonb`,
+			`SELECT '{}'::json || 'x'`,
+			`SELECT '{}'::text[] || '{}'::text[]`,
+			`SELECT lower(1)`,
+			`SELECT upper(true)`,
+			`SELECT length(1::int)`,
+			`SELECT lower(nextval('s'))`,
 			`SELECT date_trunc('day', created_at) FROM t`,
 			`SELECT * FROM t WHERE trim(name) <> ''`,
 			`SELECT * FROM t WHERE data->>'k' = 'v'`,
@@ -50,6 +57,7 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 	}
 	accepted := map[Server][]string{
 		postgres.New(): {
+			`SELECT lower(1::text), 'a' || 1`,
 			`SELECT lower(name), length(name), coalesce(n, 0) FROM t WHERE created_at < now() - make_interval(secs => 10)`,
 			`SELECT count(*), sum(n), row_number() OVER (PARTITION BY k ORDER BY id) FROM t GROUP BY k`,
 			`SELECT * FROM t WHERE id = ANY(ARRAY[1, 2]) AND name LIKE 'x%' AND a BETWEEN 1 AND 2`,

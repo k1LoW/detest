@@ -124,6 +124,42 @@ func TestFromFunctionRefusedBeforeItsArguments(t *testing.T) {
 	}
 }
 
+func TestPostgresExpressionTypesRefusedBeforeEvaluation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	mustExec(t, db, `CREATE TABLE typed (id int PRIMARY KEY, j jsonb, a text[], name text)`)
+	mustExec(t, db, `CREATE VIEW typed_view AS SELECT * FROM typed`)
+	for _, q := range []string{
+		`SELECT '{}'::jsonb || '{}'::jsonb`,
+		`SELECT '{}'::text[] || '{}'::text[]`,
+		`SELECT j || '{}' FROM typed`,
+		`SELECT a || '{}' FROM typed`,
+		`SELECT t.j || '{}' FROM typed t`,
+		`SELECT d.j || '{}' FROM (SELECT j FROM typed) d`,
+		`SELECT j || '{}' FROM typed_view`,
+		`WITH d AS (SELECT j FROM typed) SELECT j || '{}' FROM d`,
+		`UPDATE typed SET j = j || '{}'`,
+		`SELECT j || nextval('s') FROM typed`,
+		`SELECT lower(1)`,
+		`SELECT lower(nextval('s'))`,
+		`SELECT lower(id) FROM typed`,
+		`SELECT lower(max(id)) FROM typed`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after refused expressions: %d, %v; want 1", n, err)
+	}
+	mustExec(t, db, `INSERT INTO typed (id, name) VALUES (1, 'A')`)
+	if got := rowsOf(t, db, `SELECT lower(name), name || id FROM typed`); !reflect.DeepEqual(got, []string{"a,A1"}) {
+		t.Errorf("supported text expressions: %v", got)
+	}
+}
+
 func TestSavepoint(t *testing.T) {
 	s := newSim(t)
 	db, store := s.DB("app", postgres.New())

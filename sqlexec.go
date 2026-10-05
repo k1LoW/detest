@@ -3582,6 +3582,11 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 	if what := arityMismatch(f); what != "" {
 		return x.unsupported(what)
 	}
+	if !x.tx.db.kind.InnoDB() {
+		if what := textArgumentMismatch(f, nil); what != "" {
+			return x.unsupported(what)
+		}
+	}
 	return nil
 }
 
