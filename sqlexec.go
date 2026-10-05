@@ -247,9 +247,6 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if err := x.collationCheck(s.stmt); err != nil {
 		return nil, err
 	}
-	if err := x.checkArrays(s.stmt); err != nil {
-		return nil, err
-	}
 	res, err := x.execStatement(s.stmt)
 	if err != nil {
 		// Every path that evaluates an expression ends here, so an
@@ -290,6 +287,11 @@ func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
 	if err := x.checkColumns(stmt); err != nil {
+		return nil, err
+	}
+	// After the column check, which refuses what Postgres refuses when it
+	// plans the statement, as Postgres reads the arrays only at bind time.
+	if err := x.checkArrays(stmt); err != nil {
 		return nil, err
 	}
 	switch st := stmt.(type) {

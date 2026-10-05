@@ -161,6 +161,8 @@ func TestArrayComparisonUnsupported(t *testing.T) {
 		// An array cast whose element type does not compare with x as it
 		// does with x's own type, an empty array included.
 		{`SELECT id FROM t WHERE name = ANY('{}'::bigint[])`, nil},
+		{`SELECT id FROM t WHERE name = ANY($1::bigint[])`, []any{pq.Array([]string{"abc"})}},
+		{`SELECT id FROM t WHERE id = ANY($1) OR id = $1`, []any{"{1,"}},
 		{`SELECT id FROM t WHERE u = ANY($1::text[])`, []any{[]string{"00000000-0000-0000-0000-000000000001"}}},
 		{`SELECT id FROM t WHERE id = ANY($1::text[])`, []any{[]string{"1"}}},
 	} {
