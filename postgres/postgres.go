@@ -220,6 +220,12 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 					val = fmt.Sprint(k.Value)
 				}
 			}
+			if val == "" {
+				// Postgres refuses an empty value for these settings
+				// (22023), where RESET and TO DEFAULT, which carry no
+				// value, restore the default.
+				return c.unsupported("SET " + v.Name + " to an empty value")
+			}
 		}
 		if v.Name == "default_transaction_isolation" {
 			level = val
@@ -246,8 +252,10 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 	case *pg.Node_SelectStmt:
 		if path, ok := setConfigSearchPath(s.SelectStmt); ok {
 			// A schema dump sets search_path with SELECT pg_catalog.set_config(...),
-			// which is checked as SET search_path is.
-			return &sqlir.SetStmt{Name: "search_path", Value: path, Returns: true}, nil
+			// which is checked as SET search_path is. The row it returns
+			// carries the alias when the SELECT gives one.
+			col := s.SelectStmt.TargetList[0].GetResTarget().GetName()
+			return &sqlir.SetStmt{Name: "search_path", Value: path, Returns: true, Column: col}, nil
 		}
 		return c.selectStmt(s.SelectStmt)
 	case *pg.Node_CreateTableAsStmt:
@@ -444,7 +452,12 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 // value. Any other call of set_config is a function call, which detest does
 // not run and refuses, so that a setting it would change is not ignored.
 func setConfigSearchPath(sel *pg.SelectStmt) (string, bool) {
-	if sel == nil || sel.FromClause != nil || len(sel.TargetList) != 1 {
+	// The bare SELECT of the call and nothing else: a clause such as
+	// WHERE false would decide whether the server evaluates it at all.
+	if sel == nil || len(sel.TargetList) != 1 || sel.FromClause != nil || sel.WhereClause != nil ||
+		sel.GroupClause != nil || sel.HavingClause != nil || sel.WindowClause != nil || sel.SortClause != nil ||
+		sel.LimitCount != nil || sel.LimitOffset != nil || sel.DistinctClause != nil || sel.WithClause != nil ||
+		sel.LockingClause != nil || sel.ValuesLists != nil || sel.IntoClause != nil || sel.Op != pg.SetOperation_SETOP_NONE {
 		return "", false
 	}
 	fc := sel.TargetList[0].GetResTarget().GetVal().GetFuncCall()
@@ -1777,7 +1790,10 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			// The executor returns hashtext's input, which keys an advisory
 			// lock as the int4 hash would, equal for equal strings, but is
 			// not the value Postgres gives anywhere the application reads
-			// or compares it.
+			// or compares it. Two keys whose 32-bit hashes collide on the
+			// server, which detest tells apart, are not modelled: among
+			// the keys an application holds the chance is 2^-32 a pair,
+			// and modelling it needs the server's hash function.
 			return nil, c.unsupported("hashtext anywhere but as the key of an advisory lock")
 		}
 		if fname == "pg_advisory_xact_lock" || fname == "pg_try_advisory_xact_lock" {

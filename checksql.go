@@ -240,6 +240,9 @@ func (c *staticCheck) tableRef(t *sqlir.TableRef) error {
 		if t.Func.Name != "generate_series" {
 			return unsupported("set-returning function "+t.Func.Name+" in FROM", c.query)
 		}
+		if len(t.Func.Args) != 2 && len(t.Func.Args) != 3 {
+			return unsupported("generate_series with other than two or three arguments", c.query)
+		}
 		return c.exprs(t.Func.Args)
 	}
 	return nil

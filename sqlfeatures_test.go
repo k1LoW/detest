@@ -419,6 +419,8 @@ func TestTransactionSettingsSetBySQL(t *testing.T) {
 		`SET default_transaction_isolation TO 'repeatable read'`,
 		`SET default_transaction_read_only TO 'true'`,
 		`SET default_transaction_read_only = 1`,
+		`SET default_transaction_isolation = ''`,
+		`SET default_transaction_read_only = ''`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -544,6 +546,26 @@ func TestSearchPathSetBySQL(t *testing.T) {
 		path := strings.Join(tc.path, ", ")
 		if err := db.QueryRow(`SELECT set_config('search_path', '` + path + `', true)`).Scan(&got); err != nil || got != path {
 			t.Errorf("set_config returned %q, %v; want %q", got, err, path)
+		}
+		rows, err := db.Query(`SELECT set_config('search_path', '` + path + `', true) AS p`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cols, _ := rows.Columns(); len(cols) != 1 || cols[0] != "p" {
+			t.Errorf("set_config AS p: columns %v", cols)
+		}
+		rows.Close()
+		// With a clause, the statement is an ordinary SELECT of a function
+		// detest does not run: with WHERE false the server never evaluates
+		// it and returns no rows, and so does detest, while CheckSQL
+		// refuses the call wherever it stands.
+		rows, err = db.Query(`SELECT set_config('search_path', 'tenant_1', true) WHERE false`)
+		if err != nil || rows.Next() {
+			t.Errorf("set_config WHERE false: rows=%v, err=%v; want none", rows.Next(), err)
+		}
+		rows.Close()
+		if err := CheckSQL(tc.srv, `SELECT set_config('search_path', 'public', true) WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL set_config WHERE false: got %v, want ErrUnsupportedSQL", err)
 		}
 		// RESET and TO DEFAULT go back to the declared path, which is the
 		// session's default, so they change nothing and run.

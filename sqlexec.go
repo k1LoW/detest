@@ -350,7 +350,11 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		}
 		if st.Returns {
 			// set_config returns the value it set, as text.
-			return &sqlResult{cols: []string{"set_config"}, rows: [][]driver.Value{{st.Value}}}, nil
+			col := st.Column
+			if col == "" {
+				col = "set_config"
+			}
+			return &sqlResult{cols: []string{col}, rows: [][]driver.Value{{st.Value}}}, nil
 		}
 		return &sqlResult{}, nil
 	case *sqlir.SetConstraintsStmt:
