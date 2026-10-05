@@ -832,6 +832,13 @@ func (x *sqlExec) freeze(stmt any) {
 		}
 	}
 	add(stmt)
+	// The table a write chooses its rows from is a name, not a FROM item.
+	switch st := stmt.(type) {
+	case *sqlir.UpdateStmt:
+		add(sqlir.TableRef{Name: st.Table})
+	case *sqlir.DeleteStmt:
+		add(sqlir.TableRef{Name: st.Table})
+	}
 }
 
 // fromItems describes the FROM items of a query, for locking reads.
@@ -1719,8 +1726,16 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 	if alias == "" {
 		alias = relname(table)
 	}
+	// The rows the statement began with, once freeze has kept them: a CTE
+	// that waits for a lock runs before the rows are chosen, and Postgres
+	// chooses them from the statement's snapshot, reading a chosen row at its
+	// latest only once it locks it.
+	base, ok := x.frozen[x.tx.db.resolve(table)]
+	if !ok {
+		base = x.tx.selectNoYield(table, nil)
+	}
 	var rows []jrow
-	for _, r := range x.tx.selectNoYield(table, nil) {
+	for _, r := range base {
 		rows = append(rows, newJrow(alias, r))
 	}
 	for _, t := range extra {
