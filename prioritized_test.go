@@ -123,6 +123,30 @@ func TestPrioritizedMeasuringRunReachesNothing(t *testing.T) {
 	}
 }
 
+// The run k is measured on takes no fault, so a loss listed before the
+// delivery does not end it early and put every run's loss before it.
+func TestPrioritizedDeliversOnALossyQueue(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		delivered := false
+		s.Seed(func() { delivered = false })
+		q := s.Queue("orders", Losses(1))
+		s.Manual("checkout", 1, func(p *Proc) error {
+			q.Enqueue(p, Msg{"id": "o1"})
+			return nil
+		})
+		s.OnMessage("complete", q, func(p *Proc, msg Msg) error {
+			p.Step("complete %s", msg.Str("id"))
+			delivered = true
+			return nil
+		})
+		s.Sometimes("delivered", func(st *State) bool { return delivered })
+	}
+	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 2), MaxRuns(50)}, nil, 0)
+	if res.Violated || len(res.Unreached) != 0 {
+		t.Fatalf("want a run delivering the message, got %s", res.report())
+	}
+}
+
 func TestPrioritizedFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		counterModel(s, false)

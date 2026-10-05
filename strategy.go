@@ -97,6 +97,12 @@ func (s *Sim) rngFor(index int) *rand.Rand {
 	return rand.New(rand.NewPCG(s.strategy.seed, uint64(index))) //nolint:gosec // schedules, not secrets
 }
 
+// measuringRng returns the generator of the run Prioritized measures k on,
+// the same in every worker and shard, and apart from every run's.
+func (s *Sim) measuringRng() *rand.Rand {
+	return rand.New(rand.NewPCG(s.strategy.seed, ^uint64(0))) //nolint:gosec // schedules, not secrets
+}
+
 // A random run replays no prefix, so the fingerprint check a replayed prefix
 // gives depth-first exploration is made against the worker's earlier runs:
 // two runs that made the same picks up to a choice must arrive at it with the
@@ -115,21 +121,6 @@ type seenChoice struct {
 
 // seenChoices maps the hash of the picks that lead to a choice to the choice.
 type seenChoices map[uint64]seenChoice
-
-// record adds the shallow choices of a run whose picks were not drawn, so
-// that later runs are checked against it too.
-func (seen seenChoices) record(choices []choice) {
-	path := uint64(fnvOffset)
-	for pos, c := range choices {
-		if pos >= seenDepth || len(seen) >= seenMax {
-			return
-		}
-		if _, ok := seen[path]; !ok {
-			seen[path] = seenChoice{n: c.n, fp: c.fp}
-		}
-		path = hashInt(path, int64(c.picked))
-	}
-}
 
 func (r *run) checkSeen(label string, n int, fp uint64) {
 	if r.pos >= seenDepth {
