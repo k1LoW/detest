@@ -461,7 +461,8 @@ func setConfigSearchPath(sel *pg.SelectStmt) (string, bool) {
 		return "", false
 	}
 	fc := sel.TargetList[0].GetResTarget().GetVal().GetFuncCall()
-	if fc == nil || len(fc.Funcname) == 0 || len(fc.Funcname) > 2 || len(fc.Args) != 3 {
+	if fc == nil || len(fc.Funcname) == 0 || len(fc.Funcname) > 2 || len(fc.Args) != 3 ||
+		fc.AggDistinct || fc.AggStar || fc.Over != nil || fc.AggFilter != nil || len(fc.AggOrder) > 0 || fc.AggWithinGroup {
 		return "", false
 	}
 	if len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
@@ -1786,6 +1787,11 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		if len(fc.Funcname) > 0 {
 			fname = strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
 		}
+		if len(fc.Funcname) > 2 || len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
+			// A function of another schema is the user's, which detest
+			// would otherwise take for the built-in of the same name.
+			return nil, c.unsupported("function " + fc.Funcname[0].GetString_().GetSval() + "." + fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
+		}
 		if fname == "hashtext" && !c.lockKey {
 			// The executor returns hashtext's input, which keys an advisory
 			// lock as the int4 hash would, equal for equal strings, but is
@@ -1815,7 +1821,14 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 				}
 				args = append(args, e)
 			}
-			return &sqlir.FuncCall{Name: fname, Args: args}, nil
+			if fc.AggDistinct {
+				return nil, c.unsupported("DISTINCT in a call to " + fname)
+			}
+			call := &sqlir.FuncCall{Name: fname, Args: args, Star: fc.AggStar}
+			if fc.Over != nil {
+				return c.window(call, fc.Over)
+			}
+			return call, nil
 		}
 		if fname == "make_interval" {
 			// The executor takes make_interval's one argument as seconds,
@@ -1829,11 +1842,6 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		args, err := c.exprs(fc.Args)
 		if err != nil {
 			return nil, err
-		}
-		if len(fc.Funcname) > 2 || len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
-			// A function of another schema is the user's, which detest
-			// would otherwise take for the built-in of the same name.
-			return nil, c.unsupported("function " + fc.Funcname[0].GetString_().GetSval() + "." + fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
 		}
 		call := &sqlir.FuncCall{Name: strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval()), Args: args, Star: fc.AggStar, Distinct: fc.AggDistinct}
 		if sqlir.OtherAggregates[call.Name] {

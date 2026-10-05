@@ -529,7 +529,8 @@ func TestSearchPathSetBySQL(t *testing.T) {
 				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
 			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
 				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`,
-				`SELECT set_config('search_path', 'public', 1)`, `SELECT set_config('search_path', 'public', $1)`},
+				`SELECT set_config('search_path', 'public', 1)`, `SELECT set_config('search_path', 'public', $1)`,
+				`SELECT set_config(DISTINCT 'search_path', 'public', true)`, `SELECT set_config('search_path', 'public', true) OVER ()`},
 		},
 		{
 			postgres.New(postgres.SearchPath("app", "public")),
@@ -620,6 +621,10 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 		`SELECT pg_advisory_xact_lock(abs(hashtext(name))) FROM t`,
 		`SELECT pg_advisory_xact_lock(hashtext(left(hashtext(name)::text, 1))) FROM t`,
 		`SELECT pg_advisory_xact_lock(hashtext(hashtext(name)::text)) FROM t`,
+		`SELECT app.pg_advisory_xact_lock(1)`,
+		`SELECT pg_advisory_xact_lock(DISTINCT 1)`,
+		`SELECT pg_advisory_xact_lock(1) OVER ()`,
+		`SELECT pg_advisory_xact_lock(*)`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
@@ -633,6 +638,7 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 		`SELECT pg_try_advisory_xact_lock(hashtext('k'))`,
 		`SELECT pg_advisory_xact_lock(hashtext(name)) FROM t`,
 		`SELECT pg_advisory_xact_lock(1, hashtext($1))`,
+		`SELECT pg_catalog.pg_advisory_xact_lock(hashtext($1))`,
 	} {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("CheckSQL %s: got %v, want nil", q, err)
