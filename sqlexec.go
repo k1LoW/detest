@@ -334,7 +334,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// which resolve the same either way; a dump writes nothing
 			// else after it, and refusing it would stop dumps loading.
 			var path []string
-			for _, s := range strings.Split(st.Value, ",") {
+			for s := range strings.SplitSeq(st.Value, ",") {
 				// "$user" names a schema no test declares, and pg_catalog
 				// is on every path whether written or not.
 				if s = strings.Trim(strings.TrimSpace(s), `"`); s != "" && s != "$user" && s != "pg_catalog" {
