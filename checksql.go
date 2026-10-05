@@ -51,6 +51,8 @@ var windowFuncs = map[string][2]int{
 func windowArityMismatch(f *sqlir.FuncCall) string {
 	arity, ok := windowFuncs[f.Name]
 	switch {
+	case f.Distinct:
+		return "DISTINCT in a window call of " + f.Name // which Postgres and MySQL refuse
 	case f.Name == "count" && f.Star && len(f.Args) == 0:
 		return ""
 	case f.Star:

@@ -491,6 +491,7 @@ func TestWindowFunctionArity(t *testing.T) {
 		`SELECT row_number(1) OVER () FROM empty_t`,
 		`SELECT row_number(*) OVER () FROM t`,
 		`SELECT now(*) FROM t`,
+		`SELECT count(DISTINCT k) OVER () FROM t`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
