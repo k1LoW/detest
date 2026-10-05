@@ -134,6 +134,15 @@ func (c *conv) column(ch *sqlir.SchemaChange, d *ast.ColumnDef) error {
 			col.Members, col.Set = d.Tp.GetElems(), d.Tp.GetType() == mysql.TypeSet
 		case mysql.TypeDatetime, mysql.TypeTimestamp:
 			col.FSP = max(d.Tp.GetDecimal(), 0)
+		case mysql.TypeNewDecimal:
+			// DECIMAL without a precision is DECIMAL(10, 0).
+			col.Precision, col.Scale = 10, 0
+			if d.Tp.GetFlen() > 0 {
+				col.Precision = d.Tp.GetFlen()
+			}
+			if d.Tp.GetDecimal() > 0 {
+				col.Scale = d.Tp.GetDecimal()
+			}
 		}
 	}
 	for _, o := range d.Options {

@@ -80,6 +80,9 @@ type procType struct {
 	msgFn     func(p *Proc, msg Msg) error
 	after     func(st *State) bool
 	when      func() bool
+	// fromLoop marks a type spawned by a loop, or by a process a loop
+	// spawned, whose changes are the loop's activity rather than progress.
+	fromLoop bool
 }
 
 // ProcOption configures a process type.
@@ -153,12 +156,17 @@ type run struct {
 	prev     *State
 	version  int
 	idleAt   map[*procType]int
-	idles    map[*procType]int // idle ticks that left the budget unspent
-	cut      bool              // a loop went idle more than MaxIdleTicks allows
-	pending  *violation        // raised by a simulated resource during a step
-	fp       uint64            // fingerprint of the run so far (see choice.fp)
-	tracing  bool              // keep the trace (see note)
-	snap     *State            // the latest snapshot, whose tables the next one reuses
+	// progress counts the changes made by processes other than loops and
+	// the processes they spawned, and the loop ticks that did work. idleRun
+	// counts a loop's idle ticks since progress last moved, at idleSeen.
+	progress int
+	idleRun  map[*procType]int
+	idleSeen map[*procType]int
+	cut      bool       // a loop went idle more than MaxIdleTicks allows
+	pending  *violation // raised by a simulated resource during a step
+	fp       uint64     // fingerprint of the run so far (see choice.fp)
+	tracing  bool       // keep the trace (see note)
+	snap     *State     // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
 	queuesTouched bool
 	// outside counts the processes blocked outside detest, which may wake and
@@ -722,6 +730,9 @@ func (r *run) bump(p *Proc) {
 	if p != nil {
 		p.bumps++
 	}
+	if p == nil || (p.pt.kind != trigLoop && !p.pt.fromLoop) {
+		r.progress++
+	}
 }
 
 // redeliver puts back the message p failed to handle, unless it was
@@ -781,15 +792,19 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			}
 		}
 		p.txs = nil
+		idle := errors.Is(ev.err, ErrIdle)
 		switch {
-		case errors.Is(ev.err, ErrIdle):
+		case idle:
 			r.note(p, "done (idle, budget not consumed)")
 			if p.pt.kind == trigLoop {
-				if r.idles[p.pt] >= r.s.maxIdleTicks {
+				if seen, ok := r.idleSeen[p.pt]; !ok || seen != r.progress {
+					r.idleRun[p.pt], r.idleSeen[p.pt] = 0, r.progress
+				}
+				r.idleRun[p.pt]++
+				if r.idleRun[p.pt] > r.s.maxIdleTicks {
 					r.cut = true
 					break
 				}
-				r.idles[p.pt]++
 				r.runs[p.pt]--
 				if r.version-p.started > p.bumps {
 					r.idleAt[p.pt] = p.started
@@ -806,6 +821,9 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			}
 		case ev.err == nil:
 			r.note(p, "done")
+		}
+		if p.pt.kind == trigLoop && !idle {
+			r.progress++ // a tick that did work, or failed at it
 		}
 		if p.msg != nil && ev.err != nil {
 			r.note(p, "nack %s", p.msg)
@@ -921,7 +939,7 @@ func (p *Proc) Choose(label string, n int) int {
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
-	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn}
+	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
 }
@@ -947,7 +965,7 @@ func (p *Proc) main() {
 	p.r.gidMu.Lock()
 	p.r.byGid[p.gid] = p
 	p.r.gidMu.Unlock()
-	<-p.resume
+	p.wait() // a run that ends before the process first runs aborts it here
 	switch p.pt.kind {
 	case trigMessage:
 		p.err = p.pt.msgFn(p, p.msg.msg)
@@ -1212,7 +1230,7 @@ func (r *run) dbsTouched() bool {
 }
 
 func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idles: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {

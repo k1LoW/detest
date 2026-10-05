@@ -86,13 +86,14 @@ func MaxRedeliveries(n int) Option { return func(s *Sim) { s.maxRedeliveries = n
 // detest does not know which processes share a pod.
 func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
 
-// MaxIdleTicks bounds how many idle ticks of each loop per run leave its
-// budget unspent (3 by default). An idle tick is free so that a sweep keeps
-// ticking until it has work, but loops whose idle ticks lock or write rows
-// can wake each other without end, so a run whose loop goes idle once more
-// is cut there, without checking the invariants at quiescence, and the
-// result counts it. Raise it when a loop needs more idle ticks to reach its
-// work.
+// MaxIdleTicks bounds how many idle ticks of a loop in a row leave its
+// budget unspent while nothing else makes progress (3 by default). An idle
+// tick is free so that a sweep keeps ticking until it has work, and a change
+// by a manual process, a message handler or a loop tick that did work starts
+// the count again. Loops whose idle ticks lock or write rows can still wake
+// each other without end with no progress in between, so a run whose loop
+// goes idle once more is cut there, without checking the invariants at
+// quiescence, and the result counts it.
 func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per

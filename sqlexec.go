@@ -1038,6 +1038,15 @@ func (x *sqlExec) evalBoolAgg(e sqlir.Expr, g *aggEnv) (bool, error) {
 // evalAgg evaluates an expression over a group: aggregates fold the group's
 // rows, other expressions use the group's sample row.
 func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
+	v, err := x.evalAggRaw(e, g)
+	if _, ok := v.(numRange); ok && err == nil {
+		return nil, x.errInexact()
+	}
+	return v, err
+}
+
+// evalAggRaw is evalAgg, giving a numRange as it is.
+func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 	switch v := e.(type) {
 	case *sqlir.WindowFunc:
 		return x.eval(v, g.env)
@@ -1050,9 +1059,14 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 			var vals []any
 			seen := map[string]bool{}
 			for _, r := range g.rows {
-				val, err := x.eval(v.Args[0], r.env(g.env.outer))
+				val, err := x.evalRaw(v.Args[0], r.env(g.env.outer))
 				if err != nil {
 					return nil, err
+				}
+				// DISTINCT would tell ranges apart by their bounds, not by
+				// the values the server gives.
+				if _, ok := val.(numRange); ok && (v.Distinct || (v.Name != "sum" && v.Name != "avg")) {
+					return nil, x.errInexact()
 				}
 				if derefValue(val) == nil {
 					continue
@@ -1066,7 +1080,7 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 				}
 				vals = append(vals, x.aggOperand(v.Name, val))
 			}
-			return foldAggregate(v.Name, false, vals, len(g.rows)), nil
+			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]))
 		}
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
@@ -1102,13 +1116,16 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		return out, err
 	case *sqlir.BinaryExpr:
-		l, err := x.evalAgg(v.L, g)
+		l, err := x.evalAggRaw(v.L, g)
 		if err != nil {
 			return nil, err
 		}
-		r, err := x.evalAgg(v.R, g)
+		r, err := x.evalAggRaw(v.R, g)
 		if err != nil {
 			return nil, err
+		}
+		if isRange(l) || isRange(r) {
+			return x.rangeBinary(v.Op, l, r)
 		}
 		switch v.Op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
@@ -1119,7 +1136,11 @@ func (x *sqlExec) evalAgg(e sqlir.Expr, g *aggEnv) (any, error) {
 		if v.Op == "||" {
 			l, r = paramText(v.L, l), paramText(v.R, r)
 		}
-		return x.binary(v.Op, l, r)
+		res, err := x.binary(v.Op, l, r)
+		if err != nil {
+			return nil, err
+		}
+		return x.arithValue(v, l, r, res), nil
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {
@@ -1221,12 +1242,15 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			row := Row{}
 			for i, e := range exprs {
-				v, err := x.eval(e, &env{})
+				v, err := x.evalRaw(e, &env{})
 				if err != nil {
 					return nil, x.unsupportedExpr(err, "in VALUES")
 				}
 				if _, isDefault := e.(*sqlir.Default); isDefault {
 					continue
+				}
+				if v, err = x.columnValue(table, cols[i], v); err != nil {
+					return nil, err
 				}
 				row[cols[i]] = v
 			}
@@ -2038,6 +2062,15 @@ func (x *sqlExec) evalBool(e sqlir.Expr, en *env) (bool, error) {
 }
 
 func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
+	v, err := x.evalRaw(e, en)
+	if _, ok := v.(numRange); ok && err == nil {
+		return nil, x.errInexact()
+	}
+	return v, err
+}
+
+// evalRaw is eval, giving a numRange as it is, for a caller that resolves it.
+func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 	switch v := e.(type) {
 	case nil:
 		return true, nil
@@ -2128,13 +2161,16 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 			}
 			return !decides, nil
 		}
-		l, err := x.eval(v.L, en)
+		l, err := x.evalRaw(v.L, en)
 		if err != nil {
 			return nil, err
 		}
-		r, err := x.eval(v.R, en)
+		r, err := x.evalRaw(v.R, en)
 		if err != nil {
 			return nil, err
+		}
+		if isRange(l) || isRange(r) {
+			return x.rangeBinary(v.Op, l, r)
 		}
 		switch v.Op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
@@ -2153,7 +2189,11 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 		if v.Op == "||" {
 			l, r = paramText(v.L, l), paramText(v.R, r)
 		}
-		return x.binary(v.Op, l, r)
+		res, err := x.binary(v.Op, l, r)
+		if err != nil {
+			return nil, err
+		}
+		return x.arithValue(v, l, r, res), nil
 	case *sqlir.IsNull:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -3063,6 +3103,13 @@ func exprNumberKind(e sqlir.Expr) numberKind {
 		case "float8", "float4", "double precision", "real":
 			return floatKind
 		}
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "mysql_double":
+			return floatKind
+		case "mysql_dividend":
+			return exprNumberKind(e.Args[0])
+		}
 	case *sqlir.UnaryExpr:
 		if e.Op == "-" {
 			return exprNumberKind(e.X)
@@ -3394,7 +3441,7 @@ var strictFuncs = map[string][]int{
 	"lower": {1}, "upper": {1}, "length": {1}, "char_length": {1}, "hashtext": {1},
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
-	"octet_length": {1}, "left": {2}, "mysql_signed": {1}, "mysql_double": {1},
+	"octet_length": {1}, "left": {2}, "mysql_signed": {1}, "mysql_double": {1}, "mysql_dividend": {1},
 }
 
 // mysqlNullIfAnyNull are MySQL's functions of any number of arguments that
@@ -3523,9 +3570,12 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return args[0], nil
 		case "mysql_signed":
 			return mysqlSigned(derefValue(args[0])), nil
-		case "mysql_double":
+		case "mysql_double", "mysql_dividend":
 			if f, ok := toFloat(derefValue(mysqlArithOperand(args[0]))); ok {
 				return f, nil
+			}
+			if name == "mysql_dividend" {
+				return nil, x.unsupported("division of a " + fmt.Sprintf("%T", derefValue(args[0])))
 			}
 			return nil, x.unsupported("CAST to DOUBLE of a " + fmt.Sprintf("%T", derefValue(args[0])))
 		case "mysql_truth":

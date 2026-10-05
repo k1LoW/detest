@@ -4925,3 +4925,124 @@ func TestInnoDBTxAPIDuplicatesShare(t *testing.T) {
 		s.Sometimes("the second fails while the first holds its check", func(*State) bool { return shared })
 	})
 }
+
+func TestDecimalArithmetic(t *testing.T) {
+	s := newSim(t)
+	my, _ := s.DB("my", mysqlBin())
+	pg, _ := s.DB("pg", postgres.New())
+	for _, db := range []*sql.DB{my, pg} {
+		mustExec(t, db, "CREATE TABLE acct (id INT PRIMARY KEY, bal DECIMAL(10, 2) NOT NULL, d DOUBLE PRECISION)")
+		mustExec(t, db, "INSERT INTO acct VALUES (1, 0.10, 0.1), (2, 0.20, 0.2), (3, 0.25, 0.25)")
+	}
+	tests := []struct {
+		db   *sql.DB
+		name string
+		q    string
+		want string // empty when refused
+	}{
+		// Literals are decimals by their form, computed exactly.
+		{my, "literal sum", "SELECT 0.1 + 0.2", "0.3"},
+		{my, "literal product", "SELECT 1.1 * 3", "3.3"},
+		{my, "literal comparison", "SELECT 0.1 + 0.2 = 0.3", "true"},
+		{my, "DOUBLE literal", "SELECT 1e-1 + 2e-1", "0.30000000000000004"},
+		{my, "DOUBLE cast", "SELECT CAST(0.1 AS DOUBLE) + CAST(0.2 AS DOUBLE)", "0.30000000000000004"},
+		{my, "DOUBLE dividend", "SELECT 1e0 / 3", "0.3333333333333333"},
+		{my, "DOUBLE cast dividend", "SELECT CAST(1 AS DOUBLE) / 3", "0.3333333333333333"},
+		{my, "exact product of literals", "SELECT 0.123456789 * 0.123456789", "0.015241578750190521"},
+		{my, "exact product with more digits than a float prints", "SELECT 0.1234567891 * 0.1234567891", ""},
+		{my, "DISTINCT over ranges", "SELECT SUM(DISTINCT bal + 0.2) FROM acct", ""},
+		{my, "DECIMAL and DOUBLE mixed", "SELECT (bal + 0.2) - (d + 0.2) < -0.00000000000000005 FROM acct WHERE id = 1", ""},
+		{my, "quotient within four places", "SELECT 1 / 8", "0.125"},
+		{my, "quotient MySQL rounds to four places", "SELECT 1 / 32", ""},
+		{my, "repeating quotient", "SELECT 1 / 3", ""},
+		// A column's value does not say whether it is a DECIMAL or a DOUBLE.
+		{my, "exact column arithmetic", "SELECT bal * 4 FROM acct WHERE id = 3", "1"},
+		{my, "inexact column arithmetic read back", "SELECT bal + 0.2 FROM acct WHERE id = 1", ""},
+		{my, "comparison every reading decides", "SELECT bal + 0.2 > 0.29 FROM acct WHERE id = 1", "true"},
+		{my, "comparison the readings disagree on", "SELECT bal + 0.2 = 0.3 FROM acct WHERE id = 1", ""},
+		{my, "repeating quotient compared", "SELECT bal / 3 < 0.034 FROM acct WHERE id = 1", "true"},
+		{my, "repeating quotient compared within MySQL's rounding", "SELECT bal / 3 < 0.03334 FROM acct WHERE id = 1", ""},
+		{my, "inexact SUM read back", "SELECT SUM(bal) FROM acct WHERE id IN (1, 2)", ""},
+		{my, "inexact SUM compared", "SELECT SUM(bal) > 0.5 FROM acct", "true"},
+		{my, "exact SUM", "SELECT SUM(bal) FROM acct WHERE id IN (2, 3)", "0.45"},
+		{my, "repeating AVG read back", "SELECT AVG(bal) FROM acct", ""},
+		{my, "repeating AVG compared", "SELECT AVG(bal) > 0.18 FROM acct", "true"},
+		{my, "exact AVG", "SELECT AVG(bal) FROM acct WHERE id IN (2, 3)", "0.225"},
+		{my, "inexact result in another function", "SELECT ABS(bal + 0.2) FROM acct WHERE id = 1", ""},
+		{my, "inexact result ordered by", "SELECT id FROM acct ORDER BY bal * 1.1 LIMIT 1", ""},
+		{pg, "literal sum", "SELECT 0.1 + 0.2", "0.3"},
+		{pg, "literal comparison", "SELECT 0.1 + 0.2 = 0.3", "true"},
+		{pg, "float8 cast", "SELECT 0.1::float8 + 0.2::float8", "0.30000000000000004"},
+		{pg, "terminating quotient", "SELECT 1.0 / 32", "0.03125"},
+		{pg, "repeating quotient", "SELECT 1.0 / 3", ""},
+		{pg, "repeating quotient compared", "SELECT 1.0 / 3 > 0.3333", "true"},
+		{pg, "inexact column arithmetic read back", "SELECT bal + 0.2 FROM acct WHERE id = 1", ""},
+		{pg, "inexact sum read back", "SELECT sum(bal) FROM acct WHERE id IN (1, 2)", ""},
+		{pg, "inexact sum compared", "SELECT sum(bal) < 0.31 FROM acct WHERE id IN (1, 2)", "true"},
+	}
+	for _, tt := range tests {
+		var got string
+		err := tt.db.QueryRow(tt.q).Scan(&got)
+		if tt.want == "" {
+			if !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s: %s: got %q, %v, want unsupported", tt.name, tt.q, got, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("%s: %s: got %q, %v, want %q", tt.name, tt.q, got, err, tt.want)
+		}
+	}
+}
+
+func TestDecimalArithmeticWrites(t *testing.T) {
+	s := newSim(t)
+	my, myStore := s.DB("my", mysqlBin())
+	pg, pgStore := s.DB("pg", postgres.New())
+	for _, db := range []*sql.DB{my, pg} {
+		mustExec(t, db, "CREATE TABLE m (id INT PRIMARY KEY, price DECIMAL(10, 2), d DOUBLE PRECISION)")
+		mustExec(t, db, "INSERT INTO m (id, price, d) VALUES (1, 100.50, 0.1), (2, 10.00, 0.1), (3, 1.15, 0.1)")
+		// Every reading of the product rounds to 110.55 and of the quotient
+		// to 3.33.
+		mustExec(t, db, "UPDATE m SET price = price * 1.1 WHERE id = 1")
+		mustExec(t, db, "UPDATE m SET price = price / 3 WHERE id = 2")
+		mustExec(t, db, "INSERT INTO m (id, price) VALUES (4, 0.1 + 0.2)")
+		// 1.15 * 0.7 is 0.805, which rounds to 0.81, where the product of
+		// floats, 0.8049999999999999, rounds to 0.80.
+		if _, err := db.Exec("UPDATE m SET price = price * 0.7 WHERE id = 3"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("a product rounding apart: %v", err)
+		}
+		// A range across zero holds values within the column's range.
+		if _, err := db.Exec("UPDATE m SET price = ((d + 0.2) - (0.1 + 0.2)) * 1e30 WHERE id = 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("a range across zero written out of range at both ends: %v", err)
+		}
+		// A DOUBLE column keeps the value unrounded.
+		if _, err := db.Exec("UPDATE m SET d = d + 0.2 WHERE id = 1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("an inexact sum into a DOUBLE column: %v", err)
+		}
+	}
+	for _, store := range []*DB{myStore, pgStore} {
+		if got := peekRows(store, "m", "id", "price"); got != "1:110.55 2:3.33 3:1.15 4:0.3" {
+			t.Errorf("prices: %s", got)
+		}
+	}
+}
+
+func TestMySQLDecimalScale(t *testing.T) {
+	s := newSim(t)
+	my, store := s.DB("my", mysqlBin())
+	mustExec(t, my, "CREATE TABLE m (id INT PRIMARY KEY, price DECIMAL(10, 2), small DECIMAL(4, 1), whole DECIMAL)")
+	mustExec(t, my, "INSERT INTO m (id, price) VALUES (1, 1.005), (2, '2.999'), (3, -1.005)")
+	mustExec(t, my, "INSERT INTO m (id, whole) VALUES (4, 2.5)")
+	if got := peekRows(store, "m", "id", "price"); got != "1:1.01 2:3 3:-1.01 4:<nil>" {
+		t.Errorf("rounded to the scale: %s", got)
+	}
+	if got := peekRows(store, "m", "id", "whole"); got != "1:<nil> 2:<nil> 3:<nil> 4:3" {
+		t.Errorf("DECIMAL rounded as DECIMAL(10, 0): %s", got)
+	}
+	_, err := my.Exec("INSERT INTO m (id, small) VALUES (5, 999.95)")
+	var dbErr *DBError
+	if !errors.As(err, &dbErr) || dbErr.Number != 1264 {
+		t.Errorf("out of range: %v", err)
+	}
+}

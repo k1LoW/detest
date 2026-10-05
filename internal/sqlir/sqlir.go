@@ -303,8 +303,9 @@ type ColumnDef struct {
 	MaxLen  int
 	Members []string
 	Set     bool
-	// Precision and Scale are a Postgres NUMERIC(p, s) column's, which
-	// rounds what it stores to s places; 0 for an unconstrained numeric.
+	// Precision and Scale are a Postgres NUMERIC(p, s) or a MySQL
+	// DECIMAL(p, s) column's, which rounds what it stores to s places; 0
+	// for an unconstrained numeric.
 	Precision int
 	Scale     int
 	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column

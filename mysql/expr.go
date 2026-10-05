@@ -39,6 +39,11 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			// any value that large is past every row.
 			return nil, c.unsupported("an integer literal above 9223372036854775807")
 		}
+		if _, ok := e.GetValue().(float64); ok {
+			// A literal with an exponent is a DOUBLE, which MySQL computes
+			// with floats, where one with a point only is a DECIMAL.
+			return &sqlir.FuncCall{Name: "mysql_double", Args: []sqlir.Expr{&sqlir.Const{Value: value(e.GetValue())}}}, nil
+		}
 		return &sqlir.Const{Value: value(e.GetValue())}, nil
 	case *ast.ParenthesesExpr:
 		return c.expr(e.Expr)
@@ -67,7 +72,9 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			return &sqlir.BinaryExpr{Op: binaryOps[e.Op], L: truthy(l), R: truthy(r)}, nil
 		case opcode.Div:
 			// MySQL's / divides exactly, where Postgres's divides integers.
-			return &sqlir.BinaryExpr{Op: "/", L: &sqlir.FuncCall{Name: "mysql_double", Args: []sqlir.Expr{l}}, R: r}, nil
+			// The dividend is not a CAST to DOUBLE, whose quotient MySQL
+			// computes with floats.
+			return &sqlir.BinaryExpr{Op: "/", L: &sqlir.FuncCall{Name: "mysql_dividend", Args: []sqlir.Expr{l}}, R: r}, nil
 		case opcode.NullEQ:
 			return nullSafeEqual(l, r), nil
 		case opcode.LogicXor:

@@ -283,6 +283,19 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "numeric arithmetic",
+		Schema: []string{`CREATE TABLE m (id int PRIMARY KEY, price numeric(10,2))`},
+		Seed:   []string{`INSERT INTO m (id, price) VALUES (1, 0.10), (2, 0.20), (3, 10.00)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT 0.1 + 0.2 = 0.3, 1.0 / 32 = 0.03125, 1.0 / 3 > 0.3333`),
+			difftest.Q(0, `SELECT sum(price) > 0.29, sum(price) < 0.31, avg(price) < 0.16 FROM m WHERE id IN (1, 2)`),
+			difftest.Q(0, `SELECT id FROM m WHERE price * 1.1 > 0.2 ORDER BY id`),
+			difftest.S(0, `UPDATE m SET price = price / 3 WHERE id = 3`),
+			difftest.Q(0, `SELECT price = 3.33 FROM m WHERE id = 3`),
+		},
+	},
+	{
 		Name: "limits set by ALTER COLUMN TYPE",
 		// DDL runs once, before the rows, as a migration does; the rewrite
 		// of rows an ALTER finds is covered by the unit tests.
