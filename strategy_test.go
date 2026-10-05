@@ -116,4 +116,8 @@ func TestRandomViolationReportsTheSeed(t *testing.T) {
 			t.Fatalf("want a violation naming seed 3, got %s", res.report())
 		}
 	}
+	replayed, _ := exploreBubble(t, model, []Option{Random(3), Replay(one.Schedule)}, nil, 0)
+	if !replayed.Violated || strings.Contains(replayed.report(), "random seed") {
+		t.Fatalf("want a replayed violation naming no seed, got %s", replayed.report())
+	}
 }

@@ -361,7 +361,7 @@ func (r *result) outcome() string {
 		choices = len(strings.Split(r.Schedule, ","))
 	}
 	seed := ""
-	if r.strategy.random {
+	if r.strategy.random && !r.Replay { // a replay draws nothing from the seed
 		seed = fmt.Sprintf(" of random seed %d", r.strategy.seed)
 	}
 	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
