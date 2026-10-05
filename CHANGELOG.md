@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.1](https://github.com/k1LoW/detest/compare/v0.1.0...v0.1.1) - 2026-10-05
+
+- fix: show the scenario the skill's test runs, told from the code up by @k1LoW in https://github.com/k1LoW/detest/pull/33
+- docs: make the unsupported list and CheckSQL usable as a pre-check by @k1LoW in https://github.com/k1LoW/detest/pull/32
+
 ## [v0.1.0](https://github.com/k1LoW/detest/commits/v0.1.0) - 2026-10-05
 
 - build(deps): bump github.com/moby/go-archive from 0.2.0 to 0.3.0 by @dependabot[bot] in https://github.com/k1LoW/detest/pull/1
