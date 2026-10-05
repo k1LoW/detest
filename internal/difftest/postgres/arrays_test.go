@@ -86,6 +86,8 @@ var arrayCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{1,"2"x}')`),
 			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{a"b"}')`),
 			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{}x')`),
+			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{"1"')`),
+			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{"1')`),
 			difftest.Q(0, `SELECT id FROM e WHERE id = ANY('{abc}'::bigint[])`),
 			difftest.S(0, `UPDATE e SET id = 1 WHERE id = ANY('{1')`),
 			difftest.Q(0, `SELECT id FROM a WHERE id = ANY('{1,abc}')`),

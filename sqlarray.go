@@ -232,7 +232,7 @@ func (x *sqlExec) parseArray(s string) ([]*string, error) {
 					i++
 				}
 				i = skipSpace(s, i)
-				if i < len(s) && s[i] != ',' && s[i] != '}' {
+				if i >= len(s) || s[i] != ',' && s[i] != '}' {
 					return nil, malformed()
 				}
 			} else {
