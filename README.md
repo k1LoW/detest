@@ -128,6 +128,12 @@ A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes 
 
 Processes interact only through simulated resources. Every operation on them is a scheduling point, and each one models how its real counterpart behaves under concurrency.
 
+The simulations replace what the application talks to at the client boundary, the level of its client libraries, rather than system calls, packets or disks. The code above that boundary, business logic, ORMs and generated clients included, runs unchanged. A race reaches detest only through what crosses one of these boundaries, which are a PostgreSQL or MySQL database through `database/sql`, a call to another service through an `http.RoundTripper` or `ext.Do`, a queue declared with `s.Queue`, and a mutex injected in place of `sync.Mutex`. Shared state outside them is not simulated, and races through it are not explored.
+
+- A database reached without `database/sql`, such as through pgx's native `pgxpool.Pool` or `pgx.Conn`, or through a vendor SDK
+- A store detest has no simulation of, such as SQLite, MongoDB, DynamoDB, Spanner, or Redis holding locks or counters
+- Go memory shared between goroutines without one of the mutexes above, which `go test -race` checks
+
 ### Database
 
 `s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.
