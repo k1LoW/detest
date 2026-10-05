@@ -1326,7 +1326,13 @@ func numericValue(v any) any {
 // returns the form Postgres stores and prints it in: lower case, in groups of
 // 8-4-4-4-12. Keeping that form makes equal uuids equal values.
 func canonicalUUID(s string) (string, bool) {
-	t := strings.TrimSuffix(strings.TrimPrefix(s, "{"), "}")
+	t := s
+	if strings.HasPrefix(t, "{") || strings.HasSuffix(t, "}") {
+		if len(t) < 2 || !strings.HasPrefix(t, "{") || !strings.HasSuffix(t, "}") {
+			return "", false
+		}
+		t = t[1 : len(t)-1]
+	}
 	hex := make([]byte, 0, 32)
 	for i := range len(t) {
 		switch c := t[i]; {

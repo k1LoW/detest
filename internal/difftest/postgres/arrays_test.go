@@ -90,6 +90,9 @@ var arrayCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM a WHERE u = 'nope'::uuid`),
 			difftest.Q(0, `SELECT id FROM a WHERE u = ANY('{nope}'::uuid[])`),
 			difftest.S(0, `INSERT INTO a (id, u) VALUES (7, '00000000-0000-0000-0000-0000000000')`),
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (7, '{00000000-0000-0000-0000-00000000000e')`),
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (7, '00000000-0000-0000-0000-00000000000e}')`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = '00000000-0000-0000-0000-00000000000e}'::uuid`),
 		},
 	},
 	{
