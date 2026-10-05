@@ -809,6 +809,83 @@ func TestBooleanAndTimestampColumnsStoreTheirValues(t *testing.T) {
 	}
 }
 
+func TestUntypedTextComparedWithUUID(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE a (id int PRIMARY KEY, u uuid, name text)`)
+	mustExec(t, db, `INSERT INTO a VALUES (1, '00000000-0000-0000-0000-000000000001', 'x')`)
+	mustExec(t, db, `INSERT INTO a VALUES (2, $1, 'y')`, []byte("{00000000-0000-0000-0000-00000000000A}"))
+	upper := "00000000-0000-0000-0000-00000000000A"
+	for _, tc := range []struct {
+		query string
+		args  []any
+		want  []string
+	}{
+		{`SELECT id FROM a WHERE u = $1`, []any{upper}, []string{"2"}},
+		{`SELECT id FROM a WHERE $1 = u`, []any{[]byte("0000000000000000000000000000000a")}, []string{"2"}},
+		{`SELECT id FROM a WHERE u = ANY($1)`, []any{[]string{upper}}, []string{"2"}},
+		{`SELECT id FROM a WHERE u = ANY($1)`, []any{"{" + upper + "}"}, []string{"2"}},
+		{`SELECT id FROM a WHERE u IN ($1, $2) ORDER BY id`, []any{upper, "00000000-0000-0000-0000-000000000001"}, []string{"1", "2"}},
+		{`SELECT id FROM a WHERE u = gen_random_uuid()`, nil, nil},
+	} {
+		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
+		}
+	}
+	// The client reads the uuid back as the text Postgres prints.
+	var got any
+	if err := db.QueryRow(`SELECT u FROM a WHERE id = 2`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "00000000-0000-0000-0000-00000000000a" {
+		t.Errorf("uuid read back: got %#v", got)
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`SELECT id FROM a WHERE u = 'nope'`, nil},
+		{`SELECT id FROM a WHERE u = $1`, []any{"nope"}},
+		{`SELECT id FROM a WHERE u = ANY($1)`, []any{[]string{"nope"}}},
+		// Read when the statement is bound, before it reaches a row.
+		{`SELECT id FROM a WHERE id < 0 AND u = $1`, []any{"nope"}},
+		{`SELECT id FROM a WHERE true OR u = $1`, []any{"nope"}},
+		{`SELECT id FROM a WHERE false AND id = $1`, []any{"abc"}},
+		{`SELECT id FROM a WHERE id < 0 AND u = ANY($1)`, []any{[]string{"nope"}}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", tc.query, err)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		// Postgres has no operator comparing text or a number with a uuid.
+		{`SELECT id FROM a WHERE u = name`, nil},
+		{`SELECT id FROM a WHERE u > '00000000-0000-0000-0000-00000000000' || '2'`, nil},
+		{`SELECT id FROM a WHERE u = 1`, nil},
+		{`SELECT id FROM a WHERE u = $1`, []any{int64(1)}},
+		// Postgres types a parameter by its first use, so the second
+		// comparison has no operator.
+		{`SELECT id FROM a WHERE id = $1 OR u = $1`, []any{"1"}},
+		{`SELECT id FROM a WHERE name = $1 OR id = $1`, []any{"1"}},
+		// Refused before any row, as Postgres has no operator for them.
+		{`SELECT id FROM a WHERE id < 0 AND u = name`, nil},
+		{`SELECT id FROM a WHERE id < 0 AND (u = 1 OR id = name)`, nil},
+		{`SELECT id FROM a WHERE false AND u IN (name)`, nil},
+		// A driver sends these in a form of its own.
+		{`SELECT id FROM a WHERE u = $1`, []any{true}},
+		{`SELECT id FROM a WHERE u = $1`, []any{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}},
+		{`INSERT INTO a (id, u) VALUES (3, 1)`, nil},
+		{`INSERT INTO a (id, u) VALUES (3, $1)`, []any{int64(1)}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", tc.query, err)
+		}
+	}
+}
+
 // Postgres compares rows pair by pair: an ordering by the first pair that is
 // not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestRowComparison(t *testing.T) {

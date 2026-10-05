@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -468,6 +469,12 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
 	l, r = paramText(le, l), paramText(re, r)
+	// A driver sends a boolean or a time bound to a parameter in a form of
+	// its own, which against a value of another such type Postgres reads as
+	// that type's input or the driver refuses to encode.
+	if mismatchedParam(le, l, r) || mismatchedParam(re, r, l) {
+		return nil, nil, x.unsupported("a parameter holding a value of another type compared with a boolean, a time or a uuid")
+	}
 	// Rows are compared pair by pair in compareRows; one reaching here comes
 	// from a context that does not, such as HAVING, CASE or NULLIF.
 	if _, ok := l.([]any); ok {
@@ -517,10 +524,11 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 	if !lp && !rp && (isText(l) && isNumber(r) || isNumber(l) && isText(r)) {
 		return nil, nil, x.unsupported("a comparison of text with a number")
 	}
-	// Boolean and timestamp columns hold their own values, so text against
-	// one comes from a text expression, which Postgres has no operator for.
+	// Boolean, timestamp and uuid columns hold their own values, so text
+	// against one comes from a text expression, which Postgres has no
+	// operator for.
 	if !lp && !rp && (isText(l) && isOther(r) || isOther(l) && isText(r)) {
-		return nil, nil, x.unsupported("a comparison of text with a boolean or a time")
+		return nil, nil, x.unsupported("a comparison of text with a boolean, a time or a uuid")
 	}
 	// Postgres sorts NaN above every number, which the comparisons do not.
 	if isNaN(l) || isNaN(r) {
@@ -620,6 +628,13 @@ func unmodeledTextParam(e sqlir.Expr, v, other any) bool {
 	}
 	_, isInt := integer(derefValue(v))
 	return !isInt
+}
+
+func mismatchedParam(e sqlir.Expr, v, other any) bool {
+	if _, ok := e.(*sqlir.Param); !ok || !isOther(v) || !isOther(other) {
+		return false
+	}
+	return reflect.TypeOf(derefValue(v)) != reflect.TypeOf(derefValue(other))
 }
 
 func untypedExpr(e sqlir.Expr) bool {
@@ -726,6 +741,12 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		return v, nil
 	}
 	switch derefValue(other).(type) {
+	case uuidValue:
+		c, ok := canonicalUUID(s)
+		if !ok {
+			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), "", "", "")
+		}
+		return uuidValue(c), nil
 	case bool:
 		b, ok := parseBool(s)
 		if !ok {
@@ -1479,7 +1500,10 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		x.tx.db.setval(fmt.Sprint(derefValue(args[0])), v, called)
 		return v, nil
 	case "gen_random_uuid", "uuid_generate_v4":
-		return x.tx.db.newUUID(), nil
+		if x.tx.db.kind.InnoDB() {
+			return x.tx.db.newUUID(), nil // MySQL's UUID() returns text
+		}
+		return uuidValue(x.tx.db.newUUID()), nil
 	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
 		// Postgres fixes now() at the start of the transaction, which a
 		// transaction that starts early and commits late depends on.

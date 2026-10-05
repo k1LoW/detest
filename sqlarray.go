@@ -101,6 +101,21 @@ func (x *sqlExec) checkArrays(stmt sqlir.Statement) error {
 			return x.unsupported("an array parameter anywhere but the right side of = ANY or <> ALL")
 		}
 	}
+	for _, c := range sqlir.ArrayCmps(stmt) {
+		sample, ok := x.arrayTypes[c]
+		if !ok {
+			continue
+		}
+		a, err := x.arrayElems(c)
+		if err != nil {
+			return err
+		}
+		for i := range a.vals {
+			if _, err := x.untyped(a.exprs[i], a.vals[i], sample); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

@@ -4458,6 +4458,22 @@ func TestMySQLBackfillSharesVolatileDefault(t *testing.T) {
 	}
 }
 
+// MySQL has no uuid type, so UUID() is text and compares with text.
+func TestMySQLUUIDIsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, u VARCHAR(36))")
+	mustExec(t, db, "INSERT INTO t VALUES (1, UUID())")
+	var got any
+	if err := db.QueryRow("SELECT u FROM t WHERE id = 1").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM t WHERE u = ?", got).Scan(&n); err != nil || n != 1 {
+		t.Errorf("UUID() read back as %#v and matched %d rows (%v), want 1", got, n, err)
+	}
+}
+
 // ON UPDATE CURRENT_TIMESTAMP compares the row as it stores it, so a value
 // that converts back to the one held changes nothing.
 func TestMySQLOnUpdateComparesStoredValues(t *testing.T) {
