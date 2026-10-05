@@ -248,6 +248,12 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 				return nil, err
 			}
 		}
+		if err := c.exprs(sel.Limit, sc); err != nil {
+			return nil, err
+		}
+		if err := c.exprs(sel.Offset, sc); err != nil {
+			return nil, err
+		}
 		return out, nil
 	}
 	sc := &colScope{items: map[string]colSet{}, outer: outer}
