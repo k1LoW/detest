@@ -385,27 +385,33 @@ func TestEqualRowUnderUniqueWaits(t *testing.T) {
 	})
 }
 
-// An isolation level set by SQL is refused as one asked for in BeginTx is,
-// rather than ignored, which would run the transaction at Read Committed where
-// production runs it at another level, and so is READ ONLY, under which the
-// server fails every write. Read Committed itself, READ WRITE and DEFERRABLE
-// change nothing and run.
-func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
+// SET TRANSACTION and the transaction_isolation and transaction_read_only
+// settings are refused in every form, as MySQL's are, since Postgres fails
+// them once the transaction has run a query and the level is BeginTx's to
+// set. The session defaults run when they ask for Read Committed (Read
+// Uncommitted is Read Committed in Postgres) and READ WRITE, and are
+// refused for another level or for READ ONLY, under which the server fails
+// every write.
+func TestTransactionSettingsSetBySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
 	for _, q := range []string{
 		`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
-		`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
-		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
-		`SET transaction_isolation = 'serializable'`,
-		`SET default_transaction_isolation TO 'repeatable read'`,
-		`SET LOCAL transaction_isolation = 'repeatable read'`,
+		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
 		`SET TRANSACTION READ ONLY`,
-		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
-		`SET transaction_read_only = on`,
-		`SET default_transaction_read_only TO 'true'`,
+		`SET TRANSACTION READ WRITE`,
 		`SET TRANSACTION SNAPSHOT '00000003-0000001B-1'`,
+		`SET transaction_isolation = 'read committed'`,
+		`SET LOCAL transaction_isolation = 'repeatable read'`,
+		`SET transaction_read_only = on`,
+		`SET transaction_read_only = 1`,
+		`RESET transaction_isolation`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
+		`SET default_transaction_isolation TO 'repeatable read'`,
+		`SET default_transaction_read_only TO 'true'`,
+		`SET default_transaction_read_only = 1`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -420,14 +426,12 @@ func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 		}
 	}
 	for _, q := range []string{
-		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
-		`SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`,
-		`SET TRANSACTION READ WRITE`,
-		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE, NOT DEFERRABLE`,
-		`SET transaction_read_only = off`,
 		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED`,
-		`SET transaction_isolation = 'read committed'`,
-		`RESET transaction_isolation`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ UNCOMMITTED, READ WRITE, NOT DEFERRABLE`,
+		`SET default_transaction_isolation TO 'read committed'`,
+		`SET default_transaction_read_only = off`,
+		`SET default_transaction_read_only = 0`,
+		`RESET default_transaction_isolation`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -437,5 +441,24 @@ func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 			t.Errorf("%s: got %v, want nil", q, err)
 		}
 		_ = tx.Rollback()
+	}
+}
+
+// make_interval's one argument is taken as seconds, which is the named form
+// backoff SQL writes; Postgres reads a positional argument as years and has
+// six other names, so every other form is refused.
+func TestMakeIntervalArguments(t *testing.T) {
+	for _, q := range []string{
+		`SELECT make_interval(1)`,
+		`SELECT make_interval(days => 1)`,
+		`SELECT make_interval(secs => 1, mins => 1)`,
+		`SELECT make_interval()`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	if err := CheckSQL(postgres.New(), `SELECT now() - make_interval(secs => 30)`); err != nil {
+		t.Errorf("make_interval(secs => 30): got %v", err)
 	}
 }

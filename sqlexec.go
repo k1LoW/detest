@@ -3524,12 +3524,22 @@ var otherArity = map[string][]int{
 }
 
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
+	if what := arityMismatch(f); what != "" {
+		return x.unsupported(what)
+	}
+	return nil
+}
+
+// arityMismatch names what is wrong with a call's arguments, or returns ""
+// when the call has the arguments its function takes. The statement alone
+// decides it, so CheckSQL asks it too.
+func arityMismatch(f *sqlir.FuncCall) string {
 	arity, known := strictFuncs[f.Name]
 	if !known {
 		arity, known = otherArity[f.Name]
 	}
 	if known && !slices.Contains(arity, len(f.Args)) {
-		return x.unsupported(fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args)))
+		return fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args))
 	}
 	// round with a scale exists only for numeric; detest keeps no type for
 	// its argument but can see a cast to a float or a call of random.
@@ -3539,10 +3549,10 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 		c, cast := f.Args[0].(*sqlir.Cast)
 		r, call := f.Args[0].(*sqlir.FuncCall)
 		if cast && (c.Type == "float4" || c.Type == "float8") || call && r.Name == "random" {
-			return x.unsupported("round of a float with a scale")
+			return "round of a float with a scale"
 		}
 	}
-	return nil
+	return ""
 }
 
 func (x *sqlExec) callFunc(name string, args []any) (any, error) {

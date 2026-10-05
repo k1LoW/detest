@@ -18,11 +18,14 @@ import (
 //
 // The check runs against a database with no schema, so it reports the cases
 // the statement decides on its own, and refuses a function or an operator
-// detest does not evaluate wherever it stands in the statement, where a run
-// reaches only the expressions it evaluates. A case that depends on the
+// detest does not evaluate, or a call with other arguments than the function
+// takes, wherever it stands in a SELECT, INSERT, UPDATE or DELETE, where a
+// run reaches only the expressions it evaluates. A case that depends on the
 // schema, such as a write that needs a generated column detest cannot
 // compute, or a comparison whose outcome depends on the column's type,
-// passes here and fails with ErrUnsupportedSQL when the statement runs.
+// passes here and fails with ErrUnsupportedSQL when the statement runs. So
+// does an expression in a default, a CHECK or a generated column, which
+// loads with the schema and is refused by the write that reads it.
 func CheckSQL(d Server, query string) error {
 	kind := sqlir.ImplOf(d)
 	if kind == nil {

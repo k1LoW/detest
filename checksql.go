@@ -266,6 +266,9 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			}
 			return c.refuse(v.Name + "(...)")
 		}
+		if what := arityMismatch(v); what != "" {
+			return unsupported(what, c.query)
+		}
 		return c.exprs(v.Args)
 	case *sqlir.WindowFunc:
 		if !windowFuncs[v.Func.Name] && !aggregateFuncs[v.Func.Name] {

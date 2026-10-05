@@ -163,28 +163,28 @@ type pgConv struct {
 
 func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what, c.query) }
 
-// transactionSet refuses a SET that asks for an isolation level other than
-// Read Committed, which detest runs Postgres at, or for a read-only
-// transaction: SET TRANSACTION, SET SESSION CHARACTERISTICS AS TRANSACTION,
-// SET TRANSACTION SNAPSHOT, and the transaction_isolation,
-// default_transaction_isolation, transaction_read_only and
-// default_transaction_read_only settings. Read
-// Uncommitted is Read Committed in Postgres. A level asked for in BeginTx is
-// refused by the driver; one set by SQL would otherwise be ignored and the
-// transaction run at another level than production's. A read-only
-// transaction fails every write with 25006, which detest does not model, so
-// it is refused as MySQL's tx_read_only is; READ WRITE is the default and
-// runs. DEFERRABLE changes nothing outside Serializable and is ignored.
+// transactionSet refuses the SETs that change what a transaction is. SET
+// TRANSACTION, SET TRANSACTION SNAPSHOT and the transaction_isolation and
+// transaction_read_only settings are refused in every form, as MySQL's SET
+// TRANSACTION is: Postgres fails them with 25001 once the transaction has
+// run a query, which detest does not track, and the level and the read-only
+// state they set are the driver's to take from BeginTx. The session defaults,
+// SET SESSION CHARACTERISTICS AS TRANSACTION and default_transaction_*, have
+// no such timing rule and run when they ask for what detest runs anyway, Read
+// Committed (Read Uncommitted is Read Committed in Postgres) and READ WRITE.
+// A read-only default would fail every write with 25006, which detest does
+// not model. DEFERRABLE changes nothing outside Serializable and is ignored.
 func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 	var level, readOnly string
 	switch v.Kind {
 	case pg.VariableSetKind_VAR_SET_MULTI:
-		if v.Name == "TRANSACTION SNAPSHOT" {
-			// Imports another session's snapshot, which needs Repeatable
-			// Read or Serializable, so Read Committed fails it with 25001.
+		switch v.Name {
+		case "TRANSACTION":
+			return c.unsupported("SET TRANSACTION (use database/sql's BeginTx)")
+		case "TRANSACTION SNAPSHOT":
 			return c.unsupported("SET TRANSACTION SNAPSHOT")
-		}
-		if v.Name != "TRANSACTION" && v.Name != "SESSION CHARACTERISTICS" {
+		case "SESSION CHARACTERISTICS":
+		default:
 			return nil
 		}
 		for _, a := range v.Args {
@@ -196,18 +196,28 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 				readOnly = strconv.FormatInt(int64(d.Arg.GetAConst().GetIval().GetIval()), 10)
 			}
 		}
-	case pg.VariableSetKind_VAR_SET_VALUE:
-		var val string
-		if len(v.Args) > 0 {
-			val = v.Args[0].GetAConst().GetSval().GetSval()
-		}
+	case pg.VariableSetKind_VAR_SET_VALUE, pg.VariableSetKind_VAR_RESET:
 		switch v.Name {
-		case "transaction_isolation", "default_transaction_isolation":
-			level = val
-		case "transaction_read_only", "default_transaction_read_only":
-			readOnly = val
+		case "transaction_isolation", "transaction_read_only":
+			return c.unsupported("SET " + v.Name + " (use database/sql's BeginTx)")
+		case "default_transaction_isolation", "default_transaction_read_only":
 		default:
 			return nil
+		}
+		var val string
+		if len(v.Args) > 0 {
+			// The constant as written: a string, or the integer or boolean
+			// a boolean setting also takes (= 1, = on, = 'true').
+			if e, err := c.expr(v.Args[0]); err == nil {
+				if k, ok := e.(*sqlir.Const); ok && k.Value != nil {
+					val = fmt.Sprint(k.Value)
+				}
+			}
+		}
+		if v.Name == "default_transaction_isolation" {
+			level = val
+		} else {
+			readOnly = val
 		}
 	default:
 		return nil
@@ -1730,6 +1740,15 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			return nil, c.unsupported("aggregate ORDER BY")
 		case fc.AggWithinGroup:
 			return nil, c.unsupported("aggregate WITHIN GROUP")
+		}
+		if len(fc.Funcname) > 0 && strings.EqualFold(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval(), "make_interval") {
+			// The executor takes make_interval's one argument as seconds,
+			// which is the named form backoff SQL writes. Postgres reads a
+			// positional first argument as years and has six other names,
+			// which the executor would also take for seconds.
+			if len(fc.Args) != 1 || fc.Args[0].GetNamedArgExpr().GetName() != "secs" {
+				return nil, c.unsupported("make_interval with an argument other than secs => n")
+			}
 		}
 		args, err := c.exprs(fc.Args)
 		if err != nil {
