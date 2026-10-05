@@ -24,11 +24,13 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // did not draw, so the exploration is never complete. A violation is
 // reported with its schedule and replays with DETEST_REPLAY as under
 // DepthFirst. Each run draws from its own generator, derived from seed and
-// the run's index, so the runs drawn and the violation reported do not
-// depend on Workers. Shard splits the runs rather than the tree: shard index
-// of total makes the runs whose index leaves index when divided by total,
-// and depth is not used. Of DepthFirst and Random, the one passed last
-// applies.
+// the run's index, so the schedule of a run does not depend on Workers, nor
+// does the violation reported when the exploration stops at it or at
+// MaxRuns. MaxDuration ends it after however many runs the workers made by
+// then, which differs from one execution to the next. Shard splits the runs
+// rather than the tree: shard index of total makes the runs whose index
+// leaves index when divided by total, and depth is not used. Of DepthFirst
+// and Random, the one passed last applies.
 func Random(seed uint64) Option {
 	return func(s *Sim) { s.strategy = strategy{random: true, seed: seed} }
 }
