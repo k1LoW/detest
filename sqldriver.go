@@ -32,7 +32,7 @@ func CheckSQL(d Server, query string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkStatic(s.stmt, query); err != nil {
+	if err := checkStatic(s.stmt, query, kind.InnoDB()); err != nil {
 		return err
 	}
 	pdb := &DB{name: "probe", kind: kind}

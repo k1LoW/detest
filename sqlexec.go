@@ -3553,9 +3553,10 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			args[i] = string(b)
 		}
 	}
-	if !knownFuncs[name] {
-		// Refused here so that knownFuncs, which CheckSQL reads, is the one
-		// list of what runs; a name the switch below lacks is refused too.
+	if !knownFunc(name, x.tx.db.kind.InnoDB()) {
+		// Refused here so that knownFuncs and mysqlFuncs, which CheckSQL
+		// reads, are the one list of what runs; a name the switch below
+		// lacks is refused too.
 		return nil, errUnknownExpr{name + "(...)"}
 	}
 	if _, strict := strictFuncs[name]; (strict || mysqlNullIfAnyNull[name]) && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {

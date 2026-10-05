@@ -6,10 +6,10 @@ import (
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
-// knownFuncs are the functions callFunc computes, by the names the dialects
-// give them. callFunc refuses any other name, and CheckSQL refuses it before
-// running the statement, since with no rows to evaluate over the executor
-// would never reach the call.
+// knownFuncs are the functions callFunc computes for every kind of server,
+// by their Postgres names. callFunc refuses any other name, and CheckSQL
+// refuses it before running the statement, since with no rows to evaluate
+// over the executor would never reach the call.
 var knownFuncs = map[string]bool{
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
 	"left": true, "lower": true, "upper": true, "length": true, "char_length": true, "octet_length": true, "concat": true, "hashtext": true,
@@ -17,9 +17,19 @@ var knownFuncs = map[string]bool{
 	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true, "statement_timestamp": true,
 	"random": true, "abs": true, "floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true,
 	"make_interval": true, "pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
-	// MySQL's, under the executor's names for them (mysql/expr.go).
+}
+
+// mysqlFuncs are the functions callFunc computes on InnoDB only, under the
+// executor's names for them (mysql/expr.go). Written in a statement for
+// Postgres they name no function the server has, so they are refused there.
+var mysqlFuncs = map[string]bool{
 	"last_insert_id": true, "mysql_concat": true, "mysql_greatest": true, "mysql_least": true, "mysql_nullif": true,
 	"mysql_signed": true, "mysql_double": true, "mysql_dividend": true, "mysql_truth": true,
+}
+
+// knownFunc reports whether callFunc computes name on a server of the kind.
+func knownFunc(name string, innodb bool) bool {
+	return knownFuncs[name] || innodb && mysqlFuncs[name]
 }
 
 // aggregateFuncs are the aggregates the executor folds.
@@ -31,7 +41,9 @@ var windowFuncs = map[string]bool{
 	"row_number": true, "rank": true, "dense_rank": true, "lag": true, "lead": true, "first_value": true, "last_value": true,
 }
 
-// knownBinaryOps are the operators the executor's binary evaluates.
+// knownBinaryOps are the operators the executor's binary evaluates. <=> is
+// MySQL's, which its converter alone produces, since the Postgres converter
+// refuses it.
 var knownBinaryOps = map[string]bool{
 	"AND": true, "OR": true,
 	"=": true, "<>": true, "!=": true, "<": true, "<=": true, ">": true, ">=": true, "<=>": true,
@@ -46,12 +58,15 @@ var knownBinaryOps = map[string]bool{
 // exploration. The schema statements are left alone: an expression in a
 // default or a CHECK loads unconverted and is refused by the write that reads
 // it, as README's Approximate rules say.
-func checkStatic(st sqlir.Statement, query string) error {
-	c := &staticCheck{query: query}
+func checkStatic(st sqlir.Statement, query string, innodb bool) error {
+	c := &staticCheck{query: query, innodb: innodb}
 	return c.statement(st)
 }
 
-type staticCheck struct{ query string }
+type staticCheck struct {
+	query  string
+	innodb bool
+}
 
 func (c *staticCheck) refuse(what string) error {
 	return unsupported("an expression in the statement detest cannot evaluate ("+what+")", c.query)
@@ -245,7 +260,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 	case *sqlir.Unconverted:
 		return c.refuse("an expression detest could not convert")
 	case *sqlir.FuncCall:
-		if !knownFuncs[v.Name] && !aggregateFuncs[v.Name] {
+		if !knownFunc(v.Name, c.innodb) && !aggregateFuncs[v.Name] {
 			if sqlir.OtherAggregates[v.Name] {
 				return unsupported("aggregate "+v.Name, c.query)
 			}

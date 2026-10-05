@@ -31,6 +31,9 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE age(u.at, t.at) > interval '1 day')`,
 			`SELECT CASE WHEN a > 1 THEN mod(a, 2) ELSE 0 END FROM t`,
 			`SELECT * FROM t WHERE 'x' = ANY(tags)`,
+			`SELECT mysql_signed(id) FROM t`,
+			`SELECT last_insert_id()`,
+			`SELECT * FROM t WHERE a <=> b`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",
@@ -49,6 +52,7 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 		mysql.New(): {
 			"SELECT LOWER(name), IFNULL(n, 0), UUID() FROM t WHERE created_at > NOW()",
 			"INSERT INTO t (id) VALUES (?) ON DUPLICATE KEY UPDATE n = VALUES(n)",
+			"SELECT LAST_INSERT_ID(), CAST(n AS SIGNED) FROM t WHERE a <=> ?",
 		},
 	}
 	for srv, qs := range refused {
@@ -67,9 +71,10 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 	}
 }
 
-// knownFuncs is what CheckSQL and callFunc agree on, so every name in it must
-// have a case in callFunc's switch, and every case must be in it. Otherwise
-// CheckSQL would pass a function the run refuses, or the reverse.
+// knownFuncs and mysqlFuncs are what CheckSQL and callFunc agree on, so
+// every name in them must have a case in callFunc's switch, and every case
+// must be in one of them. Otherwise CheckSQL would pass a function the run
+// refuses, or the reverse.
 func TestKnownFuncsMatchCallFunc(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "sqlexec.go", nil, 0)
@@ -103,10 +108,18 @@ func TestKnownFuncsMatchCallFunc(t *testing.T) {
 		if !cases[name] {
 			t.Errorf("knownFuncs has %q, which callFunc has no case for", name)
 		}
+		if mysqlFuncs[name] {
+			t.Errorf("%q is in knownFuncs and mysqlFuncs both", name)
+		}
+	}
+	for name := range mysqlFuncs {
+		if !cases[name] {
+			t.Errorf("mysqlFuncs has %q, which callFunc has no case for", name)
+		}
 	}
 	for name := range cases {
-		if !knownFuncs[name] {
-			t.Errorf("callFunc has a case for %q, which knownFuncs lacks", name)
+		if !knownFuncs[name] && !mysqlFuncs[name] {
+			t.Errorf("callFunc has a case for %q, which knownFuncs and mysqlFuncs lack", name)
 		}
 	}
 }

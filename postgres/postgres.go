@@ -1903,6 +1903,11 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			return nil, err
 		}
 		switch op {
+		case "<=>":
+			// MySQL's null-safe equality, which the executor evaluates for
+			// its converter. Postgres has no such operator and fails the
+			// statement with 42883.
+			return nil, c.unsupported("operator <=>")
 		case "~~":
 			op = "LIKE"
 		case "!~~":
