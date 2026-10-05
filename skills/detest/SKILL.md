@@ -15,7 +15,7 @@ Do not shorten it to "simulates the database", since the real code runs and the 
 
 **Start only on the user's decision.** If the user has not asked for detest or In-Process DST, and has not accepted a suggestion to use it, do not begin the workflow. Suggest it in one or two lines, saying what it would check in their code and that it adds a test dependency, and wait. A yes to that suggestion is the decision; the checkpoints below still apply.
 
-**The user is assumed to know nothing about detest.** They decide to use it; you do everything else. Talk to them about their code and the rules it must keep, never about detest's API, unless they ask. The user is most likely the person who wrote or maintains the code and who will fix what you find, so explain in terms of the codebase, naming the functions, the `file:line`, the SQL statements and the transactions involved. Use the business story to say why it matters, not in place of the code. How much of the domain you can name depends on how much you learned from the session and the code, so say what you inferred when it is a guess. Ask only the questions whose answers you cannot get from the code, and offer a proposed answer with each so they can just confirm. Speak the user's language.
+**The user is assumed to know nothing about detest.** They decide to use it; you do everything else. Talk to them about their code and the rules it must keep, never about detest's API, unless they ask. The user owns the code and will fix what you find, but may not hold it in their head. Judge how well they know it from the session. A user who wrote or edited this code in the session, or talked about it at the level of functions and statements, knows it; a user who only named a feature, or asked for detest without pointing at any code, may know what it does only roughly. Every proposal and report says, however familiar the user is, which domain the code belongs to, which operation is targeted, and what the test does to it. For a user who does not know the code well, also walk through what the operation does before any scenario, namely which function is called, what it reads and writes and in which transactions, with the `file:line` of each. Then explain the scenario in those terms, naming the functions, the SQL statements and the transactions involved. Use the business story to say why it matters, not in place of the code. How much of the domain you can name depends on how much you learned from the session and the code, so say what you inferred when it is a guess. Ask only the questions whose answers you cannot get from the code, and offer a proposed answer with each so they can just confirm. Speak the user's language.
 
 ## Workflow
 
@@ -100,12 +100,40 @@ Present 2 to 5 candidates, ranked by how likely and how costly the bug would be,
 - the rule that would be broken (this becomes the invariant)
 - what detest would vary (interleavings only, or also crashes, duplicate deliveries, lost responses)
 
-Then agree on the details with the user. Propose an answer to each question from what the code says, and let them correct it:
+Then agree on the details with the user. Propose an answer to each question from what the code says, and let them correct it. Present the proposal in the shape below, which is the scenario the test will run, told from the code up.
 
 - **The rule that must never break**, stated so it can be checked from the database or from what the callers saw. "Stock never goes below zero and orders never exceed the initial stock." This is the most important thing to get right, since detest proves exactly the invariant you write and nothing else.
 - **Who runs concurrently, and how many.** Two concurrent actors are usually enough to show a race; three rarely add anything but cost.
 - **Which failures happen in production**: workers dying mid-flow, a queue delivering twice or losing a message, an external call whose response is lost after it took effect.
 - **Which outcomes are acceptable.** A request that fails cleanly with "sold out" is fine; one that fails with a deadlock error may or may not be, depending on whether callers retry.
+
+```markdown
+## Test scenario: <flow name>
+
+### What this code does
+<always: the domain, the operation targeted and what the test does to it, in two to four sentences, such as "In the shop's checkout, `Buy` sells one unit of a product. The test has two buyers call it at once for the last unit."
+For a user who does not know the code well, also the path a request takes, one line per step, such as
+1. `Buy` (shop/service.go:30) begins a transaction
+2. reads the stock with `SELECT stock FROM products WHERE id = $1` (shop/repo.go:43)
+3. returns `ErrSoldOut` when it is 0, otherwise `UPDATE products SET stock = stock - 1` (shop/repo.go:51) and `INSERT INTO orders` (shop/repo.go:58)
+4. commits>
+
+### What the test does
+- Data before each run: <the concrete rows, such as one product `p1` with stock 1>
+- What happens at the same time: <who calls what with which arguments, such as two buyers, alice and bob, each call `Buy(p1)` once>
+- Faults injected: <none, or what fails, where, and what it stands for in production>
+- What is checked: <the rule in plain words, and how it is read from the database or the callers' results>
+- Acceptable outcomes: <such as one buyer gets `ErrSoldOut`>; not acceptable: <such as a deadlock error, if callers do not retry>
+- Situation that must be reached: <what the bug needs, such as both buyers past the stock check before either commits>
+
+### The order that would break it
+<the suspected interleaving, one numbered step per operation, with the actor, the `file:line` and what it reads or writes, ending in the broken rule>
+
+### Guesses
+<what you assumed because the code did not say, or "none">
+```
+
+Write the whole proposal in the message before asking for the decision. A question tool's options carry only the choice (go ahead, change the rule, change who runs or what fails), not the scenario, and the user should not have to open them to learn what is being tested. Never stand in for the proposal with a line saying the scenario and rules were worked out. Every name in it must be one the user can find in their code. Names you make up for the test, such as actor names or seeded ids, are introduced with what they stand for the first time they appear.
 
 Do not proceed on an invariant the user has not agreed with. A wrong invariant produces either a false alarm or a false sense of safety.
 
@@ -192,13 +220,13 @@ Rules that, when broken, silently make the test meaningless:
 
 ## 5. Run and iterate
 
-Before the first run, show the user the conditions the test sets, in plain words, and ask once whether they are fine. Keep it to a short list with your proposal filled in, so the answer can be a yes.
+Before the first run, show the user the conditions the test sets, in plain words, and ask once whether they are fine. Time has passed since step 2 and the user may not remember the scenario, so restate it in a few lines first (what the code does, who does what at the same time, what is checked), then give what is new, with your proposal filled in so the answer can be a yes.
 
-- who runs, how many times, and with which seeded data
-- the faults injected (none, worker crashes, duplicate or lost messages, lost responses) and how many per run
-- the bounds on the search (`MaxPreemptions`, `MaxRuns`, `MaxDuration`, or none) and what they leave out
-- the invariants and the `Sometimes` conditions
+- anything about the scenario that changed while writing the test, and why
+- the bounds on the search and what they leave out, why you chose them, and what widening them later would add and cost
 - any way the test's schema differs from production's, such as a collation override (see `references/troubleshooting.md`), with what it leaves unchecked
+
+Describe each bound by what it limits in the user's code, never by its option name, such as "at most two points per run where one buyer is paused in the middle of `Buy` and the other runs" rather than `MaxPreemptions(2)`. Keep progress ("the test compiles") on a line of its own, apart from the questions.
 
 These decide what the result can claim, so the user should own them. Ask again only when you change one of them later, such as when widening the scenario or adding a bound to make the search finish.
 
@@ -234,6 +262,9 @@ Always end with a report the user can act on without knowing detest. It answers 
 
 ```markdown
 ## In-Process DST report: <flow name>
+
+### What the code does
+<the same few lines as in the step 2 proposal, so the report reads on its own>
 
 ### What was run
 - Code under test: <functions/handlers, with file:line>, real code, unchanged
