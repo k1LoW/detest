@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -184,6 +185,13 @@ type run struct {
 	spinProc    *Proc
 	spinCount   int
 	spinVersion int
+	// handoffs counts the times a spinning process gave way with committed
+	// state at handoffVersion, and spinners and gaveTo name the processes on
+	// either side, so that processes taking turns at spinning are caught too.
+	handoffs       int
+	handoffVersion int
+	spinners       []string
+	gaveTo         []string
 	// outside counts the processes blocked outside detest, which may wake and
 	// call into detest without being resumed. Those calls run concurrently with
 	// the resumed process, hence atomic.
@@ -397,8 +405,14 @@ func (r *run) execute() (v *violation) {
 		}
 		o := opts[i]
 		cur := r.current
+		gaveWay, before := r.spinner(), r.version
 		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
 		r.countSpin(o)
+		if gaveWay != nil {
+			if v := r.handoff(gaveWay, before); v != nil {
+				return v
+			}
+		}
 		if r.pending != nil {
 			return r.pending
 		}
@@ -437,6 +451,32 @@ func (r *run) countSpin(o option) {
 	default:
 		r.spinProc, r.spinCount, r.spinVersion = o.p, 1, r.version
 	}
+}
+
+// handoff counts a spinning process giving way. Giving way lets another
+// process take a step, which may make true what the spinner waits for
+// without changing committed state, so the spinner may run again after it.
+// Processes that only take turns at spinning would then go on for ever, so
+// MaxSpins handoffs with no change in between are a progress violation.
+func (r *run) handoff(p *Proc, before int) *violation {
+	if r.version != before {
+		r.handoffs, r.spinners, r.gaveTo = 0, nil, nil // the step it gave way to changed something
+		return nil
+	}
+	if before != r.handoffVersion {
+		r.handoffs, r.handoffVersion, r.spinners, r.gaveTo = 0, before, nil, nil
+	}
+	r.handoffs++
+	if !slices.Contains(r.spinners, p.name) {
+		r.spinners = append(r.spinners, p.name)
+	}
+	if to := r.current; to != nil && !slices.Contains(r.gaveTo, to.name) {
+		r.gaveTo = append(r.gaveTo, to.name)
+	}
+	if r.handoffs <= r.s.maxSpins {
+		return nil
+	}
+	return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between, so they would go on for ever; raise MaxSpins if they do that much work without committing", strings.Join(r.spinners, ", "), strings.Join(r.gaveTo, ", "), r.handoffs)}
 }
 
 // spinner returns the process that took MaxSpins steps in a row without

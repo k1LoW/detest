@@ -107,8 +107,10 @@ func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 // the setter from running. Schedules where a process goes on longer than
 // that without changing anything are left out. A process that takes that
 // many steps while nothing else can run would spin for ever in production
-// too, and is reported as a progress violation; raise n for code that does
-// that much work alone without committing.
+// too, and is reported as a progress violation, as are processes that give
+// way to each other n times with no change in between, such as two that
+// each wait for the other; raise n for code that does that much work
+// without committing.
 func MaxSpins(n int) Option { return func(s *Sim) { s.maxSpins = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per
