@@ -78,7 +78,7 @@ mysql.New(mysql.Isolation(detest.ReadCommitted), mysql.Database("app"), mysql.Co
 
 Without `Errors`, the app sees `*detest.DBError`, which matches `detest.ErrUniqueViolation`, `detest.ErrDeadlock`, `detest.ErrLockNotAvailable` and the other sentinels with `errors.Is`.
 
-`detest.CheckSQL(postgres.New(), query)` tells whether detest can run a statement without a schema, and refuses a function or an operator detest does not know, or a call with the wrong arguments, wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`. A case decided by the schema or the values passes it and fails in the run, as does an expression in a default, a `CHECK` or a generated column, which the write that reads it refuses. `ddl.From(ctx, liveDB, postgres.New())` (package `github.com/k1LoW/detest/ddl`) writes the tables of a live database as DDL detest accepts.
+`detest.CheckSQL(postgres.New(), query)` tells whether detest can run a statement without a schema, and refuses a function or an operator detest does not know, or a call with the wrong arguments, wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`. A case decided by the schema or the values passes it and fails in the run, as does an expression in a `CHECK` or a generated column, which the write that evaluates it refuses. A default detest cannot evaluate passes both: a write that leaves the column out stores the `Unknown` marker, and is refused only when the table's own schema reads the column. `ddl.From(ctx, liveDB, postgres.New())` (package `github.com/k1LoW/detest/ddl`) writes the tables of a live database as DDL detest accepts.
 
 ## Hand-written model API
 

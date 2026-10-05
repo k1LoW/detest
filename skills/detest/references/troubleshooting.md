@@ -16,7 +16,7 @@ detest refuses SQL it cannot run with the server's exact semantics, instead of a
   Without agreement the refusal stands. Say which flows cannot be checked, and offer a target that does not touch the column. In the report, list an agreed override under what the result does not cover.
 - **ORM auto-migration or startup queries** (`AutoMigrate`, version checks, pings). Skip them in the test (`DisableAutomaticPing`, `SkipInitializeWithVersion`, schema from files).
 
-`detest.CheckSQL(server, query)` checks a statement in isolation, refusing the functions and operators detest does not know wherever they stand in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`; a case decided by the schema or the values passes it and fails in the run, as does an expression in a default, a `CHECK` or a generated column, which the write that reads it refuses. `ObserveSQL` lists every statement a flow sends.
+`detest.CheckSQL(server, query)` checks a statement in isolation, refusing the functions and operators detest does not know wherever they stand in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`; a case decided by the schema or the values passes it and fails in the run, as does an expression in a `CHECK` or a generated column, which the write that evaluates it refuses. A default detest cannot evaluate passes both, and a write that leaves the column out stores the `Unknown` marker unless the table's own schema reads the column. `ObserveSQL` lists every statement a flow sends.
 
 ## `detest: no scheduling progress for 30s ... Goroutines blocked in the bubble`
 

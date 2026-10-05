@@ -24,8 +24,10 @@ import (
 // schema, such as a write that needs a generated column detest cannot
 // compute, or a comparison whose outcome depends on the column's type,
 // passes here and fails with ErrUnsupportedSQL when the statement runs. So
-// does an expression in a default, a CHECK or a generated column, which
-// loads with the schema and is refused by the write that reads it.
+// does an expression in a CHECK or a generated column, which loads with the
+// schema and is refused by the write that evaluates it, and a default detest
+// cannot evaluate, which a write that leaves the column out stores as the
+// Unknown marker unless the table's own schema reads the column.
 func CheckSQL(d Server, query string) error {
 	kind := sqlir.ImplOf(d)
 	if kind == nil {
