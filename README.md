@@ -168,7 +168,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - Defaults, serial and identity columns, sequences with their `START`, `INCREMENT` and `RESTART`, with values that repeat from run to run
 - Stored generated columns, computed on every write. A Postgres 18 virtual column loads through `ddl.From`, which writes it as stored, but not from a Postgres 18 dump, whose `GENERATED ALWAYS AS (...)` without `STORED` the grammar detest parses with rejects
 - Schemas and `search_path` (`postgres.SearchPath`)
-- Migrations and `pg_dump --schema-only` output run as they are, outside a transaction, apart from the DDL forms listed under **Not supported**. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
+- Migrations and `pg_dump --schema-only` output run as they are, in a transaction or not, apart from the DDL forms listed under **Not supported**. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
 - `ddl.From` reads the tables of a live database and writes DDL that detest accepts
 - `store.Ignore(...)` takes tables the invariants do not look at, such as an audit log, out of the simulation. Writes to them are dropped and are no scheduling points, which keeps the exploration small
 
@@ -188,7 +188,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Isolation*
 
 - Isolation levels other than Read Committed, asked for in `BeginTx` or set as the session default by SQL (`SET SESSION CHARACTERISTICS AS TRANSACTION`, `default_transaction_isolation`). `READ UNCOMMITTED` as the session default runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
-- `SET TRANSACTION` in any form, `SET TRANSACTION SNAPSHOT`, and the `transaction_isolation` and `transaction_read_only` settings, as for MySQL. Postgres fails them once the transaction has run a query, which detest does not track, and the level is `BeginTx`'s to set
+- `SET TRANSACTION` in any form, `SET TRANSACTION SNAPSHOT`, and the `transaction_isolation` and `transaction_read_only` settings in any form (`SET`, `RESET`, `TO DEFAULT`, `FROM CURRENT`), as for MySQL. Postgres fails them once the transaction has run a query, which detest does not track, and the level is `BeginTx`'s to set
 - A read-only session default (`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`, `default_transaction_read_only`), under which the server fails every write. `TxOptions.ReadOnly` in `BeginTx` is accepted and ignored, as before
 
 *Query forms*
@@ -198,7 +198,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - `RIGHT` and `FULL` joins, `JOIN ... USING`, `NATURAL JOIN`, `TABLESAMPLE`, `SELECT INTO`, `INSERT ... DEFAULT VALUES`
 - Set-returning functions in `FROM` or in the select list other than `generate_series`, such as `unnest`
 - `ANY (subquery)` with an operator other than `=`, row comparisons of different shapes
-- Window frames other than the default and the whole partition, window functions other than the seven listed and the aggregates
+- Window frames other than the default and the whole partition, window functions other than the seven listed and the aggregates, and a window call with other arguments than the function takes
 - Aggregates other than `count`, `sum`, `min`, `max` and `avg`, such as `array_agg`, `string_agg`, `bool_or`, `every` and `json_agg`, and `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates
 
 *Functions and operators*
@@ -228,11 +228,11 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Writes*
 
 - A write to the columns of a `DEFERRABLE` primary key or unique constraint, a value other than `DEFAULT` for a `GENERATED ALWAYS` identity column without `OVERRIDING SYSTEM VALUE`, `OVERRIDING USER VALUE`, `nextval` of a sequence with `CACHE` above 1, and `ON CONFLICT ... WHERE` with a predicate other than the partial index's own
-- `TRUNCATE`, `COPY`
+- `TRUNCATE` (MySQL runs it outside a transaction) and `COPY`
 
 *Schema*
 
-- `ALTER COLUMN ... TYPE ... USING`, `CREATE TABLE ... LIKE`, `ADD CONSTRAINT ... USING INDEX`, `CREATE TEMPORARY TABLE`, adding a generated column to a table that holds rows, and DDL inside a transaction. Apply migrations outside one
+- `ALTER COLUMN ... TYPE ... USING`, `CREATE TABLE ... LIKE`, `ADD CONSTRAINT ... USING INDEX`, `CREATE TEMPORARY TABLE`, and adding a generated column to a table that holds rows
 - The system catalogs and `information_schema`, which are not there, so a query of them fails as of an undefined table
 
 *Statements*
@@ -284,7 +284,7 @@ For MySQL, these fail with `detest.ErrUnsupportedSQL` besides the forms above.
 - A `sql_mode` without strict mode, other than the `NO_AUTO_VALUE_ON_ZERO` a dump sets, and a `time_zone` other than UTC (`'+00:00'` as a dump sets it)
 - Temporal strings in formats other than `YYYY-MM-DD[ HH:MM:SS[.ffffff]]`, and values of `TIME` columns
 - Generated columns
-- Functions other than `IF`, `IFNULL`, `COALESCE`, `NULLIF`, `NOW`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `LOCALTIME`, `UUID`, `LENGTH`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `LOWER`, `LCASE`, `UPPER`, `UCASE`, `LEFT`, `CONCAT`, `GREATEST`, `LEAST`, `ABS`, `FLOOR`, `CEIL`, `CEILING`, `ROUND`, `POWER`, `POW` and `LAST_INSERT_ID()`, the aggregates and the window functions above. Among the refused: `INTERVAL` expressions (`NOW() - INTERVAL 1 DAY`, `DATE_SUB`, `ADDDATE`, `TIMESTAMPDIFF`), `DATE`, `UTC_TIMESTAMP`, `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `DATEDIFF`, the JSON functions and operators (`JSON_EXTRACT`, `->>`, `JSON_SET`), `GROUP_CONCAT`, `FIND_IN_SET`, `GET_LOCK`, `ROW_COUNT`, `FOUND_ROWS`, `UUID_TO_BIN` and `BIN_TO_UUID`
+- Functions other than `IF`, `IFNULL`, `COALESCE`, `NULLIF`, `NOW`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `LOCALTIME`, `UUID`, `LENGTH`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `LOWER`, `LCASE`, `UPPER`, `UCASE`, `LEFT`, `CONCAT`, `GREATEST`, `LEAST`, `ABS`, `FLOOR`, `CEIL`, `CEILING`, `ROUND` with one argument, `POWER`, `POW` and `LAST_INSERT_ID()`, the aggregates and the window functions above. Among the refused: `INTERVAL` expressions (`NOW() - INTERVAL 1 DAY`, `DATE_SUB`, `ADDDATE`, `TIMESTAMPDIFF`), `DATE`, `UTC_TIMESTAMP`, `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `DATEDIFF`, the JSON functions and operators (`JSON_EXTRACT`, `->>`, `JSON_SET`), `GROUP_CONCAT`, `FIND_IN_SET`, `GET_LOCK`, `ROW_COUNT`, `FOUND_ROWS`, `UUID_TO_BIN` and `BIN_TO_UUID`
 - `REGEXP` and `RLIKE`, `MATCH ... AGAINST`, `BINARY`, `CAST` to `UNSIGNED` or `DECIMAL`, the bit operators and `DIV`, `COLLATE` in an expression, user variables (`@x`), index hints, `WITH` on `UPDATE` or `DELETE`, `SET TRANSACTION ISOLATION LEVEL` and `SET autocommit = 0`, `SHOW`, `CREATE TEMPORARY TABLE`, and DDL or `TRUNCATE` inside a transaction
 
 ### Queue
