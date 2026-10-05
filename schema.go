@@ -1328,16 +1328,16 @@ func numericValue(v any) any {
 func canonicalUUID(s string) (string, bool) {
 	t := strings.TrimSuffix(strings.TrimPrefix(s, "{"), "}")
 	hex := make([]byte, 0, 32)
-	for i, c := range t {
-		switch {
+	for i := range len(t) {
+		switch c := t[i]; {
 		case c == '-':
 			if i == 0 || len(hex)%4 != 0 || strings.HasSuffix(t[:i], "-") {
 				return "", false
 			}
 		case (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'):
-			hex = append(hex, byte(c))
+			hex = append(hex, c)
 		case c >= 'A' && c <= 'F':
-			hex = append(hex, byte(c-'A'+'a'))
+			hex = append(hex, c-'A'+'a')
 		default:
 			return "", false
 		}
