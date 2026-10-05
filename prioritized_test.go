@@ -44,6 +44,45 @@ func TestPrioritizedReachesALateWindow(t *testing.T) {
 	}
 }
 
+// The second switch drops b below a, which the first switch stopped, so a
+// runs again while b can still run: a, then b, then a again.
+func TestPrioritizedSwitchesBack(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		aSteps, bSteps, bSawA, aSawB := 0, 0, -1, -1
+		s.Seed(func() { aSteps, bSteps, bSawA, aSawB = 0, 0, -1, -1 })
+		s.Manual("a", 1, func(p *Proc) error {
+			for i := range 10 {
+				p.Step("a %d", i)
+				aSteps++
+				if aSteps == 6 {
+					aSawB = bSteps
+				}
+			}
+			return nil
+		})
+		s.Manual("b", 1, func(p *Proc) error {
+			for i := range 10 {
+				p.Step("b %d", i)
+				bSteps++
+				if bSteps == 1 {
+					bSawA = aSteps
+				}
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if bSawA == 5 && aSawB == 5 {
+				return fmt.Errorf("a ran 5 steps, b 5 steps, then a again")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 3), MaxRuns(5000)}, nil, 0)
+	if !res.Violated {
+		t.Fatalf("want a, b, a found, got %s", res.report())
+	}
+}
+
 func TestPrioritizedFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		counterModel(s, false)

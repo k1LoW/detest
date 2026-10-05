@@ -23,7 +23,7 @@ type prioritized struct {
 	rng      *rand.Rand
 	step     int
 	switches []int  // the steps where the process that ran last drops, ascending
-	lowered  uint64 // switches done; the i-th gives priority i, below every drawn one
+	lowered  uint64 // the priority the next switch gives: one per switch at first, one less after each
 	crashAt  []int
 	loseAt   []int
 	crashDue int
@@ -51,6 +51,11 @@ func newPrioritized(rng *rand.Rand, depth, k, crashes, losses int) *prioritized 
 	p := &prioritized{rng: rng, starts: map[startKey]uint64{}, delivers: map[deliverKey]uint64{}}
 	k = max(k, 1)
 	p.switches = distinctSteps(rng, min(depth-1, k), k)
+	// As in PCT, a later switch drops its process below the earlier ones', so
+	// that the process an earlier switch stopped can run again.
+	for range p.switches {
+		p.lowered++
+	}
 	for range crashes {
 		p.crashAt = append(p.crashAt, 1+rng.IntN(k))
 	}
@@ -84,10 +89,10 @@ func (p *prioritized) pick(r *run, opts []option) int {
 	p.step++
 	for len(p.switches) > 0 && p.switches[0] == p.step {
 		p.switches = p.switches[1:]
-		p.lowered++
 		if r.current != nil {
 			r.current.prio = p.lowered
 		}
+		p.lowered--
 	}
 	for len(p.crashAt) > 0 && p.crashAt[0] == p.step {
 		p.crashAt, p.crashDue = p.crashAt[1:], p.crashDue+1
