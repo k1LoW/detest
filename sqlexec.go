@@ -527,6 +527,15 @@ func (x *sqlExec) unsupported(what string) error { return unsupported(what, x.qu
 
 // functionRows evaluates a set-returning function in FROM.
 func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
+	// The functions detest runs in FROM give one column, and the ordinality
+	// one more.
+	width := 1
+	if t.Ordinality {
+		width++
+	}
+	if len(t.Columns) > width {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("too many column aliases specified for function %s", t.Func.Name), "", "", "")
+	}
 	en := outer
 	if en == nil {
 		en = &env{}

@@ -61,6 +61,8 @@ var writeCases = []difftest.Case{
 			difftest.S(0, `DELETE FROM stock USING LATERAL (SELECT stock.n AS m) s`),
 			difftest.Q(0, `SELECT typo FROM (SELECT 1, 2) s(a)`),
 			difftest.Q(0, `SELECT * FROM (SELECT 1) s(a, b)`),
+			difftest.Q(0, `SELECT a FROM generate_series(1, 2) AS s(a, b)`),
+			difftest.Q(0, `SELECT a FROM generate_series(1, 2) WITH ORDINALITY AS s(a, o, x)`),
 			difftest.Q(0, `SELECT sku FROM stock a, stock b`),
 			difftest.Q(0, `SELECT sku FROM stock a, stock b, generate_series(1, 2) g`),
 			difftest.Q(0, `SELECT 1 UNION SELECT 2 ORDER BY 2`),
