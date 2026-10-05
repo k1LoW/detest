@@ -254,13 +254,17 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 			return nil, err
 		}
 		out := &sqlir.SetStmt{Name: v.Name, Local: v.IsLocal}
-		if len(v.Args) > 0 {
-			if e, err := c.expr(v.Args[0]); err == nil {
-				if k, ok := e.(*sqlir.Const); ok {
-					out.Value = fmt.Sprint(k.Value)
+		// The constants as written, joined as a list setting such as
+		// search_path is (SET search_path TO app, public).
+		var vals []string
+		for _, a := range v.Args {
+			if e, err := c.expr(a); err == nil {
+				if k, ok := e.(*sqlir.Const); ok && k.Value != nil {
+					vals = append(vals, fmt.Sprint(k.Value))
 				}
 			}
 		}
+		out.Value = strings.Join(vals, ", ")
 		return out, nil
 	case *pg.Node_ConstraintsSetStmt:
 		out := &sqlir.SetConstraintsStmt{Deferred: s.ConstraintsSetStmt.Deferred}

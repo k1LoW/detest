@@ -324,6 +324,24 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// wrong one.
 			return nil, x.unsupported("USE of a database other than " + x.tx.db.kind.SearchPath()[0])
 		}
+		if st.Name == "search_path" {
+			// Names resolve on the path postgres.SearchPath declares, for
+			// every connection, so a SET that puts another schema first
+			// would read and write other tables than the server. One
+			// that names the declared path again, as a migration does,
+			// changes nothing; an empty path, as pg_dump sets, leaves
+			// only qualified names, which resolve the same either way.
+			first := ""
+			for _, s := range strings.Split(st.Value, ",") {
+				if s = strings.Trim(strings.TrimSpace(s), `"`); s != "" && s != "$user" {
+					first = s
+					break
+				}
+			}
+			if first != "" && first != x.tx.db.kind.SearchPath()[0] {
+				return nil, x.unsupported("SET search_path to a schema other than the first of postgres.SearchPath (" + x.tx.db.kind.SearchPath()[0] + ")")
+			}
+		}
 		return &sqlResult{}, nil
 	case *sqlir.SetConstraintsStmt:
 		return &sqlResult{}, x.setConstraints(st)

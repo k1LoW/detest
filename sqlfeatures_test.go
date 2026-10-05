@@ -498,3 +498,42 @@ func TestWindowFunctionArity(t *testing.T) {
 		t.Errorf("lag(id, 1, 0): got %d, %v", n, err)
 	}
 }
+
+// SET search_path runs when it names the path postgres.SearchPath declares,
+// as a migration or a dump does, and is refused when it would put another
+// schema first, since detest resolves every name on the declared path and
+// would read and write other tables than the server.
+func TestSearchPathSetBySQL(t *testing.T) {
+	for _, tc := range []struct {
+		srv      Server
+		accepted []string
+		refused  []string
+	}{
+		{
+			postgres.New(),
+			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`},
+			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET LOCAL search_path TO app`},
+		},
+		{
+			postgres.New(postgres.SearchPath("app", "public")),
+			[]string{`SET search_path TO app`, `SET search_path TO app, public`},
+			[]string{`SET search_path TO public`},
+		},
+	} {
+		s := newSim(t)
+		db, _ := s.DB("app", tc.srv)
+		for _, q := range tc.accepted {
+			if _, err := db.Exec(q); err != nil {
+				t.Errorf("%s: got %v, want nil", q, err)
+			}
+		}
+		for _, q := range tc.refused {
+			if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+			}
+			if err := CheckSQL(tc.srv, q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+			}
+		}
+	}
+}
