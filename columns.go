@@ -418,13 +418,16 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		}
 		return c.undefined(r.Table + "." + r.Column)
 	}
-	// The innermost scope with the name decides it; an item whose columns
-	// are unknown may have it, so it decides nothing.
+	// The innermost scope with the name decides it. An item whose columns
+	// are unknown may have it, so it decides nothing beyond what the known
+	// items already settle: two of them having the name is ambiguous
+	// whatever it has.
 	for s := sc; s != nil; s = s.outer {
-		found, twice, wholeRow := 0, false, false
+		found, twice, wholeRow, unknown := 0, false, false, false
 		for alias, cols := range s.items {
 			if cols == nil {
-				return nil
+				unknown = true
+				continue
 			}
 			if has, once := cols.has(r.Column); has {
 				found++
@@ -435,6 +438,8 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		switch {
 		case found > 1:
 			return c.x.tx.db.kind.Error(sqlir.AmbiguousColumn, fmt.Sprintf("column reference %q is ambiguous", r.Column), "", r.Column, "")
+		case unknown:
+			return nil
 		case found == 1 && twice:
 			return c.twice(r.Column)
 		case found == 1:
