@@ -3553,6 +3553,11 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			args[i] = string(b)
 		}
 	}
+	if !knownFuncs[name] {
+		// Refused here so that knownFuncs, which CheckSQL reads, is the one
+		// list of what runs; a name the switch below lacks is refused too.
+		return nil, errUnknownExpr{name + "(...)"}
+	}
 	if _, strict := strictFuncs[name]; (strict || mysqlNullIfAnyNull[name]) && slices.ContainsFunc(args, func(a any) bool { return derefValue(a) == nil }) {
 		return nil, nil // a strict function of NULL is NULL
 	}

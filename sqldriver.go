@@ -17,9 +17,12 @@ import (
 // through CheckSQL to measure coverage before modeling the service.
 //
 // The check runs against a database with no schema, so it reports the cases
-// the statement decides on its own. A case that depends on the schema, such
-// as a write that needs a generated column detest cannot compute, passes here
-// and fails with ErrUnsupportedSQL when the statement runs.
+// the statement decides on its own, and refuses a function or an operator
+// detest does not evaluate wherever it stands in the statement, where a run
+// reaches only the expressions it evaluates. A case that depends on the
+// schema, such as a write that needs a generated column detest cannot
+// compute, or a comparison whose outcome depends on the column's type,
+// passes here and fails with ErrUnsupportedSQL when the statement runs.
 func CheckSQL(d Server, query string) error {
 	kind := sqlir.ImplOf(d)
 	if kind == nil {
@@ -27,6 +30,9 @@ func CheckSQL(d Server, query string) error {
 	}
 	s, err := parseWith(kind.Parser(), query)
 	if err != nil {
+		return err
+	}
+	if err := checkStatic(s.stmt, query); err != nil {
 		return err
 	}
 	pdb := &DB{name: "probe", kind: kind}
