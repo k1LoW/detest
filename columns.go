@@ -350,22 +350,47 @@ func (sc *colScope) columnType(r *sqlir.ColumnRef) string {
 }
 
 // query checks a query block and returns its output columns.
+// writeWith is with for WITH ... UPDATE or DELETE. The table written is the
+// table whatever a CTE is named, where FROM, USING and the subqueries would
+// read the CTE, so a CTE of the target's name is refused.
+func (c *columnChecker) writeWith(with []sqlir.CTE, target string) (pop func(), err error) {
+	for _, cte := range with {
+		if c.x.tx.db.resolve(cte.Name) == c.x.tx.db.resolve(target) {
+			return nil, c.x.unsupported(fmt.Sprintf("a CTE named %q as the table the statement writes", cte.Name))
+		}
+	}
+	return c.with(with, nil)
+}
+
+// with checks the CTEs of a statement and declares them for the rest of it,
+// each seeing the ones before it. pop takes them out again.
+func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err error) {
+	if len(with) == 0 {
+		return func() {}, nil
+	}
+	m := map[string]colSet{}
+	c.ctes = append(c.ctes, m)
+	pop = func() { c.ctes = c.ctes[:len(c.ctes)-1] }
+	for _, cte := range with {
+		s, err := c.query(cte.Select, outer)
+		if err != nil {
+			pop()
+			return nil, err
+		}
+		m[cte.Name] = s
+	}
+	return pop, nil
+}
+
 func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, error) {
 	if sel == nil {
 		return nil, nil
 	}
-	if len(sel.With) > 0 {
-		m := map[string]colSet{}
-		c.ctes = append(c.ctes, m)
-		defer func() { c.ctes = c.ctes[:len(c.ctes)-1] }()
-		for _, cte := range sel.With {
-			s, err := c.query(cte.Select, outer)
-			if err != nil {
-				return nil, err
-			}
-			m[cte.Name] = s
-		}
+	pop, err := c.with(sel.With, outer)
+	if err != nil {
+		return nil, err
 	}
+	defer pop()
 	if sel.SetOp != "" {
 		out, err := c.query(sel.Larg, outer)
 		if err != nil {
@@ -859,6 +884,11 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(up.Table)) != nil {
 		return nil // the missing table is the error, which the UPDATE reports first
 	}
+	pop, err := c.writeWith(up.With, up.Table)
+	if err != nil {
+		return err
+	}
+	defer pop()
 	sc, cols := c.target(up.Table, up.Alias)
 	if err := c.assigned(up.Table, cols, assignedColumns(up.Set), false); err != nil {
 		return err
@@ -900,6 +930,11 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(del.Table)) != nil {
 		return nil // the missing table is the error, which the DELETE reports first
 	}
+	pop, err := c.writeWith(del.With, del.Table)
+	if err != nil {
+		return err
+	}
+	defer pop()
 	sc, _ := c.target(del.Table, del.Alias)
 	if err := c.extraItems(del.Using, sc, targetAlias(del.Table, del.Alias)); err != nil {
 		return err

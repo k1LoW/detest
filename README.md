@@ -154,7 +154,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 
 - `SELECT` with inner, left and cross joins, `LATERAL`, subqueries, non-recursive CTEs, `GROUP BY` and `HAVING`, aggregates (`count`, `sum`, `min`, `max`, `avg`), window functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value` and the aggregates) over the default frame or the whole partition, `DISTINCT`, `DISTINCT ON`, `UNION`, `INTERSECT`, `EXCEPT`, `VALUES`, `ORDER BY` with `NULLS FIRST | LAST`, `LIMIT` and `OFFSET`
 - `INSERT` with `ON CONFLICT DO NOTHING | DO UPDATE` and `RETURNING`, `INSERT ... SELECT`
-- `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`
+- `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`, and `WITH` on both, as in `WITH c AS (SELECT id FROM jobs ... LIMIT 1 FOR UPDATE SKIP LOCKED) UPDATE jobs ... FROM c`. The CTEs run once, before the rows to write are chosen, and a CTE the statement does not read does not run
 - Functions: `coalesce`, `nullif`, `greatest`, `least`, `lower`, `upper`, `length`, `char_length`, `octet_length`, `left`, `concat`, `abs`, `ceil`, `ceiling`, `floor`, `round`, `power`, `pow`, `random`, `now`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `make_interval`, `nextval`, `setval`, `gen_random_uuid`, `uuid_generate_v4`, the transaction advisory locks `pg_advisory_xact_lock` and `pg_try_advisory_xact_lock`, and `hashtext` as the key of one of them, where only its equality matters
 - That is the whole list of functions. Any other fails with `detest.ErrUnsupportedSQL` where a statement evaluates it, and under `detest.CheckSQL` wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`. An expression in a `CHECK` or a generated column loads with the schema and is refused by the write that evaluates it. A default detest cannot evaluate loads too, and a write that leaves the column out stores the `Unknown` marker, unless the table's key, a constraint, a generated column or a checked type reads the column, in which case the write is refused
 - `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, and `generate_series` over integers in `FROM`
@@ -194,7 +194,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Query forms*
 
-- Recursive CTEs, and `WITH` on `UPDATE`, `DELETE` or `INSERT ... VALUES` (`WITH` on `SELECT` and on `INSERT ... SELECT` runs)
+- Recursive CTEs, a CTE that writes (`WITH d AS (DELETE ... RETURNING ...)`), `WITH` on `INSERT ... VALUES`, and a CTE of `UPDATE` or `DELETE` named as the table it writes. `WITH` on `SELECT`, `INSERT ... SELECT`, `UPDATE` and `DELETE` runs
 - Column alias lists on a table, a CTE or a view (`FROM t AS x(a, b)`, `WITH c(a) AS (...)`)
 - `RIGHT` and `FULL` joins, `JOIN ... USING`, `NATURAL JOIN`, `TABLESAMPLE`, `SELECT INTO`, `INSERT ... DEFAULT VALUES`
 - Set-returning functions other than `generate_series` in `FROM`, such as `unnest`, and any set-returning function in the select list, `generate_series` included

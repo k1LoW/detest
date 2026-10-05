@@ -712,8 +712,13 @@ func (x *sqlExec) tableLabel(t sqlir.TableRef) string {
 // withCTEs runs the CTEs of sel the query reads. Postgres skips one it does
 // not read, so its errors, locks and calls never happen.
 func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
-	read := reachableCTEs(sel)
-	for _, cte := range sel.With {
+	return x.evalCTEs(sel.With, reachableCTEs(sel), outer)
+}
+
+// evalCTEs runs the CTEs read of with, in order, so that a later one reads
+// the earlier ones.
+func (x *sqlExec) evalCTEs(with []sqlir.CTE, read map[string]bool, outer *env) error {
+	for _, cte := range with {
 		if !read[cte.Name] {
 			continue
 		}
@@ -728,6 +733,15 @@ func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
 		x.ctes[cte.Name] = rows
 	}
 	return nil
+}
+
+// writeCTEs runs the CTEs of WITH ... UPDATE or DELETE that body reads, once
+// and before the rows to write are chosen, after freeze so that they read
+// the statement's snapshot. Postgres runs a CTE that locks rows, or that the
+// statement reads twice, once in the same way, and one it inlines reads the
+// same rows from the snapshot.
+func (x *sqlExec) writeCTEs(with []sqlir.CTE, body any) error {
+	return x.evalCTEs(with, reachableWith(with, body), nil)
 }
 
 // tableRows returns the rows of a FROM item with the alias they are known by.
@@ -1811,8 +1825,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set), false); err != nil {
 		return nil, err // before WHERE is evaluated, which may have effects
 	}
-	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
-		return nil, err
+	// A WHERE that reads the CTEs cannot be tried before they run, which is
+	// after the statement's scheduling point.
+	if len(up.With) == 0 {
+		if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
+			return nil, err
+		}
 	}
 	preview := lazyString(func() string {
 		row := Row{}
@@ -1835,6 +1853,11 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	})
 	x.tx.yieldf("%s: update %s set %s where %s", x.tx.db.name, up.Table, preview, lazyString(func() string { return x.exprString(up.Where) }))
 	x.freeze(up)
+	body := *up
+	body.With = nil
+	if err := x.writeCTEs(up.With, &body); err != nil {
+		return nil, err
+	}
 	var stop *scanStop
 	if len(up.From) == 0 {
 		var err error
@@ -2014,6 +2037,11 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
 	x.freeze(del)
+	body := *del
+	body.With = nil
+	if err := x.writeCTEs(del.With, &body); err != nil {
+		return nil, err
+	}
 	delAlias := del.Alias
 	if delAlias == "" {
 		delAlias = relname(del.Table)

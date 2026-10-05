@@ -164,6 +164,9 @@ type OnConflict struct {
 
 // UpdateStmt is UPDATE ... SET ... [FROM ...] WHERE ... [RETURNING ...].
 type UpdateStmt struct {
+	// With are the CTEs of WITH ... UPDATE, which FROM, WHERE, SET and
+	// RETURNING may read.
+	With      []CTE
 	Table     string
 	Alias     string
 	Set       []Assignment
@@ -178,6 +181,7 @@ type UpdateStmt struct {
 
 // DeleteStmt is DELETE FROM ... [USING ...] WHERE ... [RETURNING ...].
 type DeleteStmt struct {
+	With      []CTE // as in UpdateStmt
 	Table     string
 	Alias     string
 	Using     []TableRef
