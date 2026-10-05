@@ -6,12 +6,16 @@ import (
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
-// sequenceFuncs are the functions whose every evaluation returns another
-// value or changes what the next one returns, so that evaluating them
-// another number of times than Postgres shows in the results.
-var sequenceFuncs = map[string]bool{"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true}
+// effectFuncs are the functions whose every call returns another value or
+// changes state, a sequence's, the generated values detest counts, or the
+// advisory locks held, so that calling them another number of times than
+// Postgres shows in the results.
+var effectFuncs = map[string]bool{
+	"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true,
+	"pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
+}
 
-// checkSequenceCalls refuses nextval and setval where detest evaluates them
+// checkSequenceCalls refuses effectFuncs where detest evaluates them
 // another number of times than Postgres: in the WHERE of an UPDATE or a
 // DELETE, which detest also evaluates to validate the statement before it
 // yields, and in a subquery, which Postgres evaluates once when it is
@@ -184,7 +188,7 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 				if v.IsNil() {
 					return
 				}
-				if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && sequenceFuncs[f.Name] {
+				if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && effectFuncs[f.Name] {
 					found = f.Name
 					return
 				}
@@ -207,13 +211,6 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 		}
 	}
 	return nil
-}
-
-// effectFuncs are the functions whose call changes state: sequences, the
-// generated values detest counts, and advisory locks.
-var effectFuncs = map[string]bool{
-	"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true,
-	"pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
 }
 
 // hasEffects reports whether evaluating e changes state, by such a function

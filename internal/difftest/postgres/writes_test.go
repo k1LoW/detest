@@ -628,7 +628,7 @@ var writeCases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
 			difftest.Q(0, `SELECT 1 FROM (SELECT pg_advisory_xact_lock(1)) l`),
-			difftest.Q(1, `SELECT (SELECT 1 FROM (SELECT pg_advisory_xact_lock(1)) l), (SELECT n FROM stock WHERE sku = 'apple')`),
+			difftest.Q(1, `SELECT (SELECT n FROM stock WHERE sku = 'apple') FROM (SELECT pg_advisory_xact_lock(1)) l`),
 			difftest.S(2, `UPDATE stock SET n = 9 WHERE sku = 'apple'`),
 			difftest.S(0, `COMMIT`),
 			difftest.Q(1, `SELECT n FROM stock WHERE sku = 'apple'`),
