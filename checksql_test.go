@@ -64,6 +64,8 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT now(*) FROM t`,
 			`SELECT row_number(*) OVER () FROM t`,
 			`SELECT sum(*) OVER () FROM t`,
+			`SELECT lag(id, 1.5) OVER (ORDER BY id) FROM t`,
+			`SELECT lead(id, 'x'::text) OVER (ORDER BY id) FROM t`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",
@@ -78,6 +80,7 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT left(name, length(name)) FROM t`,
 			`SELECT lower(name), length(name), coalesce(n, 0) FROM t WHERE created_at < now() - make_interval(secs => 10)`,
 			`SELECT count(*), sum(n), row_number() OVER (PARTITION BY k ORDER BY id) FROM t GROUP BY k`,
+			`SELECT lag(id, 2) OVER (ORDER BY id) FROM t`,
 			`SELECT * FROM t WHERE id = ANY(ARRAY[1, 2]) AND name LIKE 'x%' AND a BETWEEN 1 AND 2`,
 			`UPDATE t SET n = n + 1, updated_at = now() WHERE id = $1 AND version = $2`,
 			`SELECT * FROM generate_series(1, 3)`,

@@ -66,6 +66,17 @@ func windowArityMismatch(f *sqlir.FuncCall) string {
 	if len(f.Args) < arity[0] || len(f.Args) > arity[1] {
 		return fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args))
 	}
+	// lag/lead's offset is a bigint; Postgres rejects a call whose offset
+	// has another type before it reads any row, where the executor
+	// (select.go) would otherwise ignore the failed conversion and use the
+	// default offset of 1.
+	if (f.Name == "lag" || f.Name == "lead") && len(f.Args) > 1 {
+		switch typ := expressionType(f.Args[1], nil); typ {
+		case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
+		default:
+			return f.Name + " with a " + typ + " offset argument"
+		}
+	}
 	return ""
 }
 
