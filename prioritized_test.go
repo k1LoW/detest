@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/k1LoW/detest/postgres"
 )
 
 // windowModel breaks only when b runs right after a's 20th step and before
@@ -144,6 +146,21 @@ func TestPrioritizedDeliversOnALossyQueue(t *testing.T) {
 	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 2), MaxRuns(50)}, nil, 0)
 	if res.Violated || len(res.Unreached) != 0 {
 		t.Fatalf("want a run delivering the message, got %s", res.report())
+	}
+}
+
+// A statement refused while the simulation is declared, before any run, is
+// reported as before.
+func TestRefusalBeforeAnyRunIsReported(t *testing.T) {
+	f := newFrontier(1, 200000)
+	exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		if _, err := db.Exec(`SELECT md5('x')`); err == nil {
+			t.Fatal("want md5 refused")
+		}
+	}, nil, f, 0)
+	if got := f.refusals(); len(got) != 1 || !strings.Contains(got[0], "md5") {
+		t.Fatalf("want md5 listed as unsupported, got %q", got)
 	}
 }
 
