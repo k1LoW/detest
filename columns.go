@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 
@@ -240,7 +241,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			first = first.Larg
 		}
 		for _, o := range sel.OrderBy {
-			if err := c.position(first, o.Expr, "ORDER BY"); err != nil {
+			if err := c.position(first, nil, o.Expr, "ORDER BY"); err != nil {
 				return nil, err
 			}
 			if err := c.orderExpr(o.Expr, sc); err != nil {
@@ -304,7 +305,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 	}
 	for _, e := range sel.GroupBy {
-		if err := c.position(sel, e, "GROUP BY"); err != nil {
+		if err := c.position(sel, sc, e, "GROUP BY"); err != nil {
 			return nil, err
 		}
 		if err := c.groupExpr(e, sc); err != nil {
@@ -317,7 +318,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 	}
 	for _, o := range sel.OrderBy {
-		if err := c.position(sel, o.Expr, "ORDER BY"); err != nil {
+		if err := c.position(sel, sc, o.Expr, "ORDER BY"); err != nil {
 			return nil, err
 		}
 		if err := c.orderExpr(o.Expr, sc); err != nil {
@@ -334,9 +335,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 }
 
 // position fails an integer GROUP BY or ORDER BY item that is no position
-// of the select list. A * makes the list longer by columns detest does not
-// count here, so a query with one is let through.
-func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause string) error {
+// of the select list. A * counts the columns of the items it covers, sc's;
+// without them, as for a set operation, the position is let through.
+func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Expr, clause string) error {
 	k, ok := e.(*sqlir.Const)
 	if !ok {
 		return nil
@@ -345,18 +346,49 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, e sqlir.Expr, clause str
 	if !ok {
 		return nil
 	}
+	width := len(sel.Targets)
 	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
 		if clause == "GROUP BY" {
 			// The position may point into the columns of the *, which
 			// grouping does not expand.
 			return c.x.unsupported("a GROUP BY position in a select list with *")
 		}
-		return nil
+		if sc == nil {
+			return nil
+		}
+		w, ok := starWidth(sel, sc)
+		if !ok {
+			return c.x.unsupported("an ORDER BY position in a select list with a * over columns detest does not know")
+		}
+		width = w
 	}
-	if n < 1 || n > int64(len(sel.Targets)) {
+	if n < 1 || n > int64(width) {
 		return c.x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("%s position %d is not in select list", clause, n), "", "", "")
 	}
 	return nil
+}
+
+// starWidth is the number of columns a select list with a * gives, false
+// when an item the * covers has columns detest does not know, or two of
+// one name, which its set does not count.
+func starWidth(sel *sqlir.SelectStmt, sc *colScope) (int, bool) {
+	width := 0
+	for _, t := range sel.Targets {
+		if !t.Star {
+			width++
+			continue
+		}
+		for alias, cols := range sc.items {
+			if t.Table != "" && alias != t.Table {
+				continue
+			}
+			if cols == nil || slices.Contains(slices.Collect(maps.Values(cols)), false) {
+				return 0, false
+			}
+			width += len(cols)
+		}
+	}
+	return width, true
 }
 
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name

@@ -1039,6 +1039,9 @@ func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
 		`SELECT public.t.* FROM public.t`,
 		`SELECT *, id + 1 AS id FROM t ORDER BY id`,
 		`SELECT a FROM generate_series(1, 2) AS s(a, a)`,
+		`SELECT s.a FROM (SELECT 1 AS a, 2 AS a, 3 AS a) s`,
+		`SELECT a AS x, b AS x, id AS x FROM t ORDER BY x`,
+		`SELECT * FROM generate_series(1, 2) g ORDER BY 1`,
 		`UPDATE public.t AS x SET a = 1 RETURNING public.t.*`,
 		`UPDATE t SET a = 1 FROM t AS u WHERE u.id = t.id RETURNING u.*`,
 	} {
