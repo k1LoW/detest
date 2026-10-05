@@ -405,6 +405,7 @@ func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
 		`SET transaction_read_only = on`,
 		`SET default_transaction_read_only TO 'true'`,
+		`SET TRANSACTION SNAPSHOT '00000003-0000001B-1'`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {

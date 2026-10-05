@@ -166,8 +166,9 @@ func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what,
 // transactionSet refuses a SET that asks for an isolation level other than
 // Read Committed, which detest runs Postgres at, or for a read-only
 // transaction: SET TRANSACTION, SET SESSION CHARACTERISTICS AS TRANSACTION,
-// and the transaction_isolation, default_transaction_isolation,
-// transaction_read_only and default_transaction_read_only settings. Read
+// SET TRANSACTION SNAPSHOT, and the transaction_isolation,
+// default_transaction_isolation, transaction_read_only and
+// default_transaction_read_only settings. Read
 // Uncommitted is Read Committed in Postgres. A level asked for in BeginTx is
 // refused by the driver; one set by SQL would otherwise be ignored and the
 // transaction run at another level than production's. A read-only
@@ -178,6 +179,11 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 	var level, readOnly string
 	switch v.Kind {
 	case pg.VariableSetKind_VAR_SET_MULTI:
+		if v.Name == "TRANSACTION SNAPSHOT" {
+			// Imports another session's snapshot, which needs Repeatable
+			// Read or Serializable, so Read Committed fails it with 25001.
+			return c.unsupported("SET TRANSACTION SNAPSHOT")
+		}
 		if v.Name != "TRANSACTION" && v.Name != "SESSION CHARACTERISTICS" {
 			return nil
 		}

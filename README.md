@@ -187,7 +187,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Isolation*
 
-- Isolation levels other than Read Committed, asked for in `BeginTx` or set by SQL (`SET TRANSACTION ISOLATION LEVEL`, `SET SESSION CHARACTERISTICS`, `transaction_isolation`, `default_transaction_isolation`). `READ UNCOMMITTED` set by SQL runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
+- Isolation levels other than Read Committed, asked for in `BeginTx` or set by SQL (`SET TRANSACTION ISOLATION LEVEL`, `SET SESSION CHARACTERISTICS`, `transaction_isolation`, `default_transaction_isolation`, `SET TRANSACTION SNAPSHOT`). `READ UNCOMMITTED` set by SQL runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
 - A read-only transaction set by SQL (`SET TRANSACTION READ ONLY`, `transaction_read_only`, `default_transaction_read_only`), under which the server fails every write. `TxOptions.ReadOnly` in `BeginTx` is accepted and ignored, as before
 
 *Query forms*
