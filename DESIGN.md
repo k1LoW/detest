@@ -14,7 +14,7 @@ detest is deterministic simulation testing (DST) done in process, with stateless
 
 - **In process.** The code under test, the scheduler and every simulated resource run inside one `go test` process. There is no container, no real database and no network.
 - **Simulation at the client boundary.** detest does not intercept system calls, packets or disks. It replaces what the application talks to at the level of its client libraries, such as a `database/sql` driver, an `http.RoundTripper`, queues and mutexes. The production code above that boundary runs unchanged.
-- **Exhaustive within bounds.** Most DST tools pick schedules at random from a seed. detest enumerates them depth first, as stateless model checkers do. A passing exploration means no schedule within the bounds breaks an invariant, rather than that the samples tried did not. The bounds (preemptions, failures, crashes, runs) are reported with the result, because the search is still not a proof.
+- **Exhaustive within bounds.** Most DST tools pick schedules at random from a seed. detest enumerates them depth first by default, as stateless model checkers do. A passing exploration means no schedule within the bounds breaks an invariant, rather than that the samples tried did not. The bounds (preemptions, failures, crashes, runs) are reported with the result, because the search is still not a proof.
 
 ## Architecture
 
@@ -161,7 +161,7 @@ Determinism is a precondition of the search, so detest asks a few things of a te
 
 ## Decisions not taken
 
-- **Random search.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need.
+- **Random search as the default.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need. `Random(seed)` is there for trees too large for a depth-first search to get past the first choices within `MaxRuns`, and its result is never reported as complete.
 - **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code.
 - **A store for shared variables.** Replacing in-memory variables of production code with detest types would make their accesses yield points, at the cost of changing the code under test more than injecting a mutex does.
 - **Static analysis of read and write sets.** With real code running through the driver, the explorer needs no declared read and write sets.

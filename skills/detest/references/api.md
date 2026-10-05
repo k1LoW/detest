@@ -58,7 +58,8 @@ msgs := st.Queue(q)
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |
 | `MaxDuration(d)` | none | Wall-clock cap |
 | `Workers(n)` | 1 | Parallel workers |
-| `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`) |
+| `DepthFirst()`, `Random(seed)` | `DepthFirst()` | `Random(seed)` draws every choice from a seeded generator until `MaxRuns` or `MaxDuration`; never complete, no `DETEST_CHECKPOINT` |
+| `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`); under `Random`, every `total`-th run, with `depth` unused |
 | `Pods(n)` | 1 | Default instances of loops and message consumers |
 | `ObserveSQL(fn)` | | Called with every statement and its error |
 | `Replay(choices)` | | Run one schedule only |

@@ -13,7 +13,8 @@ import (
 )
 
 // Explore declares a simulation with fn and explores every schedule of it,
-// failing the test on a violation. fn registers simulated resources,
+// depth first, failing the test on a violation. Under Random it runs
+// schedules drawn from a seed instead. fn registers simulated resources,
 // processes, seeds and invariants on s and returns; the exploration starts
 // after it returns.
 //
@@ -31,6 +32,7 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
 	f := newFrontier(n, maxRuns)
+	f.random = strategyOf(opts).random
 	if maxDuration != 0 {
 		// The clock inside the bubbles is fake, so the deadline is kept by a
 		// timer outside them.
@@ -42,6 +44,11 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
 	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
 		ckpt = "" // a replay neither resumes nor ends an exploration
+	}
+	if ckpt != "" && f.random {
+		// A random exploration has no subtrees left to save: it goes on with
+		// another seed instead.
+		t.Fatal("detest: DETEST_CHECKPOINT does not apply to the Random strategy; run again with another seed")
 	}
 	if ckpt != "" {
 		if err := f.load(ckpt); err != nil {
@@ -184,6 +191,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 		if s.shardTotal > 1 {
 			res.Shard = fmt.Sprintf("%d/%d", s.shardIndex, s.shardTotal)
 		}
+		res.strategy = s.strategy
 		expect = s.expect
 	})
 	return res, expect
