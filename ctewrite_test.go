@@ -131,6 +131,7 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) INSERT INTO jobs VALUES (1, 'x')`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`},
+		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' WHERE id IN (WITH c AS (SELECT 2 AS id) SELECT id FROM c)`},
 		// Postgres's RETURNING * gives the FROM or USING items' columns too.
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id RETURNING *`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING *`},

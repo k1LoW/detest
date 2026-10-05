@@ -355,12 +355,13 @@ func (sc *colScope) columnType(r *sqlir.ColumnRef) string {
 // table whatever a CTE is named, where FROM, USING and the subqueries would
 // read the CTE, so a CTE of the target's name is refused.
 //
-// detest runs every CTE the statement reads before it chooses the rows to
-// write, where Postgres runs one only as far as the statement asks for its
-// rows. A CTE that locks rows or has effects is asked for in full when it is
-// an item of FROM or USING, which is how a job queue claims a job. Read by
-// SET, RETURNING, a subquery or another CTE, it runs only for the rows that
-// reach it, so that is refused.
+// detest runs a CTE in full when the statement first reads it, where
+// Postgres runs one only as far as the statement asks for its rows. A CTE
+// that locks rows or has effects is asked for in full when it is an item of
+// FROM or USING, which is how a job queue claims a job. Read by SET,
+// RETURNING, a subquery or another CTE, it may be asked for a few rows only,
+// as by a LIMIT, so the rows it locks or the effects it has would differ,
+// and that is refused.
 func (c *columnChecker) writeWith(with []sqlir.CTE, target string, items []sqlir.TableRef, rest any) (pop func(), err error) {
 	if len(with) == 0 {
 		return func() {}, nil
@@ -380,6 +381,15 @@ func (c *columnChecker) writeWith(with []sqlir.CTE, target string, items []sqlir
 	}
 	for _, cte := range with {
 		others = append(others, cte.Select)
+	}
+	// A write's CTEs run when first read, by name, so a query inside the
+	// statement that declares one of their names would read the write's.
+	for _, s := range sqlir.Selects([]any{rest, items, with}) {
+		for _, inner := range s.With {
+			if ctes[inner.Name] {
+				return nil, c.x.unsupported(fmt.Sprintf("CTE %q declared again inside a write that declares it", inner.Name))
+			}
+		}
 	}
 	readElsewhere := map[string]bool{}
 	for _, name := range freeNames([]any{rest, others}) {

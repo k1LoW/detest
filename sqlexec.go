@@ -70,6 +70,9 @@ type sqlExec struct {
 	// cteCols those of the CTEs in scope, by name, scoped as ctes is.
 	queryCols map[any][]string
 	cteCols   map[string][]string
+	// pendingCTEs are the CTEs of WITH ... UPDATE or DELETE not run yet,
+	// which run when the statement first reads them.
+	pendingCTEs map[string]sqlir.CTE
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -298,7 +301,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
-			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
+			x.ctes, x.cteCols, x.frozen, x.pendingCTEs = map[string][]Row{}, nil, nil, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
@@ -735,13 +738,40 @@ func (x *sqlExec) evalCTEs(with []sqlir.CTE, read map[string]bool, outer *env) e
 	return nil
 }
 
-// writeCTEs runs the CTEs of WITH ... UPDATE or DELETE that body reads, once
-// and before the rows to write are chosen, after freeze so that they read
-// the statement's snapshot. Postgres runs a CTE that locks rows, or that the
-// statement reads twice, once in the same way, and one it inlines reads the
-// same rows from the snapshot.
+// writeCTEs declares the CTEs of WITH ... UPDATE or DELETE that body reads.
+// Each runs once, when the statement first reads it, after freeze so that it
+// reads the statement's snapshot. Postgres runs a CTE that locks rows, or
+// that the statement reads twice, once in the same way, and one it inlines
+// reads the same rows from the snapshot. A CTE read only by SET, RETURNING
+// or a subquery that no row reaches does not run in either, so one that
+// would fail, such as by a division by zero, fails neither.
+//
+// Not eager as a SELECT's CTEs are: those run each time their query does,
+// once per row for a correlated subquery, while a write's run once for the
+// statement.
 func (x *sqlExec) writeCTEs(with []sqlir.CTE, body any) error {
-	return x.evalCTEs(with, reachableWith(with, body), nil)
+	read := reachableWith(with, body)
+	for _, cte := range with {
+		if !read[cte.Name] {
+			continue
+		}
+		if x.pendingCTEs == nil {
+			x.pendingCTEs = map[string]sqlir.CTE{}
+		}
+		x.pendingCTEs[cte.Name] = cte
+	}
+	return nil
+}
+
+// runPendingCTE runs the pending CTE name, if there is one, before the
+// statement reads it.
+func (x *sqlExec) runPendingCTE(name string) error {
+	cte, ok := x.pendingCTEs[name]
+	if !ok {
+		return nil
+	}
+	delete(x.pendingCTEs, name)
+	return x.evalCTEs([]sqlir.CTE{cte}, map[string]bool{name: true}, nil)
 }
 
 // tableRows returns the rows of a FROM item with the alias they are known by.
@@ -777,6 +807,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	}
 	if alias == "" {
 		alias = relname(t.Name)
+	}
+	if err := x.runPendingCTE(t.Name); err != nil {
+		return "", nil, false, err
 	}
 	if rows, ok := x.ctes[t.Name]; ok {
 		return alias, rows, false, nil
@@ -872,8 +905,7 @@ func (x *sqlExec) fromItemsOf(sel *sqlir.SelectStmt) fromItems {
 			alias = relname(t.Name)
 		}
 		from.aliases = append(from.aliases, alias)
-		_, isCTE := x.ctes[t.Name]
-		isCTE = isCTE || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
+		isCTE := x.isCTE(t.Name) || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
 		switch {
 		case t.Sub != nil:
 			from.kinds[alias] = "subquery"

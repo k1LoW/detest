@@ -96,6 +96,20 @@ var cteWriteCases = []difftest.Case{
 		},
 	},
 	{
+		// A CTE runs only when the statement reads it, so one that would
+		// fail does not fail a statement that never gets to it.
+		Name:   "a CTE no row reaches does not run",
+		Schema: jobSchema, Seed: jobSeed, Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `WITH q AS (SELECT 1 / (id - id) AS v FROM jobs) UPDATE jobs SET worker = (SELECT v FROM q LIMIT 1) WHERE false`),
+			difftest.S(0, `WITH q AS (SELECT 1 / (id - id) AS v FROM jobs) UPDATE jobs SET worker = (SELECT v FROM q LIMIT 1) WHERE id = 9`),
+			difftest.Q(0, `WITH q AS (SELECT 1 / (id - id) AS v FROM jobs) DELETE FROM jobs WHERE id = 9 RETURNING (SELECT v FROM q LIMIT 1)`),
+			difftest.S(0, `WITH q AS (SELECT 1 / (id - id) AS v FROM jobs) DELETE FROM jobs WHERE id = 9 AND id IN (SELECT v FROM q)`),
+			difftest.S(0, `WITH q AS (SELECT 1 / (id - id) AS v FROM jobs) UPDATE jobs SET worker = (SELECT v FROM q LIMIT 1) WHERE id = 1`),
+			difftest.Q(0, `SELECT id, worker FROM jobs ORDER BY id`),
+		},
+	},
+	{
 		Name:   "the CTE of an UPDATE reads the statement's snapshot",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
