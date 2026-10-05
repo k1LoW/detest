@@ -1121,8 +1121,15 @@ func (c *pgConv) with(w *pg.WithClause) ([]sqlir.CTE, error) {
 		return nil, c.unsupported("recursive CTE")
 	}
 	var out []sqlir.CTE
+	seen := map[string]bool{}
 	for _, n := range w.Ctes {
 		cte := n.GetCommonTableExpr()
+		// Postgres fails the statement (42712); the CTEs are kept by name,
+		// so the later one would stand in for both.
+		if seen[cte.Ctename] {
+			return nil, c.unsupported("a WITH query name given twice")
+		}
+		seen[cte.Ctename] = true
 		if len(cte.Aliascolnames) > 0 {
 			// The CTE's rows are keyed by the names its query gives them.
 			return nil, c.unsupported("a column alias list on a CTE")
@@ -1612,10 +1619,11 @@ func (c *pgConv) targetColumn(rt *pg.ResTarget) (string, error) {
 }
 
 func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
-	if s.WithClause != nil {
-		return nil, c.unsupported("CTE on UPDATE")
+	with, err := c.with(s.WithClause)
+	if err != nil {
+		return nil, err
 	}
-	out := &sqlir.UpdateStmt{Table: rangeVarName(s.Relation)}
+	out := &sqlir.UpdateStmt{With: with, Table: rangeVarName(s.Relation)}
 	if s.Relation.Alias != nil {
 		out.Alias = s.Relation.Alias.Aliasname
 	}
@@ -1641,7 +1649,6 @@ func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 		}
 		out.From = append(out.From, *t)
 	}
-	var err error
 	if s.WhereClause != nil {
 		if out.Where, err = c.expr(s.WhereClause); err != nil {
 			return nil, err
@@ -1654,10 +1661,11 @@ func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 }
 
 func (c *pgConv) deleteStmt(s *pg.DeleteStmt) (sqlir.Statement, error) {
-	if s.WithClause != nil {
-		return nil, c.unsupported("CTE on DELETE")
+	with, err := c.with(s.WithClause)
+	if err != nil {
+		return nil, err
 	}
-	out := &sqlir.DeleteStmt{Table: rangeVarName(s.Relation)}
+	out := &sqlir.DeleteStmt{With: with, Table: rangeVarName(s.Relation)}
 	if s.Relation.Alias != nil {
 		out.Alias = s.Relation.Alias.Aliasname
 	}
@@ -1671,7 +1679,6 @@ func (c *pgConv) deleteStmt(s *pg.DeleteStmt) (sqlir.Statement, error) {
 		}
 		out.Using = append(out.Using, *t)
 	}
-	var err error
 	if s.WhereClause != nil {
 		if out.Where, err = c.expr(s.WhereClause); err != nil {
 			return nil, err

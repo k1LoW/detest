@@ -913,8 +913,9 @@ func (x *sqlExec) joinLocks(sel *sqlir.SelectStmt, plan lockPlan, table, alias s
 // isCTE reports whether name is a CTE of the statement, which shadows a table
 // of the same name. An empty CTE has no rows, so its presence is the key's.
 func (x *sqlExec) isCTE(name string) bool {
-	_, ok := x.ctes[name]
-	return ok
+	_, ok := x.cteRows(name)
+	_, pending := x.pendingCTEs[name]
+	return ok || pending
 }
 
 // lockPlan is what a locking read locks, worked out before it runs.
@@ -1495,8 +1496,8 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 		}
 		return names
 	default:
-		if _, isCTE := x.ctes[t.Name]; isCTE {
-			if cols, ok := x.cteCols[t.Name]; ok {
+		if x.isCTE(t.Name) {
+			if cols, ok := x.cteColumns(t.Name); ok {
 				return cols
 			}
 			break

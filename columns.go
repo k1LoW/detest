@@ -398,22 +398,195 @@ func (sc *colScope) columnType(r *sqlir.ColumnRef) string {
 }
 
 // query checks a query block and returns its output columns.
+// writeWith is with for WITH ... UPDATE or DELETE, whose FROM or USING items
+// are items and the rest of the statement rest. The table written is the
+// table whatever a CTE is named, where FROM, USING and the subqueries would
+// read the CTE, so a CTE of the target's name is refused.
+//
+// detest runs a CTE in full when the statement first reads it, where
+// Postgres runs one only as far as the statement asks for its rows. Read by
+// SET, RETURNING, a subquery or another CTE, a CTE that locks rows or has
+// effects may be asked for a few rows only, as by a LIMIT, so the rows it
+// locks or the effects it has would differ, and that is refused. As an item
+// of FROM or USING it is accepted in the shape partlyRun allows only.
+func (c *columnChecker) writeWith(with []sqlir.CTE, target, alias string, items []sqlir.TableRef, where sqlir.Expr, rest any) (pop func(), err error) {
+	if len(with) == 0 {
+		return func() {}, nil
+	}
+	ctes := map[string]bool{}
+	for _, cte := range with {
+		if c.x.tx.db.resolve(cte.Name) == c.x.tx.db.resolve(target) {
+			return nil, c.x.unsupported(fmt.Sprintf("a CTE named %q as the table the statement writes", cte.Name))
+		}
+		ctes[cte.Name] = true
+	}
+	var others []any
+	for _, t := range items {
+		if t.Sub != nil || t.Func != nil || !ctes[t.Name] {
+			others = append(others, t)
+		}
+	}
+	for _, cte := range with {
+		others = append(others, cte.Select)
+	}
+	// A CTE sees only the ones declared before it, and a name of its own or
+	// of a later one means a table there. The pending CTEs are found by
+	// name, so the later one would stand in for the table.
+	index := map[string]int{}
+	for i, cte := range with {
+		index[cte.Name] = i
+	}
+	for i, cte := range with {
+		for _, name := range freeNames(cte.Select) {
+			if j, ok := index[name]; ok && j >= i {
+				return nil, c.x.unsupported(fmt.Sprintf("CTE %q reading %q, which is not declared before it", cte.Name, name))
+			}
+		}
+	}
+	// A write's CTEs run when first read, by name, so a query inside the
+	// statement that declares one of their names would read the write's.
+	for _, s := range sqlir.Selects([]any{rest, items, with}) {
+		for _, inner := range s.With {
+			if ctes[inner.Name] {
+				return nil, c.x.unsupported(fmt.Sprintf("CTE %q declared again inside a write that declares it", inner.Name))
+			}
+		}
+	}
+	readElsewhere := map[string]bool{}
+	for _, name := range freeNames([]any{rest, others}) {
+		readElsewhere[name] = true
+	}
+	effects := map[string]bool{}
+	for _, cte := range with {
+		if !queryHasEffects(cte.Select) {
+			continue
+		}
+		if readElsewhere[cte.Name] {
+			return nil, c.x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read other than as an item of FROM or USING", cte.Name))
+		}
+		effects[cte.Name] = true
+	}
+	pop, err = c.with(with, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range items {
+		if t.Sub != nil || t.Func != nil || !effects[t.Name] {
+			continue
+		}
+		if what := c.partlyRun(with, t, items, target, alias, where); what != "" {
+			pop()
+			return nil, c.x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, %s", t.Name, what))
+		}
+	}
+	return pop, nil
+}
+
+// partlyRun names why Postgres might not run all of a CTE with effects that
+// item reads in a write's FROM or USING, or returns "". Postgres skips the
+// rest of a join, the CTE included, when the other side has no rows, which
+// side that is being its planner's choice. That cannot change what the CTE
+// does when the CTE reads only the target table and the WHERE only joins the
+// two on their columns: the target then has rows whenever the CTE has, as
+// both read the statement's snapshot, so the CTE runs in full under any plan.
+// That is the shape a job queue claims a job with.
+func (c *columnChecker) partlyRun(with []sqlir.CTE, item sqlir.TableRef, items []sqlir.TableRef, target, alias string, where sqlir.Expr) string {
+	if len(items) != 1 {
+		return "joined with other FROM or USING items"
+	}
+	var sel *sqlir.SelectStmt
+	for _, cte := range with {
+		if cte.Name == item.Name {
+			sel = cte.Select
+		}
+	}
+	// Its rows must come from the target's rows alone, so that it has none
+	// when the target has none. A table merely named in a branch, a nested
+	// WITH or a subquery does not make that so, and an aggregate gives a row
+	// over no rows.
+	if f := sel.From; sel.With != nil || sel.SetOp != "" || sel.Values != nil || len(sel.Joins) > 0 ||
+		f == nil || f.Sub != nil || f.Func != nil || c.x.tx.db.resolve(f.Name) != c.x.tx.db.resolve(target) ||
+		slices.ContainsFunc(with, func(cte sqlir.CTE) bool { return cte.Name == f.Name }) {
+		return "reading other rows than the target's alone"
+	}
+	if len(sel.GroupBy) > 0 || sel.Having != nil || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return "aggregating the target's rows"
+	}
+	// LIMIT and OFFSET are evaluated before the first row is read.
+	if hasEffects(sel.Limit) || hasEffects(sel.Offset) {
+		return "with effects in its LIMIT or OFFSET"
+	}
+	itemAlias := item.Alias
+	if itemAlias == "" {
+		itemAlias = item.Name
+	}
+	targetCols := colSet{}
+	for _, col := range c.x.tableCols(c.x.tx.db.resolve(target)) {
+		targetCols[col] = true
+	}
+	cteCols := c.ctes[len(c.ctes)-1][item.Name]
+	side := func(e sqlir.Expr) string {
+		ref, ok := e.(*sqlir.ColumnRef)
+		if !ok {
+			return ""
+		}
+		inTarget, _ := targetCols.has(ref.Column)
+		inCTE, _ := cteCols.has(ref.Column)
+		switch {
+		case ref.Table == alias || ref.Table == "" && inTarget && !inCTE:
+			return "target"
+		case ref.Table == itemAlias || ref.Table == "" && inCTE && !inTarget:
+			return "cte"
+		}
+		return ""
+	}
+	var joins func(e sqlir.Expr) bool
+	joins = func(e sqlir.Expr) bool {
+		b, ok := e.(*sqlir.BinaryExpr)
+		if !ok {
+			return false
+		}
+		if b.Op == "AND" {
+			return joins(b.L) && joins(b.R)
+		}
+		l, r := side(b.L), side(b.R)
+		return b.Op == "=" && l != "" && r != "" && l != r
+	}
+	if where != nil && !joins(where) {
+		return "with a WHERE other than equalities between the target's columns and its own"
+	}
+	return ""
+}
+
+// with checks the CTEs of a statement and declares them for the rest of it,
+// each seeing the ones before it. pop takes them out again.
+func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err error) {
+	if len(with) == 0 {
+		return func() {}, nil
+	}
+	m := map[string]colSet{}
+	c.ctes = append(c.ctes, m)
+	pop = func() { c.ctes = c.ctes[:len(c.ctes)-1] }
+	for _, cte := range with {
+		s, err := c.query(cte.Select, outer)
+		if err != nil {
+			pop()
+			return nil, err
+		}
+		m[cte.Name] = s
+	}
+	return pop, nil
+}
+
 func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, error) {
 	if sel == nil {
 		return nil, nil
 	}
-	if len(sel.With) > 0 {
-		m := map[string]colSet{}
-		c.ctes = append(c.ctes, m)
-		defer func() { c.ctes = c.ctes[:len(c.ctes)-1] }()
-		for _, cte := range sel.With {
-			s, err := c.query(cte.Select, outer)
-			if err != nil {
-				return nil, err
-			}
-			m[cte.Name] = s
-		}
+	pop, err := c.with(sel.With, outer)
+	if err != nil {
+		return nil, err
 	}
+	defer pop()
 	if sel.SetOp != "" {
 		out, err := c.query(sel.Larg, outer)
 		if err != nil {
@@ -942,6 +1115,11 @@ func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string
 			}
 			continue
 		}
+		// With FROM or USING items, Postgres's RETURNING * gives their columns
+		// after the target's, where detest gives the target's only.
+		if t.Table == "" && len(sc.items) > 1 {
+			return c.x.unsupported("RETURNING * of a write with FROM or USING items")
+		}
 		if t.Table == "" || t.Table == target {
 			continue
 		}
@@ -1017,6 +1195,11 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(up.Table)) != nil {
 		return nil // the missing table is the error, which the UPDATE reports first
 	}
+	pop, err := c.writeWith(up.With, up.Table, targetAlias(up.Table, up.Alias), up.From, up.Where, []any{up.Set, up.Where, up.Returning, up.OrderBy, up.Limit})
+	if err != nil {
+		return err
+	}
+	defer pop()
 	sc, cols := c.target(up.Table, up.Alias)
 	if err := c.assigned(up.Table, cols, assignedColumns(up.Set), false); err != nil {
 		return err
@@ -1058,6 +1241,11 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(del.Table)) != nil {
 		return nil // the missing table is the error, which the DELETE reports first
 	}
+	pop, err := c.writeWith(del.With, del.Table, targetAlias(del.Table, del.Alias), del.Using, del.Where, []any{del.Where, del.Returning, del.OrderBy, del.Limit})
+	if err != nil {
+		return err
+	}
+	defer pop()
 	sc, _ := c.target(del.Table, del.Alias)
 	if err := c.extraItems(del.Using, sc, targetAlias(del.Table, del.Alias)); err != nil {
 		return err

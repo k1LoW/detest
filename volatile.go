@@ -16,6 +16,22 @@ var effectFuncs = map[string]bool{
 	"clock_timestamp": true, "pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
 }
 
+// queryHasEffects reports whether running sel changes state: a locking
+// clause or one of effectFuncs anywhere in it.
+func queryHasEffects(sel *sqlir.SelectStmt) bool {
+	for _, s := range sqlir.Selects(sel) {
+		if s.Lock != nil {
+			return true
+		}
+	}
+	for _, f := range sqlir.FuncCallsIn(sel) {
+		if effectFuncs[f.Name] {
+			return true
+		}
+	}
+	return false
+}
+
 // checkSequenceCalls refuses effectFuncs where detest evaluates them
 // another number of times than Postgres: in the WHERE of an UPDATE or a
 // DELETE, which detest also evaluates to validate the statement before it
@@ -47,6 +63,11 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		}
 		return x.rowSequenceCalls(st.Returning)
 	case *sqlir.UpdateStmt:
+		body := *st
+		body.With = nil
+		if err := x.cteSequenceCalls(st.With, &body); err != nil {
+			return err
+		}
 		if err := x.rowSequenceCalls(assignedValues(st.Set)); err != nil {
 			return err
 		}
@@ -58,6 +79,11 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		}
 		return x.rowSequenceCalls(st.Returning)
 	case *sqlir.DeleteStmt:
+		body := *st
+		body.With = nil
+		if err := x.cteSequenceCalls(st.With, &body); err != nil {
+			return err
+		}
 		if err := x.rowSequenceCalls([]any{st.Using, st.OrderBy, st.Limit}); err != nil {
 			return err
 		}
@@ -65,6 +91,21 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 			return err
 		}
 		return x.rowSequenceCalls(st.Returning)
+	}
+	return nil
+}
+
+// cteSequenceCalls checks the CTEs of a write that body reads, which run
+// once in both.
+func (x *sqlExec) cteSequenceCalls(with []sqlir.CTE, body any) error {
+	used := reachableWith(with, body)
+	for _, cte := range with {
+		if !used[cte.Name] {
+			continue
+		}
+		if err := x.topSequenceCalls(cte.Select); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -109,12 +150,18 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 // CTEs declared before it, so a name it shares with a later one reads
 // whatever that name means outside.
 func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
-	index := map[string]int{}
-	for i, cte := range sel.With {
-		index[cte.Name] = i
-	}
 	body := *sel
 	body.With = nil
+	return reachableWith(sel.With, &body)
+}
+
+// reachableWith is reachableCTEs for the CTEs of any statement, body being
+// the statement without them.
+func reachableWith(with []sqlir.CTE, body any) map[string]bool {
+	index := map[string]int{}
+	for i, cte := range with {
+		index[cte.Name] = i
+	}
 	reached := map[string]bool{}
 	var visit func(names []string, before int)
 	visit = func(names []string, before int) {
@@ -124,10 +171,10 @@ func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
 				continue
 			}
 			reached[name] = true
-			visit(freeNames(sel.With[i].Select), i)
+			visit(freeNames(with[i].Select), i)
 		}
 	}
-	visit(freeNames(&body), len(sel.With))
+	visit(freeNames(body), len(with))
 	return reached
 }
 

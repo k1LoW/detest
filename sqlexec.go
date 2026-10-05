@@ -74,6 +74,13 @@ type sqlExec struct {
 	// cteCols those of the CTEs in scope, by name, scoped as ctes is.
 	queryCols map[any][]string
 	cteCols   map[string][]string
+	// pendingCTEs are the CTEs of WITH ... UPDATE or DELETE not run yet,
+	// which run when the statement first reads them, and writeRows and
+	// writeCols those run, kept apart from ctes, which a query with a WITH
+	// of its own restores when it ends.
+	pendingCTEs map[string]sqlir.CTE
+	writeRows   map[string][]Row
+	writeCols   map[string][]string
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -303,6 +310,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
 			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
+			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
@@ -716,8 +724,13 @@ func (x *sqlExec) tableLabel(t sqlir.TableRef) string {
 // withCTEs runs the CTEs of sel the query reads. Postgres skips one it does
 // not read, so its errors, locks and calls never happen.
 func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
-	read := reachableCTEs(sel)
-	for _, cte := range sel.With {
+	return x.evalCTEs(sel.With, reachableCTEs(sel), outer)
+}
+
+// evalCTEs runs the CTEs read of with, in order, so that a later one reads
+// the earlier ones.
+func (x *sqlExec) evalCTEs(with []sqlir.CTE, read map[string]bool, outer *env) error {
+	for _, cte := range with {
 		if !read[cte.Name] {
 			continue
 		}
@@ -732,6 +745,81 @@ func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
 		x.ctes[cte.Name] = rows
 	}
 	return nil
+}
+
+// writeCTEs declares the CTEs of WITH ... UPDATE or DELETE that body reads.
+// Each runs once, when the statement first reads it, after freeze so that it
+// reads the statement's snapshot. Postgres runs a CTE that locks rows, or
+// that the statement reads twice, once in the same way, and one it inlines
+// reads the same rows from the snapshot. A CTE read only by SET, RETURNING
+// or a subquery that no row reaches does not run in either, so one that
+// would fail, such as by a division by zero, fails neither.
+//
+// Not eager as a SELECT's CTEs are: those run each time their query does,
+// once per row for a correlated subquery, while a write's run once for the
+// statement.
+func (x *sqlExec) writeCTEs(with []sqlir.CTE, body any) error {
+	read := reachableWith(with, body)
+	for _, cte := range with {
+		if !read[cte.Name] {
+			continue
+		}
+		if x.pendingCTEs == nil {
+			x.pendingCTEs = map[string]sqlir.CTE{}
+		}
+		x.pendingCTEs[cte.Name] = cte
+	}
+	return nil
+}
+
+// runPendingCTE runs the pending CTE name, if there is one, before the
+// statement reads it.
+func (x *sqlExec) runPendingCTE(name string) error {
+	cte, ok := x.pendingCTEs[name]
+	if !ok {
+		return nil
+	}
+	delete(x.pendingCTEs, name)
+	if err := x.evalCTEs([]sqlir.CTE{cte}, map[string]bool{name: true}, nil); err != nil {
+		return err
+	}
+	if x.writeRows == nil {
+		x.writeRows, x.writeCols = map[string][]Row{}, map[string][]string{}
+	}
+	x.writeRows[name], x.writeCols[name] = x.ctes[name], x.cteCols[name]
+	delete(x.ctes, name)
+	delete(x.cteCols, name)
+	return nil
+}
+
+// viewRows runs a view's query without the statement's CTEs in scope: its
+// names were bound when it was created, so a CTE does not shadow a table it
+// reads.
+func (x *sqlExec) viewRows(view *sqlir.SelectStmt) ([]string, []Row, error) {
+	ctes, cteCols, pending, wrows, wcols := x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols
+	defer func() {
+		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = ctes, cteCols, pending, wrows, wcols
+	}()
+	x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = map[string][]Row{}, nil, nil, nil, nil
+	return x.evalSelect(view, nil)
+}
+
+// cteRows are the rows of the CTE name in scope: a query's, or a write's.
+// A query declaring a write's CTE name is refused, so the two never meet.
+func (x *sqlExec) cteRows(name string) ([]Row, bool) {
+	if rows, ok := x.ctes[name]; ok {
+		return rows, true
+	}
+	rows, ok := x.writeRows[name]
+	return rows, ok
+}
+
+func (x *sqlExec) cteColumns(name string) ([]string, bool) {
+	if cols, ok := x.cteCols[name]; ok {
+		return cols, true
+	}
+	cols, ok := x.writeCols[name]
+	return cols, ok
 }
 
 // tableRows returns the rows of a FROM item with the alias they are known by.
@@ -768,14 +856,17 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	if alias == "" {
 		alias = relname(t.Name)
 	}
-	if rows, ok := x.ctes[t.Name]; ok {
+	if err := x.runPendingCTE(t.Name); err != nil {
+		return "", nil, false, err
+	}
+	if rows, ok := x.cteRows(t.Name); ok {
 		return alias, rows, false, nil
 	}
 	if err := x.tx.db.checkTable(x.tx.db.resolve(t.Name)); err != nil {
 		return "", nil, false, err
 	}
 	if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil {
-		cols, rows, err := x.evalSelect(v.View, nil)
+		cols, rows, err := x.viewRows(v.View)
 		if err == nil && len(v.ViewColumns) > 0 {
 			rows = renameColumns(rows, cols, v.ViewColumns)
 			cols = renamedCols(cols, v.ViewColumns)
@@ -822,6 +913,13 @@ func (x *sqlExec) freeze(stmt any) {
 		}
 	}
 	add(stmt)
+	// The table a write chooses its rows from is a name, not a FROM item.
+	switch st := stmt.(type) {
+	case *sqlir.UpdateStmt:
+		add(sqlir.TableRef{Name: st.Table})
+	case *sqlir.DeleteStmt:
+		add(sqlir.TableRef{Name: st.Table})
+	}
 }
 
 // fromItems describes the FROM items of a query, for locking reads.
@@ -855,8 +953,7 @@ func (x *sqlExec) fromItemsOf(sel *sqlir.SelectStmt) fromItems {
 			alias = relname(t.Name)
 		}
 		from.aliases = append(from.aliases, alias)
-		_, isCTE := x.ctes[t.Name]
-		isCTE = isCTE || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
+		isCTE := x.isCTE(t.Name) || slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == t.Name })
 		switch {
 		case t.Sub != nil:
 			from.kinds[alias] = "subquery"
@@ -1676,11 +1773,16 @@ func (x *sqlExec) returningCols(ret []sqlir.Target, all []string) []string {
 }
 
 func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) error {
+	return x.appendReturningIn(out, ret, row, &env{tables: map[string]Row{out.alias: row}, merged: row})
+}
+
+// appendReturningIn evaluates RETURNING in e, which for UPDATE ... FROM and
+// DELETE ... USING holds the joined rows besides the row written.
+func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row, e *env) error {
 	if len(ret) == 0 {
 		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
-	e := &env{tables: map[string]Row{out.alias: row}, merged: row}
 	for _, t := range ret {
 		if t.Star {
 			for _, c := range out.star {
@@ -1709,8 +1811,16 @@ func (x *sqlExec) writeCandidates(table, alias string, extra []sqlir.TableRef, w
 	if alias == "" {
 		alias = relname(table)
 	}
+	// The rows the statement began with, once freeze has kept them: a CTE
+	// that waits for a lock runs before the rows are chosen, and Postgres
+	// chooses them from the statement's snapshot, reading a chosen row at its
+	// latest only once it locks it.
+	base, ok := x.frozen[x.tx.db.resolve(table)]
+	if !ok {
+		base = x.tx.selectNoYield(table, nil)
+	}
 	var rows []jrow
-	for _, r := range x.tx.selectNoYield(table, nil) {
+	for _, r := range base {
 		rows = append(rows, newJrow(alias, r))
 	}
 	for _, t := range extra {
@@ -1815,8 +1925,12 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set), false); err != nil {
 		return nil, err // before WHERE is evaluated, which may have effects
 	}
-	if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
-		return nil, err
+	// A WHERE that reads the CTEs cannot be tried before they run, which is
+	// after the statement's scheduling point.
+	if len(up.With) == 0 {
+		if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
+			return nil, err
+		}
 	}
 	preview := lazyString(func() string {
 		row := Row{}
@@ -1839,6 +1953,11 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	})
 	x.tx.yieldf("%s: update %s set %s where %s", x.tx.db.name, up.Table, preview, lazyString(func() string { return x.exprString(up.Where) }))
 	x.freeze(up)
+	body := *up
+	body.With = nil
+	if err := x.writeCTEs(up.With, &body); err != nil {
+		return nil, err
+	}
 	var stop *scanStop
 	if len(up.From) == 0 {
 		var err error
@@ -1933,7 +2052,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			// reports them without clientFoundRows.
 			out.affected++
 		}
-		return x.appendReturning(out, up.Returning, updated)
+		return x.appendReturningIn(out, up.Returning, updated, c.rebind(alias, updated).env(nil))
 	}
 	changed := assignedColumns(up.Set)
 	if def := x.tx.db.defs[table]; def != nil {
@@ -2018,6 +2137,11 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
 	x.freeze(del)
+	body := *del
+	body.With = nil
+	if err := x.writeCTEs(del.With, &body); err != nil {
+		return nil, err
+	}
 	delAlias := del.Alias
 	if delAlias == "" {
 		delAlias = relname(del.Table)
@@ -2061,7 +2185,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return err
 		}
 		out.affected++
-		return x.appendReturning(out, del.Returning, cur)
+		return x.appendReturningIn(out, del.Returning, cur, c.rebind(alias, cur).env(nil))
 	}
 	if x.rowByRow(table, alias, del.Where, len(del.Using) == 0 && len(del.OrderBy) == 0, nil) {
 		n, err := x.count(del.Limit, "LIMIT", nil)
