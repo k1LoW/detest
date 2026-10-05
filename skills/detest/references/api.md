@@ -58,6 +58,7 @@ msgs := st.Queue(q)
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |
 | `MaxDuration(d)` | none | Wall-clock cap |
 | `Workers(n)` | 1 | Parallel workers |
+| `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`) |
 | `Pods(n)` | 1 | Default instances of loops and message consumers |
 | `ObserveSQL(fn)` | | Called with every statement and its error |
 | `Replay(choices)` | | Run one schedule only |
@@ -77,7 +78,7 @@ mysql.New(mysql.Isolation(detest.ReadCommitted), mysql.Database("app"), mysql.Co
 
 Without `Errors`, the app sees `*detest.DBError`, which matches `detest.ErrUniqueViolation`, `detest.ErrDeadlock`, `detest.ErrLockNotAvailable` and the other sentinels with `errors.Is`.
 
-`detest.CheckSQL(postgres.New(), query)` tells whether detest can run a statement without a schema. `ddl.From(ctx, liveDB, postgres.New())` (package `github.com/k1LoW/detest/ddl`) writes the tables of a live database as DDL detest accepts.
+`detest.CheckSQL(postgres.New(), query)` tells whether detest can run a statement without a schema, and refuses a function or an operator detest does not know wherever it stands in the statement. A case decided by the schema or the values passes it and fails in the run. `ddl.From(ctx, liveDB, postgres.New())` (package `github.com/k1LoW/detest/ddl`) writes the tables of a live database as DDL detest accepts.
 
 ## Hand-written model API
 
