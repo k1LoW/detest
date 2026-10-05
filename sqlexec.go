@@ -26,8 +26,10 @@ type sqlResult struct {
 	cols     []string
 	rows     [][]driver.Value
 	affected int64
-	// star are the columns a RETURNING * gives, the table's.
-	star []string
+	// star are the columns a RETURNING * gives, the table's, and alias the
+	// name RETURNING refers to the written row by.
+	star  []string
+	alias string
 	// lastID is the AUTO_INCREMENT value an InnoDB insert generated first.
 	lastID    int64
 	hasLastID bool
@@ -1265,7 +1267,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if def := x.tx.db.defs[table]; def != nil {
 		all = def.columns
 	}
-	out := x.returningResult(ins.Returning, all)
+	out := x.returningResult(ins.Returning, all, alias)
 	type autoID struct {
 		id        int64
 		generated bool
@@ -1567,8 +1569,8 @@ func (x *sqlExec) findConflict(table string, oc *sqlir.OnConflict, row Row) (Row
 
 // returningResult is the result of a write with RETURNING ret, all being
 // the columns a * gives.
-func (x *sqlExec) returningResult(ret []sqlir.Target, all []string) *sqlResult {
-	return &sqlResult{cols: x.returningCols(ret, all), star: all}
+func (x *sqlExec) returningResult(ret []sqlir.Target, all []string, alias string) *sqlResult {
+	return &sqlResult{cols: x.returningCols(ret, all), star: all, alias: alias}
 }
 
 // tableCols are the declared columns of table, in order.
@@ -1596,7 +1598,7 @@ func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) e
 		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
-	e := &env{merged: row}
+	e := &env{tables: map[string]Row{out.alias: row}, merged: row}
 	for _, t := range ret {
 		if t.Star {
 			for _, c := range out.star {
@@ -1709,7 +1711,7 @@ func (x *sqlExec) writeLimit(cands []jrow, order []sqlir.OrderKey, limit sqlir.E
 func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(up.Table)
 	if x.tx.db.ignored[table] {
-		return x.returningResult(up.Returning, x.tableCols(table)), nil // nothing to update
+		return x.returningResult(up.Returning, x.tableCols(table), ""), nil // nothing to update
 	}
 	alias := up.Alias
 	if alias == "" {
@@ -1760,7 +1762,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			return nil, err
 		}
 	}
-	out := x.returningResult(up.Returning, x.tableCols(table))
+	out := x.returningResult(up.Returning, x.tableCols(table), alias)
 	// MySQL's single-table UPDATE assigns left to right, each assignment
 	// seeing the ones before it, where Postgres evaluates them all against the
 	// old row.
@@ -1928,7 +1930,7 @@ func (x *sqlExec) touchOnUpdate(table string, cur, updated Row, set []sqlir.Assi
 
 func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	if x.tx.db.isIgnored(del.Table) {
-		return x.returningResult(del.Returning, x.tableCols(x.tx.db.resolve(del.Table))), nil // nothing to delete
+		return x.returningResult(del.Returning, x.tableCols(x.tx.db.resolve(del.Table)), ""), nil // nothing to delete
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
 	x.freeze(del)
@@ -1945,7 +1947,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 	}
 	table := x.tx.db.resolve(del.Table)
 	alias := delAlias
-	out := x.returningResult(del.Returning, x.tableCols(table))
+	out := x.returningResult(del.Returning, x.tableCols(table), alias)
 	done := map[string]bool{}
 	// apply deletes the row of c if it still matches, once it is locked.
 	apply := func(c jrow) error {
