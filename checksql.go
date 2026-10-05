@@ -140,6 +140,9 @@ func (c *staticCheck) statement(st sqlir.Statement) error {
 		}
 		return c.targets(s.Returning)
 	case *sqlir.UpdateStmt:
+		if err := c.ctes(s.With); err != nil {
+			return err
+		}
 		if err := c.assignments(s.Set); err != nil {
 			return err
 		}
@@ -159,6 +162,9 @@ func (c *staticCheck) statement(st sqlir.Statement) error {
 		}
 		return c.targets(s.Returning)
 	case *sqlir.DeleteStmt:
+		if err := c.ctes(s.With); err != nil {
+			return err
+		}
 		for i := range s.Using {
 			if err := c.tableRef(&s.Using[i]); err != nil {
 				return err
@@ -186,14 +192,22 @@ func (c *staticCheck) statement(st sqlir.Statement) error {
 	return nil
 }
 
+// ctes checks every CTE, read or not, as Postgres analyzes them all.
+func (c *staticCheck) ctes(with []sqlir.CTE) error {
+	for _, cte := range with {
+		if err := c.selectStmt(cte.Select); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *staticCheck) selectStmt(s *sqlir.SelectStmt) error {
 	if s == nil {
 		return nil
 	}
-	for _, cte := range s.With {
-		if err := c.selectStmt(cte.Select); err != nil {
-			return err
-		}
+	if err := c.ctes(s.With); err != nil {
+		return err
 	}
 	if err := c.exprs(s.DistinctOn); err != nil {
 		return err

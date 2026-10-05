@@ -121,6 +121,17 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c(id) AS (SELECT 1) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH d AS (DELETE FROM jobs RETURNING id) UPDATE jobs SET status = 'x' FROM d WHERE jobs.id = d.id`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) INSERT INTO jobs VALUES (1, 'x')`},
+		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`},
+		// An unread CTE is checked too, as Postgres analyzes it.
+		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) UPDATE jobs SET status = 'x'`},
+		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) DELETE FROM jobs`},
+		// A CTE with effects runs in Postgres only as far as SET, RETURNING,
+		// a subquery or another CTE asks for its rows.
+		{postgres.New(), `WITH q AS (SELECT id FROM jobs FOR UPDATE SKIP LOCKED) DELETE FROM jobs WHERE id IN (SELECT id FROM q)`},
+		{postgres.New(), `WITH q AS (SELECT id FROM jobs FOR UPDATE) UPDATE jobs SET status = (SELECT 'x' FROM q LIMIT 1)`},
+		{postgres.New(), `WITH n AS (SELECT nextval('s') AS v) UPDATE jobs SET status = 'x' RETURNING (SELECT v FROM n)`},
+		{postgres.New(), `WITH q AS (SELECT id FROM jobs FOR UPDATE), r AS (SELECT id FROM q) UPDATE jobs SET status = 'x' FROM r WHERE jobs.id = r.id`},
 		{mysql.New(), "WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' WHERE id IN (SELECT id FROM c)"},
 		{mysql.New(), "WITH c AS (SELECT 1 AS id) DELETE FROM jobs WHERE id IN (SELECT id FROM c)"},
 	} {

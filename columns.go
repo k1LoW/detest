@@ -350,13 +350,44 @@ func (sc *colScope) columnType(r *sqlir.ColumnRef) string {
 }
 
 // query checks a query block and returns its output columns.
-// writeWith is with for WITH ... UPDATE or DELETE. The table written is the
+// writeWith is with for WITH ... UPDATE or DELETE, whose FROM or USING items
+// are items and the rest of the statement rest. The table written is the
 // table whatever a CTE is named, where FROM, USING and the subqueries would
 // read the CTE, so a CTE of the target's name is refused.
-func (c *columnChecker) writeWith(with []sqlir.CTE, target string) (pop func(), err error) {
+//
+// detest runs every CTE the statement reads before it chooses the rows to
+// write, where Postgres runs one only as far as the statement asks for its
+// rows. A CTE that locks rows or has effects is asked for in full when it is
+// an item of FROM or USING, which is how a job queue claims a job. Read by
+// SET, RETURNING, a subquery or another CTE, it runs only for the rows that
+// reach it, so that is refused.
+func (c *columnChecker) writeWith(with []sqlir.CTE, target string, items []sqlir.TableRef, rest any) (pop func(), err error) {
+	if len(with) == 0 {
+		return func() {}, nil
+	}
+	ctes := map[string]bool{}
 	for _, cte := range with {
 		if c.x.tx.db.resolve(cte.Name) == c.x.tx.db.resolve(target) {
 			return nil, c.x.unsupported(fmt.Sprintf("a CTE named %q as the table the statement writes", cte.Name))
+		}
+		ctes[cte.Name] = true
+	}
+	var others []any
+	for _, t := range items {
+		if t.Sub != nil || t.Func != nil || !ctes[t.Name] {
+			others = append(others, t)
+		}
+	}
+	for _, cte := range with {
+		others = append(others, cte.Select)
+	}
+	readElsewhere := map[string]bool{}
+	for _, name := range freeNames([]any{rest, others}) {
+		readElsewhere[name] = true
+	}
+	for _, cte := range with {
+		if readElsewhere[cte.Name] && queryHasEffects(cte.Select) {
+			return nil, c.x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read other than as an item of FROM or USING", cte.Name))
 		}
 	}
 	return c.with(with, nil)
@@ -884,7 +915,7 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(up.Table)) != nil {
 		return nil // the missing table is the error, which the UPDATE reports first
 	}
-	pop, err := c.writeWith(up.With, up.Table)
+	pop, err := c.writeWith(up.With, up.Table, up.From, []any{up.Set, up.Where, up.Returning, up.OrderBy, up.Limit})
 	if err != nil {
 		return err
 	}
@@ -930,7 +961,7 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(del.Table)) != nil {
 		return nil // the missing table is the error, which the DELETE reports first
 	}
-	pop, err := c.writeWith(del.With, del.Table)
+	pop, err := c.writeWith(del.With, del.Table, del.Using, []any{del.Where, del.Returning, del.OrderBy, del.Limit})
 	if err != nil {
 		return err
 	}

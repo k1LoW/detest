@@ -16,6 +16,22 @@ var effectFuncs = map[string]bool{
 	"clock_timestamp": true, "pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
 }
 
+// queryHasEffects reports whether running sel changes state: a locking
+// clause or one of effectFuncs anywhere in it.
+func queryHasEffects(sel *sqlir.SelectStmt) bool {
+	for _, s := range sqlir.Selects(sel) {
+		if s.Lock != nil {
+			return true
+		}
+	}
+	for _, f := range sqlir.FuncCallsIn(sel) {
+		if effectFuncs[f.Name] {
+			return true
+		}
+	}
+	return false
+}
+
 // checkSequenceCalls refuses effectFuncs where detest evaluates them
 // another number of times than Postgres: in the WHERE of an UPDATE or a
 // DELETE, which detest also evaluates to validate the statement before it

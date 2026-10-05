@@ -1108,8 +1108,15 @@ func (c *pgConv) with(w *pg.WithClause) ([]sqlir.CTE, error) {
 		return nil, c.unsupported("recursive CTE")
 	}
 	var out []sqlir.CTE
+	seen := map[string]bool{}
 	for _, n := range w.Ctes {
 		cte := n.GetCommonTableExpr()
+		// Postgres fails the statement (42712); the CTEs are kept by name,
+		// so the later one would stand in for both.
+		if seen[cte.Ctename] {
+			return nil, c.unsupported("a WITH query name given twice")
+		}
+		seen[cte.Ctename] = true
 		if len(cte.Aliascolnames) > 0 {
 			// The CTE's rows are keyed by the names its query gives them.
 			return nil, c.unsupported("a column alias list on a CTE")

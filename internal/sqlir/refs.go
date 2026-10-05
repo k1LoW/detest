@@ -8,6 +8,13 @@ func ColumnRefs(e Expr) []*ColumnRef { return find[*ColumnRef](e) }
 // FuncCalls returns the function calls in e, in the order they appear.
 func FuncCalls(e Expr) []*FuncCall { return find[*FuncCall](e) }
 
+// Selects returns the queries under n, a statement or an expression, n
+// itself included.
+func Selects(n any) []*SelectStmt { return find[*SelectStmt](n) }
+
+// FuncCallsIn is FuncCalls for any node, a statement or a query included.
+func FuncCallsIn(n any) []*FuncCall { return find[*FuncCall](n) }
+
 // BlockFuncCalls returns the function calls of e's own query block: not
 // those in a subquery, which belong to its block, nor the function a window
 // computes, which is no aggregate of the block. A window's arguments,
