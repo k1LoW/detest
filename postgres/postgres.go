@@ -159,6 +159,9 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 type pgConv struct {
 	query   string
 	windows map[string]*pg.WindowDef // the WINDOW clause of the query being converted
+	// lockKey is set while the arguments of an advisory lock function are
+	// converted, where hashtext may stand.
+	lockKey bool
 }
 
 func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what, c.query) }
@@ -635,9 +638,6 @@ var mutableFuncs = map[string]bool{
 	"statement_timestamp": true, "random": true, "concat": true,
 	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
 	"count": true, "sum": true, "min": true, "max": true, "avg": true,
-	// Immutable in Postgres, but detest returns its input rather than the
-	// int4 hash, which a stored value must not differ from.
-	"hashtext": true,
 }
 
 // immutable refuses what Postgres does not allow in a generation expression:
@@ -1764,7 +1764,22 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		case fc.AggWithinGroup:
 			return nil, c.unsupported("aggregate WITHIN GROUP")
 		}
-		if len(fc.Funcname) > 0 && strings.EqualFold(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval(), "make_interval") {
+		fname := ""
+		if len(fc.Funcname) > 0 {
+			fname = strings.ToLower(fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval())
+		}
+		if fname == "hashtext" && !c.lockKey {
+			// The executor returns hashtext's input, which keys an advisory
+			// lock as the int4 hash would, equal for equal strings, but is
+			// not the value Postgres gives anywhere the application reads
+			// or compares it.
+			return nil, c.unsupported("hashtext anywhere but as the key of an advisory lock")
+		}
+		if fname == "pg_advisory_xact_lock" || fname == "pg_try_advisory_xact_lock" {
+			defer func(prev bool) { c.lockKey = prev }(c.lockKey)
+			c.lockKey = true
+		}
+		if fname == "make_interval" {
 			// The executor takes make_interval's one argument as seconds,
 			// which is the named form backoff SQL writes. Postgres reads a
 			// positional first argument as years and has six other names,

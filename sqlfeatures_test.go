@@ -185,6 +185,9 @@ func TestUnconvertedSchemaExpressions(t *testing.T) {
 		`CREATE TABLE e (id int PRIMARY KEY, d uuid DEFAULT CURRENT_USER::uuid)`,
 		`CREATE TABLE e (id int PRIMARY KEY, d smallint DEFAULT length(CURRENT_USER))`,
 		`CREATE TABLE e (id int PRIMARY KEY, d int DEFAULT length(CURRENT_USER) REFERENCES c (id))`,
+		// hashtext is refused outside an advisory lock's key, so the
+		// generated column loads unconverted and the write is refused.
+		`CREATE TABLE e (id int PRIMARY KEY, a text, h int GENERATED ALWAYS AS (hashtext(a)) STORED)`,
 	} {
 		mustExec(t, db, ddl)
 		if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -540,5 +543,46 @@ func TestSearchPathSetBySQL(t *testing.T) {
 				t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
 			}
 		}
+	}
+}
+
+// hashtext runs only as the key of an advisory lock, where the executor's
+// value, the input string, locks as Postgres's int4 hash would: equal for
+// equal strings. Anywhere else the application would read or compare a
+// value Postgres never gives.
+func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'a')`)
+	for _, q := range []string{
+		`SELECT hashtext(name) FROM t`,
+		`SELECT * FROM t WHERE hashtext(name) = 1`,
+		`SELECT id FROM t ORDER BY hashtext(name)`,
+		`SELECT pg_advisory_xact_lock(1), hashtext(name) FROM t`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT pg_advisory_xact_lock(hashtext($1))`,
+		`SELECT pg_try_advisory_xact_lock(hashtext('k'))`,
+		`SELECT pg_advisory_xact_lock(hashtext(name)) FROM t`,
+	} {
+		if err := CheckSQL(postgres.New(), q); err != nil {
+			t.Errorf("CheckSQL %s: got %v, want nil", q, err)
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q, "k"); err != nil {
+			t.Errorf("%s: got %v, want nil", q, err)
+		}
+		_ = tx.Rollback()
 	}
 }
