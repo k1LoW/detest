@@ -8,9 +8,19 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/k1LoW/detest/internal/sqlir"
 	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
 )
+
+func TestKnownFunctionResultTypes(t *testing.T) {
+	for name := range knownFuncs {
+		f := &sqlir.FuncCall{Name: name, Args: []sqlir.Expr{&sqlir.Cast{Type: "text"}}}
+		if typ := expressionType(f, nil); typ == "" {
+			t.Errorf("known function %s has no result-type classification", name)
+		}
+	}
+}
 
 // CheckSQL runs against a database with no rows, so an expression over a
 // table's rows is never evaluated. A function or an operator detest does not
@@ -26,6 +36,12 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT upper(true)`,
 			`SELECT length(1::int)`,
 			`SELECT lower(nextval('s'))`,
+			`SELECT lower(round(1))`,
+			`SELECT lower(pg_try_advisory_xact_lock(1))`,
+			`SELECT left(name, 1.5) FROM t`,
+			`SELECT left(name, 1 + 1.5) FROM t`,
+			`SELECT left(name, nextval('s')) FROM t`,
+			`SELECT lower(row_number() OVER ())`,
 			`SELECT date_trunc('day', created_at) FROM t`,
 			`SELECT * FROM t WHERE trim(name) <> ''`,
 			`SELECT * FROM t WHERE data->>'k' = 'v'`,
@@ -58,6 +74,8 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 	accepted := map[Server][]string{
 		postgres.New(): {
 			`SELECT lower(1::text), 'a' || 1`,
+			`SELECT left(name, 1) FROM t`,
+			`SELECT left(name, length(name)) FROM t`,
 			`SELECT lower(name), length(name), coalesce(n, 0) FROM t WHERE created_at < now() - make_interval(secs => 10)`,
 			`SELECT count(*), sum(n), row_number() OVER (PARTITION BY k ORDER BY id) FROM t GROUP BY k`,
 			`SELECT * FROM t WHERE id = ANY(ARRAY[1, 2]) AND name LIKE 'x%' AND a BETWEEN 1 AND 2`,

@@ -145,6 +145,11 @@ func TestPostgresExpressionTypesRefusedBeforeEvaluation(t *testing.T) {
 		`SELECT lower(nextval('s'))`,
 		`SELECT lower(id) FROM typed`,
 		`SELECT lower(max(id)) FROM typed`,
+		`SELECT lower(round(1))`,
+		`SELECT lower(pg_try_advisory_xact_lock(1))`,
+		`SELECT left(name, 1.5) FROM typed`,
+		`SELECT left('abc', nextval('s'))`,
+		`SELECT lower(row_number() OVER ())`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
