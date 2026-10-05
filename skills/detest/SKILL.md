@@ -300,7 +300,7 @@ Be exact about the bounds. A pass is a statement about the schedules explored, n
 - runs were cut at `MaxIdleTicks` (`N runs cut at MaxIdleTicks` in the summary line). Those runs went no further than a loop's last allowed idle tick and their invariants at quiescence were not checked;
 - `MaxPreemptions` or another bound cut the search (`complete=true` then means complete within that bound only). Name the bound and what it leaves out;
 - it explored one shard (`DETEST_SHARD`) of the space;
-- it ran under `detest.Random(seed)` (`random seed S` in the summary line). Give the runs drawn and the seed, and say that the schedules not drawn are unknown, however many runs passed;
+- it ran under `detest.Random(seed)` (`random seed S` in the summary line). Give the runs drawn and the seed, and say that the schedules not drawn are unknown, however many runs passed. More runs or another seed draw more of them, as a checkpoint does not apply to a random exploration;
 - a `Sometimes` condition never held, so the situation the bug needs was never reached.
 
 Then say what it would take to cover the rest (a higher bound, more time, a checkpoint to resume from), and offer to run it. Explain terms like "interleaving" or "invariant" in a few words the first time if the user seems unfamiliar with them.
