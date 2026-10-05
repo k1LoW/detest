@@ -387,8 +387,9 @@ func TestEqualRowUnderUniqueWaits(t *testing.T) {
 
 // An isolation level set by SQL is refused as one asked for in BeginTx is,
 // rather than ignored, which would run the transaction at Read Committed where
-// production runs it at another level. Read Committed itself, and the other
-// transaction modes, change nothing and run.
+// production runs it at another level, and so is READ ONLY, under which the
+// server fails every write. Read Committed itself, READ WRITE and DEFERRABLE
+// change nothing and run.
 func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
@@ -400,6 +401,10 @@ func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 		`SET transaction_isolation = 'serializable'`,
 		`SET default_transaction_isolation TO 'repeatable read'`,
 		`SET LOCAL transaction_isolation = 'repeatable read'`,
+		`SET TRANSACTION READ ONLY`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
+		`SET transaction_read_only = on`,
+		`SET default_transaction_read_only TO 'true'`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -416,7 +421,9 @@ func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
 	for _, q := range []string{
 		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
 		`SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`,
-		`SET TRANSACTION READ ONLY`,
+		`SET TRANSACTION READ WRITE`,
+		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE, NOT DEFERRABLE`,
+		`SET transaction_read_only = off`,
 		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED`,
 		`SET transaction_isolation = 'read committed'`,
 		`RESET transaction_isolation`,

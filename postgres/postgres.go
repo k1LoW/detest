@@ -163,41 +163,59 @@ type pgConv struct {
 
 func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what, c.query) }
 
-// isolationSet refuses a SET that asks for an isolation level other than Read
-// Committed, which detest runs Postgres at: SET TRANSACTION ISOLATION LEVEL,
-// SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL, and the
-// transaction_isolation and default_transaction_isolation settings. Read
+// transactionSet refuses a SET that asks for an isolation level other than
+// Read Committed, which detest runs Postgres at, or for a read-only
+// transaction: SET TRANSACTION, SET SESSION CHARACTERISTICS AS TRANSACTION,
+// and the transaction_isolation, default_transaction_isolation,
+// transaction_read_only and default_transaction_read_only settings. Read
 // Uncommitted is Read Committed in Postgres. A level asked for in BeginTx is
 // refused by the driver; one set by SQL would otherwise be ignored and the
-// transaction run at another level than production's. The other transaction
-// modes, READ ONLY and DEFERRABLE, change no outcome detest models.
-func (c *pgConv) isolationSet(v *pg.VariableSetStmt) error {
-	var level string
+// transaction run at another level than production's. A read-only
+// transaction fails every write with 25006, which detest does not model, so
+// it is refused as MySQL's tx_read_only is; READ WRITE is the default and
+// runs. DEFERRABLE changes nothing outside Serializable and is ignored.
+func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
+	var level, readOnly string
 	switch v.Kind {
 	case pg.VariableSetKind_VAR_SET_MULTI:
 		if v.Name != "TRANSACTION" && v.Name != "SESSION CHARACTERISTICS" {
 			return nil
 		}
 		for _, a := range v.Args {
-			if d := a.GetDefElem(); d != nil && d.Defname == "transaction_isolation" {
+			d := a.GetDefElem()
+			switch d.GetDefname() {
+			case "transaction_isolation":
 				level = d.Arg.GetAConst().GetSval().GetSval()
+			case "transaction_read_only":
+				readOnly = strconv.FormatInt(int64(d.Arg.GetAConst().GetIval().GetIval()), 10)
 			}
 		}
 	case pg.VariableSetKind_VAR_SET_VALUE:
-		if v.Name != "transaction_isolation" && v.Name != "default_transaction_isolation" {
-			return nil
-		}
+		var val string
 		if len(v.Args) > 0 {
-			level = v.Args[0].GetAConst().GetSval().GetSval()
+			val = v.Args[0].GetAConst().GetSval().GetSval()
+		}
+		switch v.Name {
+		case "transaction_isolation", "default_transaction_isolation":
+			level = val
+		case "transaction_read_only", "default_transaction_read_only":
+			readOnly = val
+		default:
+			return nil
 		}
 	default:
 		return nil
 	}
 	switch strings.ToLower(level) {
 	case "", "read committed", "read uncommitted":
+	default:
+		return c.unsupported("an isolation level other than Read Committed set by SQL (" + strings.ToUpper(level) + ")")
+	}
+	switch strings.ToLower(readOnly) {
+	case "", "0", "off", "false", "no":
 		return nil
 	}
-	return c.unsupported("an isolation level other than Read Committed set by SQL (" + strings.ToUpper(level) + ")")
+	return c.unsupported("a read-only transaction set by SQL (READ ONLY)")
 }
 
 func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
@@ -212,7 +230,7 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 		return c.createTableAs(s.CreateTableAsStmt)
 	case *pg.Node_VariableSetStmt:
 		v := s.VariableSetStmt
-		if err := c.isolationSet(v); err != nil {
+		if err := c.transactionSet(v); err != nil {
 			return nil, err
 		}
 		out := &sqlir.SetStmt{Name: v.Name, Local: v.IsLocal}
