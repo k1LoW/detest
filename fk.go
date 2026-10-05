@@ -428,6 +428,12 @@ func (x *sqlExec) lockChild(ck childKey, k, parent Row, mode lockMode) (lockKey,
 }
 
 func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action string) error {
+	if len(kids) > 0 {
+		// The action writes the child's key columns as an UPDATE would.
+		if err := x.writesDeferrableKey(ck.table, ck.fk.Columns); err != nil {
+			return err
+		}
+	}
 	def := x.tx.db.defs[ck.table]
 	for _, k := range kids {
 		lk, cur, ok, err := x.lockChild(ck, k, old, x.tx.db.updateLock(ck.table, ck.fk.Columns))

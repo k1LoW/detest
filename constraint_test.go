@@ -584,3 +584,23 @@ DROP SEQUENCE IF EXISTS missing;
 		}
 	}
 }
+
+func TestReferentialActionOnDeferrableKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE p (id int PRIMARY KEY);
+CREATE TABLE c (id int PRIMARY KEY, pid int UNIQUE DEFERRABLE REFERENCES p (id) ON UPDATE CASCADE);
+`)
+	// Seed outside the refused write path.
+	mustExec(t, db, `INSERT INTO p VALUES (1)`)
+	if _, err := db.Exec(`INSERT INTO c VALUES (1, 1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("insert into a deferrable key: %v", err)
+	}
+	mustExec(t, db, `ALTER TABLE c DROP CONSTRAINT c_pid_key`)
+	mustExec(t, db, `INSERT INTO c VALUES (1, 1)`)
+	mustExec(t, db, `ALTER TABLE c ADD CONSTRAINT c_pid_key UNIQUE (pid) DEFERRABLE`)
+	if _, err := db.Exec(`UPDATE p SET id = 2`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("cascade into a deferrable key: %v", err)
+	}
+}
