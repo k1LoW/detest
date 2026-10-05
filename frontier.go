@@ -33,10 +33,12 @@ type frontier struct {
 	incomplete bool // MaxRuns or MaxDuration cut the exploration short
 	// random hands out run indexes instead of subtrees, under the Random
 	// strategy, with next the index of the next run and bestIndex the
-	// index of the best violation's run.
+	// index of the best violation's run. halted stops handing them out
+	// once a run violated, before it is shrunk.
 	random    bool
 	next      int
 	bestIndex int
+	halted    bool
 	runs      int
 	maxRuns   int
 	expired   atomic.Bool // MaxDuration has passed
@@ -149,11 +151,11 @@ func (f *frontier) take(worker int) ([]choice, int, bool) {
 }
 
 // takeRandom is take under the Random strategy. Indexes are handed out in
-// order, so once a violation is found every run before it has been taken,
-// and no other is needed to report the violation of the lowest index. f.mu
+// order, so once a run violates every run before it has been taken, and no
+// other is needed to report the violation of the lowest index. f.mu
 // is held.
 func (f *frontier) takeRandom(worker int) ([]choice, int, bool) {
-	if f.stopped || f.bestResult != nil {
+	if f.stopped || f.halted {
 		f.progress[worker].idle.Store(true)
 		return nil, 0, false
 	}
@@ -258,6 +260,14 @@ func (f *frontier) fail(err error) {
 	f.stopped = true
 	f.busy--
 	f.wakeAll()
+}
+
+// halt stops handing out random runs, as one violated. The runs handed out
+// already, the earlier ones among them, go on.
+func (f *frontier) halt() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.halted = true
 }
 
 // found records a violating run, keeping the earliest one: the first in
@@ -365,6 +375,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		if v != nil {
+			if f.random {
+				f.halt() // shrinking takes a run per choice
+			}
 			choices := r.choices
 			r, v = s.shrink(r, v)
 			if !r.tracing {
