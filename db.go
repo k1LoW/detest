@@ -627,9 +627,9 @@ func (def *tableDef) renameColumn(old, nw string) {
 		delete(def.generated, old)
 		def.generated[nw] = g
 	}
-	if def.identityAlways[old] {
+	if always, ok := def.identityAlways[old]; ok {
 		delete(def.identityAlways, old)
-		def.identityAlways[nw] = true
+		def.identityAlways[nw] = always
 	}
 	for _, g := range def.generated {
 		g.renameColumn(old, nw)
