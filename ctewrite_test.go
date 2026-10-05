@@ -132,6 +132,9 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' WHERE id IN (WITH c AS (SELECT 2 AS id) SELECT id FROM c)`},
+		// A CTE sees only the ones before it.
+		{postgres.New(), `WITH p AS (SELECT id FROM q), q AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM p, q WHERE jobs.id = p.id`},
+		{postgres.New(), `WITH p AS (SELECT id FROM p) DELETE FROM jobs USING p WHERE jobs.id = p.id`},
 		// Postgres's RETURNING * gives the FROM or USING items' columns too.
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id RETURNING *`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING *`},

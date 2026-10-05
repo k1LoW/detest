@@ -382,6 +382,20 @@ func (c *columnChecker) writeWith(with []sqlir.CTE, target string, items []sqlir
 	for _, cte := range with {
 		others = append(others, cte.Select)
 	}
+	// A CTE sees only the ones declared before it, and a name of its own or
+	// of a later one means a table there. The pending CTEs are found by
+	// name, so the later one would stand in for the table.
+	index := map[string]int{}
+	for i, cte := range with {
+		index[cte.Name] = i
+	}
+	for i, cte := range with {
+		for _, name := range freeNames(cte.Select) {
+			if j, ok := index[name]; ok && j >= i {
+				return nil, c.x.unsupported(fmt.Sprintf("CTE %q reading %q, which is not declared before it", cte.Name, name))
+			}
+		}
+	}
 	// A write's CTEs run when first read, by name, so a query inside the
 	// statement that declares one of their names would read the write's.
 	for _, s := range sqlir.Selects([]any{rest, items, with}) {
