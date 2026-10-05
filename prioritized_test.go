@@ -83,6 +83,30 @@ func TestPrioritizedSwitchesBack(t *testing.T) {
 	}
 }
 
+// A step with a single option takes no choice, so the choices a lone
+// process makes are drawn as under Random.
+func TestPrioritizedDrawsALoneProcessChoices(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		picked := 0
+		s.Seed(func() { picked = 0 })
+		s.Manual("a", 1, func(p *Proc) error {
+			p.Step("a")
+			picked = p.Choose("x", 2)
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if picked == 1 {
+				return fmt.Errorf("picked the second option")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 2), MaxRuns(50)}, nil, 0)
+	if !res.Violated {
+		t.Fatalf("want a run picking the second option, got %s", res.report())
+	}
+}
+
 func TestPrioritizedFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		counterModel(s, false)

@@ -372,10 +372,15 @@ func (r *run) execute() (v *violation) {
 		r.steps++
 		i := 0
 		if r.prio != nil {
-			r.want = r.prio.pick(r, opts)
-			i = r.want
+			i = r.prio.pick(r, opts)
 		}
 		if len(opts) > 1 {
+			if r.prio != nil {
+				// Only the step choice takes the pick, or a lone option would
+				// leave it to the next choice, such as an external call's
+				// outcome.
+				r.want = i
+			}
 			r.mixOptions(opts)
 			i = r.choose("step", len(opts))
 		}
