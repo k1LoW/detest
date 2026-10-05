@@ -1395,6 +1395,11 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 			exprs := false
 			for _, n := range oc.Infer.IndexElems {
 				ie := n.GetIndexElem()
+				if len(ie.Opclass) > 0 || len(ie.Collation) > 0 {
+					// Postgres picks arbiters by them, which detest's
+					// indexes do not keep.
+					return nil, c.unsupported("an operator class or collation in ON CONFLICT's target")
+				}
 				if ie.Expr == nil {
 					conf.Columns = append(conf.Columns, ie.Name)
 					conf.Elems = append(conf.Elems, &sqlir.ColumnRef{Column: ie.Name})

@@ -403,6 +403,8 @@ CREATE SEQUENCE IF NOT EXISTS kept START 10;
 		// A unique index is no constraint, which Postgres fails with 42704.
 		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT ON CONSTRAINT u_email DO NOTHING`,
 		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT ON CONSTRAINT "primary key" DO NOTHING`,
+		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT (email text_ops) WHERE NOT deleted DO NOTHING`,
+		`INSERT INTO u VALUES (1, 'a', false) ON CONFLICT (email COLLATE "C") WHERE NOT deleted DO NOTHING`,
 		`WITH d AS (DELETE FROM u RETURNING id) INSERT INTO u SELECT id, 'x', false FROM d`,
 		`WITH s AS (SELECT 1) INSERT INTO u VALUES (1, 'a', false)`,
 	} {
