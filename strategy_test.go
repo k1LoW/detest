@@ -102,3 +102,18 @@ func TestRandomShardsSplitTheRuns(t *testing.T) {
 		}
 	}
 }
+
+// A random counterexample names the seed it was drawn from, alone and with
+// workers.
+func TestRandomViolationReportsTheSeed(t *testing.T) {
+	model := func(t *testing.T, s *Sim) { counterModel(s, false) }
+	one, _ := exploreBubble(t, model, []Option{Random(3)}, nil, 0)
+	f := newFrontier(4, 200000)
+	f.random = true
+	many, _ := exploreWorkers(t, model, []Option{Random(3)}, f, 4)
+	for _, res := range []*result{one, many} {
+		if !res.Violated || !strings.Contains(res.report(), "of random seed 3,") {
+			t.Fatalf("want a violation naming seed 3, got %s", res.report())
+		}
+	}
+}

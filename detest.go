@@ -360,8 +360,12 @@ func (r *result) outcome() string {
 	if r.Schedule != "" {
 		choices = len(strings.Split(r.Schedule, ","))
 	}
-	return fmt.Sprintf("detest: %s\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
-		what, r.Runs, choices, r.Schedule, r.Trace)
+	seed := ""
+	if r.strategy.random {
+		seed = fmt.Sprintf(" of random seed %d", r.strategy.seed)
+	}
+	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
+		what, r.Runs, seed, choices, r.Schedule, r.Trace)
 }
 
 // refuse records a statement refused as unsupported, for the report.

@@ -416,7 +416,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.strategy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.strategy
 		return &v
 	}
 	return merged
