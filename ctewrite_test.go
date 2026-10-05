@@ -36,6 +36,14 @@ func TestCTEWrites(t *testing.T) {
 		DELETE FROM jobs USING d WHERE jobs.id = d.id RETURNING jobs.id`); !slices.Equal(got, []int64{3}) {
 		t.Errorf("WITH ... DELETE ... USING: got %v, want [3]", got)
 	}
+	// RETURNING reads the FROM and USING rows the written row was joined with.
+	mustExec(t, db, `INSERT INTO jobs VALUES (5, 'queued', NULL)`)
+	if got := queryIDs(t, db, `WITH c AS (SELECT 5 AS id, 70 AS v) UPDATE jobs SET worker = c.v FROM c WHERE jobs.id = c.id RETURNING c.v + jobs.id`); !slices.Equal(got, []int64{75}) {
+		t.Errorf("RETURNING of a FROM item: got %v, want [75]", got)
+	}
+	if got := queryIDs(t, db, `WITH c AS (SELECT 5 AS id, 70 AS v) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING c.v`); !slices.Equal(got, []int64{70}) {
+		t.Errorf("RETURNING of a USING item: got %v, want [70]", got)
+	}
 	if _, err := db.Exec(`WITH c AS (SELECT id FROM jobs) UPDATE jobs SET worker = 1 FROM c WHERE c.nope = 1`); !errors.Is(err, ErrUndefinedColumn) {
 		t.Errorf("a column the CTE does not give: got %v, want 42703", err)
 	}
@@ -123,6 +131,9 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) INSERT INTO jobs VALUES (1, 'x')`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`},
+		// Postgres's RETURNING * gives the FROM or USING items' columns too.
+		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id RETURNING *`},
+		{postgres.New(), `WITH c AS (SELECT 1 AS id) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING *`},
 		// An unread CTE is checked too, as Postgres analyzes it.
 		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) UPDATE jobs SET status = 'x'`},
 		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) DELETE FROM jobs`},

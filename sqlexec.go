@@ -1693,11 +1693,16 @@ func (x *sqlExec) returningCols(ret []sqlir.Target, all []string) []string {
 }
 
 func (x *sqlExec) appendReturning(out *sqlResult, ret []sqlir.Target, row Row) error {
+	return x.appendReturningIn(out, ret, row, &env{tables: map[string]Row{out.alias: row}, merged: row})
+}
+
+// appendReturningIn evaluates RETURNING in e, which for UPDATE ... FROM and
+// DELETE ... USING holds the joined rows besides the row written.
+func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row, e *env) error {
 	if len(ret) == 0 {
 		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
-	e := &env{tables: map[string]Row{out.alias: row}, merged: row}
 	for _, t := range ret {
 		if t.Star {
 			for _, c := range out.star {
@@ -1967,7 +1972,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 			// reports them without clientFoundRows.
 			out.affected++
 		}
-		return x.appendReturning(out, up.Returning, updated)
+		return x.appendReturningIn(out, up.Returning, updated, c.rebind(alias, updated).env(nil))
 	}
 	changed := assignedColumns(up.Set)
 	if def := x.tx.db.defs[table]; def != nil {
@@ -2100,7 +2105,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 			return err
 		}
 		out.affected++
-		return x.appendReturning(out, del.Returning, cur)
+		return x.appendReturningIn(out, del.Returning, cur, c.rebind(alias, cur).env(nil))
 	}
 	if x.rowByRow(table, alias, del.Where, len(del.Using) == 0 && len(del.OrderBy) == 0, nil) {
 		n, err := x.count(del.Limit, "LIMIT", nil)

@@ -840,6 +840,11 @@ func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string
 			}
 			continue
 		}
+		// With FROM or USING items, Postgres's RETURNING * gives their columns
+		// after the target's, where detest gives the target's only.
+		if t.Table == "" && len(sc.items) > 1 {
+			return c.x.unsupported("RETURNING * of a write with FROM or USING items")
+		}
 		if t.Table == "" || t.Table == target {
 			continue
 		}

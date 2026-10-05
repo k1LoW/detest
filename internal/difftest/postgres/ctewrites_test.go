@@ -71,6 +71,9 @@ var cteWriteCases = []difftest.Case{
 			difftest.Q(0, `WITH d AS (SELECT 3 AS id), w AS (SELECT id + 1 AS id FROM d)
 				UPDATE jobs SET status = 'archived' WHERE id = (SELECT id FROM d) RETURNING id, (SELECT id FROM w)`),
 			difftest.S(0, `WITH n AS (SELECT 9 AS id) UPDATE jobs SET worker = 0 FROM n WHERE jobs.id = n.id`),
+			difftest.Q(0, `WITH c AS (SELECT 1 AS id, 70 AS v) UPDATE jobs SET worker = c.v FROM c WHERE jobs.id = c.id RETURNING jobs.id, c.v, v`),
+			difftest.Q(0, `UPDATE jobs SET worker = j.id FROM jobs j WHERE jobs.id = 2 AND j.id = 3 RETURNING jobs.id, j.id, j.status = 'archived'`),
+			difftest.Q(0, `WITH c AS (SELECT 3 AS id, 'gone' AS why) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING jobs.id, why = 'gone'`),
 			difftest.Q(0, `SELECT id, status, worker FROM jobs ORDER BY id`),
 		},
 	},
