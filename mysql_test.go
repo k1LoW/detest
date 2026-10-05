@@ -4951,6 +4951,7 @@ func TestDecimalArithmetic(t *testing.T) {
 		{my, "exact product of literals", "SELECT 0.123456789 * 0.123456789", "0.015241578750190521"},
 		{my, "exact product with more digits than a float prints", "SELECT 0.1234567891 * 0.1234567891", ""},
 		{my, "DISTINCT over ranges", "SELECT SUM(DISTINCT bal + 0.2) FROM acct", ""},
+		{my, "DECIMAL and DOUBLE mixed", "SELECT (bal + 0.2) - (d + 0.2) < -0.00000000000000005 FROM acct WHERE id = 1", ""},
 		{my, "quotient within four places", "SELECT 1 / 8", "0.125"},
 		{my, "quotient MySQL rounds to four places", "SELECT 1 / 32", ""},
 		{my, "repeating quotient", "SELECT 1 / 3", ""},
@@ -5010,6 +5011,10 @@ func TestDecimalArithmeticWrites(t *testing.T) {
 		// floats, 0.8049999999999999, rounds to 0.80.
 		if _, err := db.Exec("UPDATE m SET price = price * 0.7 WHERE id = 3"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("a product rounding apart: %v", err)
+		}
+		// A range across zero holds values within the column's range.
+		if _, err := db.Exec("UPDATE m SET price = ((d + 0.2) - (0.1 + 0.2)) * 1e30 WHERE id = 2"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("a range across zero written out of range at both ends: %v", err)
 		}
 		// A DOUBLE column keeps the value unrounded.
 		if _, err := db.Exec("UPDATE m SET d = d + 0.2 WHERE id = 1"); !errors.As(err, new(*ErrUnsupportedSQL)) {

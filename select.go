@@ -1293,7 +1293,13 @@ func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind 
 		total, ints, ranged := 0.0, true, false
 		lo, hi, known := new(big.Rat), new(big.Rat), kind != floatKind
 		for _, val := range vals {
+			// The values of one column are all DECIMALs or all DOUBLEs, so
+			// a plain one adds as the decimal it prints as, and the float
+			// total stands for the DOUBLEs.
 			r, ok := numBounds(val)
+			if q, exact := exactRat(val); exact {
+				r, ok = numRange{q, q, r.flt}, true
+			}
 			if _, isInt := integer(derefValue(val)); !isInt {
 				ints = false
 			}

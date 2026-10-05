@@ -59,8 +59,10 @@ func numBounds(v any) (numRange, bool) {
 	if !ok {
 		return numRange{}, false
 	}
+	// A DOUBLE value takes part in float arithmetic as its exact binary
+	// value, and in decimal arithmetic as the decimal it prints as.
 	f, _ := toFloat(derefValue(v))
-	return numRange{q, q, f}, true
+	return numRange{minRat(q, ratOf(f)), maxRat(q, ratOf(f)), f}, true
 }
 
 // rangeValue is the range lo to hi widened to hold flt, or flt itself when
@@ -76,14 +78,33 @@ func rangeValue(lo, hi *big.Rat, flt float64) any {
 			return flt
 		}
 	}
-	b := new(big.Rat).SetFloat64(flt)
-	if b.Cmp(lo) < 0 {
-		lo = b
+	// A later operation may take any value as the DOUBLE it converts to, as
+	// mixing a DECIMAL with a DOUBLE does, so the range holds the floats of
+	// its bounds too, which bound the floats of the values between them.
+	fl, _ := lo.Float64()
+	fh, _ := hi.Float64()
+	return numRange{minRat(lo, ratOf(flt), ratOf(fl)), maxRat(hi, ratOf(flt), ratOf(fh)), flt}
+}
+
+// ratOf is the exact value of the float64 f.
+func ratOf(f float64) *big.Rat { return new(big.Rat).SetFloat64(f) }
+
+func minRat(r *big.Rat, more ...*big.Rat) *big.Rat {
+	for _, m := range more {
+		if m.Cmp(r) < 0 {
+			r = m
+		}
 	}
-	if b.Cmp(hi) > 0 {
-		hi = b
+	return r
+}
+
+func maxRat(r *big.Rat, more ...*big.Rat) *big.Rat {
+	for _, m := range more {
+		if m.Cmp(r) > 0 {
+			r = m
+		}
 	}
-	return numRange{lo, hi, flt}
+	return r
 }
 
 // arithValue is the value of the arithmetic e computed as v from the plain
@@ -269,7 +290,7 @@ func (x *sqlExec) columnValue(table, col string, v any) (any, error) {
 	lo, errLo := scaledRat(r.lo, l)
 	hi, errHi := scaledRat(r.hi, l)
 	switch {
-	case errLo != nil && errHi != nil:
+	case errLo != nil && errHi != nil && r.lo.Sign() == r.hi.Sign():
 		return r.flt, nil // out of range whichever value it is, as the write reports
 	case errLo != nil || errHi != nil || lo.Cmp(hi) != 0:
 		return nil, x.errInexact()
