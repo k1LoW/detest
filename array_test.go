@@ -54,6 +54,7 @@ func (u uuidValuer) Value() (driver.Value, error) { return string(u), nil }
 // array a Go slice or pq.Array binds, and for array text written in the
 // statement.
 func TestArrayComparison(t *testing.T) {
+	t.Parallel()
 	db := arrayDB(t)
 	one := int64(1)
 	tests := []struct {

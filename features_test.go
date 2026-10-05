@@ -171,6 +171,7 @@ func TestIdleLoopRetriesARowSkipLockedPassedOver(t *testing.T) {
 // Idle loops that lock rows the other passes over with SKIP LOCKED end, cut
 // at MaxIdleTicks rather than waking each other forever.
 func TestIdleLoopsWakingEachOtherAreCut(t *testing.T) {
+	t.Parallel()
 	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysql.New())
 		mustExec(t, db, `CREATE TABLE work (id varchar(8) COLLATE utf8mb4_bin PRIMARY KEY, done bool NOT NULL)`)
@@ -520,6 +521,7 @@ func TestMaxRedeliveries(t *testing.T) {
 // Shards split the runs: each explores less than the whole, and together
 // they cover it, the shallow runs above the split depth on every shard.
 func TestShardsSplitTheRuns(t *testing.T) {
+	t.Parallel()
 	model := func(t *testing.T, s *Sim) { counterModel(s, true) }
 	whole, _ := exploreBubble(t, model, nil, nil, 0)
 	sum := 0
