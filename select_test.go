@@ -1003,3 +1003,87 @@ func TestValueFormsByType(t *testing.T) {
 		t.Errorf("ALTER TYPE over a longer row: got %v", err)
 	}
 }
+
+func TestDuplicateColumnAliasIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if _, err := db.Query(`SELECT * FROM (SELECT 1, 2) s(a, a)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestWholeRowValueIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	if _, err := db.Query(`SELECT t FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int, b int)`)
+	for _, q := range []string{
+		`SELECT a AS x, b AS x FROM t ORDER BY x`,
+		`SELECT a AS x, b AS x FROM t GROUP BY x`,
+		`SELECT DISTINCT ON (x) a AS x, b AS x FROM t`,
+		`SELECT *, count(*) FROM t GROUP BY 1, 2, 3`,
+		`SELECT s.a FROM (SELECT 1 AS a, 2 AS a) s`,
+		`SELECT a FROM (SELECT 1 AS a, 2 AS a) s`,
+		`SELECT k FROM t AS x(k)`,
+		`WITH w AS (SELECT id FROM t) SELECT k FROM w AS x(k)`,
+		`WITH c(x) AS (SELECT id FROM t) SELECT x FROM c`,
+		`SELECT x.id FROM t AS x JOIN t AS x ON true`,
+		`SELECT public.t.* FROM public.t`,
+		`SELECT *, id + 1 AS id FROM t ORDER BY id`,
+		`SELECT a FROM generate_series(1, 2) AS s(a, a)`,
+		`SELECT s.a FROM (SELECT 1 AS a, 2 AS a, 3 AS a) s`,
+		`SELECT a AS x, b AS x, id AS x FROM t ORDER BY x`,
+		`SELECT * FROM generate_series(1, 2) g ORDER BY 1`,
+		`SELECT a FROM (SELECT 1 AS a, 2 AS a) s, generate_series(1, 1) g`,
+		`UPDATE public.t AS x SET a = 1 RETURNING public.t.*`,
+		`UPDATE t SET a = 1 FROM t AS u WHERE u.id = t.id RETURNING u.*`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v", q, err)
+		}
+	}
+	mustExec(t, db, `SELECT * FROM t ORDER BY 2`)
+}
+
+func TestColumnCheckWithoutSchema(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	if _, err := db.Query(`SELECT typo FROM (SELECT 1 AS a) s`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Errorf("a derived table's columns are known without a schema: %v", err)
+	}
+}
+
+func TestUndeclaredSequenceIsUndefined(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	for _, q := range []string{`SELECT nextval('missing')`, `SELECT setval('missing', 3)`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
+
+func TestInsertColumnChecks(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int)`)
+	if _, err := db.Exec(`INSERT INTO t (a, a) VALUES (1, 2)`); !errors.Is(err, ErrDuplicateColumn) {
+		t.Errorf("duplicate INSERT target: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO missing VALUES (typo)`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("missing table first: %v", err)
+	}
+	if _, err := db.Exec(`WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 5, x FROM c RETURNING (SELECT x FROM c)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CTE read by RETURNING: %v", err)
+	}
+	mustExec(t, db, `WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 6, x FROM c RETURNING id`)
+}

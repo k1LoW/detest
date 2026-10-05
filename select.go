@@ -41,7 +41,9 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if len(sel.With) > 0 {
 		// The CTEs a query block declares shadow outer ones of the same
 		// name inside it only.
-		defer func(ctes map[string][]Row) { x.ctes = ctes }(maps.Clone(x.ctes))
+		defer func(ctes map[string][]Row, cols map[string][]string) {
+			x.ctes, x.cteCols = ctes, cols
+		}(maps.Clone(x.ctes), maps.Clone(x.cteCols))
 	}
 	var locking lockPlan
 	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
@@ -64,7 +66,7 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
 		}
 	}
-	if err := x.withCTEs(sel.With, outer); err != nil {
+	if err := x.withCTEs(sel, outer); err != nil {
 		return nil, nil, err
 	}
 	// OFFSET and LIMIT are taken, and a negative one refused, before the
@@ -186,9 +188,14 @@ func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*sel
 	type group struct{ rows []jrow }
 	var gs []*group
 	index := map[string]*group{}
+	inputs := x.inputColumns(sel, rows)
+	by := make([]sqlir.Expr, len(sel.GroupBy))
+	for i, g := range sel.GroupBy {
+		by[i] = groupExpr(sel, g, inputs)
+	}
 	for _, r := range rows {
 		var kb strings.Builder
-		for _, g := range sel.GroupBy {
+		for _, g := range by {
 			v, err := x.eval(g, r.env(outer))
 			if err != nil {
 				return nil, err
@@ -228,6 +235,30 @@ func (x *sqlExec) groups(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]*sel
 	return items, nil
 }
 
+// groupExpr is what a GROUP BY item groups by, as Postgres reads it: a name
+// that is no column of the input but an output column's is that column's
+// expression, and an integer the select list item at that position.
+func groupExpr(sel *sqlir.SelectStmt, g sqlir.Expr, inputs map[string]bool) sqlir.Expr {
+	switch v := g.(type) {
+	case *sqlir.ColumnRef:
+		if v.Table != "" || inputs[v.Column] {
+			return g
+		}
+		for _, t := range sel.Targets {
+			// The name the item goes by, given or derived, as the column
+			// check resolves it.
+			if !t.Star && targetName(t) == v.Column {
+				return t.Expr
+			}
+		}
+	case *sqlir.Const:
+		if n, ok := v.Value.(int64); ok && n >= 1 && int(n) <= len(sel.Targets) && !sel.Targets[n-1].Star {
+			return sel.Targets[n-1].Expr
+		}
+	}
+	return g
+}
+
 // value evaluates e for an item: over its group when the query aggregates.
 func (x *sqlExec) value(it *selItem, e sqlir.Expr) (any, error) {
 	if it.agg != nil {
@@ -237,60 +268,21 @@ func (x *sqlExec) value(it *selItem, e sqlir.Expr) (any, error) {
 }
 
 func (x *sqlExec) projectItems(sel *sqlir.SelectStmt, items []*selItem, rows []jrow) ([]string, error) {
-	keys := outputKeys(sel.Targets)
-	var cols []string
-	for i, t := range sel.Targets {
-		if t.Star {
-			cols = append(cols, starColumns(t, rows)...)
-			continue
-		}
-		cols = append(cols, keys[i])
-	}
+	cols := x.outputCols(sel, rows)
 	for _, it := range items {
-		o := Row{}
-		for i, t := range sel.Targets {
-			if t.Star {
-				src := it.jr.merged
-				if t.Table != "" {
-					src = it.jr.by[t.Table]
-				}
-				for k, v := range src {
-					if k != "_key" {
-						o[k] = v
-					}
-				}
-				continue
-			}
-			v, err := x.value(it, t.Expr)
+		o, err := outputRow(cols, it.jr, func(i int) (any, error) {
+			v, err := x.value(it, sel.Targets[i].Expr)
 			if err != nil {
 				return nil, x.unsupportedExpr(err, "in the select list")
 			}
-			o[keys[i]] = v
+			return v, nil
+		})
+		if err != nil {
+			return nil, err
 		}
 		it.out = o
 	}
-	return cols, nil
-}
-
-func starColumns(t sqlir.Target, rows []jrow) []string {
-	set := map[string]bool{}
-	for _, r := range rows {
-		src := r.merged
-		if t.Table != "" {
-			src = r.by[t.Table]
-		}
-		for k := range src {
-			if k != "_key" {
-				set[k] = true
-			}
-		}
-	}
-	all := make([]string, 0, len(set))
-	for k := range set {
-		all = append(all, k)
-	}
-	sort.Strings(all)
-	return all
+	return outKeys(cols), nil
 }
 
 // outputValue resolves an ORDER BY or DISTINCT ON item as PostgreSQL does: an
@@ -1369,6 +1361,180 @@ func outputKeys(targets []sqlir.Target) []string {
 		}
 		seen[k] = true
 		keys[i] = k
+	}
+	return keys
+}
+
+// renamedCols is cols with the first ones renamed to names, as AS
+// alias(a, b) renames them.
+func renamedCols(cols, names []string) []string {
+	out := slices.Clone(cols)
+	for i := range min(len(out), len(names)) {
+		out[i] = names[i]
+	}
+	return out
+}
+
+func (x *sqlExec) noteCols(key any, cols []string) {
+	if x.queryCols == nil {
+		x.queryCols = map[any][]string{}
+	}
+	x.queryCols[key] = cols
+}
+
+// outCol is a column of a query's output: a select list item, or a column
+// of the FROM item alias a * expands to.
+type outCol struct {
+	key        string
+	target     int
+	alias, col string
+}
+
+// outputCols are the columns of a query's output, in order. A * expands to
+// the columns of the FROM items in FROM order, each in its own order, the
+// order Postgres gives them and a positional Scan reads them by. A name two
+// items share is kept twice, under a key the driver strips.
+func (x *sqlExec) outputCols(sel *sqlir.SelectStmt, rows []jrow) []outCol {
+	keys := outputKeys(sel.Targets)
+	seen := map[string]bool{}
+	for i, t := range sel.Targets {
+		if !t.Star {
+			seen[keys[i]] = true
+		}
+	}
+	var out []outCol
+	for i, t := range sel.Targets {
+		if !t.Star {
+			out = append(out, outCol{key: keys[i], target: i})
+			continue
+		}
+		if sel.From == nil {
+			continue
+		}
+		items := fromRefs(sel)
+		from := x.fromItemsOf(sel)
+		for n, it := range items {
+			alias := from.aliases[n]
+			if t.Table != "" && alias != t.Table {
+				continue
+			}
+			for _, c := range x.itemColumns(it, alias, rows) {
+				k := c
+				if seen[k] {
+					k = fmt.Sprintf("%s\x00%d.%d", c, i, len(out))
+				}
+				seen[k] = true
+				out = append(out, outCol{key: k, target: i, alias: alias, col: c})
+			}
+		}
+	}
+	return out
+}
+
+func fromRefs(sel *sqlir.SelectStmt) []sqlir.TableRef {
+	if sel.From == nil {
+		return nil
+	}
+	items := []sqlir.TableRef{*sel.From}
+	for _, j := range sel.Joins {
+		items = append(items, j.Table)
+	}
+	return items
+}
+
+// inputColumns are the names of the columns of a query's FROM items, which
+// a GROUP BY name refers to before an output column of the same name. They
+// are taken from the items rather than from each row, as an unmatched row
+// of an outer join has none of its nullable side's.
+func (x *sqlExec) inputColumns(sel *sqlir.SelectStmt, rows []jrow) map[string]bool {
+	out := map[string]bool{}
+	from := x.fromItemsOf(sel)
+	for n, it := range fromRefs(sel) {
+		for _, c := range x.itemColumns(it, from.aliases[n], rows) {
+			out[c] = true
+		}
+	}
+	return out
+}
+
+// itemColumns are the columns of a FROM item in order: a table's as
+// declared, a query's as it returned them. Those of an item detest knows no
+// order of, such as a function or a table no schema declared, are sorted.
+func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []string {
+	switch {
+	case t.Sub != nil:
+		if cols, ok := x.queryCols[t.Sub]; ok {
+			return cols
+		}
+	case t.Func != nil:
+		// The value column, then the ordinality one, as functionRows names
+		// them, with no rows too.
+		names := []string{t.Func.Name}
+		switch {
+		case len(t.Columns) > 0:
+			names[0] = t.Columns[0]
+		case t.Alias != "":
+			names[0] = t.Alias
+		}
+		if t.Ordinality {
+			ord := "ordinality"
+			if len(t.Columns) > 1 {
+				ord = t.Columns[1]
+			}
+			names = append(names, ord)
+		}
+		return names
+	default:
+		if _, isCTE := x.ctes[t.Name]; isCTE {
+			if cols, ok := x.cteCols[t.Name]; ok {
+				return cols
+			}
+			break
+		}
+		table := x.tx.db.resolve(t.Name)
+		if v := x.tx.db.views[table]; v != nil {
+			if cols, ok := x.queryCols[v.View]; ok {
+				return cols
+			}
+			break
+		}
+		if def := x.tx.db.defs[table]; def != nil {
+			return def.columns
+		}
+	}
+	set := map[string]bool{}
+	for _, r := range rows {
+		for k := range r.by[alias] {
+			if k != "_key" {
+				set[k] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// outputRow is the output row of out's columns, the select list items'
+// values given by value.
+func outputRow(cols []outCol, jr jrow, value func(i int) (any, error)) (Row, error) {
+	o := Row{}
+	for _, c := range cols {
+		if c.alias != "" || c.col != "" {
+			o[c.key] = jr.by[c.alias][c.col]
+			continue
+		}
+		v, err := value(c.target)
+		if err != nil {
+			return nil, err
+		}
+		o[c.key] = v
+	}
+	return o, nil
+}
+
+func outKeys(cols []outCol) []string {
+	keys := make([]string, len(cols))
+	for i, c := range cols {
+		keys[i] = c.key
 	}
 	return keys
 }

@@ -114,6 +114,14 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "21000", 0
 	case sqlir.ForeignKeyParentViolation:
 		return "23503", 0
+	case sqlir.RestrictViolation:
+		return "23001", 0
+	case sqlir.UndefinedColumn:
+		return "42703", 0
+	case sqlir.AmbiguousColumn:
+		return "42702", 0
+	case sqlir.DuplicateColumn:
+		return "42701", 0
 	case sqlir.ArithmeticOutOfRange:
 		return "22003", 0
 	case sqlir.LockWaitTimeout:
@@ -271,10 +279,11 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		if err != nil {
 			return nil, true, err
 		}
+		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
 		object, ok := map[pg.ObjectType]string{pg.ObjectType_OBJECT_TABLE: "", pg.ObjectType_OBJECT_VIEW: "view",
-			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index"}[s.DropStmt.RemoveType]
+			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index", pg.ObjectType_OBJECT_SEQUENCE: "sequence"}[s.DropStmt.RemoveType]
 		if !ok {
 			return nil, true, nil
 		}
@@ -283,7 +292,8 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			for _, p := range obj.GetList().GetItems() {
 				parts = append(parts, p.GetString_().GetSval())
 			}
-			changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Drop: true, IfExists: s.DropStmt.MissingOk, Object: object})
+			changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Drop: true, IfExists: s.DropStmt.MissingOk, Object: object,
+				Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE})
 		}
 		return changes, true, nil
 	case *pg.Node_ViewStmt:
@@ -314,8 +324,19 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		// detest cannot run PL/pgSQL. In migrations a DO block usually checks the
 		// catalog and raises, declaring nothing, so it runs as nothing.
 		return nil, true, nil
-	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt,
-		*pg.Node_CreateSeqStmt, *pg.Node_AlterSeqStmt, *pg.Node_CreateExtensionStmt,
+	case *pg.Node_CreateSeqStmt:
+		opts, _, err := c.sequenceOptions(s.CreateSeqStmt.Options)
+		if err != nil {
+			return nil, true, err
+		}
+		return []sqlir.SchemaChange{{Table: rangeVarName(s.CreateSeqStmt.Sequence), Object: "sequence", Create: true, IfNotExists: s.CreateSeqStmt.IfNotExists, Sequence: opts}}, true, nil
+	case *pg.Node_AlterSeqStmt:
+		opts, _, err := c.sequenceOptions(s.AlterSeqStmt.Options)
+		if err != nil {
+			return nil, true, err
+		}
+		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
+	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
 		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
@@ -432,11 +453,15 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 	if d.RawDefault != nil {
 		col.Default = c.defaultExpr(d.RawDefault)
 	}
-	if d.Identity != "" || isSerial(d.TypeName) {
+	if isSerial(d.TypeName) {
+		// A serial column owns a sequence of its own, as an identity
+		// column does, which CREATE SEQUENCE IF NOT EXISTS then finds.
 		col.Default = sequenceDefault(table, d.Colname)
+		col.Sequence = &sqlir.SequenceOptions{}
 	}
 	var cons []sqlir.UniqueDef
 	var checks []sqlir.CheckDef
+	var last *sqlir.UniqueDef
 	col.NotNull = d.IsNotNull
 	for _, n := range d.Constraints {
 		k := n.GetConstraint()
@@ -460,7 +485,9 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 		case pg.ConstrType_CONSTR_DEFAULT:
 			col.Default = c.defaultExpr(k.RawExpr)
 		case pg.ConstrType_CONSTR_IDENTITY:
-			col.Default = sequenceDefault(table, d.Colname)
+			if err := c.identity(&col, table, k); err != nil {
+				return col, nil, nil, err
+			}
 		case pg.ConstrType_CONSTR_GENERATED:
 			g, err := c.expr(k.RawExpr)
 			// Every refusal of an aggregate (string_agg, FILTER, ORDER BY,
@@ -484,6 +511,15 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 				return col, nil, nil, err
 			}
 			cons = append(cons, u)
+			last = &cons[len(cons)-1]
+		case pg.ConstrType_CONSTR_FOREIGN:
+			last = nil // the attributes after it are the foreign key's
+		case pg.ConstrType_CONSTR_ATTR_DEFERRABLE, pg.ConstrType_CONSTR_ATTR_DEFERRED:
+			// The grammar gives DEFERRABLE and INITIALLY DEFERRED written
+			// after a column constraint as constraints of their own.
+			if last != nil {
+				last.Deferrable = true
+			}
 		}
 	}
 	if col.Generated != nil && col.Default != nil {
@@ -700,14 +736,101 @@ func isSerial(t *pg.TypeName) bool {
 	return false
 }
 
+// identity makes col an identity column, whose default is nextval of the
+// sequence the constraint names, or of table_column_seq.
+func (c *pgConv) identity(col *sqlir.ColumnDef, table string, k *pg.Constraint) error {
+	seq, name, err := c.sequenceOptions(k.GetOptions())
+	if err != nil {
+		return err
+	}
+	col.Default = sequenceDefault(table, col.Name)
+	if name != "" {
+		col.Default = &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: name}}}
+	}
+	col.Sequence = seq
+	col.Identity = identityMode(k.GetGeneratedWhen())
+	return nil
+}
+
+// identityMode is the IR's name for the generated_when of an identity
+// column: 'a' for ALWAYS, 'd' for BY DEFAULT.
+func identityMode(when string) string {
+	if when == "a" {
+		return "always"
+	}
+	return "by default"
+}
+
+// sequenceOptions converts the options of a sequence that decide its values,
+// and returns the name an identity column's SEQUENCE NAME gives it. AS, OWNED
+// BY and CYCLE change nothing a run reaches.
+func (c *pgConv) sequenceOptions(opts []*pg.Node) (*sqlir.SequenceOptions, string, error) {
+	out := &sqlir.SequenceOptions{}
+	var name string
+	for _, n := range opts {
+		d := n.GetDefElem()
+		if d == nil {
+			continue
+		}
+		var v *int64
+		if a := d.Arg; a != nil {
+			var n int64
+			switch {
+			case a.GetInteger() != nil:
+				n = int64(a.GetInteger().Ival)
+				v = &n
+			case a.GetFloat() != nil:
+				p, err := strconv.ParseInt(a.GetFloat().Fval, 10, 64)
+				if err != nil {
+					return nil, "", c.unsupported("sequence option " + d.Defname + " " + a.GetFloat().Fval)
+				}
+				v = &p
+			}
+		}
+		switch d.Defname {
+		case "start":
+			out.Start = v
+		case "increment":
+			out.Increment = v
+		case "minvalue":
+			out.MinValue = v
+		case "maxvalue":
+			out.MaxValue = v
+		case "cache":
+			out.Cache = v
+		case "restart":
+			out.Restart, out.RestartStart = v, v == nil
+		case "owned_by":
+			var parts []string
+			for _, p := range d.Arg.GetList().GetItems() {
+				parts = append(parts, p.GetString_().GetSval())
+			}
+			switch {
+			case len(parts) == 1 && strings.EqualFold(parts[0], "none"):
+				out.OwnedNone = true
+			case len(parts) >= 2:
+				out.OwnedBy = [2]string{strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]}
+			}
+		case "sequence_name":
+			var parts []string
+			for _, p := range d.Arg.GetList().GetItems() {
+				parts = append(parts, p.GetString_().GetSval())
+			}
+			name = strings.Join(parts, ".")
+		}
+	}
+	if out.Increment != nil && *out.Increment == 0 {
+		return nil, "", c.unsupported("sequence INCREMENT 0")
+	}
+	return out, name, nil
+}
+
 // sequenceDefault is the default of a serial or identity column. Postgres
 // names the sequence table_column_seq.
 func sequenceDefault(table, column string) sqlir.Expr {
-	rel := table
-	if i := strings.LastIndex(rel, "."); i >= 0 {
-		rel = rel[i+1:]
-	}
-	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: rel + "_" + column + "_seq"}}}
+	// The sequence goes to the table's schema, which an unqualified name
+	// leaves to the search path as it does the table's.
+	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: table + "_" + column + "_seq"}}}
 }
 
 // constraintDef converts a PRIMARY KEY or UNIQUE constraint. cols are the
@@ -716,7 +839,7 @@ func (c *pgConv) constraintDef(k *pg.Constraint, cols []string) (sqlir.UniqueDef
 	if k.Contype != pg.ConstrType_CONSTR_PRIMARY && k.Contype != pg.ConstrType_CONSTR_UNIQUE {
 		return sqlir.UniqueDef{}, false, nil
 	}
-	u := sqlir.UniqueDef{Name: k.Conname, Primary: k.Contype == pg.ConstrType_CONSTR_PRIMARY, NullsNotDistinct: k.NullsNotDistinct}
+	u := sqlir.UniqueDef{Name: k.Conname, Primary: k.Contype == pg.ConstrType_CONSTR_PRIMARY, NullsNotDistinct: k.NullsNotDistinct, Deferrable: k.Deferrable || k.Initdeferred}
 	if k.Indexname != "" {
 		return u, false, c.unsupported("constraint USING INDEX")
 	}
@@ -790,7 +913,33 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			}
 			ch.Columns = append(ch.Columns, col)
 		case pg.AlterTableType_AT_AddIdentity:
-			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Default: sequenceDefault(ch.Table, cmd.Name)})
+			col := sqlir.ColumnDef{Name: cmd.Name}
+			if err := c.identity(&col, ch.Table, cmd.Def.GetConstraint()); err != nil {
+				return nil, err
+			}
+			ch.Columns = append(ch.Columns, col)
+		case pg.AlterTableType_AT_SetIdentity:
+			var opts []*pg.Node
+			var mode string
+			for _, n := range cmd.Def.GetList().GetItems() {
+				if d := n.GetDefElem(); d.GetDefname() == "generated" {
+					mode = identityMode(string(rune(d.GetArg().GetInteger().GetIval())))
+					continue
+				}
+				opts = append(opts, n)
+			}
+			seq, _, err := c.sequenceOptions(opts)
+			if err != nil {
+				return nil, err
+			}
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, TypeOnly: true, Sequence: seq, Identity: mode})
+		case pg.AlterTableType_AT_DropIdentity:
+			// The default goes as with DROP DEFAULT, and the identity with it.
+			mode := "drop"
+			if cmd.MissingOk {
+				mode = "drop if exists"
+			}
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Identity: mode})
 		case pg.AlterTableType_AT_AddColumn:
 			col, cons, checks, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
 			if err != nil {
@@ -838,6 +987,10 @@ func (c *pgConv) with(w *pg.WithClause) ([]sqlir.CTE, error) {
 	var out []sqlir.CTE
 	for _, n := range w.Ctes {
 		cte := n.GetCommonTableExpr()
+		if len(cte.Aliascolnames) > 0 {
+			// The CTE's rows are keyed by the names its query gives them.
+			return nil, c.unsupported("a column alias list on a CTE")
+		}
 		sel, err := c.selectStmt(cte.Ctequery.GetSelectStmt())
 		if err != nil {
 			return nil, err
@@ -906,7 +1059,10 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		rt := t.GetResTarget()
 		if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
 			tg := sqlir.Target{Star: true}
-			if len(cr.Fields) > 1 {
+			if len(cr.Fields) > 2 {
+				return nil, c.unsupported("a schema-qualified *")
+			}
+			if len(cr.Fields) == 2 {
 				tg.Table = cr.Fields[0].GetString_().GetSval()
 			}
 			out.Targets = append(out.Targets, tg)
@@ -1071,6 +1227,11 @@ func (c *pgConv) fromItem(n *pg.Node) (*sqlir.TableRef, []sqlir.Join, error) {
 	case *pg.Node_RangeVar:
 		t := &sqlir.TableRef{Name: rangeVarName(f.RangeVar)}
 		if f.RangeVar.Alias != nil {
+			if len(f.RangeVar.Alias.Colnames) > 0 {
+				// The rows of a table are keyed by its column names and
+				// locked by their identity, which renaming them would lose.
+				return nil, nil, c.unsupported("a column alias list on a table, CTE or view")
+			}
 			t.Alias = f.RangeVar.Alias.Aliasname
 		}
 		return t, nil, nil
@@ -1162,7 +1323,14 @@ func (c *pgConv) targets(list []*pg.Node) ([]sqlir.Target, error) {
 	for _, t := range list {
 		rt := t.GetResTarget()
 		if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
-			out = append(out, sqlir.Target{Star: true})
+			t := sqlir.Target{Star: true}
+			if len(cr.Fields) > 2 {
+				return nil, c.unsupported("a schema-qualified *")
+			}
+			if len(cr.Fields) == 2 {
+				t.Table = cr.Fields[0].GetString_().GetSval()
+			}
+			out = append(out, t)
 			continue
 		}
 		e, err := c.expr(rt.Val)
@@ -1185,6 +1353,12 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 			return nil, err
 		}
 		out.Columns = append(out.Columns, name)
+	}
+	switch s.Override {
+	case pg.OverridingKind_OVERRIDING_SYSTEM_VALUE:
+		out.OverridingSystemValue = true
+	case pg.OverridingKind_OVERRIDING_USER_VALUE:
+		return nil, c.unsupported("OVERRIDING USER VALUE")
 	}
 	sel := s.SelectStmt.GetSelectStmt()
 	if sel == nil {
@@ -1209,11 +1383,51 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 		}
 		out.Select = q
 	}
+	if s.WithClause != nil {
+		// WITH ... INSERT puts the CTEs on the INSERT, where the query reads
+		// them as it would its own.
+		if out.Select == nil {
+			return nil, c.unsupported("CTE on INSERT ... VALUES")
+		}
+		with, err := c.with(s.WithClause)
+		if err != nil {
+			return nil, err
+		}
+		out.Select.With = append(with, out.Select.With...)
+	}
 	if oc := s.OnConflictClause; oc != nil {
 		conf := &sqlir.OnConflict{}
 		if oc.Infer != nil {
-			for _, ie := range oc.Infer.IndexElems {
-				conf.Columns = append(conf.Columns, ie.GetIndexElem().GetName())
+			conf.Constraint = oc.Infer.Conname
+			exprs := false
+			for _, n := range oc.Infer.IndexElems {
+				ie := n.GetIndexElem()
+				if len(ie.Opclass) > 0 || len(ie.Collation) > 0 {
+					// Postgres picks arbiters by them, which detest's
+					// indexes do not keep.
+					return nil, c.unsupported("an operator class or collation in ON CONFLICT's target")
+				}
+				if ie.Expr == nil {
+					conf.Columns = append(conf.Columns, ie.Name)
+					conf.Elems = append(conf.Elems, &sqlir.ColumnRef{Column: ie.Name})
+					continue
+				}
+				e, err := c.expr(ie.Expr)
+				if err != nil {
+					return nil, err
+				}
+				exprs = true
+				conf.Elems = append(conf.Elems, e)
+			}
+			if exprs {
+				conf.Columns = nil
+			}
+			if oc.Infer.WhereClause != nil {
+				w, err := c.expr(oc.Infer.WhereClause)
+				if err != nil {
+					return nil, err
+				}
+				conf.InferWhere = w
 			}
 		}
 		switch oc.Action {

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -604,7 +605,7 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 // conflictTargets returns the unique indexes an INSERT ... ON CONFLICT (cols)
 // arbitrates on: the one over exactly cols, or every one, primary key
 // included, without a column list.
-func (x *sqlExec) conflictTargets(table string, cols []string) ([]sqlir.UniqueDef, error) {
+func (x *sqlExec) conflictTargets(table string, oc *sqlir.OnConflict) ([]sqlir.UniqueDef, error) {
 	def := x.tx.db.defs[table]
 	var all []sqlir.UniqueDef
 	if len(def.pk) > 0 {
@@ -615,28 +616,59 @@ func (x *sqlExec) conflictTargets(table string, cols []string) ([]sqlir.UniqueDe
 		all = append(all, pk)
 	}
 	all = append(all, def.uniques...)
-	if len(cols) == 0 {
+	if oc.Constraint != "" {
+		for _, u := range all {
+			// The primary key's entry here is named for the message; its
+			// constraint's name is pkConstraint's.
+			if !u.Index && !u.Primary && u.Name == oc.Constraint || u.Primary && oc.Constraint == x.tx.db.pkConstraint(table) {
+				return []sqlir.UniqueDef{u}, nil
+			}
+		}
+		return nil, x.unsupported(fmt.Sprintf("ON CONFLICT ON CONSTRAINT %q, which is no unique constraint of the table", oc.Constraint))
+	}
+	if len(oc.Elems) == 0 {
+		if !oc.DoNothing && !x.tx.db.kind.InnoDB() {
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, "ON CONFLICT DO UPDATE requires inference specification or constraint name", relname(table), "", "")
+		}
 		return all, nil
 	}
+	// Postgres arbitrates on every unique index whose elements are the
+	// inference elements in any order, a partial one only when the
+	// inference predicate implies its own.
+	var out []sqlir.UniqueDef
 	for _, u := range all {
-		if sameColumns(u, cols) {
-			return []sqlir.UniqueDef{u}, nil
+		if !sameElems(u.Elems, oc.Elems) {
+			continue
 		}
+		if u.Where != nil {
+			if oc.InferWhere == nil {
+				continue
+			}
+			if !reflect.DeepEqual(u.Where, oc.InferWhere) {
+				// Postgres proves the implication; detest only sees an
+				// identical predicate, and would otherwise pick other
+				// arbiters than the server.
+				return nil, x.unsupported("ON CONFLICT ... WHERE with a predicate other than the partial index's own")
+			}
+		}
+		out = append(out, u)
 	}
-	return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, "there is no unique or exclusion constraint matching the ON CONFLICT specification", relname(table), strings.Join(cols, ", "), "")
+	if len(out) == 0 {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, "there is no unique or exclusion constraint matching the ON CONFLICT specification", relname(table), strings.Join(oc.Columns, ", "), "")
+	}
+	return out, nil
 }
 
-func sameColumns(u sqlir.UniqueDef, cols []string) bool {
-	if len(u.Elems) != len(cols) || u.Where != nil {
-		return false
+// sameElems reports whether a unique index's elements are the inference
+// elements, in any order.
+func sameElems(index, infer []sqlir.Expr) bool {
+	// As sets: Postgres ignores the order and a repeated element.
+	within := func(a, b []sqlir.Expr) bool {
+		return !slices.ContainsFunc(a, func(e sqlir.Expr) bool {
+			return !slices.ContainsFunc(b, func(f sqlir.Expr) bool { return reflect.DeepEqual(e, f) })
+		})
 	}
-	for _, e := range u.Elems {
-		c, ok := e.(*sqlir.ColumnRef)
-		if !ok || !strings.Contains(","+strings.Join(cols, ",")+",", ","+c.Column+",") {
-			return false
-		}
-	}
-	return true
+	return within(index, infer) && within(infer, index)
 }
 
 // checkTypes makes the checks Postgres makes when a value is stored in a
@@ -1327,16 +1359,17 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 	return nil
 }
 
-// writesGenerated refuses a statement that gives a generated column a value
-// other than DEFAULT, which Postgres rejects. exprs are the values written to
-// cols, nil when they come from a query.
-func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr) error {
+// writesGenerated refuses a statement that gives a generated column or a
+// GENERATED ALWAYS identity column a value other than DEFAULT, which Postgres
+// refuses, unless OVERRIDING SYSTEM VALUE (overriding) lets the identity
+// column take it. exprs are the values, nil when a query gives them.
+func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Expr, overriding bool) error {
 	def := x.tx.db.defs[table]
-	if def == nil || len(def.generated) == 0 {
+	if def == nil || len(def.generated) == 0 && len(def.identityAlways) == 0 {
 		return nil
 	}
 	for i, col := range cols {
-		if def.generated[col] == nil {
+		if def.generated[col] == nil && (!def.identityAlways[col] || overriding) {
 			continue
 		}
 		if exprs != nil {
@@ -1344,7 +1377,45 @@ func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Exp
 				continue
 			}
 		}
+		if def.generated[col] == nil {
+			return x.unsupported(fmt.Sprintf("a value other than DEFAULT for GENERATED ALWAYS identity column %q", col))
+		}
 		return x.unsupported(fmt.Sprintf("a value other than DEFAULT for generated column %q", col))
+	}
+	return nil
+}
+
+// writesDeferrableKey refuses a write of the columns cols (every column when
+// nil) that a DEFERRABLE primary key or unique constraint covers. Postgres
+// checks one at the end of the statement or at commit, and waits there for a
+// concurrent insert of the same key, which detest's checks on each row do
+// not do.
+func (x *sqlExec) writesDeferrableKey(table string, cols []string) error {
+	def := x.tx.db.defs[table]
+	if def == nil {
+		return nil
+	}
+	if cols != nil {
+		// A generated column computed from one written is written too.
+		for _, g := range slices.Sorted(maps.Keys(def.generated)) {
+			if slices.ContainsFunc(def.generated[g].columns(), func(c string) bool { return slices.Contains(cols, c) }) {
+				cols = append(slices.Clone(cols), g)
+			}
+		}
+	}
+	covers := func(c string) bool { return cols == nil || slices.Contains(cols, c) }
+	if def.pkDeferrable && slices.ContainsFunc(def.pk, covers) {
+		return x.unsupported(fmt.Sprintf("a write to the DEFERRABLE primary key %q", def.pkName))
+	}
+	for _, u := range def.uniques {
+		if !u.Deferrable {
+			continue
+		}
+		for _, e := range u.Elems {
+			if slices.ContainsFunc(sqlir.ColumnRefs(e), func(r *sqlir.ColumnRef) bool { return covers(r.Column) }) {
+				return x.unsupported(fmt.Sprintf("a write to the DEFERRABLE unique constraint %q", u.Name))
+			}
+		}
 	}
 	return nil
 }
@@ -1353,16 +1424,16 @@ func (x *sqlExec) writesGenerated(table string, cols []string, exprs []sqlir.Exp
 // it evaluates anything, as Postgres does when it plans the statement.
 func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []string) error {
 	def := x.tx.db.defs[table]
-	if def == nil || len(def.generated) == 0 {
+	if def == nil || len(def.generated) == 0 && len(def.identityAlways) == 0 {
 		return nil
 	}
 	if ins.OnConflict != nil {
-		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set)); err != nil {
+		if err := x.writesGenerated(table, assignedColumns(ins.OnConflict.Set), assignedValues(ins.OnConflict.Set), false); err != nil {
 			return err
 		}
 	}
 	for _, exprs := range ins.Rows {
-		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs); err != nil {
+		if err := x.writesGenerated(table, cols[:min(len(cols), len(exprs))], exprs, ins.OverridingSystemValue); err != nil {
 			return err
 		}
 	}
@@ -1376,7 +1447,7 @@ func (x *sqlExec) insertsGenerated(table string, ins *sqlir.InsertStmt, cols []s
 			return x.unsupported("INSERT ... SELECT without a column list into a table with generated columns")
 		}
 	}
-	return x.writesGenerated(table, cols[:min(len(cols), width)], nil)
+	return x.writesGenerated(table, cols[:min(len(cols), width)], nil, ins.OverridingSystemValue)
 }
 
 // selectWidth is the number of columns a query returns, when it is known

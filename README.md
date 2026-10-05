@@ -146,7 +146,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 **Constraints**
 
 - Primary keys (composite too), unique constraints and unique indexes, including partial, expression and `NULLS NOT DISTINCT` indexes
-- Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`
+- Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`. A statement's checks run when it has written all its rows, as Postgres's do
 - `CHECK` and `NOT NULL`
 - Column types `uuid`, `smallint` and `integer` are checked on write
 
@@ -157,11 +157,12 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`
 - Common functions, among them `coalesce`, `nullif`, `greatest`, `least`, `lower`, `upper`, `length`, `concat`, `now`, `nextval`, `setval`, `gen_random_uuid`, `generate_series` and the transaction advisory locks
 - Expressions follow SQL's three-valued logic
+- Column references are resolved against the schema before a statement runs, so a column none of the tables in scope has fails with 42703 as on the server. A name is let through when an item in scope has columns detest does not know, such as a function or a table no schema declared
 
 **Schema**
 
 - `CREATE`, `ALTER` and `DROP` of tables, columns, constraints, indexes, views and materialized views, `CREATE TABLE AS`, `REFRESH MATERIALIZED VIEW`, renames
-- Defaults, serial and identity columns, sequences, with values that repeat from run to run
+- Defaults, serial and identity columns, sequences with their `START`, `INCREMENT` and `RESTART`, with values that repeat from run to run
 - Stored generated columns, computed on every write. A Postgres 18 virtual column loads through `ddl.From`, which writes it as stored, but not from a Postgres 18 dump, whose `GENERATED ALWAYS AS (...)` without `STORED` the grammar detest parses with rejects
 - Schemas and `search_path` (`postgres.SearchPath`)
 - Migrations and `pg_dump --schema-only` output run as they are. Statements that declare nothing detest needs, such as functions, grants and comments, are accepted and ignored
@@ -193,6 +194,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - Text and a number in the same column of a set operation, or among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`
 - Values written to a column that Postgres converts by rules detest does not model, namely a value shorter than its `char(n)` column, text without a time zone written to a `timestamptz` column, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, and number text written as `0x10`, `0x1p2` or `1_000`
 - Locking reads over a view, a subquery or a `LATERAL` item
+- A write to the columns of a `DEFERRABLE` primary key or unique constraint, a value other than `DEFAULT` for a `GENERATED ALWAYS` identity column without `OVERRIDING SYSTEM VALUE`, `nextval` of a sequence with `CACHE` above 1, and `ON CONFLICT ... WHERE` with a predicate other than the partial index's own
 - `COPY`, system catalogs, and `BEGIN` or `COMMIT` sent as SQL (use `database/sql`'s transactions)
 
 `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own. A case that depends on the schema, such as a generated column detest cannot compute, fails when the statement runs. The statements refused in a run are listed after the exploration's report, as an application that drops the error hides them.

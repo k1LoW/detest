@@ -143,6 +143,7 @@ type DB struct {
 	defs     map[string]*tableDef
 	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views    map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs     map[string]int64                    // sequence values of the run, for nextval
 	uuids    int64                               // gen_random_uuid values handed out in the run
 	ignored  map[string]bool                     // tables Ignore took out of the simulation
@@ -241,6 +242,10 @@ type tableDef struct {
 	// generated are the expressions of generated columns, kept as written
 	// with the renames since in alias, as a CHECK's are.
 	generated map[string]*tableCheck
+	// identityAlways are the GENERATED ALWAYS identity columns, and
+	// pkDeferrable is a DEFERRABLE primary key.
+	identityAlways map[string]bool
+	pkDeferrable   bool
 }
 
 // Name returns the database name.
@@ -421,7 +426,7 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 	if def.pk != nil {
 		return kind.Error(sqlir.InvalidTableDefinition, fmt.Sprintf("multiple primary keys for table %q are not allowed", relname(table)), relname(table), "", "")
 	}
-	def.pkName = u.Name
+	def.pkName, def.pkDeferrable = u.Name, u.Deferrable
 	if def.pkName == "" {
 		def.pkName = relname(table) + "_pkey"
 	}
@@ -441,7 +446,7 @@ func (def *tableDef) addConstraint(kind *sqlir.Impl, table string, u sqlir.Uniqu
 // another index, never a foreign key or a check of the same name.
 func (def *tableDef) dropIndex(name string) {
 	if def.pkName == name {
-		def.pk, def.pkName = nil, ""
+		def.pk, def.pkName, def.pkDeferrable = nil, "", false
 	}
 	def.uniques = slices.DeleteFunc(def.uniques, func(u sqlir.UniqueDef) bool { return u.Name == name })
 	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return ix.Name == name })
@@ -578,6 +583,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.ci, col)
 	delete(def.fsp, col)
 	delete(def.generated, col)
+	delete(def.identityAlways, col)
 	delete(def.types, col)
 	delete(def.notNull, col)
 	delete(def.autoInc, col)
@@ -620,6 +626,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if g, ok := def.generated[old]; ok {
 		delete(def.generated, old)
 		def.generated[nw] = g
+	}
+	if always, ok := def.identityAlways[old]; ok {
+		delete(def.identityAlways, old)
+		def.identityAlways[nw] = always
 	}
 	for _, g := range def.generated {
 		g.renameColumn(old, nw)
@@ -832,18 +842,245 @@ func (s *Sim) DB(name string, srv Server) (*sql.DB, *DB) {
 	return db.Open(), db
 }
 
-func (db *DB) nextval(seq string) int64 {
-	seq = sequenceName(seq)
-	db.seqs[seq]++
-	return db.seqs[seq]
+// seqDef is a sequence's options: the value it starts from, the step, and
+// the value each run's first nextval returns, which RESTART moves.
+type seqDef struct {
+	start, inc, first int64
+	min, max          *int64
+	cache             int64
+	// owner is the table and column that own the sequence, a serial or
+	// identity column or OWNED BY, which drop it with them.
+	owner [2]string
 }
 
-// setval sets a sequence so that nextval returns v+1, or v when not called.
-func (db *DB) setval(seq string, v int64, called bool) {
-	if !called {
-		v--
+// seqName is the sequence name s refers to: one qualified by a schema as
+// written, else the first on the search path that exists, else one in the
+// first schema of the path. A sequence in public goes by its bare name, as
+// sequenceName gives it.
+func (db *DB) seqName(s string) string {
+	if strings.Contains(s, ".") {
+		return sequenceName(s)
 	}
-	db.seqs[sequenceName(seq)] = v
+	path := db.searchPath()
+	for _, schema := range path {
+		// Tables, views and sequences share one namespace, so the first
+		// relation of the name is the one meant, sequence or not.
+		q := sequenceName(schema + "." + s)
+		if _, ok := db.seqDefs[q]; ok {
+			return q
+		}
+		if _, ok := db.seqs[q]; ok {
+			return q
+		}
+		if db.isRelation(q) {
+			return q
+		}
+	}
+	return db.newSeqName(s)
+}
+
+// isRelation reports whether a table or view, rather than a sequence,
+// goes by the sequence name seq.
+func (db *DB) isRelation(seq string) bool {
+	table := seq
+	if !strings.Contains(table, ".") {
+		table = "public." + table
+	}
+	_, isView := db.views[table]
+	return db.defs[table] != nil || isView
+}
+
+// missingSequence reports a sequence function given a name no sequence has,
+// once a schema is declared; without one, any name counts from 1, as a
+// test that declares no schema runs nextval on whatever its defaults name.
+func (db *DB) missingSequence(seq string) error {
+	if db.defs == nil {
+		return nil
+	}
+	if _, ok := db.seqDefs[seq]; ok {
+		return nil
+	}
+	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(seq)), relname(seq), "", "")
+}
+
+// noSequence is the error of ALTER or DROP SEQUENCE of a sequence that does
+// not exist, none with IF EXISTS.
+func (db *DB) noSequence(seq string, ifExists bool) error {
+	if ifExists {
+		return nil
+	}
+	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(seq)), relname(seq), "", "")
+}
+
+// notSequence is the error of a sequence function or DDL given a table or
+// view.
+func (db *DB) notSequence(seq string) error {
+	return db.kind.Error(sqlir.WrongObjectType, fmt.Sprintf("%q is not a sequence", relname(seq)), relname(seq), "", "")
+}
+
+// newSeqName is the name CREATE SEQUENCE s gives a sequence: in the first
+// schema of the search path when s names none, whatever the others hold.
+func (db *DB) newSeqName(s string) string {
+	if strings.Contains(s, ".") {
+		return sequenceName(s)
+	}
+	return sequenceName(db.searchPath()[0] + "." + s)
+}
+
+func (db *DB) searchPath() []string {
+	if path := db.kind.SearchPath(); len(path) > 0 {
+		return path
+	}
+	return defaultSearchPath
+}
+
+// seq returns the options of seq, those of a sequence declared without any
+// when it was not.
+func (db *DB) seqOptions(seq string) seqDef {
+	if d := db.seqDefs[seq]; d != nil {
+		return *d
+	}
+	return seqDef{start: 1, inc: 1, first: 1, cache: 1}
+}
+
+// alterSequence applies CREATE SEQUENCE (create) or ALTER SEQUENCE options.
+func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
+	if create {
+		seq = db.newSeqName(seq)
+	} else {
+		seq = db.seqName(seq)
+	}
+	d := db.seqOptions(seq)
+	if create {
+		d = seqDef{inc: 1, cache: 1}
+	}
+	if o.Increment != nil {
+		d.inc = *o.Increment
+	}
+	if o.MinValue != nil {
+		d.min = o.MinValue
+	}
+	if o.MaxValue != nil {
+		d.max = o.MaxValue
+	}
+	if o.Cache != nil {
+		d.cache = *o.Cache
+	}
+	switch {
+	case o.Start != nil:
+		d.start = *o.Start
+	case create && d.inc > 0:
+		d.start = 1
+		if d.min != nil {
+			d.start = *d.min
+		}
+	case create:
+		d.start = -1
+		if d.max != nil {
+			d.start = *d.max
+		}
+	}
+	switch {
+	case create || o.RestartStart:
+		d.first = d.start
+	case o.Restart != nil:
+		d.first = *o.Restart
+	}
+	if o.RestartStart || o.Restart != nil {
+		delete(db.seqs, seq) // the next nextval returns first again
+	}
+	if db.seqDefs == nil {
+		db.seqDefs = map[string]*seqDef{}
+	}
+	switch {
+	case o.OwnedNone:
+		d.owner = [2]string{}
+	case o.OwnedBy[0] != "":
+		d.owner = [2]string{db.resolve(o.OwnedBy[0]), o.OwnedBy[1]}
+	}
+	db.seqDefs[seq] = &d
+}
+
+func (db *DB) dropSequence(seq string) {
+	delete(db.seqDefs, seq)
+	delete(db.seqs, seq)
+}
+
+// dropOwnedSequences drops the sequences table's column col owns, or any of
+// its columns when col is empty, as Postgres drops them with the table or
+// the column.
+func (db *DB) dropOwnedSequences(table, col string, cascade bool) error {
+	var owned []string
+	for name, d := range db.seqDefs {
+		if d.owner[0] == table && (col == "" || d.owner[1] == col) {
+			owned = append(owned, name)
+		}
+	}
+	slices.Sort(owned)
+	for _, name := range owned {
+		if err := db.dropSequenceDependents(name, cascade, table, col); err != nil {
+			return err
+		}
+	}
+	for _, name := range owned {
+		db.dropSequence(name)
+	}
+	return nil
+}
+
+// dropSequenceDependents handles the defaults drawing from the sequence
+// being dropped, other than those of skipTable's column skipCol (any of its
+// columns when empty), which go with it. They depend on the sequence:
+// CASCADE drops them, and the identity they make, where Postgres refuses
+// the drop otherwise, which fails the setup that runs it.
+func (db *DB) dropSequenceDependents(name string, cascade bool, skipTable, skipCol string) error {
+	for _, table := range slices.Sorted(maps.Keys(db.defs)) {
+		def := db.defs[table]
+		for _, col := range slices.Sorted(maps.Keys(def.defaults)) {
+			if table == skipTable && (skipCol == "" || col == skipCol) {
+				continue
+			}
+			if seq, ok := nextvalOf(def.defaults[col]); !ok || db.seqName(seq) != name {
+				continue
+			}
+			if !cascade {
+				return unsupported(fmt.Sprintf("dropping sequence %q, which the default of %s.%s draws from", relname(name), relname(table), col), "")
+			}
+			delete(def.defaults, col)
+			delete(def.identityAlways, col)
+		}
+	}
+	return nil
+}
+
+// nextval returns the next value of seq, or why detest refuses to. A
+// sequence that caches more than one value hands each session its own block
+// of them, which detest does not do, so its values are refused rather than
+// given in another order.
+func (db *DB) nextval(seq string) (int64, string) {
+	seq = db.seqName(seq)
+	d := db.seqOptions(seq)
+	if d.cache > 1 {
+		return 0, fmt.Sprintf("nextval of sequence %q, which caches %d values per session", seq, d.cache)
+	}
+	v, called := db.seqs[seq]
+	if called {
+		v += d.inc
+	} else {
+		v = d.first
+	}
+	db.seqs[seq] = v
+	return v, ""
+}
+
+// setval sets a sequence so that nextval returns the value after v, or v
+// when not called.
+func (db *DB) setval(seq string, v int64, called bool) {
+	seq = db.seqName(seq)
+	if !called {
+		v -= db.seqOptions(seq).inc
+	}
+	db.seqs[seq] = v
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
@@ -873,6 +1110,39 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "sequence" && ch.Drop:
+		name := db.seqName(ch.Table)
+		if db.isRelation(name) {
+			return db.notSequence(name)
+		}
+		if _, ok := db.seqDefs[name]; !ok {
+			return db.noSequence(name, ch.IfExists)
+		}
+		if err := db.dropSequenceDependents(name, ch.Cascade, "", ""); err != nil {
+			return err
+		}
+		db.dropSequence(name)
+		return nil
+	case ch.Object == "sequence":
+		if ch.Sequence == nil {
+			return nil
+		}
+		if ch.Create {
+			name := db.newSeqName(ch.Table)
+			_, exists := db.seqDefs[name]
+			if (exists || db.isRelation(name)) && ch.IfNotExists {
+				return nil
+			}
+			if db.isRelation(name) {
+				return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(name)), relname(name), "", "")
+			}
+		} else if name := db.seqName(ch.Table); db.isRelation(name) {
+			return db.notSequence(name)
+		} else if _, ok := db.seqDefs[name]; !ok {
+			return db.noSequence(name, ch.IfExists)
+		}
+		db.alterSequence(ch.Table, ch.Sequence, ch.Create)
+		return nil
 	case ch.Object == "index":
 		return db.indexChange(table, ch)
 	case ch.Object == "view" && !ch.Drop:
@@ -886,6 +1156,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		_, isView := db.views[table]
 		if db.defs[table] == nil && !isView && !ch.IfExists {
 			return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
+		}
+		if err := db.dropOwnedSequences(table, "", ch.Cascade); err != nil {
+			return err
 		}
 		delete(db.defs, table)
 		delete(db.committed, table)
@@ -1016,6 +1289,45 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				redefined = true
 			}
 		}
+		switch col.Identity {
+		case "":
+		case "drop", "drop if exists":
+			if _, identity := def.identityAlways[col.Name]; !identity {
+				if col.Identity == "drop if exists" {
+					continue // the column, its default included, stays as it is
+				}
+				// Postgres fails the statement, and the setup with it.
+				return unsupported(fmt.Sprintf("DROP IDENTITY of column %q, which is no identity column", col.Name), "")
+			}
+			delete(def.identityAlways, col.Name)
+			// An identity's sequence goes with it.
+			if err := db.dropOwnedSequences(table, col.Name, false); err != nil {
+				return err
+			}
+		default:
+			if _, identity := def.identityAlways[col.Name]; col.TypeOnly && !identity {
+				// SET GENERATED, which Postgres fails, and the setup with it,
+				// on a column that is no identity.
+				return unsupported(fmt.Sprintf("SET GENERATED of column %q, which is no identity column", col.Name), "")
+			}
+			if def.identityAlways == nil {
+				def.identityAlways = map[string]bool{}
+			}
+			def.identityAlways[col.Name] = col.Identity == "always"
+		}
+		if col.Sequence != nil {
+			d := col.Default
+			if col.TypeOnly {
+				d = def.defaults[col.Name]
+			}
+			if name, ok := nextvalOf(d); ok {
+				db.alterSequence(name, col.Sequence, !col.TypeOnly)
+				if !col.TypeOnly {
+					// A serial or identity column owns the sequence it makes.
+					db.seqDefs[db.seqName(name)].owner = [2]string{table, col.Name}
+				}
+			}
+		}
 		if col.TypeOnly {
 			continue
 		}
@@ -1038,7 +1350,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.generated[col.Name] = &tableCheck{CheckDef: sqlir.CheckDef{Name: col.Name, Expr: col.Generated}}
 		}
 		if col.Default != nil {
-			def.defaults[col.Name] = col.Default
+			def.defaults[col.Name] = db.bindSequence(col.Default)
 		} else {
 			delete(def.defaults, col.Name)
 		}
@@ -1113,9 +1425,17 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	for _, col := range ch.DropColumns {
 		def.dropColumn(col)
 		db.dropColumnInRows(table, col, tx)
+		if err := db.dropOwnedSequences(table, col, false); err != nil {
+			return err
+		}
 	}
 	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
 		def.renameColumn(old, nw)
+		for _, d := range db.seqDefs {
+			if d.owner == [2]string{table, old} {
+				d.owner[1] = nw
+			}
+		}
 		if v, ok := db.seqs[autoIncKey(table, old)]; ok {
 			delete(db.seqs, autoIncKey(table, old))
 			db.seqs[autoIncKey(table, nw)] = v
@@ -1554,6 +1874,11 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 	if def, ok := db.defs[table]; ok {
 		delete(db.defs, table)
 		db.defs[to] = def
+		for _, d := range db.seqDefs {
+			if d.owner[0] == table {
+				d.owner[0] = to
+			}
+		}
 		moved = true
 		for _, other := range db.defs { // foreign keys that reference the table
 			for i := range other.fks {
@@ -2188,4 +2513,48 @@ func (db *DB) pkConstraint(table string) string {
 		return def.pkName
 	}
 	return relname(table) + "_pkey"
+}
+
+// bindSequence binds the sequence of a nextval default to the one its name
+// resolves to now, as Postgres casts the name to regclass when it stores the
+// default, so a sequence of the name created later in an earlier schema of
+// the search path does not take it over.
+func (db *DB) bindSequence(e sqlir.Expr) sqlir.Expr {
+	name, ok := nextvalOf(e)
+	if !ok {
+		return e
+	}
+	if seq := db.seqName(name); !db.isRelation(seq) {
+		if _, declared := db.seqDefs[seq]; !declared {
+			// Postgres needs the sequence to exist, but ddl.From writes a
+			// serial column's default without its CREATE SEQUENCE, so one
+			// a stored default names is declared with it.
+			db.alterSequence(name, &sqlir.SequenceOptions{}, true)
+		}
+	}
+	if strings.Contains(name, ".") {
+		return e
+	}
+	resolved := db.seqName(name)
+	if !strings.Contains(resolved, ".") {
+		resolved = "public." + resolved // a bare name is public's, which the search path would not keep
+	}
+	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: resolved}}}
+}
+
+// nextvalOf returns the sequence a default of nextval('name') draws from.
+func nextvalOf(e sqlir.Expr) (string, bool) {
+	f, ok := e.(*sqlir.FuncCall)
+	if !ok || f.Name != "nextval" || len(f.Args) != 1 {
+		return "", false
+	}
+	arg := f.Args[0]
+	if cast, ok := arg.(*sqlir.Cast); ok {
+		arg = cast.X // nextval('s'::regclass), as pg_dump writes it
+	}
+	c, ok := arg.(*sqlir.Const)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprint(c.Value), true
 }

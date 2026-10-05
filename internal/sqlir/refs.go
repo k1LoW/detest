@@ -169,3 +169,33 @@ func deepCopy(v reflect.Value) reflect.Value {
 	}
 	return v
 }
+
+// TableNames returns the names the FROM items under n read, CTEs and views
+// included, in the order they appear.
+func TableNames(n any) []string {
+	var out []string
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Pointer, reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			if t, ok := reflect.TypeAssert[TableRef](v); ok && t.Name != "" {
+				out = append(out, t.Name)
+			}
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(n))
+	return out
+}

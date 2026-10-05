@@ -141,15 +141,25 @@ type InsertStmt struct {
 	Select     *SelectStmt
 	OnConflict *OnConflict
 	Returning  []Target
+	// OverridingSystemValue is OVERRIDING SYSTEM VALUE, which lets an
+	// INSERT give a GENERATED ALWAYS identity column a value.
+	OverridingSystemValue bool
 }
 
 // OnConflict is ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ... WHERE ...
 // (MySQL's INSERT IGNORE and ON DUPLICATE KEY UPDATE map here too).
 type OnConflict struct {
-	Columns   []string
-	DoNothing bool
-	Set       []Assignment
-	Where     Expr
+	Columns []string
+	// Elems are Postgres's inference elements, the columns and expressions
+	// of the unique index to arbitrate on, when one of them is not a plain
+	// column; Where is the predicate that infers a partial one, and
+	// Constraint names the constraint of ON CONFLICT ON CONSTRAINT.
+	Elems      []Expr
+	InferWhere Expr
+	Constraint string
+	DoNothing  bool
+	Set        []Assignment
+	Where      Expr
 }
 
 // UpdateStmt is UPDATE ... SET ... [FROM ...] WHERE ... [RETURNING ...].
@@ -229,6 +239,26 @@ type SchemaChange struct {
 	View        *SelectStmt
 	ViewColumns []string
 	Replace     bool
+	// Cascade is DROP ... CASCADE, which drops what depends on the object
+	// too, as the defaults that draw from a sequence.
+	Cascade bool
+	// Sequence is CREATE SEQUENCE (Create) or ALTER SEQUENCE of the
+	// sequence Table names, with Object "sequence".
+	Sequence *SequenceOptions
+}
+
+// SequenceOptions are the options of a sequence that decide the values
+// nextval returns, nil when not given.
+type SequenceOptions struct {
+	Start, Increment, MinValue, MaxValue, Cache *int64
+	// Restart is RESTART WITH n, and RestartStart a RESTART without a
+	// value, which starts over at the start value.
+	Restart      *int64
+	RestartStart bool
+	// OwnedBy is OWNED BY table.column, the column whose table or column
+	// a DROP drops the sequence with, and OwnedNone is OWNED BY NONE.
+	OwnedBy   [2]string
+	OwnedNone bool
 }
 
 // ColumnDef is a column with its default, if any. A serial or identity column
@@ -248,6 +278,13 @@ type ColumnDef struct {
 	// Generated is the expression of a generated column, GENERATED ALWAYS
 	// AS (expr), whose value is computed from the row on every write.
 	Generated Expr
+	// Sequence are the options of an identity column's sequence, the one
+	// its Default calls nextval of. Identity is "always" for GENERATED
+	// ALWAYS, which takes no value but DEFAULT, "by default" for GENERATED
+	// BY DEFAULT, "drop" for DROP IDENTITY, "drop if exists" for DROP
+	// IDENTITY IF EXISTS and empty to leave it as it is.
+	Sequence *SequenceOptions
+	Identity string
 	// AutoIncrement is MySQL's AUTO_INCREMENT: an insert that leaves the
 	// column NULL or 0 takes the next value, and an explicit larger value
 	// moves the counter past it. DropAutoIncrement removes it, as a MODIFY
@@ -309,6 +346,12 @@ type UniqueDef struct {
 	Elems            []Expr
 	Where            Expr
 	NullsNotDistinct bool
+	// Deferrable is a constraint DEFERRABLE, whose check Postgres runs at
+	// the end of the statement or at commit.
+	Deferrable bool
+	// Index is a unique index made by CREATE UNIQUE INDEX, which is no
+	// constraint ON CONFLICT ON CONSTRAINT may name.
+	Index bool
 }
 
 // ForeignKey is a FOREIGN KEY or REFERENCES constraint. RefColumns empty
@@ -661,6 +704,17 @@ const (
 	// DataTruncated is a value that is none of an ENUM's or a SET's members,
 	// which MySQL's strict mode refuses.
 	DataTruncated
+	// RestrictViolation is an update or delete of a parent row that children
+	// reference through an ON DELETE or ON UPDATE RESTRICT foreign key, which
+	// Postgres reports apart from NO ACTION.
+	RestrictViolation
+	// UndefinedColumn is a column reference no table in scope has.
+	UndefinedColumn
+	// AmbiguousColumn is an unqualified column reference more than one
+	// table in scope has.
+	AmbiguousColumn
+	// DuplicateColumn is a column an INSERT's column list names twice.
+	DuplicateColumn
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -688,6 +742,9 @@ var (
 	ErrCardinalityViolation      = errors.New("detest: more than one row returned by a subquery used as an expression")
 	ErrStringDataRightTruncation = errors.New("detest: value too long for the column")
 	ErrDataTruncated             = errors.New("detest: data truncated for the column")
+	ErrUndefinedColumn           = errors.New("detest: column does not exist")
+	ErrAmbiguousColumn           = errors.New("detest: column reference is ambiguous")
+	ErrDuplicateColumn           = errors.New("detest: column specified more than once")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -695,7 +752,9 @@ var (
 		CheckViolation: ErrCheckViolation, InvalidParameterValue: ErrInvalidParameterValue, LockWaitTimeout: ErrLockNotAvailable,
 		InvalidRowCountInLimit: ErrInvalidParameterValue, InvalidRowCountInOffset: ErrInvalidParameterValue,
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
-		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated}
+		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
+		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
+		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers
