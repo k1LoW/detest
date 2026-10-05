@@ -140,6 +140,18 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " key argument"
 			}
 		}
+	case "abs", "floor", "ceil", "ceiling", "power", "pow":
+		// Postgres has no signature of these for a non-numeric argument
+		// and rejects the call before evaluating any of them, where
+		// callFunc would otherwise evaluate a side-effecting argument
+		// (nextval) and only then find it cannot convert the result.
+		for _, a := range f.Args {
+			switch typ := expressionType(a, column); typ {
+			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "float4", "float8", "real", "double precision":
+			default:
+				return f.Name + " with a " + typ + " argument"
+			}
+		}
 	}
 	return ""
 }
