@@ -713,6 +713,8 @@ const (
 	// AmbiguousColumn is an unqualified column reference more than one
 	// table in scope has.
 	AmbiguousColumn
+	// DuplicateColumn is a column an INSERT's column list names twice.
+	DuplicateColumn
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -742,6 +744,7 @@ var (
 	ErrDataTruncated             = errors.New("detest: data truncated for the column")
 	ErrUndefinedColumn           = errors.New("detest: column does not exist")
 	ErrAmbiguousColumn           = errors.New("detest: column reference is ambiguous")
+	ErrDuplicateColumn           = errors.New("detest: column specified more than once")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -751,7 +754,7 @@ var (
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
 		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
-		AmbiguousColumn: ErrAmbiguousColumn}
+		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers

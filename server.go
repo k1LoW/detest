@@ -66,6 +66,7 @@ const (
 	RestrictViolation         = sqlir.RestrictViolation
 	UndefinedColumn           = sqlir.UndefinedColumn
 	AmbiguousColumn           = sqlir.AmbiguousColumn
+	DuplicateColumn           = sqlir.DuplicateColumn
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

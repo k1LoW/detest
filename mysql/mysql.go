@@ -105,6 +105,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "42S22", 1054 // ER_BAD_FIELD_ERROR
 	case sqlir.AmbiguousColumn:
 		return "23000", 1052 // ER_NON_UNIQ_ERROR
+	case sqlir.DuplicateColumn:
+		return "42000", 1110 // ER_FIELD_SPECIFIED_TWICE
 	case sqlir.ForeignKeyParentViolation, sqlir.RestrictViolation:
 		return "23000", 1451 // ER_ROW_IS_REFERENCED_2
 	case sqlir.ArithmeticOutOfRange:

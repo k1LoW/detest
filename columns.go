@@ -589,11 +589,14 @@ func targetAlias(table, alias string) string {
 
 // assigned checks the columns a write assigns, which must be the table's,
 // each once.
-func (c *columnChecker) assigned(table string, cols colSet, names []string) error {
+func (c *columnChecker) assigned(table string, cols colSet, names []string, insert bool) error {
 	seen := map[string]bool{}
 	for _, n := range names {
 		if cols != nil && !cols[n] {
 			return c.undefinedIn(table, n)
+		}
+		if seen[n] && insert {
+			return c.x.tx.db.kind.Error(sqlir.DuplicateColumn, fmt.Sprintf("column %q specified more than once", n), relname(table), n, "")
 		}
 		if seen[n] {
 			return c.x.tx.db.kind.Error(sqlir.SyntaxError, fmt.Sprintf("multiple assignments to same column %q", n), relname(table), n, "")
@@ -626,8 +629,25 @@ func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string
 }
 
 func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
+	if c.x.tx.db.checkTable(c.x.tx.db.resolve(ins.Table)) != nil {
+		return nil // the missing table is the error, which the INSERT reports first
+	}
+	if ins.Select != nil && len(ins.Select.With) > 0 {
+		// WITH ... INSERT's CTEs go to its query alone, where Postgres
+		// lets RETURNING and ON CONFLICT read them too.
+		var rest []any
+		rest = append(rest, ins.Returning)
+		if oc := ins.OnConflict; oc != nil {
+			rest = append(rest, oc.Set, oc.Where)
+		}
+		for _, name := range freeNames(rest) {
+			if slices.ContainsFunc(ins.Select.With, func(cte sqlir.CTE) bool { return cte.Name == name }) {
+				return c.x.unsupported(fmt.Sprintf("CTE %q read outside the INSERT's query", name))
+			}
+		}
+	}
 	sc, cols := c.target(ins.Table, ins.Alias)
-	if err := c.assigned(ins.Table, cols, ins.Columns); err != nil {
+	if err := c.assigned(ins.Table, cols, ins.Columns, true); err != nil {
 		return err
 	}
 	values := &colScope{items: map[string]colSet{}}
@@ -653,7 +673,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(oc.InferWhere, sc); err != nil {
 			return err
 		}
-		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set)); err != nil {
+		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set), false); err != nil {
 			return err
 		}
 		up := &colScope{items: sc.items, excluded: cols, hasExcluded: true}
@@ -668,8 +688,11 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 }
 
 func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
+	if c.x.tx.db.checkTable(c.x.tx.db.resolve(up.Table)) != nil {
+		return nil // the missing table is the error, which the UPDATE reports first
+	}
 	sc, cols := c.target(up.Table, up.Alias)
-	if err := c.assigned(up.Table, cols, assignedColumns(up.Set)); err != nil {
+	if err := c.assigned(up.Table, cols, assignedColumns(up.Set), false); err != nil {
 		return err
 	}
 	if err := c.extraItems(up.From, sc, targetAlias(up.Table, up.Alias)); err != nil {
@@ -705,6 +728,9 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 }
 
 func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
+	if c.x.tx.db.checkTable(c.x.tx.db.resolve(del.Table)) != nil {
+		return nil // the missing table is the error, which the DELETE reports first
+	}
 	sc, _ := c.target(del.Table, del.Alias)
 	if err := c.extraItems(del.Using, sc, targetAlias(del.Table, del.Alias)); err != nil {
 		return err

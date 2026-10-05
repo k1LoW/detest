@@ -1071,3 +1071,19 @@ func TestUndeclaredSequenceIsUndefined(t *testing.T) {
 		}
 	}
 }
+
+func TestInsertColumnChecks(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a int)`)
+	if _, err := db.Exec(`INSERT INTO t (a, a) VALUES (1, 2)`); !errors.Is(err, ErrDuplicateColumn) {
+		t.Errorf("duplicate INSERT target: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO missing VALUES (typo)`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("missing table first: %v", err)
+	}
+	if _, err := db.Exec(`WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 5, x FROM c RETURNING (SELECT x FROM c)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CTE read by RETURNING: %v", err)
+	}
+	mustExec(t, db, `WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 6, x FROM c RETURNING id`)
+}

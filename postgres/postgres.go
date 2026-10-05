@@ -120,6 +120,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "42703", 0
 	case sqlir.AmbiguousColumn:
 		return "42702", 0
+	case sqlir.DuplicateColumn:
+		return "42701", 0
 	case sqlir.ArithmeticOutOfRange:
 		return "22003", 0
 	case sqlir.LockWaitTimeout:
