@@ -865,6 +865,8 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 		{`SELECT id FROM a WHERE u > '00000000-0000-0000-0000-00000000000' || '2'`, nil},
 		{`SELECT id FROM a WHERE u = 1`, nil},
 		{`SELECT id FROM a WHERE u = $1`, []any{int64(1)}},
+		{`INSERT INTO a (id, u) VALUES (3, 1)`, nil},
+		{`INSERT INTO a (id, u) VALUES (3, $1)`, []any{int64(1)}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", tc.query, err)

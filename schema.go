@@ -896,12 +896,22 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if b, ok := v.([]byte); ok {
 				v = string(b)
 			}
-			if s, ok := v.(string); ok {
-				c, ok := canonicalUUID(s)
+			switch u := v.(type) {
+			case uuidValue:
+			case string:
+				c, ok := canonicalUUID(u)
 				if !ok {
-					return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")
+					return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", u), relname(table), col, "")
 				}
 				row[col] = uuidValue(c)
+			default:
+				if v == sqlir.Unknown {
+					continue
+				}
+				// Postgres refuses a literal of another type and reads a
+				// parameter as the text the driver sends, which the value
+				// does not tell apart.
+				return x.unsupported(fmt.Sprintf("a %T written to the uuid column %q", v, col))
 			}
 		case "int1", "int2", "int3", "int4", "int8", "uint1", "uint2", "uint3", "uint4", "uint8":
 			if x.tx.db.kind.InnoDB() {
