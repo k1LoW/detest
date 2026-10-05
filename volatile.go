@@ -71,10 +71,13 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 // topSequenceCalls checks a query, whose clauses detest evaluates as
 // often as Postgres does, but not its subqueries.
 func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
-	used := reachableCTEs(sel)
+	used, shadowed := reachableCTEs(sel), nestedCTEs(sel)
 	for _, cte := range sel.With {
 		check := x.topSequenceCalls
-		if !used[cte.Name] {
+		// A nested WITH of the same name hides the CTE from the parts it
+		// covers, which reachableCTEs does not tell apart, so such a CTE
+		// counts as unread.
+		if !used[cte.Name] || shadowed[cte.Name] {
 			// detest runs every CTE, where Postgres skips one the query
 			// does not read.
 			check = func(s *sqlir.SelectStmt) error { return x.noSequenceCalls(s) }
@@ -127,6 +130,39 @@ func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
 		}
 	}
 	return reached
+}
+
+// nestedCTEs are the names the WITH clauses inside sel's query and CTEs
+// declare.
+func nestedCTEs(sel *sqlir.SelectStmt) map[string]bool {
+	names := map[string]bool{}
+	var walk func(v reflect.Value, top bool)
+	walk = func(v reflect.Value, top bool) {
+		switch v.Kind() {
+		case reflect.Interface, reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			if s, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok && !top {
+				for _, cte := range s.With {
+					names[cte.Name] = true
+				}
+			}
+			walk(v.Elem(), false)
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i), false)
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i), false)
+			}
+		}
+	}
+	walk(reflect.ValueOf(sel), true)
+	return names
 }
 
 // rowSequenceCalls checks expressions detest evaluates as often as Postgres,
