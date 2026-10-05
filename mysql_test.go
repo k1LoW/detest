@@ -1743,6 +1743,7 @@ func TestMySQLLockTablesOnlyAroundInserts(t *testing.T) {
 // the row leaves, so an insert into it waits. The search is by a secondary
 // unique key, as the lock on a primary key would hold the insert anyway.
 func TestMySQLPointSearchRereadsAfterWaiting(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(10) NOT NULL, UNIQUE KEY uk (email))")
@@ -1824,6 +1825,7 @@ func TestPostgresNowIsTheTransactionTime(t *testing.T) {
 // An insert that waited for a row lock checks the gaps again, as a gap lock
 // taken while it waited covers the row too.
 func TestMySQLInsertRechecksGapsAfterItsRowLock(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
@@ -2436,6 +2438,7 @@ func TestMySQLTwentySeventhReviewFindings(t *testing.T) {
 // When the next record a range locks is deleted while the range waits for
 // it, the gap reaches the record after it, as InnoDB's purge leaves it.
 func TestMySQLGapFollowsADeletedNextRecord(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE e (id INT PRIMARY KEY, at INT NOT NULL, KEY idx_at (at))")
@@ -2763,6 +2766,7 @@ func TestMySQLCascadeWaitsForTheGap(t *testing.T) {
 // A LIMIT scan whose first row is deleted while it waits goes on to the next
 // one, and its gap reaches that row.
 func TestMySQLLimitScanRereadsAfterWaiting(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", mysqlBin())
 		mustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)")

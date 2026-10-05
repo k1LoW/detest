@@ -148,6 +148,7 @@ func TestInjectedMutexLockedTwice(t *testing.T) {
 // it under the write lock. The readers never see the row change in between,
 // and holding the read lock together does not block them.
 func TestInjectedRWMutexExcludesWriter(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
 		rw := s.RWMutex("counter")
