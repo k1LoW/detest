@@ -22,14 +22,6 @@ func (s colSet) has(name string) (found, once bool) {
 	return found, once
 }
 
-func setOf(cols []string) colSet {
-	s := colSet{}
-	for _, c := range cols {
-		s[c] = true
-	}
-	return s
-}
-
 // colScope is the FROM items one query block sees, inside those of the
 // blocks around it.
 type colScope struct {
@@ -112,11 +104,11 @@ func (c *columnChecker) tableColumns(name string) colSet {
 	db := c.x.tx.db
 	table := db.resolve(name)
 	if def := db.defs[table]; def != nil {
-		return setOf(def.columns)
+		return namesSet(def.columns)
 	}
 	if v := db.views[table]; v != nil {
 		if len(v.ViewColumns) > 0 {
-			return setOf(v.ViewColumns)
+			return namesSet(v.ViewColumns)
 		}
 		return outputColumns(v.View)
 	}
@@ -189,7 +181,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 		cols = nil
 		if len(t.Columns) > 0 {
-			cols = setOf(t.Columns)
+			cols = namesSet(t.Columns)
 			if t.Ordinality {
 				cols = nil // the ordinality column's name is the alias's next
 			}
