@@ -163,6 +163,43 @@ type pgConv struct {
 
 func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what, c.query) }
 
+// isolationSet refuses a SET that asks for an isolation level other than Read
+// Committed, which detest runs Postgres at: SET TRANSACTION ISOLATION LEVEL,
+// SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL, and the
+// transaction_isolation and default_transaction_isolation settings. Read
+// Uncommitted is Read Committed in Postgres. A level asked for in BeginTx is
+// refused by the driver; one set by SQL would otherwise be ignored and the
+// transaction run at another level than production's. The other transaction
+// modes, READ ONLY and DEFERRABLE, change no outcome detest models.
+func (c *pgConv) isolationSet(v *pg.VariableSetStmt) error {
+	var level string
+	switch v.Kind {
+	case pg.VariableSetKind_VAR_SET_MULTI:
+		if v.Name != "TRANSACTION" && v.Name != "SESSION CHARACTERISTICS" {
+			return nil
+		}
+		for _, a := range v.Args {
+			if d := a.GetDefElem(); d != nil && d.Defname == "transaction_isolation" {
+				level = d.Arg.GetAConst().GetSval().GetSval()
+			}
+		}
+	case pg.VariableSetKind_VAR_SET_VALUE:
+		if v.Name != "transaction_isolation" && v.Name != "default_transaction_isolation" {
+			return nil
+		}
+		if len(v.Args) > 0 {
+			level = v.Args[0].GetAConst().GetSval().GetSval()
+		}
+	default:
+		return nil
+	}
+	switch strings.ToLower(level) {
+	case "", "read committed", "read uncommitted":
+		return nil
+	}
+	return c.unsupported("an isolation level other than Read Committed set by SQL (" + strings.ToUpper(level) + ")")
+}
+
 func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 	switch s := n.Node.(type) {
 	case *pg.Node_SelectStmt:
@@ -175,6 +212,9 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 		return c.createTableAs(s.CreateTableAsStmt)
 	case *pg.Node_VariableSetStmt:
 		v := s.VariableSetStmt
+		if err := c.isolationSet(v); err != nil {
+			return nil, err
+		}
 		out := &sqlir.SetStmt{Name: v.Name, Local: v.IsLocal}
 		if len(v.Args) > 0 {
 			if e, err := c.expr(v.Args[0]); err == nil {

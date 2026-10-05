@@ -384,3 +384,50 @@ func TestEqualRowUnderUniqueWaits(t *testing.T) {
 		})
 	})
 }
+
+// An isolation level set by SQL is refused as one asked for in BeginTx is,
+// rather than ignored, which would run the transaction at Read Committed where
+// production runs it at another level. Read Committed itself, and the other
+// transaction modes, change nothing and run.
+func TestIsolationLevelSetBySQLIsUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
+		`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
+		`SET transaction_isolation = 'serializable'`,
+		`SET default_transaction_isolation TO 'repeatable read'`,
+		`SET LOCAL transaction_isolation = 'repeatable read'`,
+	} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		_ = tx.Rollback()
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
+		`SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`,
+		`SET TRANSACTION READ ONLY`,
+		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED`,
+		`SET transaction_isolation = 'read committed'`,
+		`RESET transaction_isolation`,
+	} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(q); err != nil {
+			t.Errorf("%s: got %v, want nil", q, err)
+		}
+		_ = tx.Rollback()
+	}
+}
