@@ -50,9 +50,6 @@ func TestInjectedMutexHeldAcrossYieldPoint(t *testing.T) {
 // exploration runs in a child process because the watchdog crashes it.
 func TestUninjectedMutexStalls(t *testing.T) {
 	if os.Getenv("DETEST_STALL_CHILD") == "1" {
-		// Compiling the SQL parser takes seconds under -race; keep it out of
-		// the one second the watchdog is given here.
-		_ = CheckSQL(postgres.New(), `SELECT 1`)
 		Explore(t, func(t *testing.T, s *Sim) {
 			db, _ := s.DB("app", postgres.New())
 			var mu sync.Mutex
