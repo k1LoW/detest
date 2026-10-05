@@ -360,8 +360,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		// start. It is no run of the exploration, and what it finds is left
 		// to the runs that are, but it goes through the nondeterminism check,
 		// as state it leaves behind shows in the next run.
-		r := s.newRun(nil)
-		r.measuring = true
+		r := s.newRunMeasuring(nil, true)
 		r.rng, r.seen, r.path = s.measuringRng(), seen, fnvOffset
 		r.prio = newPrioritized(r.rng, 1, 1, 0, 0)
 		r.execute()

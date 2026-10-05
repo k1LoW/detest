@@ -149,6 +149,24 @@ func TestPrioritizedDeliversOnALossyQueue(t *testing.T) {
 	}
 }
 
+// A statement a seed runs in the measuring run is no refusal of the
+// exploration either.
+func TestPrioritizedMeasuringRunSeedRefusesNothing(t *testing.T) {
+	f := newFrontier(1, 0)
+	f.random = true
+	exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Seed(func() { _, _ = db.Exec(`SELECT md5('x')`) })
+		s.Manual("a", 1, func(p *Proc) error {
+			p.Step("a")
+			return nil
+		})
+	}, []Option{Prioritized(1, 2)}, f, 0)
+	if got := f.refusals(); len(got) != 0 {
+		t.Fatalf("want nothing listed as unsupported, got %q", got)
+	}
+}
+
 // A statement refused while the simulation is declared, before any run, is
 // reported as before.
 func TestRefusalBeforeAnyRunIsReported(t *testing.T) {

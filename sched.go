@@ -1265,8 +1265,12 @@ func (r *run) dbsTouched() bool {
 	return false
 }
 
-func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset, want: -1}
+func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, false) }
+
+// newRunMeasuring is newRun with the run marked as the one Prioritized
+// measures k on, which the seeds already see.
+func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
+	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {
