@@ -357,6 +357,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		// so that the runs drawn do not depend on Workers. It is no run of
 		// the exploration, and what it finds is left to the runs that are.
 		r := s.newRun(nil)
+		r.measuring = true
 		r.execute()
 		k = r.steps
 		seen.record(r.choices) // state it leaves behind shows in the next run

@@ -107,6 +107,22 @@ func TestPrioritizedDrawsALoneProcessChoices(t *testing.T) {
 	}
 }
 
+// The run k is measured on is no run of the exploration, so a condition
+// only it met is not reported as reached.
+func TestPrioritizedMeasuringRunReachesNothing(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		s.Manual("a", 1, func(p *Proc) error {
+			p.Step("a")
+			return nil
+		})
+		s.Sometimes("always", func(st *State) bool { return true })
+	}
+	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 2), MaxRuns(0)}, nil, 0)
+	if res.Runs != 0 || len(res.Unreached) != 1 {
+		t.Fatalf("want no run and the condition unreached, got %s", res.report())
+	}
+}
+
 func TestPrioritizedFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		counterModel(s, false)

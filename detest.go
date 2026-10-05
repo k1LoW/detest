@@ -373,7 +373,7 @@ func (r *result) outcome() string {
 
 // refuse records a statement refused as unsupported, for the report.
 func (s *Sim) refuse(err *ErrUnsupportedSQL) {
-	if s.frontier != nil {
+	if s.frontier != nil && !s.run.measuring {
 		s.frontier.refuse(err.Error())
 	}
 }

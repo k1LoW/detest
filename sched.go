@@ -176,6 +176,9 @@ type run struct {
 	snap     *State     // the latest snapshot, whose tables the next one reuses
 	// queuesTouched records a queue change since snap was taken.
 	queuesTouched bool
+	// measuring marks the run Prioritized measures k on, which is no run of
+	// the exploration and so reports nothing of what it reached or refused.
+	measuring bool
 	// outside counts the processes blocked outside detest, which may wake and
 	// call into detest without being resumed. Those calls run concurrently with
 	// the resumed process, hence atomic.
@@ -418,6 +421,9 @@ func (r *run) execute() (v *violation) {
 // is not checked again once this worker saw it hold, so that a test with
 // conditions met early pays for no snapshots after.
 func (r *run) checkSometimes() {
+	if r.measuring {
+		return
+	}
 	var st *State
 	for i := range r.s.sometimes {
 		c := &r.s.sometimes[i]
