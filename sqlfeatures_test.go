@@ -616,6 +616,8 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 		`SELECT pg_advisory_xact_lock(hashtext(name)::text::bigint) FROM t`,
 		`SELECT pg_advisory_xact_lock(hashtext(name) + 1) FROM t`,
 		`SELECT pg_advisory_xact_lock(abs(hashtext(name))) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(left(hashtext(name)::text, 1))) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(hashtext(name)::text)) FROM t`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)

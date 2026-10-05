@@ -1796,6 +1796,11 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			// and modeling it needs the server's hash function.
 			return nil, c.unsupported("hashtext anywhere but as the key of an advisory lock")
 		}
+		if fname == "hashtext" {
+			// The allowance is for this call alone: a hashtext inside its
+			// argument would be read as the string on the way to the key.
+			c.lockKey = false
+		}
 		if fname == "pg_advisory_xact_lock" || fname == "pg_try_advisory_xact_lock" {
 			// hashtext may stand only as a key itself, not inside an
 			// expression that reads its value on the way to the key.
