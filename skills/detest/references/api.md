@@ -65,7 +65,7 @@ msgs := st.Queue(q)
 | `Replay(choices)` | | Run one schedule only |
 | `Verbose()` | | Print every run's trace |
 
-The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
+The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_MAX_RUNS`, `DETEST_MAX_DURATION=<dur>` and `DETEST_SEED` (for `Random` only) override their options, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
 
 ## Database servers
 
