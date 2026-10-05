@@ -74,6 +74,25 @@ var arrayCases = []difftest.Case{
 		},
 	},
 	{
+		// A uuid is stored in one form however it is written, so a cast to
+		// uuid, of a scalar or of an array's elements, matches it by value.
+		Name:   "uuid written and cast in other forms",
+		Schema: arraySchema, Seed: arraySeed, Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (4, '{00000000-0000-0000-0000-00000000000B}')`),
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (5, '0000000000000000000000000000000c')`),
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (6, '0000-0000-0000-0000-0000-0000-0000-000d')`),
+			difftest.Q(0, `SELECT id, u FROM a WHERE u IS NOT NULL ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = '00000000-0000-0000-0000-00000000000A'::uuid ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = '00000000-0000-0000-0000-00000000000b' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = ANY('{00000000-0000-0000-0000-00000000000A,0000000000000000000000000000000C}'::uuid[]) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM a WHERE u <> ALL('{"{00000000-0000-0000-0000-00000000000d}"}'::uuid[]) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = 'nope'::uuid`),
+			difftest.Q(0, `SELECT id FROM a WHERE u = ANY('{nope}'::uuid[])`),
+			difftest.S(0, `INSERT INTO a (id, u) VALUES (7, '00000000-0000-0000-0000-0000000000')`),
+		},
+	},
+	{
 		Name:   "a malformed array fails the statement before it reads a row",
 		Schema: append(append([]string{}, arraySchema...), `CREATE TABLE e (id bigint PRIMARY KEY)`),
 		Seed:   arraySeed, Conns: 1,
