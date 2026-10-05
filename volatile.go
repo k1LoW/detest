@@ -73,16 +73,17 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 	used, shadowed := reachableCTEs(sel), nestedCTEs(sel)
 	for _, cte := range sel.With {
-		check := x.topSequenceCalls
-		// A nested WITH of the same name hides the CTE from the parts it
-		// covers, which reachableCTEs does not tell apart, so such a CTE
-		// counts as unread.
-		if !used[cte.Name] || shadowed[cte.Name] {
-			// detest runs every CTE, where Postgres skips one the query
-			// does not read.
-			check = func(s *sqlir.SelectStmt) error { return x.noSequenceCalls(s) }
+		var err error
+		switch {
+		case shadowed[cte.Name]:
+			// withCTEs runs it, as a nested WITH of the same name hides
+			// whether the query reads it, where Postgres may skip it.
+			err = x.noSequenceCalls(cte.Select)
+		case used[cte.Name]:
+			err = x.topSequenceCalls(cte.Select)
 		}
-		if err := check(cte.Select); err != nil {
+		// An unread CTE runs in neither.
+		if err != nil {
 			return err
 		}
 	}

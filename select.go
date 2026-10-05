@@ -66,7 +66,7 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
 		}
 	}
-	if err := x.withCTEs(sel.With, outer); err != nil {
+	if err := x.withCTEs(sel, outer); err != nil {
 		return nil, nil, err
 	}
 	// OFFSET and LIMIT are taken, and a negative one refused, before the

@@ -639,11 +639,8 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 		`DELETE FROM t WHERE id = nextval('s')`,
 		`SELECT (SELECT nextval('s'))`,
 		`INSERT INTO t VALUES ((SELECT nextval('s')), 1)`,
-		`WITH c AS (SELECT nextval('s')) SELECT 1`,
-		`WITH c AS (SELECT nextval('s')), d AS (SELECT * FROM c) SELECT 1`,
 		`SELECT nextval('s') AS x, count(*) FROM t GROUP BY x`,
 		`SELECT id, (SELECT gen_random_uuid()) FROM t`,
-		`WITH c AS (SELECT pg_advisory_xact_lock(1)) SELECT 1`,
 		`SELECT id, (SELECT clock_timestamp()) FROM t`,
 		`WITH c AS (SELECT nextval('s')) SELECT * FROM (WITH c AS (SELECT 1 AS n) SELECT n FROM c) x`,
 	} {
@@ -663,6 +660,15 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 	mustExec(t, db, `SELECT id FROM t WHERE id < nextval('s')`)
 	mustExec(t, db, `WITH c AS (SELECT nextval('s') AS n) SELECT n FROM c`)
 	mustExec(t, db, `WITH c AS (SELECT nextval('s') AS n), d AS (SELECT n FROM c) SELECT n FROM d`)
+	// An unread CTE runs in neither, so its call draws nothing.
+	var before, after int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `WITH c AS (SELECT nextval('s')), d AS (SELECT * FROM c) SELECT 1`)
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&after); err != nil || after != before+1 {
+		t.Errorf("an unread CTE drew from the sequence: %d then %d, %v", before, after, err)
+	}
 	mustExec(t, db, `SELECT id, gen_random_uuid() FROM t`)
 }
 
