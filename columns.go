@@ -498,10 +498,10 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		switch {
 		case found > 1:
 			return c.x.tx.db.kind.Error(sqlir.AmbiguousColumn, fmt.Sprintf("column reference %q is ambiguous", r.Column), "", r.Column, "")
-		case unknown:
-			return nil
 		case found == 1 && twice:
 			return c.twice(r.Column)
+		case unknown:
+			return nil
 		case found == 1:
 			return nil
 		case wholeRow:
