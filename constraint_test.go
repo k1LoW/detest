@@ -543,4 +543,14 @@ func TestDropSequenceWithDefaults(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('a')`); !errors.Is(err, ErrNotNullViolation) {
 		t.Errorf("insert without the default: %v", err)
 	}
+	// The same with the default pg_dump writes.
+	mustExec(t, db, `
+CREATE TABLE public.u (id integer NOT NULL PRIMARY KEY, v text);
+CREATE SEQUENCE public.u_id_seq START WITH 1 INCREMENT BY 1;
+ALTER TABLE ONLY public.u ALTER COLUMN id SET DEFAULT nextval('public.u_id_seq'::regclass);
+DROP SEQUENCE public.u_id_seq CASCADE;
+`)
+	if _, err := db.Exec(`INSERT INTO u (v) VALUES ('a')`); !errors.Is(err, ErrNotNullViolation) {
+		t.Errorf("insert without the dumped default: %v", err)
+	}
 }

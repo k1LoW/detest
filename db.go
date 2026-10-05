@@ -2448,7 +2448,11 @@ func nextvalOf(e sqlir.Expr) (string, bool) {
 	if !ok || f.Name != "nextval" || len(f.Args) != 1 {
 		return "", false
 	}
-	c, ok := f.Args[0].(*sqlir.Const)
+	arg := f.Args[0]
+	if cast, ok := arg.(*sqlir.Cast); ok {
+		arg = cast.X // nextval('s'::regclass), as pg_dump writes it
+	}
+	c, ok := arg.(*sqlir.Const)
 	if !ok {
 		return "", false
 	}
