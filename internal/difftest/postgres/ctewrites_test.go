@@ -79,16 +79,16 @@ var cteWriteCases = []difftest.Case{
 	},
 	{
 		// The CTE waits for job 1 while job 4 is inserted and job 2 is
-		// finished. The UPDATE chooses its rows from the snapshot it began
-		// with, so job 4 is not among them, and job 2 fails the recheck of
-		// its latest version.
+		// finished. Both read the snapshot the statement began with, so job
+		// 4 is not among the rows, and job 2 fails the recheck of its latest
+		// version.
 		Name:   "an UPDATE chooses its rows from its snapshot after its CTE waited",
 		Schema: jobSchema, Seed: jobSeed, Conns: 2,
 		Steps: []difftest.Step{
 			difftest.S(0, `BEGIN`),
 			difftest.Q(0, `SELECT id FROM jobs WHERE id = 1 FOR UPDATE`),
-			difftest.Q(1, `WITH c AS (SELECT id FROM jobs WHERE id = 1 FOR UPDATE)
-				UPDATE jobs SET worker = 7 FROM c WHERE jobs.status = 'queued' RETURNING jobs.id`),
+			difftest.Q(1, `WITH c AS (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id FOR UPDATE)
+				UPDATE jobs SET worker = 7 FROM c WHERE jobs.id = c.id RETURNING jobs.id`),
 			difftest.S(0, `INSERT INTO jobs VALUES (4, 'queued', NULL)`),
 			difftest.S(0, `UPDATE jobs SET status = 'done' WHERE id = 2`),
 			difftest.S(0, `COMMIT`),

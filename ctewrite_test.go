@@ -132,6 +132,15 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' WHERE id IN (WITH c AS (SELECT 2 AS id) SELECT id FROM c)`},
+		// A CTE with effects in FROM or USING runs in full under every plan
+		// only when it reads the target alone and WHERE only joins the two.
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id AND jobs.status = 'queued'`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE) UPDATE jobs SET status = 'x' FROM c WHERE false`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id < c.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE), d AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM c, d WHERE jobs.id = c.id AND d.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM others FOR UPDATE) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH n AS (SELECT nextval('s') AS id) DELETE FROM jobs USING n WHERE jobs.id = n.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE) DELETE FROM jobs USING c WHERE jobs.id = c.id OR jobs.id = 1`},
 		// A CTE sees only the ones before it.
 		{postgres.New(), `WITH p AS (SELECT id FROM q), q AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM p, q WHERE jobs.id = p.id`},
 		{postgres.New(), `WITH p AS (SELECT id FROM p) DELETE FROM jobs USING p WHERE jobs.id = p.id`},
@@ -157,6 +166,8 @@ func TestCTEWritesUnsupported(t *testing.T) {
 	for _, q := range []string{
 		`WITH c AS (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) UPDATE jobs SET status = 'running' FROM c WHERE jobs.id = c.id RETURNING jobs.*`,
 		`WITH c AS (SELECT id FROM jobs WHERE status = 'done') DELETE FROM jobs WHERE id IN (SELECT id FROM c)`,
+		`WITH c AS (SELECT id FROM jobs ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) UPDATE jobs AS j SET status = 'x' FROM c WHERE c.id = j.id`,
+		`WITH c AS (SELECT id FROM jobs WHERE status = 'done' FOR UPDATE) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING jobs.id`,
 	} {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("%s: got %v, want nil", q, err)
