@@ -79,10 +79,26 @@ func (x *sqlExec) arrayElems(c *sqlir.ArrayCmp) (*arrayElems, error) {
 	return a, nil
 }
 
+// checkArrays also refuses a Go slice bound to a parameter that is not the
+// array of an = ANY or <> ALL, as pgx fails to send it before the statement
+// runs. Evaluation would find it only where it reaches the parameter, which
+// WHERE false AND id = $1 never does.
 func (x *sqlExec) checkArrays(stmt sqlir.Statement) error {
+	arrays := map[*sqlir.Param]bool{}
 	for _, c := range sqlir.ArrayCmps(stmt) {
+		if p, ok := c.Array.(*sqlir.Param); ok {
+			arrays[p] = true
+		}
 		if _, err := x.arrayElems(c); err != nil {
 			return err
+		}
+	}
+	for _, p := range sqlir.Params(stmt) {
+		if p.Index < 0 || p.Index >= len(x.args) || arrays[p] {
+			continue
+		}
+		if _, ok := x.args[p.Index].(arrayParam); ok {
+			return x.unsupported("an array parameter anywhere but the right side of = ANY or <> ALL")
 		}
 	}
 	return nil

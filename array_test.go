@@ -151,6 +151,8 @@ func TestArrayComparisonUnsupported(t *testing.T) {
 		{`SELECT id FROM t WHERE id = ANY($1)`, []any{int64(1)}},
 		{`INSERT INTO t (id, name) VALUES (4, $1)`, []any{[]string{"a"}}},
 		{`SELECT id FROM t WHERE id = $1`, []any{[]int64{1}}},
+		{`SELECT id FROM t WHERE false AND id = $1`, []any{[]int64{1}}},
+		{`SELECT id FROM t WHERE id = ANY($1) OR id = $1`, []any{[]int64{1}}},
 	} {
 		if _, err := db.Exec(tt.q, tt.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s %v: got %v, want ErrUnsupportedSQL", tt.q, tt.args, err)

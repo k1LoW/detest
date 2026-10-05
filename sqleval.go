@@ -79,9 +79,6 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if v.Index < 0 || v.Index >= len(x.args) {
 			return nil, x.tx.db.kind.Error(sqlir.UndefinedParameter, fmt.Sprintf("there is no parameter $%d", v.Index+1), "", "", "")
 		}
-		if _, ok := x.args[v.Index].(arrayParam); ok {
-			return nil, x.unsupported("an array parameter anywhere but the right side of = ANY or <> ALL")
-		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
 		return v.Value, nil
