@@ -471,7 +471,7 @@ func setConfigSearchPath(sel *pg.SelectStmt) (string, bool) {
 		return "", false
 	}
 	name, value := fc.Args[0].GetAConst().GetSval(), fc.Args[1].GetAConst().GetSval()
-	if name == nil || name.GetSval() != "search_path" || value == nil {
+	if name == nil || name.GetSval() != "search_path" || value == nil || fc.Args[2].GetAConst().GetBoolval() == nil {
 		return "", false
 	}
 	return value.GetSval(), true
@@ -1791,14 +1791,26 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			// lock as the int4 hash would, equal for equal strings, but is
 			// not the value Postgres gives anywhere the application reads
 			// or compares it. Two keys whose 32-bit hashes collide on the
-			// server, which detest tells apart, are not modelled: among
+			// server, which detest tells apart, are not modeled: among
 			// the keys an application holds the chance is 2^-32 a pair,
-			// and modelling it needs the server's hash function.
+			// and modeling it needs the server's hash function.
 			return nil, c.unsupported("hashtext anywhere but as the key of an advisory lock")
 		}
 		if fname == "pg_advisory_xact_lock" || fname == "pg_try_advisory_xact_lock" {
-			defer func(prev bool) { c.lockKey = prev }(c.lockKey)
-			c.lockKey = true
+			// hashtext may stand only as a key itself, not inside an
+			// expression that reads its value on the way to the key.
+			args := make([]sqlir.Expr, 0, len(fc.Args))
+			for _, a := range fc.Args {
+				inner := a.GetFuncCall()
+				c.lockKey = inner != nil && len(inner.Funcname) > 0 && strings.EqualFold(inner.Funcname[len(inner.Funcname)-1].GetString_().GetSval(), "hashtext")
+				e, err := c.expr(a)
+				c.lockKey = false
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, e)
+			}
+			return &sqlir.FuncCall{Name: fname, Args: args}, nil
 		}
 		if fname == "make_interval" {
 			// The executor takes make_interval's one argument as seconds,

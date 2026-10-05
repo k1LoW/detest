@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -514,22 +513,26 @@ func TestWindowFunctionArity(t *testing.T) {
 // server. Any other call of set_config is a function detest does not run.
 func TestSearchPathSetBySQL(t *testing.T) {
 	for _, tc := range []struct {
-		srv      Server
-		path     []string
-		accepted []string
-		refused  []string
+		srv       Server
+		path      string
+		setConfig string // SELECT set_config of the declared path, aliased p
+		accepted  []string
+		refused   []string
 	}{
 		{
 			postgres.New(),
-			[]string{"public"},
+			"public",
+			`SELECT set_config('search_path', 'public', true) AS p`,
 			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`,
 				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
 			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
-				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`},
+				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`,
+				`SELECT set_config('search_path', 'public', 1)`, `SELECT set_config('search_path', 'public', $1)`},
 		},
 		{
 			postgres.New(postgres.SearchPath("app", "public")),
-			[]string{"app", "public"},
+			"app, public",
+			`SELECT set_config('search_path', 'app, public', true) AS p`,
 			[]string{`SET search_path TO app, public`, `SET search_path TO "$user", app, public, pg_catalog`},
 			[]string{`SET search_path TO public`, `SET search_path TO app`, `SET search_path TO app, tenant`, `SET search_path TO public, app`},
 		},
@@ -541,29 +544,40 @@ func TestSearchPathSetBySQL(t *testing.T) {
 				t.Errorf("%s: got %v, want nil", q, err)
 			}
 		}
-		// set_config returns the value it set, as the server does.
-		var got string
-		path := strings.Join(tc.path, ", ")
-		if err := db.QueryRow(`SELECT set_config('search_path', '` + path + `', true)`).Scan(&got); err != nil || got != path {
-			t.Errorf("set_config returned %q, %v; want %q", got, err, path)
-		}
-		rows, err := db.Query(`SELECT set_config('search_path', '` + path + `', true) AS p`)
+		// set_config returns the value it set as one row, under the alias,
+		// as the server does.
+		rows, err := db.Query(tc.setConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
+		var got string
 		if cols, _ := rows.Columns(); len(cols) != 1 || cols[0] != "p" {
-			t.Errorf("set_config AS p: columns %v", cols)
+			t.Errorf("%s: columns %v", tc.setConfig, cols)
+		}
+		if !rows.Next() {
+			t.Errorf("%s: no row", tc.setConfig)
+		} else if err := rows.Scan(&got); err != nil || got != tc.path {
+			t.Errorf("%s: returned %q, %v; want %q", tc.setConfig, got, err, tc.path)
 		}
 		rows.Close()
+		if res, err := db.Exec(tc.setConfig); err != nil {
+			t.Errorf("%s: %v", tc.setConfig, err)
+		} else if n, _ := res.RowsAffected(); n != 1 {
+			t.Errorf("%s: %d rows affected, want 1", tc.setConfig, n)
+		}
 		// With a clause, the statement is an ordinary SELECT of a function
 		// detest does not run: with WHERE false the server never evaluates
 		// it and returns no rows, and so does detest, while CheckSQL
 		// refuses the call wherever it stands.
 		rows, err = db.Query(`SELECT set_config('search_path', 'tenant_1', true) WHERE false`)
-		if err != nil || rows.Next() {
-			t.Errorf("set_config WHERE false: rows=%v, err=%v; want none", rows.Next(), err)
+		if err != nil {
+			t.Errorf("set_config WHERE false: %v", err)
+		} else {
+			if rows.Next() {
+				t.Error("set_config WHERE false: got a row, want none")
+			}
+			rows.Close()
 		}
-		rows.Close()
 		if err := CheckSQL(tc.srv, `SELECT set_config('search_path', 'public', true) WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL set_config WHERE false: got %v, want ErrUnsupportedSQL", err)
 		}
@@ -599,6 +613,9 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 		`SELECT * FROM t WHERE hashtext(name) = 1`,
 		`SELECT id FROM t ORDER BY hashtext(name)`,
 		`SELECT pg_advisory_xact_lock(1), hashtext(name) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(name)::text::bigint) FROM t`,
+		`SELECT pg_advisory_xact_lock(hashtext(name) + 1) FROM t`,
+		`SELECT pg_advisory_xact_lock(abs(hashtext(name))) FROM t`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
@@ -611,6 +628,7 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 		`SELECT pg_advisory_xact_lock(hashtext($1))`,
 		`SELECT pg_try_advisory_xact_lock(hashtext('k'))`,
 		`SELECT pg_advisory_xact_lock(hashtext(name)) FROM t`,
+		`SELECT pg_advisory_xact_lock(1, hashtext($1))`,
 	} {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("CheckSQL %s: got %v, want nil", q, err)
