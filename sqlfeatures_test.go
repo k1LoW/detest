@@ -407,6 +407,9 @@ func TestTransactionSettingsSetBySQL(t *testing.T) {
 		`SET transaction_read_only = on`,
 		`SET transaction_read_only = 1`,
 		`RESET transaction_isolation`,
+		`SET transaction_isolation TO DEFAULT`,
+		`SET transaction_read_only FROM CURRENT`,
+		`SET default_transaction_isolation FROM CURRENT`,
 		`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`,
 		`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`,
 		`SET default_transaction_isolation TO 'repeatable read'`,
@@ -432,6 +435,7 @@ func TestTransactionSettingsSetBySQL(t *testing.T) {
 		`SET default_transaction_read_only = off`,
 		`SET default_transaction_read_only = 0`,
 		`RESET default_transaction_isolation`,
+		`SET default_transaction_read_only TO DEFAULT`,
 	} {
 		tx, err := db.Begin()
 		if err != nil {
@@ -460,5 +464,37 @@ func TestMakeIntervalArguments(t *testing.T) {
 	}
 	if err := CheckSQL(postgres.New(), `SELECT now() - make_interval(secs => 30)`); err != nil {
 		t.Errorf("make_interval(secs => 30): got %v", err)
+	}
+}
+
+// A window function called with other arguments than it takes is refused,
+// by CheckSQL and by the run alike, rather than computed with a missing
+// argument read as NULL or an extra one ignored.
+func TestWindowFunctionArity(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1), (2, 1)`)
+	for _, q := range []string{
+		`SELECT row_number(1) OVER () FROM t`,
+		`SELECT lag() OVER (ORDER BY id) FROM t`,
+		`SELECT lag(id, 1, 0, 9) OVER (ORDER BY id) FROM t`,
+		`SELECT first_value() OVER (ORDER BY id) FROM t`,
+		`SELECT sum(id, k) OVER () FROM t`,
+		`SELECT ntile(2) OVER (ORDER BY id) FROM t`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT count(*) OVER () FROM t LIMIT 1`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("count(*) OVER (): got %d, %v", n, err)
+	}
+	if err := db.QueryRow(`SELECT lag(id, 1, 0) OVER (ORDER BY id) FROM t ORDER BY id LIMIT 1`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("lag(id, 1, 0): got %d, %v", n, err)
 	}
 }

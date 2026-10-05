@@ -1134,6 +1134,9 @@ func (x *sqlExec) computeWindows(wins []*sqlir.WindowFunc, items []*selItem) err
 }
 
 func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
+	if what := windowArityMismatch(w.Func); what != "" {
+		return x.unsupported(what)
+	}
 	keys := make([][]any, len(part))
 	for i, it := range part {
 		keys[i] = make([]any, len(w.Order))

@@ -196,13 +196,17 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 				readOnly = strconv.FormatInt(int64(d.Arg.GetAConst().GetIval().GetIval()), 10)
 			}
 		}
-	case pg.VariableSetKind_VAR_SET_VALUE, pg.VariableSetKind_VAR_RESET:
+	case pg.VariableSetKind_VAR_SET_VALUE, pg.VariableSetKind_VAR_RESET, pg.VariableSetKind_VAR_SET_DEFAULT, pg.VariableSetKind_VAR_SET_CURRENT:
 		switch v.Name {
 		case "transaction_isolation", "transaction_read_only":
 			return c.unsupported("SET " + v.Name + " (use database/sql's BeginTx)")
 		case "default_transaction_isolation", "default_transaction_read_only":
 		default:
 			return nil
+		}
+		if v.Kind == pg.VariableSetKind_VAR_SET_CURRENT {
+			// Takes the session's value, which detest does not track.
+			return c.unsupported("SET " + v.Name + " FROM CURRENT")
 		}
 		var val string
 		if len(v.Args) > 0 {

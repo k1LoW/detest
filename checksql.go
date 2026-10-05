@@ -36,9 +36,33 @@ func knownFunc(name string, innodb bool) bool {
 var aggregateFuncs = map[string]bool{"count": true, "sum": true, "min": true, "max": true, "avg": true}
 
 // windowFuncs are the window functions the executor computes, besides the
-// aggregates.
-var windowFuncs = map[string]bool{
-	"row_number": true, "rank": true, "dense_rank": true, "lag": true, "lead": true, "first_value": true, "last_value": true,
+// aggregates, with the fewest and the most arguments each takes. The
+// executor reads the arguments it knows and takes a missing one as NULL,
+// where Postgres has no such signature, so a call with other arguments is
+// refused before it runs.
+var windowFuncs = map[string][2]int{
+	"row_number": {0, 0}, "rank": {0, 0}, "dense_rank": {0, 0},
+	"lag": {1, 3}, "lead": {1, 3}, "first_value": {1, 1}, "last_value": {1, 1},
+}
+
+// windowArityMismatch names what is wrong with a window call's arguments,
+// or returns "" when the call has the arguments its function takes: the
+// window functions' own, and one for an aggregate, or none for count(*).
+func windowArityMismatch(f *sqlir.FuncCall) string {
+	arity, ok := windowFuncs[f.Name]
+	switch {
+	case ok:
+	case f.Name == "count" && f.Star && len(f.Args) == 0:
+		return ""
+	case aggregateFuncs[f.Name]:
+		arity = [2]int{1, 1}
+	default:
+		return "window function " + f.Name
+	}
+	if len(f.Args) < arity[0] || len(f.Args) > arity[1] {
+		return fmt.Sprintf("%s with %d arguments", f.Name, len(f.Args))
+	}
+	return ""
 }
 
 // knownBinaryOps are the operators the executor's binary evaluates. <=> is
@@ -271,8 +295,8 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		}
 		return c.exprs(v.Args)
 	case *sqlir.WindowFunc:
-		if !windowFuncs[v.Func.Name] && !aggregateFuncs[v.Func.Name] {
-			return unsupported("window function "+v.Func.Name, c.query)
+		if what := windowArityMismatch(v.Func); what != "" {
+			return unsupported(what, c.query)
 		}
 		if err := c.exprs(v.Func.Args); err != nil {
 			return err
