@@ -103,6 +103,8 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `INSERT INTO cust AS x VALUES (3, 'c') RETURNING x.id`),
 			difftest.Q(0, `DELETE FROM cust AS x WHERE id = 3 RETURNING x.id`),
 			difftest.Q(0, `SELECT column1 FROM (VALUES (1), (2)) v ORDER BY column1`),
+			difftest.Q(0, `VALUES (2, 'b'), (1, 'a') ORDER BY column1`),
+			difftest.Q(0, `VALUES (2, 'b'), (1, 'a') ORDER BY 2`),
 			difftest.Q(0, `SELECT * FROM generate_series(5, 6) WITH ORDINALITY AS s(z, a) ORDER BY z`),
 			difftest.Q(0, `SELECT g FROM generate_series(1, 2) g ORDER BY g`),
 			difftest.Q(0, `SELECT n FROM generate_series(1, 2) AS s(n) ORDER BY n`),

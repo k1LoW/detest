@@ -305,6 +305,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	// The names the select list gives itself; those a * gives are the
 	// input's, which a reference resolves against anyway.
 	sc.outputs, sc.plain = colSet{}, colSet{}
+	if len(sel.Values) > 0 {
+		sc.outputs = outputColumns(sel) // column1, column2, ...
+	}
 	for _, t := range sel.Targets {
 		sc.star = sc.star || t.Star
 		if r, ok := t.Expr.(*sqlir.ColumnRef); ok && !t.Star && targetName(t) == r.Column {
@@ -359,6 +362,9 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Ex
 		return nil
 	}
 	width := len(sel.Targets)
+	if len(sel.Values) > 0 {
+		width = len(sel.Values[0])
+	}
 	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
 		if clause == "GROUP BY" {
 			// The position may point into the columns of the *, which
