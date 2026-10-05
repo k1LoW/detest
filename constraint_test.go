@@ -636,6 +636,7 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 		`DELETE FROM t WHERE id = nextval('s')`,
 		`SELECT (SELECT nextval('s'))`,
 		`INSERT INTO t VALUES ((SELECT nextval('s')), 1)`,
+		`WITH c AS (SELECT nextval('s')) SELECT 1`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -651,6 +652,7 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 	}
 	mustExec(t, db, `INSERT INTO t SELECT nextval('s'), 2`)
 	mustExec(t, db, `SELECT id FROM t WHERE id < nextval('s')`)
+	mustExec(t, db, `WITH c AS (SELECT nextval('s') AS n) SELECT n FROM c`)
 }
 
 func TestRenameIdentityColumn(t *testing.T) {

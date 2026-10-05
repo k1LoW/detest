@@ -2,6 +2,7 @@ package detest
 
 import (
 	"reflect"
+	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -66,8 +67,15 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 // topSequenceCalls checks a query, whose clauses detest evaluates as
 // often as Postgres does, but not its subqueries.
 func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
+	used := sqlir.TableNames(sel)
 	for _, cte := range sel.With {
-		if err := x.topSequenceCalls(cte.Select); err != nil {
+		check := x.topSequenceCalls
+		if !slices.Contains(used, cte.Name) {
+			// detest runs every CTE, where Postgres skips one the query
+			// does not read.
+			check = func(s *sqlir.SelectStmt) error { return x.noSequenceCalls(s) }
+		}
+		if err := check(cte.Select); err != nil {
 			return err
 		}
 	}
