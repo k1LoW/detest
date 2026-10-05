@@ -86,3 +86,17 @@ func TestRandomAcceptsDeterministicRuns(t *testing.T) {
 		t.Fatalf("explored %d runs, want 50", res.Runs)
 	}
 }
+
+// Under Random, shard index of total makes every total-th run of the
+// sequence an unsharded exploration makes.
+func TestRandomShardsSplitTheRuns(t *testing.T) {
+	whole := &Sim{strategy: strategy{random: true, seed: 5}}
+	for idx := range 3 {
+		shard := &Sim{strategy: whole.strategy, shardIndex: idx, shardTotal: 3}
+		for i := range 4 {
+			if got, want := shard.rngFor(i).Uint64(), whole.rngFor(i*3+idx).Uint64(); got != want {
+				t.Fatalf("shard %d/3 run %d drew %d, want the draw of run %d (%d)", idx, i, got, i*3+idx, want)
+			}
+		}
+	}
+}

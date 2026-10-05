@@ -23,9 +23,11 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // the first choices, at the cost of saying nothing about the schedules it
 // did not draw, so the exploration is never complete. A violation is
 // reported with its schedule and replays with DETEST_REPLAY as under
-// DepthFirst. Each run draws from its own generator, derived from seed, the
-// shard and the run's index, so the runs drawn and the violation reported do
-// not depend on Workers. Of DepthFirst and Random, the one passed last
+// DepthFirst. Each run draws from its own generator, derived from seed and
+// the run's index, so the runs drawn and the violation reported do not
+// depend on Workers. Shard splits the runs rather than the tree: shard index
+// of total makes the runs whose index leaves index when divided by total,
+// and depth is not used. Of DepthFirst and Random, the one passed last
 // applies.
 func Random(seed uint64) Option {
 	return func(s *Sim) { s.strategy = strategy{random: true, seed: seed} }
@@ -39,9 +41,14 @@ func strategyOf(opts []Option) strategy {
 	return probe.strategy
 }
 
-// rngFor returns the generator of the random run with the given index.
+// rngFor returns the generator of the shard's random run with the given
+// index. A shard takes every total-th run of the sequence one machine would
+// make, so the shards together make those runs, none twice.
 func (s *Sim) rngFor(index int) *rand.Rand {
-	return rand.New(rand.NewPCG(s.strategy.seed, uint64(s.shardIndex)<<32^uint64(index))) //nolint:gosec // schedules, not secrets
+	if s.shardTotal > 1 {
+		index = index*s.shardTotal + s.shardIndex
+	}
+	return rand.New(rand.NewPCG(s.strategy.seed, uint64(index))) //nolint:gosec // schedules, not secrets
 }
 
 // A random run replays no prefix, so the fingerprint check a replayed prefix

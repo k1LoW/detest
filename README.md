@@ -322,7 +322,7 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.MaxDuration(d)` | Stops starting runs once `d` has passed (unbounded by default) |
 | `detest.Workers(n)` | Explores with n workers in parallel (default 1) |
 | `detest.DepthFirst()`, `detest.Random(seed)` | Picks schedules depth first (the default), or at random from a seed until `MaxRuns` or `MaxDuration`. A random exploration is never complete and does not take `DETEST_CHECKPOINT`. The one passed last applies |
-| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. `DETEST_SHARD` sets it from the environment |
+| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. Under `detest.Random` it makes every `total`-th run instead, and `depth` is not used. `DETEST_SHARD` sets it from the environment |
 | `detest.MaxCrashes(n)` | Lets up to n processes per run crash at any step (none by default). Their transactions roll back, their mutexes are freed and their messages are redelivered, to check that work survives a process dying halfway |
 
 These environment variables override or add to them.

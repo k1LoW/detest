@@ -121,8 +121,9 @@ const defaultShardDepth = 12
 // by hashing their first depth choices: shard index of total explores the
 // subtrees whose hash maps to it. Runs shorter than depth are explored by
 // every shard. Each shard reports its own run count; a violation is found by
-// the shard owning its subtree. DETEST_SHARD=index/total[/depth] sets it from
-// the environment.
+// the shard owning its subtree. Under Random, the shards split the runs
+// instead (see Random). DETEST_SHARD=index/total[/depth] sets it from the
+// environment.
 func Shard(index, total, depth int) Option {
 	return func(s *Sim) { s.shardIndex, s.shardTotal, s.shardDepth = index, total, depth }
 }
