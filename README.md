@@ -156,7 +156,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - `INSERT` with `ON CONFLICT DO NOTHING | DO UPDATE` and `RETURNING`, `INSERT ... SELECT`
 - `UPDATE ... FROM` and `DELETE ... USING`, with `RETURNING`
 - Functions: `coalesce`, `nullif`, `greatest`, `least`, `lower`, `upper`, `length`, `char_length`, `octet_length`, `left`, `concat`, `abs`, `ceil`, `ceiling`, `floor`, `round`, `power`, `pow`, `random`, `now`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `make_interval`, `nextval`, `setval`, `gen_random_uuid`, `uuid_generate_v4`, `hashtext`, and the transaction advisory locks `pg_advisory_xact_lock` and `pg_try_advisory_xact_lock`
-- That is the whole list of functions. Any other fails with `detest.ErrUnsupportedSQL` where a statement evaluates it, and under `detest.CheckSQL` wherever it stands
+- That is the whole list of functions. Any other fails with `detest.ErrUnsupportedSQL` where a statement evaluates it, and under `detest.CheckSQL` wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`. An expression in a default, a `CHECK` or a generated column loads with the schema and is refused by the write that reads it
 - `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`, and `generate_series` over integers in `FROM`
 - Operators: the comparisons, `AND`, `OR`, `NOT`, `+ - * / %`, `||` of text, `LIKE`, `ILIKE`, `IN`, `BETWEEN`, `IS NULL`, `EXISTS`, `CASE`, `= ANY (ARRAY[...])` and `<> ALL (ARRAY[...])` over constants, and casts to the integer types, `numeric`, the float types, `text`, `varchar`, `char`, `boolean` and `interval` (seconds only). A cast to another type, such as `uuid` or `timestamptz`, leaves the value as it is
 - Expressions follow SQL's three-valued logic
@@ -187,8 +187,9 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Isolation*
 
-- Isolation levels other than Read Committed, asked for in `BeginTx` or set by SQL (`SET TRANSACTION ISOLATION LEVEL`, `SET SESSION CHARACTERISTICS`, `transaction_isolation`, `default_transaction_isolation`, `SET TRANSACTION SNAPSHOT`). `READ UNCOMMITTED` set by SQL runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
-- A read-only transaction set by SQL (`SET TRANSACTION READ ONLY`, `transaction_read_only`, `default_transaction_read_only`), under which the server fails every write. `TxOptions.ReadOnly` in `BeginTx` is accepted and ignored, as before
+- Isolation levels other than Read Committed, asked for in `BeginTx` or set as the session default by SQL (`SET SESSION CHARACTERISTICS AS TRANSACTION`, `default_transaction_isolation`). `READ UNCOMMITTED` as the session default runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
+- `SET TRANSACTION` in any form, `SET TRANSACTION SNAPSHOT`, and the `transaction_isolation` and `transaction_read_only` settings, as for MySQL. Postgres fails them once the transaction has run a query, which detest does not track, and the level is `BeginTx`'s to set
+- A read-only session default (`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`, `default_transaction_read_only`), under which the server fails every write. `TxOptions.ReadOnly` in `BeginTx` is accepted and ignored, as before
 
 *Query forms*
 
@@ -202,10 +203,10 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Functions and operators*
 
-- Any function not in the list above. Among the ones applications write: the date and time functions (`date_trunc`, `extract`, `to_char`, `age`, `to_timestamp`), the string functions (`trim`, `replace`, `substring`, `strpos`, `position`, `split_part`, `starts_with`, `md5`), the math functions beyond the list (`mod`, `sqrt`, `trunc`, `sign`), `current_setting` and `set_config`, `currval` and `lastval`, the session advisory locks (`pg_advisory_lock`), `pg_notify`, `pg_sleep`, `version`, and a function of another schema (`app.f()`)
+- Any function not in the list above, and a call of one with other arguments than it takes, such as `make_interval` with an argument other than `secs => n`. Among the ones applications write: the date and time functions (`date_trunc`, `extract`, `to_char`, `age`, `to_timestamp`), the string functions (`trim`, `replace`, `substring`, `strpos`, `position`, `split_part`, `starts_with`, `md5`), the math functions beyond the list (`mod`, `sqrt`, `trunc`, `sign`), `current_setting` and `set_config`, `currval` and `lastval`, the session advisory locks (`pg_advisory_lock`), `pg_notify`, `pg_sleep`, `version`, and a function of another schema (`app.f()`)
 - `CURRENT_DATE`, `CURRENT_USER` and the other SQL value functions, except `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP`
 - `IS DISTINCT FROM`, `IS TRUE` and `IS FALSE`, the regular expression operators (`~`, `~*`, `SIMILAR TO`), `LIKE ... ESCAPE`, and `||` of a `numeric`, a float, a timestamp or an interval
-- Arrays, apart from `= ANY (ARRAY[...])` over constants: `ARRAY[...]` written or read as a value, `= ANY` over a parameter, a column or a function result (`id = ANY($1)`, `'x' = ANY(tags)`), the array operators (`@>`, `<@`, `&&`), the array functions (`array_append`, `cardinality`, `array_length`), and writes to an array element or a field (`SET tags[1] = ...`)
+- Arrays, apart from `= ANY` and `<> ALL` over an `ARRAY[...]` of constants: `ARRAY[...]` written or read as a value, `= ANY` over a parameter, a column or a function result (`id = ANY($1)`, `'x' = ANY(tags)`), the array operators (`@>`, `<@`, `&&`), the array functions (`array_append`, `cardinality`, `array_length`), and writes to an array element or a field (`SET tags[1] = ...`)
 - JSON: the operators (`->`, `->>`, `@>`, `?`) and the functions (`jsonb_set`, `jsonb_build_object`, `row_to_json`)
 - Timestamp arithmetic with an interval literal other than seconds (`now() - interval '1 day'`). `now() - interval '30 seconds'` and `now() - make_interval(secs => n)` run, as does a comparison with a `time.Time` parameter
 
@@ -239,7 +240,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - `BEGIN`, `COMMIT` and `ROLLBACK` sent as SQL (use `database/sql`'s transactions), `PREPARE`, `DEALLOCATE`, `DISCARD`, `LISTEN`, `NOTIFY`, `EXPLAIN`, `VACUUM`, `ANALYZE`, `SHOW`
 - `SET` of the settings listed under **Isolation**. Any other `SET`, such as `statement_timeout`, `application_name`, `search_path`, `TIME ZONE` or a custom setting, is accepted and ignored. `current_setting` reading one back is refused
 
-`detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own, and refuses a function or an operator it does not know wherever it stands in the statement, where a run reaches only the expressions it evaluates. A case that depends on the schema or on the values, such as a generated column detest cannot compute or a comparison decided by the column's type, passes `CheckSQL` and fails when the statement runs. The statements refused in a run are listed after the exploration's report, as an application that drops the error hides them.
+`detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own, and refuses a function or an operator it does not know, or a call with other arguments than the function takes, wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`, where a run reaches only the expressions it evaluates. A case that depends on the schema or on the values, such as a generated column detest cannot compute or a comparison decided by the column's type, passes `CheckSQL` and fails when the statement runs, and so does an expression in a default, a `CHECK` or a generated column, which the write that reads it refuses. The statements refused in a run are listed after the exploration's report, as an application that drops the error hides them.
 
 A `numeric` value is kept as a float. It reads back without the trailing zeros it was written with (`1.50` as `1.5`), and one with more digits than a float keeps, such as an integer beyond 2^53, fails with `detest.ErrUnsupportedSQL`.
 
