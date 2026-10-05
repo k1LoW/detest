@@ -34,6 +34,9 @@ func TestEnvSeedOverridesRandomOnly(t *testing.T) {
 	if s := applyEnv(t, Random(1)); !s.strategy.random || s.strategy.seed != 42 {
 		t.Fatalf("got %+v, want Random with seed 42", s.strategy)
 	}
+	if s := applyEnv(t, Prioritized(1, 3)); !s.strategy.prioritized || s.strategy.seed != 42 || s.strategy.depth != 3 {
+		t.Fatalf("got %+v, want Prioritized with seed 42 at depth 3", s.strategy)
+	}
 	if s := applyEnv(t, DepthFirst()); s.strategy.random {
 		t.Fatalf("got %+v, want DepthFirst left as it is", s.strategy)
 	}

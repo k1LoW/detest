@@ -138,9 +138,12 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 
 type run struct {
 	s        *Sim
-	rng      *rand.Rand  // the Random strategy's draws past the prefix; nil picks the first option
-	seen     seenChoices // under Random, the worker's earlier runs' shallow choices
-	path     uint64      // under Random, a hash of the picks so far, which keys seen
+	rng      *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
+	seen     seenChoices  // under Random, the worker's earlier runs' shallow choices
+	path     uint64       // under Random, a hash of the picks so far, which keys seen
+	prio     *prioritized // under Prioritized, how the steps are picked
+	want     int          // under Prioritized, the option the next step choice takes
+	steps    int          // the steps taken, which Prioritized measures a run in
 	prefix   []choice
 	choices  []choice
 	pos      int
@@ -201,6 +204,7 @@ type Proc struct {
 	tx       *Tx   // transaction opened by a hand-written model through DB.Tx
 	txs      []*Tx // transactions opened through the database/sql driver
 	msg      *qmsg
+	prio     uint64        // under Prioritized, the higher the sooner it runs
 	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
@@ -271,9 +275,14 @@ func (r *run) choose(label string, n int) int {
 		}
 	} else if r.rng != nil {
 		r.checkSeen(label, n, fp)
-		picked = r.rng.IntN(n)
+		if r.want >= 0 {
+			picked = r.want
+		} else {
+			picked = r.rng.IntN(n)
+		}
 		r.path = hashInt(r.path, int64(picked))
 	}
+	r.want = -1
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
 	r.pos++
 	r.mixString(label)
@@ -360,7 +369,12 @@ func (r *run) execute() (v *violation) {
 			}
 			break
 		}
+		r.steps++
 		i := 0
+		if r.prio != nil {
+			r.want = r.prio.pick(r, opts)
+			i = r.want
+		}
 		if len(opts) > 1 {
 			r.mixOptions(opts)
 			i = r.choose("step", len(opts))
@@ -540,6 +554,9 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
+	if r.prio != nil {
+		r.prio.spawned(p)
+	}
 	r.procs = append(r.procs, p)
 	go p.main()
 	return p
@@ -1238,7 +1255,7 @@ func (r *run) dbsTouched() bool {
 }
 
 func (s *Sim) newRun(prefix []choice) *run {
-	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset}
+	r := &run{s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	s.run = r
 	for _, db := range s.dbs {

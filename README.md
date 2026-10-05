@@ -328,8 +328,8 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.MaxRuns(n)` | Caps the runs of an exploration (default 200000) |
 | `detest.MaxDuration(d)` | Stops starting runs once `d` has passed (unbounded by default) |
 | `detest.Workers(n)` | Explores with n workers in parallel (default 1) |
-| `detest.DepthFirst()`, `detest.Random(seed)` | Picks schedules depth first (the default), or at random from a seed until `MaxRuns` or `MaxDuration`. A random exploration is never complete and does not take `DETEST_CHECKPOINT`. The one passed last applies |
-| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. Under `detest.Random` it makes every `total`-th run instead, and `depth` is not used. `DETEST_SHARD` sets it from the environment |
+| `detest.DepthFirst()`, `detest.Random(seed)`, `detest.Prioritized(seed, depth)` | Picks schedules depth first (the default), or from a seed until `MaxRuns` or `MaxDuration`. `Random` draws every choice uniformly. `Prioritized` follows [PCT](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/asplos277-pct.pdf): it runs each process on and switches at `depth`-1 steps drawn at random, which reaches bugs deep in long runs that `Random` almost never does. A sampled exploration is never complete and does not take `DETEST_CHECKPOINT`. The one passed last applies |
+| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. Under `detest.Random` and `detest.Prioritized` it makes every `total`-th run instead, and `depth` is not used. `DETEST_SHARD` sets it from the environment |
 | `detest.MaxCrashes(n)` | Lets up to n processes per run crash at any step (none by default). Their transactions roll back, their mutexes are freed and their messages are redelivered, to check that work survives a process dying halfway |
 
 These environment variables override or add to them.
@@ -340,7 +340,7 @@ These environment variables override or add to them.
 | `DETEST_WORKERS` | Number of workers, overriding `detest.Workers` |
 | `DETEST_MAX_RUNS` | Cap on runs, overriding `detest.MaxRuns` |
 | `DETEST_MAX_DURATION` | Wall-clock cap such as `10m`, overriding `detest.MaxDuration` |
-| `DETEST_SEED` | Seed of a test under `detest.Random`, overriding the one it passes. A test under `detest.DepthFirst` is left as it is |
+| `DETEST_SEED` | Seed of a test under `detest.Random` or `detest.Prioritized`, overriding the one it passes. A test under `detest.DepthFirst` is left as it is |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
 | `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, and to resume from on the next run |
 | `DETEST_STALL` | How long a process may block outside the scheduler before it is reported (default `30s`) |

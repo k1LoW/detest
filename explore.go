@@ -38,7 +38,11 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
 	f := newFrontier(n, maxRuns)
-	f.random = strategyOf(opts).random
+	st := strategyOf(opts)
+	if st.prioritized && st.depth < 1 {
+		t.Fatal("detest: Prioritized needs a depth of at least 1")
+	}
+	f.random = st.random
 	if maxDuration != 0 {
 		// The clock inside the bubbles is fake, so the deadline is kept by a
 		// timer outside them.
@@ -54,7 +58,7 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	if ckpt != "" && f.random {
 		// A random exploration has no subtrees left to save: it goes on with
 		// another seed instead.
-		t.Fatal("detest: DETEST_CHECKPOINT does not apply to the Random strategy; run again with another seed")
+		t.Fatal("detest: DETEST_CHECKPOINT does not apply to Random or Prioritized; run again with another seed")
 	}
 	if ckpt != "" {
 		if err := f.load(ckpt); err != nil {
