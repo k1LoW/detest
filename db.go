@@ -1009,12 +1009,48 @@ func (db *DB) dropSequence(seq string) {
 // dropOwnedSequences drops the sequences table's column col owns, or any of
 // its columns when col is empty, as Postgres drops them with the table or
 // the column.
-func (db *DB) dropOwnedSequences(table, col string) {
+func (db *DB) dropOwnedSequences(table, col string, cascade bool) error {
+	var owned []string
 	for name, d := range db.seqDefs {
 		if d.owner[0] == table && (col == "" || d.owner[1] == col) {
-			db.dropSequence(name)
+			owned = append(owned, name)
 		}
 	}
+	slices.Sort(owned)
+	for _, name := range owned {
+		if err := db.dropSequenceDependents(name, cascade, table, col); err != nil {
+			return err
+		}
+	}
+	for _, name := range owned {
+		db.dropSequence(name)
+	}
+	return nil
+}
+
+// dropSequenceDependents handles the defaults drawing from the sequence
+// being dropped, other than those of skipTable's column skipCol (any of its
+// columns when empty), which go with it. They depend on the sequence:
+// CASCADE drops them, and the identity they make, where Postgres refuses
+// the drop otherwise, which fails the setup that runs it.
+func (db *DB) dropSequenceDependents(name string, cascade bool, skipTable, skipCol string) error {
+	for _, table := range slices.Sorted(maps.Keys(db.defs)) {
+		def := db.defs[table]
+		for _, col := range slices.Sorted(maps.Keys(def.defaults)) {
+			if table == skipTable && (skipCol == "" || col == skipCol) {
+				continue
+			}
+			if seq, ok := nextvalOf(def.defaults[col]); !ok || db.seqName(seq) != name {
+				continue
+			}
+			if !cascade {
+				return unsupported(fmt.Sprintf("dropping sequence %q, which the default of %s.%s draws from", relname(name), relname(table), col), "")
+			}
+			delete(def.defaults, col)
+			delete(def.identityAlways, col)
+		}
+	}
+	return nil
 }
 
 // nextval returns the next value of seq, or why detest refuses to. A
@@ -1082,20 +1118,8 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if _, ok := db.seqDefs[name]; !ok {
 			return db.noSequence(name, ch.IfExists)
 		}
-		// The defaults drawing from it depend on it: CASCADE drops them,
-		// and the identity they make, where Postgres refuses the drop
-		// otherwise, which fails the setup that runs it.
-		for table, def := range db.defs {
-			for col, d := range def.defaults {
-				if seq, ok := nextvalOf(d); !ok || db.seqName(seq) != name {
-					continue
-				}
-				if !ch.Cascade {
-					return unsupported(fmt.Sprintf("DROP SEQUENCE of %q, which the default of %s.%s draws from", relname(name), relname(table), col), "")
-				}
-				delete(def.defaults, col)
-				delete(def.identityAlways, col)
-			}
+		if err := db.dropSequenceDependents(name, ch.Cascade, "", ""); err != nil {
+			return err
 		}
 		db.dropSequence(name)
 		return nil
@@ -1133,7 +1157,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.defs[table] == nil && !isView && !ch.IfExists {
 			return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 		}
-		db.dropOwnedSequences(table, "")
+		if err := db.dropOwnedSequences(table, "", ch.Cascade); err != nil {
+			return err
+		}
 		delete(db.defs, table)
 		delete(db.committed, table)
 		delete(db.history, table) // a table created again under the name starts with no versions
@@ -1274,7 +1300,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				return unsupported(fmt.Sprintf("DROP IDENTITY of column %q, which is no identity column", col.Name), "")
 			}
 			delete(def.identityAlways, col.Name)
-			db.dropOwnedSequences(table, col.Name) // an identity's sequence goes with it
+			// An identity's sequence goes with it.
+			if err := db.dropOwnedSequences(table, col.Name, false); err != nil {
+				return err
+			}
 		default:
 			if _, identity := def.identityAlways[col.Name]; col.TypeOnly && !identity {
 				// SET GENERATED, which Postgres fails, and the setup with it,
@@ -1396,7 +1425,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	for _, col := range ch.DropColumns {
 		def.dropColumn(col)
 		db.dropColumnInRows(table, col, tx)
-		db.dropOwnedSequences(table, col)
+		if err := db.dropOwnedSequences(table, col, false); err != nil {
+			return err
+		}
 	}
 	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
 		def.renameColumn(old, nw)

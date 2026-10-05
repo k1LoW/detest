@@ -680,3 +680,20 @@ ALTER TABLE t RENAME COLUMN id TO n;
 ALTER TABLE t ALTER COLUMN n DROP IDENTITY;
 `)
 }
+
+func TestDropTableWithASequenceAnotherTableUses(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE a (id serial PRIMARY KEY);
+CREATE TABLE b (id int PRIMARY KEY DEFAULT nextval('a_id_seq'), v text);
+`)
+	if _, err := db.Exec(`DROP TABLE a`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("DROP TABLE of a sequence's owner another default uses: %v", err)
+	}
+	mustExec(t, db, `DROP TABLE a CASCADE`)
+	// CASCADE dropped b's default with the sequence.
+	if _, err := db.Exec(`INSERT INTO b (v) VALUES ('x')`); !errors.Is(err, ErrNotNullViolation) {
+		t.Errorf("insert into b after the cascade: %v", err)
+	}
+}
