@@ -1035,6 +1035,9 @@ func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
 		`SELECT k FROM t AS x(k)`,
 		`WITH w AS (SELECT id FROM t) SELECT k FROM w AS x(k)`,
 		`WITH c(x) AS (SELECT id FROM t) SELECT x FROM c`,
+		`SELECT x.id FROM t AS x JOIN t AS x ON true`,
+		`SELECT public.t.* FROM public.t`,
+		`UPDATE public.t AS x SET a = 1 RETURNING public.t.*`,
 		`UPDATE t SET a = 1 FROM t AS u WHERE u.id = t.id RETURNING u.*`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {

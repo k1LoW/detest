@@ -1041,7 +1041,10 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		rt := t.GetResTarget()
 		if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
 			tg := sqlir.Target{Star: true}
-			if len(cr.Fields) > 1 {
+			if len(cr.Fields) > 2 {
+				return nil, c.unsupported("a schema-qualified *")
+			}
+			if len(cr.Fields) == 2 {
 				tg.Table = cr.Fields[0].GetString_().GetSval()
 			}
 			out.Targets = append(out.Targets, tg)
@@ -1303,6 +1306,9 @@ func (c *pgConv) targets(list []*pg.Node) ([]sqlir.Target, error) {
 		rt := t.GetResTarget()
 		if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
 			t := sqlir.Target{Star: true}
+			if len(cr.Fields) > 2 {
+				return nil, c.unsupported("a schema-qualified *")
+			}
 			if len(cr.Fields) == 2 {
 				t.Table = cr.Fields[0].GetString_().GetSval()
 			}

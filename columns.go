@@ -201,6 +201,10 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			cols = namesSet(renamedCols(names, t.Columns))
 		}
 	}
+	if _, dup := sc.items[alias]; dup {
+		// Postgres fails with 42712; detest would keep one of the two.
+		return c.x.unsupported(fmt.Sprintf("FROM items with the same name %q", alias))
+	}
 	sc.items[alias] = cols
 	return nil
 }
