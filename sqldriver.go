@@ -350,16 +350,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 	if err == nil && res.hasLastID {
 		c.lastInsertID = res.lastID
 	}
-	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
-		// A session setting outlives the statement's transaction. MySQL's
-		// takes effect at once; Postgres's, run in a transaction, only
-		// when the transaction commits.
-		if c.db.kind.InnoDB() || auto {
-			c.lockTimeout = tx.lockTimeout
-		} else {
-			v := tx.lockTimeout
-			tx.pendingLockTimeout = &v
-		}
+	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
+		// MySQL session settings take effect immediately, even in a transaction.
+		c.lockTimeout = tx.lockTimeout
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
 		switch set.Name {
@@ -390,6 +383,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 			tx.rollback()
 		} else {
 			tx.commit()
+			if tx.pendingLockTimeout != nil {
+				c.lockTimeout = *tx.pendingLockTimeout
+			}
 		}
 	case err != nil:
 		// A failed statement aborts the Postgres transaction.

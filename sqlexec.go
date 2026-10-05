@@ -315,6 +315,12 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		if st.Name == "all" {
 			x.tx.lockTimeout = false // RESET ALL
 		}
+		if !tx.db.kind.InnoDB() && !st.Local && (st.Name == "lock_timeout" || st.Name == "all") {
+			// Record each script substatement, before a later SET LOCAL can
+			// change the transaction's timeout without changing the session's.
+			v := tx.lockTimeout
+			tx.pendingLockTimeout = &v
+		}
 		if st.Name == "no_auto_value_on_zero" {
 			x.tx.noAutoZero = st.Value == "true"
 		}

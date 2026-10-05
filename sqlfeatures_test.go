@@ -662,7 +662,7 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 // it waits as the server's does, with no timeout to choose; without the
 // reset the wait may time out.
 func TestResetAllClearsLockTimeout(t *testing.T) {
-	for _, reset := range []bool{true, false} {
+	for _, reset := range []string{`RESET ALL`, `RESET ALL; SELECT 1`, ""} {
 		Explore(t, func(t *testing.T, s *Sim) {
 			db, _ := s.DB("app", postgres.New())
 			mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
@@ -696,8 +696,8 @@ func TestResetAllClearsLockTimeout(t *testing.T) {
 				if _, err := conn.ExecContext(p.Context(), `SET lock_timeout = '1s'`); err != nil {
 					return err
 				}
-				if reset {
-					if _, err := conn.ExecContext(p.Context(), `RESET ALL`); err != nil {
+				if reset != "" {
+					if _, err := conn.ExecContext(p.Context(), reset); err != nil {
 						return err
 					}
 				}
@@ -720,12 +720,12 @@ func TestResetAllClearsLockTimeout(t *testing.T) {
 				if unexpected != nil {
 					return fmt.Errorf("the update failed: %w", unexpected)
 				}
-				if reset && timedOut {
+				if reset != "" && timedOut {
 					return errors.New("the wait timed out after RESET ALL")
 				}
 				return nil
 			})
-			if !reset {
+			if reset == "" {
 				s.Sometimes("the wait times out", func(*State) bool { return timedOut })
 			}
 		})

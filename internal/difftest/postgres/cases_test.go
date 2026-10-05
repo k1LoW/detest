@@ -24,6 +24,19 @@ var (
 
 var cases = []difftest.Case{
 	{
+		Name:   "reset all in a script clears the session lock timeout",
+		Schema: stockSchema, Seed: stockSeed, Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(1, `SET lock_timeout = '1ms'`),
+			difftest.S(1, `RESET ALL; SELECT 1`),
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE stock SET n = 0 WHERE sku = 'apple'`),
+			difftest.S(1, `UPDATE stock SET n = 2 WHERE sku = 'apple'`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT sku, n FROM stock ORDER BY sku`),
+		},
+	},
+	{
 		Name:   "update waits for the row lock",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
