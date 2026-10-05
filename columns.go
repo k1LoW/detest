@@ -55,8 +55,9 @@ type colScope struct {
 // check, detest would read the name as NULL and write it as a column of its
 // own.
 type columnChecker struct {
-	x    *sqlExec
-	ctes []map[string]colSet
+	x      *sqlExec
+	ctes   []map[string]colSet
+	params paramUses
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -67,18 +68,94 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return err
 	}
 	c := &columnChecker{x: x}
+	var err error
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
-		_, err := c.query(st, nil)
-		return err
+		_, err = c.query(st, nil)
 	case *sqlir.InsertStmt:
-		return c.insert(st)
+		err = c.insert(st)
 	case *sqlir.UpdateStmt:
-		return c.update(st)
+		err = c.update(st)
 	case *sqlir.DeleteStmt:
-		return c.delete(st)
+		err = c.delete(st)
+	}
+	if err != nil {
+		return err
+	}
+	if what := c.params.conflict(x.tx.checking); what != "" {
+		return x.unsupported(what)
 	}
 	return nil
+}
+
+// paramUses records how a statement uses each parameter. Postgres gives a
+// parameter one type for the whole statement, taken from where it first
+// stands, so one used as the array of = ANY and elsewhere as a scalar, or as
+// the array of = ANY against operands of other types, fails before it runs,
+// whatever value is bound to it.
+type paramUses struct {
+	scalars map[int]bool
+	arrays  map[int][]string // the types of the operands compared with it
+}
+
+func (u *paramUses) scalar(i int) {
+	if u.scalars == nil {
+		u.scalars = map[int]bool{}
+	}
+	u.scalars[i] = true
+}
+
+func (u *paramUses) array(i int, operand string) {
+	if u.arrays == nil {
+		u.arrays = map[int][]string{}
+	}
+	u.arrays[i] = append(u.arrays[i], operand)
+}
+
+// conflict names a use Postgres refuses. Under CheckSQL, which has no schema,
+// the operand types are left to the run.
+func (u *paramUses) conflict(checking bool) string {
+	for i, types := range u.arrays {
+		if u.scalars[i] {
+			return fmt.Sprintf("parameter $%d used as an array and as a scalar", i+1)
+		}
+		if len(types) < 2 || checking {
+			continue
+		}
+		for _, t := range types {
+			if !sameTypeFamily(t, types[0]) {
+				return fmt.Sprintf("parameter $%d used as the array of = ANY or <> ALL against operands of other or unknown types", i+1)
+			}
+		}
+	}
+	return ""
+}
+
+// sameTypeFamily reports whether an operand of type a is compared with an
+// element of type b by an operator detest computes as Postgres does: two
+// integer types, text and varchar, or two uuids. Another pair, such as text
+// against uuid or a numeric against bigint, Postgres compares through a cast
+// or refuses, which detest does not model.
+func sameTypeFamily(a, b string) bool {
+	family := func(t string) string {
+		switch t {
+		case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
+			return "integer"
+		case "text", "varchar":
+			return "text"
+		case "uuid":
+			return "uuid"
+		}
+		return ""
+	}
+	return family(a) != "" && family(a) == family(b)
+}
+
+func orUnknown(typ string) string {
+	if typ == "" || typ == "unresolved column type" {
+		return "value of a type detest does not know"
+	}
+	return typ
 }
 
 func (c *columnChecker) undefined(col string) error {
@@ -609,6 +686,23 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			}
 			switch e := v.Interface().(type) {
+			case *sqlir.ArrayCmp:
+				typ := expressionType(e.X, sc.columnType)
+				// CheckSQL has no schema, so an operand of a type the
+				// statement does not show is left to the run.
+				known := typ != "" && typ != "unresolved column type" || !c.x.tx.checking
+				if e.ElemType != "" && known && !sameTypeFamily(typ, e.ElemType) {
+					err = c.x.unsupported(fmt.Sprintf("= ANY or <> ALL of a %s against an array of %s", orUnknown(typ), e.ElemType))
+					return
+				}
+				if p, ok := e.Array.(*sqlir.Param); ok {
+					c.params.array(p.Index, typ)
+				}
+				walk(reflect.ValueOf(e.X))
+				return
+			case *sqlir.Param:
+				c.params.scalar(e.Index)
+				return
 			case *sqlir.BinaryExpr:
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)

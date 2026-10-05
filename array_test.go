@@ -153,6 +153,16 @@ func TestArrayComparisonUnsupported(t *testing.T) {
 		{`SELECT id FROM t WHERE id = $1`, []any{[]int64{1}}},
 		{`SELECT id FROM t WHERE false AND id = $1`, []any{[]int64{1}}},
 		{`SELECT id FROM t WHERE id = ANY($1) OR id = $1`, []any{[]int64{1}}},
+		// Postgres types a parameter once for the statement, so these fail
+		// whatever is bound, a NULL or array text included.
+		{`SELECT id FROM t WHERE false AND (id = ANY($1) OR id = $1)`, []any{nil}},
+		{`SELECT id FROM t WHERE id = ANY($1) OR id = $1`, []any{pq.Array([]int64{1})}},
+		{`SELECT id FROM t WHERE id = ANY($1) OR name = ANY($1)`, []any{[]int64{1}}},
+		// An array cast whose element type does not compare with x as it
+		// does with x's own type, an empty array included.
+		{`SELECT id FROM t WHERE name = ANY('{}'::bigint[])`, nil},
+		{`SELECT id FROM t WHERE u = ANY($1::text[])`, []any{[]string{"00000000-0000-0000-0000-000000000001"}}},
+		{`SELECT id FROM t WHERE id = ANY($1::text[])`, []any{[]string{"1"}}},
 	} {
 		if _, err := db.Exec(tt.q, tt.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s %v: got %v, want ErrUnsupportedSQL", tt.q, tt.args, err)
@@ -165,6 +175,7 @@ func TestArrayComparisonUnsupported(t *testing.T) {
 		`SELECT id FROM t WHERE id = ANY($1::bigint)`,
 		`SELECT id FROM t WHERE id < ANY($1)`,
 		`SELECT id FROM t WHERE id = ALL($1)`,
+		`SELECT id FROM t WHERE id = ANY($1) OR id = $1`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
