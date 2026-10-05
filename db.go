@@ -1279,7 +1279,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.generated[col.Name] = &tableCheck{CheckDef: sqlir.CheckDef{Name: col.Name, Expr: col.Generated}}
 		}
 		if col.Default != nil {
-			def.defaults[col.Name] = col.Default
+			def.defaults[col.Name] = db.bindSequence(col.Default)
 		} else {
 			delete(def.defaults, col.Name)
 		}
@@ -2440,6 +2440,22 @@ func (db *DB) pkConstraint(table string) string {
 		return def.pkName
 	}
 	return relname(table) + "_pkey"
+}
+
+// bindSequence binds the sequence of a nextval default to the one its name
+// resolves to now, as Postgres casts the name to regclass when it stores the
+// default, so a sequence of the name created later in an earlier schema of
+// the search path does not take it over.
+func (db *DB) bindSequence(e sqlir.Expr) sqlir.Expr {
+	name, ok := nextvalOf(e)
+	if !ok || strings.Contains(name, ".") {
+		return e
+	}
+	resolved := db.seqName(name)
+	if !strings.Contains(resolved, ".") {
+		resolved = "public." + resolved // a bare name is public's, which the search path would not keep
+	}
+	return &sqlir.FuncCall{Name: "nextval", Args: []sqlir.Expr{&sqlir.Const{Value: resolved}}}
 }
 
 // nextvalOf returns the sequence a default of nextval('name') draws from.

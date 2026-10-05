@@ -554,3 +554,18 @@ DROP SEQUENCE public.u_id_seq CASCADE;
 		t.Errorf("insert without the dumped default: %v", err)
 	}
 }
+
+func TestNextvalDefaultIsBoundWhenStored(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
+	mustExec(t, db, `
+CREATE SCHEMA billing;
+CREATE SEQUENCE public.s START 5;
+CREATE TABLE public.x (id int DEFAULT nextval('s') PRIMARY KEY, v text);
+CREATE SEQUENCE billing.s START 50;
+`)
+	var id int64
+	if err := db.QueryRow(`INSERT INTO public.x (v) VALUES ('a') RETURNING id`).Scan(&id); err != nil || id != 5 {
+		t.Errorf("the default keeps public.s, which s named when it was stored: %d %v", id, err)
+	}
+}
