@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"maps"
 	"reflect"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -71,19 +72,12 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 // topSequenceCalls checks a query, whose clauses detest evaluates as
 // often as Postgres does, but not its subqueries.
 func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
-	used, shadowed := reachableCTEs(sel), nestedCTEs(sel)
+	used := reachableCTEs(sel)
 	for _, cte := range sel.With {
-		var err error
-		switch {
-		case shadowed[cte.Name]:
-			// withCTEs runs it, as a nested WITH of the same name hides
-			// whether the query reads it, where Postgres may skip it.
-			err = x.noSequenceCalls(cte.Select)
-		case used[cte.Name]:
-			err = x.topSequenceCalls(cte.Select)
+		if !used[cte.Name] {
+			continue // an unread CTE runs in neither
 		}
-		// An unread CTE runs in neither.
-		if err != nil {
+		if err := x.topSequenceCalls(cte.Select); err != nil {
 			return err
 		}
 	}
@@ -116,7 +110,7 @@ func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
 	body := *sel
 	body.With = nil
 	reached := map[string]bool{}
-	queue := sqlir.TableNames(&body)
+	queue := freeNames(&body)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
@@ -126,44 +120,50 @@ func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
 		for _, cte := range sel.With {
 			if cte.Name == name {
 				reached[name] = true
-				queue = append(queue, sqlir.TableNames(cte.Select)...)
+				queue = append(queue, freeNames(cte.Select)...)
 			}
 		}
 	}
 	return reached
 }
 
-// nestedCTEs are the names the WITH clauses inside sel's query and CTEs
-// declare.
-func nestedCTEs(sel *sqlir.SelectStmt) map[string]bool {
-	names := map[string]bool{}
-	var walk func(v reflect.Value, top bool)
-	walk = func(v reflect.Value, top bool) {
+// freeNames are the names the FROM items under n read that no WITH inside
+// n declares, so that a nested WITH of an outer CTE's name hides it from
+// the parts it covers, as in Postgres.
+func freeNames(n any) []string {
+	var out []string
+	var walk func(v reflect.Value, hidden map[string]bool)
+	walk = func(v reflect.Value, hidden map[string]bool) {
 		switch v.Kind() {
 		case reflect.Interface, reflect.Pointer:
 			if v.IsNil() {
 				return
 			}
-			if s, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok && !top {
+			if s, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok && len(s.With) > 0 {
+				inner := maps.Clone(hidden)
 				for _, cte := range s.With {
-					names[cte.Name] = true
+					inner[cte.Name] = true
 				}
+				hidden = inner
 			}
-			walk(v.Elem(), false)
+			walk(v.Elem(), hidden)
 		case reflect.Struct:
+			if t, ok := reflect.TypeAssert[sqlir.TableRef](v); ok && t.Name != "" && !hidden[t.Name] {
+				out = append(out, t.Name)
+			}
 			for i := range v.NumField() {
 				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i), false)
+					walk(v.Field(i), hidden)
 				}
 			}
 		case reflect.Slice, reflect.Array:
 			for i := range v.Len() {
-				walk(v.Index(i), false)
+				walk(v.Index(i), hidden)
 			}
 		}
 	}
-	walk(reflect.ValueOf(sel), true)
-	return names
+	walk(reflect.ValueOf(n), map[string]bool{})
+	return out
 }
 
 // rowSequenceCalls checks expressions detest evaluates as often as Postgres,

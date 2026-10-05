@@ -642,7 +642,6 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 		`SELECT nextval('s') AS x, count(*) FROM t GROUP BY x`,
 		`SELECT id, (SELECT gen_random_uuid()) FROM t`,
 		`SELECT id, (SELECT clock_timestamp()) FROM t`,
-		`WITH c AS (SELECT nextval('s')) SELECT * FROM (WITH c AS (SELECT 1 AS n) SELECT n FROM c) x`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)

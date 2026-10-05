@@ -656,13 +656,11 @@ func (x *sqlExec) tableLabel(t sqlir.TableRef) string {
 }
 
 // withCTEs runs the CTEs of sel the query reads. Postgres skips one it does
-// not read, so its errors, locks and calls never happen. A CTE whose name a
-// nested WITH declares again is run, as which of the two a reference means
-// is not told apart here.
+// not read, so its errors, locks and calls never happen.
 func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
-	read, shadowed := reachableCTEs(sel), nestedCTEs(sel)
+	read := reachableCTEs(sel)
 	for _, cte := range sel.With {
-		if !read[cte.Name] && !shadowed[cte.Name] {
+		if !read[cte.Name] {
 			continue
 		}
 		cols, rows, err := x.evalSelect(cte.Select, outer)

@@ -69,6 +69,7 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `SELECT 1 UNION SELECT 2 LIMIT missing`),
 			difftest.Q(0, `WITH c AS (SELECT 1 / 0) SELECT 1`),
 			difftest.Q(0, `WITH c AS (SELECT 1 / 0), d AS (SELECT * FROM c) SELECT 1`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / 0) SELECT * FROM (WITH c AS (SELECT 1 AS n) SELECT n FROM c) x`),
 			difftest.Q(0, `SELECT *`),
 			difftest.Q(0, `SELECT a.sku AS sku, count(*) FROM stock a JOIN stock b ON b.sku = a.sku GROUP BY sku`),
 			difftest.Q(0, `SELECT * FROM stock ORDER BY typo`),
