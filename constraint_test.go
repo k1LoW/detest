@@ -697,3 +697,12 @@ CREATE TABLE b (id int PRIMARY KEY DEFAULT nextval('a_id_seq'), v text);
 		t.Errorf("insert into b after the cascade: %v", err)
 	}
 }
+
+func TestGeneratedColumnInADeferrableKey(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE g (id int PRIMARY KEY, a int, b int GENERATED ALWAYS AS (a) STORED UNIQUE DEFERRABLE)`)
+	if _, err := db.Exec(`UPDATE g SET a = 1`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("update of a deferrable key's generated column: %v", err)
+	}
+}

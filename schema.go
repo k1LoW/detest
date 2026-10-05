@@ -1395,6 +1395,14 @@ func (x *sqlExec) writesDeferrableKey(table string, cols []string) error {
 	if def == nil {
 		return nil
 	}
+	if cols != nil {
+		// A generated column computed from one written is written too.
+		for _, g := range slices.Sorted(maps.Keys(def.generated)) {
+			if slices.ContainsFunc(def.generated[g].columns(), func(c string) bool { return slices.Contains(cols, c) }) {
+				cols = append(slices.Clone(cols), g)
+			}
+		}
+	}
 	covers := func(c string) bool { return cols == nil || slices.Contains(cols, c) }
 	if def.pkDeferrable && slices.ContainsFunc(def.pk, covers) {
 		return x.unsupported(fmt.Sprintf("a write to the DEFERRABLE primary key %q", def.pkName))
