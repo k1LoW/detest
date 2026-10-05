@@ -562,6 +562,14 @@ func (x *sqlExec) unsupported(what string) error { return unsupported(what, x.qu
 
 // functionRows evaluates a set-returning function in FROM.
 func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
+	// PostgreSQL resolves the function signature before evaluating arguments,
+	// so a refused call must not advance sequences or acquire advisory locks.
+	if t.Func.Name != "generate_series" {
+		return nil, x.unsupported("set-returning function " + t.Func.Name + " in FROM")
+	}
+	if len(t.Func.Args) != 2 && len(t.Func.Args) != 3 {
+		return nil, x.unsupported("generate_series with other than two or three arguments")
+	}
 	// The functions detest runs in FROM give one column, and the ordinality
 	// one more.
 	width := 1
@@ -597,9 +605,6 @@ func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
 	var vals []any
 	switch t.Func.Name {
 	case "generate_series":
-		if len(args) < 2 || len(args) > 3 {
-			return nil, x.unsupported("generate_series with other than two or three arguments")
-		}
 		for _, a := range args {
 			if a == nil {
 				return nil, nil // generate_series with a NULL bound returns no rows

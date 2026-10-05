@@ -103,6 +103,27 @@ func TestSelectPipeline(t *testing.T) {
 	}
 }
 
+func TestFromFunctionRefusedBeforeItsArguments(t *testing.T) {
+	for _, q := range []string{
+		`SELECT * FROM unnest(nextval('s'))`,
+		`SELECT * FROM generate_series(nextval('s'))`,
+		`SELECT * FROM generate_series(nextval('s'), 2, 1, 1)`,
+	} {
+		t.Run(q, func(t *testing.T) {
+			s := newSim(t)
+			db, _ := s.DB("app", postgres.New())
+			mustExec(t, db, `CREATE SEQUENCE s`)
+			if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Fatalf("got %v, want ErrUnsupportedSQL", err)
+			}
+			var n int64
+			if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+				t.Errorf("nextval after the refused call: %d, %v; want 1", n, err)
+			}
+		})
+	}
+}
+
 func TestSavepoint(t *testing.T) {
 	s := newSim(t)
 	db, store := s.DB("app", postgres.New())
