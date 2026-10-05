@@ -71,8 +71,12 @@ type sqlExec struct {
 	queryCols map[any][]string
 	cteCols   map[string][]string
 	// pendingCTEs are the CTEs of WITH ... UPDATE or DELETE not run yet,
-	// which run when the statement first reads them.
+	// which run when the statement first reads them, and writeRows and
+	// writeCols those run, kept apart from ctes, which a query with a WITH
+	// of its own restores when it ends.
 	pendingCTEs map[string]sqlir.CTE
+	writeRows   map[string][]Row
+	writeCols   map[string][]string
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -301,7 +305,8 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
-			x.ctes, x.cteCols, x.frozen, x.pendingCTEs = map[string][]Row{}, nil, nil, nil
+			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
+			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
@@ -771,7 +776,34 @@ func (x *sqlExec) runPendingCTE(name string) error {
 		return nil
 	}
 	delete(x.pendingCTEs, name)
-	return x.evalCTEs([]sqlir.CTE{cte}, map[string]bool{name: true}, nil)
+	if err := x.evalCTEs([]sqlir.CTE{cte}, map[string]bool{name: true}, nil); err != nil {
+		return err
+	}
+	if x.writeRows == nil {
+		x.writeRows, x.writeCols = map[string][]Row{}, map[string][]string{}
+	}
+	x.writeRows[name], x.writeCols[name] = x.ctes[name], x.cteCols[name]
+	delete(x.ctes, name)
+	delete(x.cteCols, name)
+	return nil
+}
+
+// cteRows are the rows of the CTE name in scope: a query's, or a write's.
+// A query declaring a write's CTE name is refused, so the two never meet.
+func (x *sqlExec) cteRows(name string) ([]Row, bool) {
+	if rows, ok := x.ctes[name]; ok {
+		return rows, true
+	}
+	rows, ok := x.writeRows[name]
+	return rows, ok
+}
+
+func (x *sqlExec) cteColumns(name string) ([]string, bool) {
+	if cols, ok := x.cteCols[name]; ok {
+		return cols, true
+	}
+	cols, ok := x.writeCols[name]
+	return cols, ok
 }
 
 // tableRows returns the rows of a FROM item with the alias they are known by.
@@ -811,14 +843,19 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 	if err := x.runPendingCTE(t.Name); err != nil {
 		return "", nil, false, err
 	}
-	if rows, ok := x.ctes[t.Name]; ok {
+	if rows, ok := x.cteRows(t.Name); ok {
 		return alias, rows, false, nil
 	}
 	if err := x.tx.db.checkTable(x.tx.db.resolve(t.Name)); err != nil {
 		return "", nil, false, err
 	}
 	if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil {
+		// A view's names were bound when it was created, so the statement's
+		// CTEs do not shadow the tables it reads.
+		ctes, cteCols, pending, wrows, wcols := x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols
+		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = map[string][]Row{}, nil, nil, nil, nil
 		cols, rows, err := x.evalSelect(v.View, nil)
+		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = ctes, cteCols, pending, wrows, wcols
 		if err == nil && len(v.ViewColumns) > 0 {
 			rows = renameColumns(rows, cols, v.ViewColumns)
 			cols = renamedCols(cols, v.ViewColumns)

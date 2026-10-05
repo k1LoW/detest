@@ -110,6 +110,23 @@ var cteWriteCases = []difftest.Case{
 		},
 	},
 	{
+		// A CTE first read in a subquery with a WITH of its own is the same
+		// rows where the statement reads it again, and a view reads the
+		// table its definition names, not a CTE of the statement's.
+		Name: "a write's CTE outlives a subquery's WITH and stays out of views",
+		Schema: append(append([]string{}, jobSchema...),
+			`CREATE TABLE q (id int PRIMARY KEY)`,
+			`CREATE VIEW vq AS SELECT id FROM q`),
+		Seed:  append(append([]string{}, jobSeed...), `INSERT INTO q VALUES (1)`),
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `WITH q AS (SELECT 5 AS v) UPDATE jobs SET worker = (WITH r AS (SELECT 1) SELECT v FROM q) WHERE id = 2 RETURNING (SELECT v FROM q)`),
+			difftest.Q(0, `WITH q AS (SELECT 99 AS id) UPDATE jobs SET worker = q.id FROM vq, q WHERE jobs.id = vq.id RETURNING jobs.id, q.id`),
+			difftest.Q(0, `WITH q AS (SELECT 99 AS id) SELECT id FROM vq`),
+			difftest.Q(0, `SELECT id, worker FROM jobs ORDER BY id`),
+		},
+	},
+	{
 		Name:   "the CTE of an UPDATE reads the statement's snapshot",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{
