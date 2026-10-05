@@ -226,7 +226,7 @@ Before the first run, show the user the conditions the test sets, in plain words
 - the bounds on the search and what they leave out, why you chose them, and what widening them later would add and cost
 - any way the test's schema differs from production's, such as a collation override (see `references/troubleshooting.md`), with what it leaves unchecked
 
-Describe each bound by what it limits in the user's code, never by its option name, such as "at most two points per run where one buyer is paused in the middle of `Buy` and the other runs" rather than `MaxPreemptions(2)`. Keep progress ("the test compiles") on a line of its own, apart from the questions.
+Describe each bound by what it limits in the user's code, never by its option name, such as "at most two points per run where a buyer that could still go on is paused in the middle of `Buy` so the other runs, while a buyer waiting for a lock gives way without counting" rather than `MaxPreemptions(2)`. Keep progress ("the test compiles") on a line of its own, apart from the questions.
 
 These decide what the result can claim, so the user should own them. Ask again only when you change one of them later, such as when widening the scenario or adding a bound to make the search finish.
 
