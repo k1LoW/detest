@@ -1276,6 +1276,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			delete(def.identityAlways, col.Name)
 			db.dropOwnedSequences(table, col.Name) // an identity's sequence goes with it
 		default:
+			if _, identity := def.identityAlways[col.Name]; col.TypeOnly && !identity {
+				// SET GENERATED, which Postgres fails, and the setup with it,
+				// on a column that is no identity.
+				return unsupported(fmt.Sprintf("SET GENERATED of column %q, which is no identity column", col.Name), "")
+			}
 			if def.identityAlways == nil {
 				def.identityAlways = map[string]bool{}
 			}

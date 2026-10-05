@@ -620,6 +620,9 @@ ALTER TABLE t ALTER COLUMN id DROP IDENTITY IF EXISTS;
 	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN id DROP IDENTITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("DROP IDENTITY of a serial column: %v", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN id SET GENERATED ALWAYS`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("SET GENERATED of a serial column: %v", err)
+	}
 	mustExec(t, db, `SELECT setval('t_id_seq', 40)`)
 	mustExec(t, db, `ALTER SEQUENCE t_id_seq RESTART WITH 10`)
 	if err := db.QueryRow(`SELECT nextval('t_id_seq')`).Scan(&id); err != nil || id != 10 {
