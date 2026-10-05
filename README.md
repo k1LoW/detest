@@ -148,7 +148,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - Primary keys (composite too), unique constraints and unique indexes, including partial, expression and `NULLS NOT DISTINCT` indexes
 - Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`. A statement's checks run when it has written all its rows, as Postgres's do
 - `CHECK` and `NOT NULL`
-- Column types `uuid`, `smallint` and `integer` are checked on write, and a `uuid` is stored in the form Postgres prints it in, lower case with hyphens, however it was written
+- Column types `uuid`, `smallint` and `integer` are checked on write, and a `uuid` is stored in the form Postgres prints it in, lower case with hyphens, however it was written, and a string literal or parameter compared with one is read as a `uuid` too
 
 **Statements**
 
@@ -214,7 +214,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Comparisons and conversions*
 
 - Text compared with a number. Two cases run, a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type
-- A number, or text other than a string literal or parameter, compared with a boolean or a time
+- A number, or text other than a string literal or parameter, compared with a boolean, a time or a `uuid`
 - A string literal or parameter compared with a timestamp, through a cast too (`created_at >= '2024-01-01'`, `created_at >= '2024-01-01'::timestamptz`). Pass the time as a `time.Time` parameter
 - A cast of a `numeric` or a float to text, and `||` of one
 - `round` of a value ending in .5, and a cast of one to an integer, when the statement does not show whether it is a `numeric` or a float

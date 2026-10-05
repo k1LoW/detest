@@ -664,6 +664,35 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT qty FROM d WHERE id = 3`),
 		},
 	},
+	{
+		// A string literal compared with a uuid is read by uuid input, so
+		// it matches the row in another case, in braces or without hyphens,
+		// and text that is no uuid fails the statement.
+		Name: "string literals compared with a uuid column",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, u uuid UNIQUE, name text)`,
+		},
+		Seed: []string{
+			`INSERT INTO u VALUES (1, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001')`,
+			`INSERT INTO u VALUES (2, '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000A')`,
+			`INSERT INTO u VALUES (3, NULL, 'x')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM u WHERE u = '00000000-0000-0000-0000-00000000000A'`),
+			difftest.Q(0, `SELECT id FROM u WHERE '{00000000-0000-0000-0000-00000000000a}' = u`),
+			difftest.Q(0, `SELECT id FROM u WHERE u <> '0000000000000000000000000000000A' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM u WHERE u IN ('00000000-0000-0000-0000-00000000000A', '00000000000000000000000000000001') ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM u WHERE u = ANY('{00000000-0000-0000-0000-00000000000A}') ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM u WHERE u::text = '00000000-0000-0000-0000-00000000000A'`),
+			difftest.Q(0, `SELECT id FROM u ORDER BY u, id`),
+			difftest.Q(0, `UPDATE u SET name = 'y' WHERE u = '00000000-0000-0000-0000-00000000000A' RETURNING id`),
+			difftest.S(0, `INSERT INTO u (id, u) VALUES (4, '00000000-0000-0000-0000-00000000000A')`),
+			difftest.Q(0, `SELECT id FROM u WHERE u = 'nope'`),
+			difftest.Q(0, `SELECT id FROM u WHERE u IN ('00000000-0000-0000-0000-000000000001', 'nope')`),
+			difftest.S(0, `DELETE FROM u WHERE u = 'nope'`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

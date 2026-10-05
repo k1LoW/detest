@@ -2141,6 +2141,8 @@ func toDriverValue(v any) driver.Value {
 		return x
 	case time.Duration:
 		return x.String()
+	case uuidValue:
+		return string(x)
 	}
 	if f, ok := toFloat(v); ok {
 		return int64(f)

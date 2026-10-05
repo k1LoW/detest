@@ -893,12 +893,15 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			}
 			row[col] = numeric(f)
 		case "uuid":
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
 			if s, ok := v.(string); ok {
 				c, ok := canonicalUUID(s)
 				if !ok {
 					return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")
 				}
-				row[col] = c
+				row[col] = uuidValue(c)
 			}
 		case "int1", "int2", "int3", "int4", "int8", "uint1", "uint2", "uint3", "uint4", "uint8":
 			if x.tx.db.kind.InnoDB() {
@@ -1320,6 +1323,12 @@ func numericValue(v any) any {
 	}
 	return v
 }
+
+// uuidValue is a Postgres uuid, in the form canonicalUUID returns. It is not
+// a string so that untyped text compared with it is read by uuid input, and
+// text from a text expression is told apart, as Postgres has no operator
+// comparing text with a uuid.
+type uuidValue string
 
 // canonicalUUID reads s as Postgres's uuid input does, 32 hex digits, with
 // or without hyphens between groups of four, optionally in braces, and
