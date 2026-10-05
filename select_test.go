@@ -865,6 +865,10 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 		{`SELECT id FROM a WHERE u > '00000000-0000-0000-0000-00000000000' || '2'`, nil},
 		{`SELECT id FROM a WHERE u = 1`, nil},
 		{`SELECT id FROM a WHERE u = $1`, []any{int64(1)}},
+		// Postgres types a parameter by its first use, so the second
+		// comparison has no operator.
+		{`SELECT id FROM a WHERE id = $1 OR u = $1`, []any{"1"}},
+		{`SELECT id FROM a WHERE name = $1 OR id = $1`, []any{"1"}},
 		{`INSERT INTO a (id, u) VALUES (3, 1)`, nil},
 		{`INSERT INTO a (id, u) VALUES (3, $1)`, []any{int64(1)}},
 	} {

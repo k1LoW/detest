@@ -102,8 +102,45 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 // the array of = ANY against operands of other types, fails before it runs,
 // whatever value is bound to it.
 type paramUses struct {
-	scalars map[int]bool
-	arrays  map[int][]string // the types of the operands compared with it
+	scalars  map[int]bool
+	arrays   map[int][]string // the types of the operands compared with it
+	compared map[int]string   // the family of the first operand compared with it as a scalar
+	mixed    map[int]bool     // compared as a scalar with operands of two families
+}
+
+// comparedWith records the type of an operand the scalar parameter i is
+// compared with.
+func (u *paramUses) comparedWith(i int, typ string) {
+	f := paramFamily(typ)
+	if f == "" {
+		return
+	}
+	if u.compared == nil {
+		u.compared, u.mixed = map[int]string{}, map[int]bool{}
+	}
+	if first, ok := u.compared[i]; !ok {
+		u.compared[i] = f
+	} else if first != f {
+		u.mixed[i] = true
+	}
+}
+
+// paramFamily groups the types whose values detest reads a parameter
+// as alike. Integers and floats are kept apart, although Postgres compares
+// them across types, because the parameter takes the first one's type and
+// detest reads it against each operand.
+func paramFamily(typ string) string {
+	switch typ {
+	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
+		return "integer"
+	case "float4", "float8", "real", "double precision", "numeric", "decimal":
+		return "float"
+	case "bool", "boolean", "uuid":
+		return typ
+	case "text", "varchar":
+		return "text"
+	}
+	return ""
 }
 
 func (u *paramUses) scalar(i int) {
@@ -123,6 +160,9 @@ func (u *paramUses) array(i int, operand string) {
 // conflict names a use Postgres refuses. Under CheckSQL, which has no schema,
 // the operand types are left to the run.
 func (u *paramUses) conflict(checking bool) string {
+	if len(u.mixed) > 0 {
+		return fmt.Sprintf("parameter $%d compared with operands of different types", slices.Min(slices.Collect(maps.Keys(u.mixed)))+1)
+	}
 	for i, types := range u.arrays {
 		if u.scalars[i] {
 			return fmt.Sprintf("parameter $%d used as an array and as a scalar", i+1)
@@ -774,8 +814,12 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
+	typ := expressionType(b, sc.columnType)
+	if p, ok := a.(*sqlir.Param); ok {
+		c.params.comparedWith(p.Index, typ)
+	}
 	var sample any
-	switch expressionType(b, sc.columnType) {
+	switch typ {
 	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
 		sample = int64(0)
 	case "float4", "float8", "real", "double precision", "numeric", "decimal":
