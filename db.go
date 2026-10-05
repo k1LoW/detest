@@ -1054,6 +1054,21 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.isRelation(name) {
 			return db.notSequence(name)
 		}
+		// The defaults drawing from it depend on it: CASCADE drops them,
+		// and the identity they make, where Postgres refuses the drop
+		// otherwise, which fails the setup that runs it.
+		for table, def := range db.defs {
+			for col, d := range def.defaults {
+				if seq, ok := nextvalOf(d); !ok || db.seqName(seq) != name {
+					continue
+				}
+				if !ch.Cascade {
+					return unsupported(fmt.Sprintf("DROP SEQUENCE of %q, which the default of %s.%s draws from", relname(name), relname(table), col), "")
+				}
+				delete(def.defaults, col)
+				delete(def.identityAlways, col)
+			}
+		}
 		db.dropSequence(name)
 		return nil
 	case ch.Object == "sequence":

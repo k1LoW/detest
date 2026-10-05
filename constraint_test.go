@@ -530,3 +530,17 @@ CREATE SEQUENCE IF NOT EXISTS d_id_seq START 40;
 		}
 	}
 }
+
+func TestDropSequenceWithDefaults(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id serial PRIMARY KEY, v text)`)
+	if _, err := db.Exec(`DROP SEQUENCE t_id_seq`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("DROP SEQUENCE a default draws from: %v", err)
+	}
+	mustExec(t, db, `DROP SEQUENCE t_id_seq CASCADE`)
+	// The default went with it, so the key is NULL, as in Postgres.
+	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('a')`); !errors.Is(err, ErrNotNullViolation) {
+		t.Errorf("insert without the default: %v", err)
+	}
+}

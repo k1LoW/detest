@@ -239,6 +239,9 @@ type SchemaChange struct {
 	View        *SelectStmt
 	ViewColumns []string
 	Replace     bool
+	// Cascade is DROP ... CASCADE, which drops what depends on the object
+	// too, as the defaults that draw from a sequence.
+	Cascade bool
 	// Sequence is CREATE SEQUENCE (Create) or ALTER SEQUENCE of the
 	// sequence Table names, with Object "sequence".
 	Sequence *SequenceOptions

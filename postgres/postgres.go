@@ -290,7 +290,8 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			for _, p := range obj.GetList().GetItems() {
 				parts = append(parts, p.GetString_().GetSval())
 			}
-			changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Drop: true, IfExists: s.DropStmt.MissingOk, Object: object})
+			changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Drop: true, IfExists: s.DropStmt.MissingOk, Object: object,
+				Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE})
 		}
 		return changes, true, nil
 	case *pg.Node_ViewStmt:
