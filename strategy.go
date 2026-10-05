@@ -61,14 +61,16 @@ func Random(seed uint64) Option {
 // bugs need a depth of 1 to 3.
 //
 // It differs from PCT where detest differs from its model. A process
-// created by starting a process type or delivering a message gets its
-// priority when that option first appears. k is the length of the run that
-// picks the first option at every choice, which each worker makes once
-// before it starts. Crashes and losses happen at steps drawn among the first
-// k too, and the other choices, such as an external call's outcome, are
-// drawn as under Random. The bound holds for the order of processes only,
-// and for runs no longer than k. A switch is a preemption, so a MaxPreemptions
-// below depth-1 leaves switches unused.
+// created by starting a process type or delivering a message takes the
+// priority its option drew when it appeared, and the option draws again for
+// the next process it makes, such as a redelivery. k is the length of a run
+// that picks by priority with no switch and no fault, drawn from seed, which
+// each worker makes alike once before it starts and which reports nothing of
+// what it finds. Crashes and losses happen at steps drawn among the first k
+// too, and the other choices, such as an external call's outcome, are drawn
+// as under Random. The bound holds for the order of processes only, and for
+// runs no longer than k. A switch is a preemption, so a MaxPreemptions below
+// depth-1 leaves switches unused.
 //
 // Everything else is as under Random: the exploration is never complete,
 // violations replay with DETEST_REPLAY, Workers and Shard split the runs,

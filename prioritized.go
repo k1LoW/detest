@@ -14,8 +14,8 @@ import (
 // and almost nowhere else.
 //
 // PCT knows its threads in advance. Here a process is created by an option of
-// the scheduler, so the option gets its priority when it first appears and
-// passes it on to the process it creates. Crashes and losses are not orders
+// the scheduler, so the option draws a priority when it appears and passes it
+// on to the process it creates, and draws again for the next one. Crashes and losses are not orders
 // of processes, and drawing them at every step as Random does would put them
 // near the start of most runs, so they happen at steps drawn from the first k
 // as the switches do, to an option drawn among the ones then possible.
