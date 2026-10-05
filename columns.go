@@ -464,6 +464,10 @@ func (c *columnChecker) partlyRun(with []sqlir.CTE, item sqlir.TableRef, items [
 	if len(sel.GroupBy) > 0 || sel.Having != nil || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
 		return "aggregating the target's rows"
 	}
+	// LIMIT and OFFSET are evaluated before the first row is read.
+	if hasEffects(sel.Limit) || hasEffects(sel.Offset) {
+		return "with effects in its LIMIT or OFFSET"
+	}
 	itemAlias := item.Alias
 	if itemAlias == "" {
 		itemAlias = item.Name

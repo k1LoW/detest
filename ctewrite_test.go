@@ -146,6 +146,8 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT id FROM jobs UNION ALL SELECT nextval('s')) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT count(*) + nextval('s') AS id FROM jobs) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		{postgres.New(), `WITH c AS (SELECT j.id FROM jobs j JOIN jobs k ON k.id = j.id FOR UPDATE OF j) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs LIMIT nextval('s')) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
+		{postgres.New(), `WITH c AS (SELECT id FROM jobs FOR UPDATE OFFSET (SELECT 0 FROM jobs LIMIT 1 FOR UPDATE)) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id`},
 		// A CTE sees only the ones before it.
 		{postgres.New(), `WITH p AS (SELECT id FROM q), q AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM p, q WHERE jobs.id = p.id`},
 		{postgres.New(), `WITH p AS (SELECT id FROM p) DELETE FROM jobs USING p WHERE jobs.id = p.id`},
