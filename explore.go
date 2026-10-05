@@ -4,16 +4,20 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // Explore declares a simulation with fn and explores every schedule of it,
-// failing the test on a violation. fn registers simulated resources,
+// depth first, failing the test on a violation. Under Random it runs
+// schedules drawn from a seed instead. fn registers simulated resources,
 // processes, seeds and invariants on s and returns; the exploration starts
 // after it returns.
 //
@@ -28,20 +32,38 @@ import (
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	start := time.Now()
+	env, err := envOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts = append(slices.Clip(opts), env...)
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
 	f := newFrontier(n, maxRuns)
+	st := strategyOf(opts)
+	if st.prioritized && st.depth < 1 {
+		t.Fatal("detest: Prioritized needs a depth of at least 1")
+	}
+	f.random = st.random
 	if maxDuration != 0 {
 		// The clock inside the bubbles is fake, so the deadline is kept by a
 		// timer outside them.
 		timer := time.AfterFunc(maxDuration, f.expire)
 		defer timer.Stop()
 	}
+	// Work done once per process, such as compiling a parser, makes no
+	// scheduling progress, so it is done before the watchdog starts.
+	sqlir.Warmup()
 	stop := watchStall(f)
 	defer stop()
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
 	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
 		ckpt = "" // a replay neither resumes nor ends an exploration
+	}
+	if ckpt != "" && f.random {
+		// A random exploration has no subtrees left to save: it goes on with
+		// another seed instead.
+		t.Fatal("detest: DETEST_CHECKPOINT does not apply to Random or Prioritized; run again with another seed")
 	}
 	if ckpt != "" {
 		if err := f.load(ckpt); err != nil {
@@ -99,11 +121,6 @@ func workerCount(opts []Option) int {
 		o(probe)
 	}
 	n := probe.workers
-	if s := os.Getenv("DETEST_WORKERS"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil {
-			n = v
-		}
-	}
 	if sched, _ := replaySchedule(probe.schedule); sched != "" || n < 1 {
 		return 1 // a replay is one run
 	}
@@ -184,6 +201,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 		if s.shardTotal > 1 {
 			res.Shard = fmt.Sprintf("%d/%d", s.shardIndex, s.shardTotal)
 		}
+		res.strategy = s.strategy
 		expect = s.expect
 	})
 	return res, expect

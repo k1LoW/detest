@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	pg "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
@@ -132,6 +133,18 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "22P02", 0 // invalid input value for enum
 	}
 	return "", 0
+}
+
+// The parser runs PostgreSQL's grammar as a WebAssembly module, which it
+// compiles on its first parse in the process. That takes seconds under the
+// race detector, so it is done before Explore watches for stalls rather than
+// in the first statement of a run. Compiling it here in init instead would
+// make every binary that imports the package pay for it.
+func init() {
+	var once sync.Once
+	sqlir.RegisterWarmup(func() {
+		once.Do(func() { _, _ = parser{}.Parse("SELECT 1") })
+	})
 }
 
 // parser parses with the real PostgreSQL grammar and converts the AST into

@@ -100,6 +100,7 @@ func TestCheckpointFindsTheViolation(t *testing.T) {
 // with the reason, rather than crashing. The exploration runs in a child
 // process because the test is meant to fail.
 func TestStaleCheckpointFailsTheTest(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("DETEST_STALE_CHILD") == "1" {
 		Explore(t, func(t *testing.T, s *Sim) { counterModel(s, true) })
 		return

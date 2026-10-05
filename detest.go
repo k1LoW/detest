@@ -5,6 +5,7 @@
 // services, whose semantics detest implements. Every operation on them is a
 // scheduling point, and detest enumerates the schedules, the failure outcomes
 // and the duplicate deliveries, checking user-supplied invariants on each run.
+// Random draws them from a seed instead, for spaces too large to enumerate.
 //
 // Explore is the only entry point. It runs the declaration function and the
 // exploration inside a testing/synctest bubble.
@@ -104,13 +105,15 @@ func MaxPreemptions(n int) Option {
 }
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
+// DETEST_MAX_RUNS overrides n.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
 // MaxDuration caps the wall-clock time an exhaustive exploration takes. Once
 // d has passed, no worker starts another run, and the runs under way finish.
 // The first run is always made, so an exploration resumed from a checkpoint
 // makes progress however short d is; a negative d has passed already.
-// 0 (the default) means unbounded.
+// 0 (the default) means unbounded. DETEST_MAX_DURATION overrides d, as a
+// duration such as 10m.
 func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
 
 // defaultShardDepth is how many leading choices pick a schedule's shard.
@@ -121,8 +124,9 @@ const defaultShardDepth = 12
 // by hashing their first depth choices: shard index of total explores the
 // subtrees whose hash maps to it. Runs shorter than depth are explored by
 // every shard. Each shard reports its own run count; a violation is found by
-// the shard owning its subtree. DETEST_SHARD=index/total[/depth] sets it from
-// the environment.
+// the shard owning its subtree. Under Random, the shards split the runs
+// instead (see Random). DETEST_SHARD=index/total[/depth] sets it from the
+// environment.
 func Shard(index, total, depth int) Option {
 	return func(s *Sim) { s.shardIndex, s.shardTotal, s.shardDepth = index, total, depth }
 }
@@ -172,6 +176,7 @@ type Sim struct {
 	shardTotal       int
 	shardDepth       int
 	workers          int
+	strategy         strategy
 	frontier         *frontier // shared with the other workers, when Workers splits the exploration
 	worker           int
 
@@ -282,6 +287,7 @@ type result struct {
 	MaxDepth int
 	Complete bool
 	Shard    string // "index/total" when DETEST_SHARD or Shard splits the exploration across machines
+	strategy strategy
 	Workers  int
 	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
@@ -334,6 +340,9 @@ func (r *result) outcome() string {
 		if r.PriorRuns > 0 {
 			runs = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint,", r.Runs, r.Runs+r.PriorRuns)
 		}
+		if r.strategy.random {
+			workers += ", " + r.strategy.String()
+		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
@@ -354,13 +363,18 @@ func (r *result) outcome() string {
 	if r.Schedule != "" {
 		choices = len(strings.Split(r.Schedule, ","))
 	}
-	return fmt.Sprintf("detest: %s\nrun %d, schedule (%d choices): DETEST_REPLAY=%s\n%s",
-		what, r.Runs, choices, r.Schedule, r.Trace)
+	seed := ""
+	if r.strategy.random && !r.Replay { // a replay draws nothing from the seed
+		seed = " of " + r.strategy.String()
+	}
+	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
+		what, r.Runs, seed, choices, r.Schedule, r.Trace)
 }
 
 // refuse records a statement refused as unsupported, for the report.
 func (s *Sim) refuse(err *ErrUnsupportedSQL) {
-	if s.frontier != nil {
+	// A statement the declaration runs is refused before any run exists.
+	if s.frontier != nil && (s.run == nil || !s.run.measuring) {
 		s.frontier.refuse(err.Error())
 	}
 }
@@ -400,6 +414,7 @@ func (s *Sim) check() *result {
 		// A lone exploration, as the package's own tests start one; Explore
 		// always passes the frontier it saves and resumes.
 		f = newFrontier(1, s.maxRuns)
+		f.random = s.strategy.random
 		s.frontier = f
 		return f.merge([]*result{s.checkShared(f, 0)}, 1)
 	}

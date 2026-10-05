@@ -128,6 +128,12 @@ A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes 
 
 Processes interact only through simulated resources. Every operation on them is a scheduling point, and each one models how its real counterpart behaves under concurrency.
 
+The simulations replace what the application talks to at the client boundary, the level of its client libraries, rather than system calls, packets or disks. The code above that boundary, business logic, ORMs and generated clients included, runs unchanged. A race reaches detest only through what crosses one of these boundaries, which are a PostgreSQL or MySQL database through `database/sql`, a call to another service through an `http.RoundTripper` or `ext.Do`, a queue declared with `s.Queue`, and a mutex injected in place of `sync.Mutex`. Shared state outside them is not simulated, and races through it are not explored.
+
+- A database reached without `database/sql`, such as through pgx's native `pgxpool.Pool` or `pgx.Conn`, or through a vendor SDK
+- A store detest has no simulation of, such as SQLite, MongoDB, DynamoDB, Spanner, or Redis holding locks or counters
+- Go memory shared between goroutines without one of the mutexes above, which `go test -race` checks
+
 ### Database
 
 `s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.
@@ -148,7 +154,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - Primary keys (composite too), unique constraints and unique indexes, including partial, expression and `NULLS NOT DISTINCT` indexes
 - Foreign keys, with `FOR KEY SHARE` on the parent, `ON DELETE` and `ON UPDATE` actions (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`), `MATCH FULL`, and deferrable constraints with `SET CONSTRAINTS`. A statement's checks run when it has written all its rows, as Postgres's do
 - `CHECK` and `NOT NULL`
-- Column types `uuid`, `smallint` and `integer` are checked on write, and a `uuid` is stored in the form Postgres prints it in, lower case with hyphens, however it was written
+- Column types `uuid`, `smallint` and `integer` are checked on write, and a `uuid` is stored in the form Postgres prints it in, lower case with hyphens, however it was written, and a string literal or parameter compared with one is read as a `uuid` too
 
 **Statements**
 
@@ -214,7 +220,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Comparisons and conversions*
 
 - Text compared with a number. Two cases run, a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type
-- A number, or text other than a string literal or parameter, compared with a boolean or a time
+- A number, or text other than a string literal or parameter, compared with a boolean, a time or a `uuid`, a parameter holding a boolean or a time compared with a value of another of these types, and a parameter compared with operands of different types (`id = $1 OR name = $1`)
 - A string literal or parameter compared with a timestamp, through a cast too (`created_at >= '2024-01-01'`, `created_at >= '2024-01-01'::timestamptz`). Pass the time as a `time.Time` parameter
 - A cast of a `numeric` or a float to text, and `||` of one
 - `round` of a value ending in .5, and a cast of one to an integer, when the statement does not show whether it is a `numeric` or a float
@@ -322,7 +328,8 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.MaxRuns(n)` | Caps the runs of an exploration (default 200000) |
 | `detest.MaxDuration(d)` | Stops starting runs once `d` has passed (unbounded by default) |
 | `detest.Workers(n)` | Explores with n workers in parallel (default 1) |
-| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. `DETEST_SHARD` sets it from the environment |
+| `detest.DepthFirst()`, `detest.Random(seed)`, `detest.Prioritized(seed, depth)` | Picks schedules depth first (the default), or from a seed until `MaxRuns` or `MaxDuration`. `Random` draws every choice uniformly. `Prioritized` follows [PCT](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/asplos277-pct.pdf): it runs each process on and switches at `depth`-1 steps drawn at random, which reaches bugs deep in long runs that `Random` almost never does. A sampled exploration is never complete and does not take `DETEST_CHECKPOINT`. The one passed last applies |
+| `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. Under `detest.Random` and `detest.Prioritized` it makes every `total`-th run instead, and `depth` is not used. `DETEST_SHARD` sets it from the environment |
 | `detest.MaxCrashes(n)` | Lets up to n processes per run crash at any step (none by default). Their transactions roll back, their mutexes are freed and their messages are redelivered, to check that work survives a process dying halfway |
 
 These environment variables override or add to them.
@@ -331,6 +338,9 @@ These environment variables override or add to them.
 | --- | --- |
 | `DETEST_REPLAY` | Replay one run, given the choices printed with a violation |
 | `DETEST_WORKERS` | Number of workers, overriding `detest.Workers` |
+| `DETEST_MAX_RUNS` | Cap on runs, overriding `detest.MaxRuns` |
+| `DETEST_MAX_DURATION` | Wall-clock cap such as `10m`, overriding `detest.MaxDuration` |
+| `DETEST_SEED` | Seed of a test under `detest.Random` or `detest.Prioritized`, overriding the one it passes. A test under `detest.DepthFirst` is left as it is |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
 | `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, and to resume from on the next run |
 | `DETEST_STALL` | How long a process may block outside the scheduler before it is reported (default `30s`) |

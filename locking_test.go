@@ -129,6 +129,7 @@ func TestForUpdateOverDerivedItems(t *testing.T) {
 // After a wait, a row whose join partner no longer matches is left out, and
 // a LEFT JOIN partner that no longer matches becomes NULL.
 func TestForUpdateRecheckRejoins(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
 		mustExec(t, db, `CREATE TABLE b (id text PRIMARY KEY)`)

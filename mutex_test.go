@@ -50,9 +50,6 @@ func TestInjectedMutexHeldAcrossYieldPoint(t *testing.T) {
 // exploration runs in a child process because the watchdog crashes it.
 func TestUninjectedMutexStalls(t *testing.T) {
 	if os.Getenv("DETEST_STALL_CHILD") == "1" {
-		// Compiling the SQL parser takes seconds under -race; keep it out of
-		// the one second the watchdog is given here.
-		_ = CheckSQL(postgres.New(), `SELECT 1`)
 		Explore(t, func(t *testing.T, s *Sim) {
 			db, _ := s.DB("app", postgres.New())
 			var mu sync.Mutex
@@ -148,6 +145,7 @@ func TestInjectedMutexLockedTwice(t *testing.T) {
 // it under the write lock. The readers never see the row change in between,
 // and holding the read lock together does not block them.
 func TestInjectedRWMutexExcludesWriter(t *testing.T) {
+	t.Parallel()
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
 		rw := s.RWMutex("counter")

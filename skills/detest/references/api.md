@@ -58,13 +58,14 @@ msgs := st.Queue(q)
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |
 | `MaxDuration(d)` | none | Wall-clock cap |
 | `Workers(n)` | 1 | Parallel workers |
-| `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`) |
+| `DepthFirst()`, `Random(seed)`, `Prioritized(seed, depth)` | `DepthFirst()` | `Random(seed)` draws every choice from a seeded generator until `MaxRuns` or `MaxDuration`; `Prioritized(seed, depth)` follows PCT, running each process on and switching at `depth`-1 drawn steps (depth 2 or 3 covers most races); both never complete, no `DETEST_CHECKPOINT` |
+| `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`); under `Random` or `Prioritized`, every `total`-th run, with `depth` unused |
 | `Pods(n)` | 1 | Default instances of loops and message consumers |
 | `ObserveSQL(fn)` | | Called with every statement and its error |
 | `Replay(choices)` | | Run one schedule only |
 | `Verbose()` | | Print every run's trace |
 
-The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
+The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_MAX_RUNS`, `DETEST_MAX_DURATION=<dur>` and `DETEST_SEED` (for `Random` and `Prioritized` only) override their options, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
 
 ## Database servers
 

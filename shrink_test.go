@@ -18,6 +18,7 @@ func departures(choices []choice) int {
 // Of all the schedules that lose an update, the one departing most from the
 // default shrinks to one that departs less and breaks the same way.
 func TestShrinkSimplifiesTheSchedule(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newSim(t)
 		defer s.closeSQL()

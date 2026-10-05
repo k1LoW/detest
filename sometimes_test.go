@@ -65,6 +65,7 @@ func TestSometimesDoesNotFailAnIncompleteExploration(t *testing.T) {
 // A complete exploration in which a condition never held fails the test. It
 // runs in a child process because the test is meant to fail.
 func TestSometimesFailsACompleteExploration(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("DETEST_SOMETIMES_CHILD") == "1" {
 		Explore(t, stockModel)
 		return

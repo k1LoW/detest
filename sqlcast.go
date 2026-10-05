@@ -296,6 +296,9 @@ func castValue(v any, typ string) (any, error) {
 		// Read as a uuid column stores it, so it equals the column's value
 		// however it was written. Postgres has no cast to uuid from a type
 		// other than text.
+		if u, ok := v.(uuidValue); ok {
+			return u, nil
+		}
 		s, ok := v.(string)
 		if !ok {
 			return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to uuid", v)}
@@ -304,7 +307,7 @@ func castValue(v any, typ string) (any, error) {
 		if !ok {
 			return nil, kindError{sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s)}
 		}
-		return c, nil
+		return uuidValue(c), nil
 	case "interval":
 		if s, ok := v.(string); ok {
 			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {

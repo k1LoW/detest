@@ -31,9 +31,17 @@ type frontier struct {
 	busy       int        // workers running a prefix taken from the stack
 	stopped    bool
 	incomplete bool // MaxRuns or MaxDuration cut the exploration short
-	runs       int
-	maxRuns    int
-	expired    atomic.Bool // MaxDuration has passed
+	// random hands out run indexes instead of subtrees, under the Random
+	// strategy, with next the index of the next run and bestIndex the
+	// index of the best violation's run. halted stops handing them out
+	// once a run violated, before it is shrunk.
+	random    bool
+	next      int
+	bestIndex int
+	halted    bool
+	runs      int
+	maxRuns   int
+	expired   atomic.Bool // MaxDuration has passed
 	// best is the choices of the earliest violating run found so far, in the
 	// depth-first order one worker explores in, with its result. Subtrees
 	// after it are dropped and the ones before it still explored, so the
@@ -102,10 +110,14 @@ func (f *frontier) settled(pushed int) {
 }
 
 // take returns the next prefix to run, waiting while other workers may still
-// add some. It reports false once the exploration is over.
-func (f *frontier) take(worker int) ([]choice, bool) {
+// add some, and under the Random strategy the index of the run instead. It
+// reports false once the exploration is over.
+func (f *frontier) take(worker int) ([]choice, int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.random {
+		return f.takeRandom(worker)
+	}
 	for {
 		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1]) {
 			f.stack = f.stack[:len(f.stack)-1] // after the best violation
@@ -123,19 +135,40 @@ func (f *frontier) take(worker int) ([]choice, bool) {
 	if f.stopped || len(f.stack) == 0 {
 		f.progress[worker].idle.Store(true)
 		f.wakeAll() // the exploration is over: let the others see it
-		return nil, false
+		return nil, 0, false
 	}
 	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
 		f.wakeAll()
-		return nil, false
+		return nil, 0, false
 	}
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
 	f.busy++
 	f.runs++
-	return p, true
+	return p, 0, true
+}
+
+// takeRandom is take under the Random strategy. Indexes are handed out in
+// order, so once a run violates every run before it has been taken, and no
+// other is needed to report the violation of the lowest index. f.mu
+// is held.
+func (f *frontier) takeRandom(worker int) ([]choice, int, bool) {
+	if f.stopped || f.halted {
+		f.progress[worker].idle.Store(true)
+		return nil, 0, false
+	}
+	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
+		f.incomplete, f.stopped = true, true
+		f.progress[worker].idle.Store(true)
+		return nil, 0, false
+	}
+	i := f.next
+	f.next++
+	f.busy++
+	f.runs++
+	return nil, i, true
 }
 
 // cut counts a run cut at MaxIdleTicks.
@@ -229,10 +262,28 @@ func (f *frontier) fail(err error) {
 	f.wakeAll()
 }
 
-// found records a violating run, keeping the earliest one.
-func (f *frontier) found(choices []choice, res *result) {
+// halt stops handing out random runs, as one violated. The runs handed out
+// already, the earlier ones among them, go on.
+func (f *frontier) halt() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.halted = true
+}
+
+// found records a violating run, keeping the earliest one: the first in
+// depth-first order, or the one of the lowest index under the Random
+// strategy.
+func (f *frontier) found(choices []choice, index int, res *result) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.random {
+		if f.bestResult == nil || index < f.bestIndex {
+			f.bestIndex, f.bestResult = index, res
+		}
+		f.busy--
+		f.settled(0)
+		return
+	}
 	picks := make([]int, len(choices))
 	for i, c := range choices {
 		picks[i] = c.picked
@@ -299,13 +350,39 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 	}
 	f.declareSometimes(names)
 	runs, maxDepth := 0, 0
+	seen := seenChoices{}
+	k := 0
+	if s.strategy.prioritized {
+		// The run's length is measured on a run every worker makes alike,
+		// so that the runs drawn do not depend on Workers. It picks by
+		// priority without switches or faults, as a fault such as a loss
+		// listed first would end it early and put every run's faults at its
+		// start. It is no run of the exploration, and what it finds is left
+		// to the runs that are, but it goes through the nondeterminism check,
+		// as state it leaves behind shows in the next run.
+		r := s.newRunMeasuring(nil, true)
+		r.rng, r.seen, r.path = s.measuringRng(), seen, fnvOffset
+		r.prio = newPrioritized(r.rng, 1, 1, 0, 0)
+		r.execute()
+		k = r.steps
+	}
 	for {
-		prefix, ok := f.take(worker)
+		prefix, index, ok := f.take(worker)
 		if !ok {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		runs++
 		r := s.newRun(prefix)
+		if f.random {
+			r.rng, r.seen, r.path = s.rngFor(index), seen, fnvOffset
+			if s.strategy.prioritized {
+				losses := 0
+				for _, q := range s.queues {
+					losses += q.lossBudget
+				}
+				r.prio = newPrioritized(r.rng, s.strategy.depth, k, s.maxCrashes, losses)
+			}
+		}
 		r.tracing = s.verbose
 		v := r.execute()
 		maxDepth = max(maxDepth, len(r.choices))
@@ -320,6 +397,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
 		if v != nil {
+			if f.random {
+				f.halt() // shrinking takes a run per choice
+			}
 			choices := r.choices
 			r, v = s.shrink(r, v)
 			if !r.tracing {
@@ -331,7 +411,11 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, s.makeResult(r, v, runs, maxDepth, false, start))
+			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start))
+			continue
+		}
+		if f.random {
+			f.finish(nil)
 			continue
 		}
 		f.finish(s.children(r.choices, len(prefix)))
@@ -346,6 +430,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
+		merged.strategy = r.strategy
 		if r.Replay {
 			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule
@@ -366,7 +451,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.strategy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.strategy
 		return &v
 	}
 	return merged
