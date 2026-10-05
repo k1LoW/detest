@@ -637,6 +637,9 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 		`SELECT (SELECT nextval('s'))`,
 		`INSERT INTO t VALUES ((SELECT nextval('s')), 1)`,
 		`WITH c AS (SELECT nextval('s')) SELECT 1`,
+		`WITH c AS (SELECT nextval('s')), d AS (SELECT * FROM c) SELECT 1`,
+		`SELECT nextval('s') AS x, count(*) FROM t GROUP BY x`,
+		`SELECT id, (SELECT gen_random_uuid()) FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -653,6 +656,8 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t SELECT nextval('s'), 2`)
 	mustExec(t, db, `SELECT id FROM t WHERE id < nextval('s')`)
 	mustExec(t, db, `WITH c AS (SELECT nextval('s') AS n) SELECT n FROM c`)
+	mustExec(t, db, `WITH c AS (SELECT nextval('s') AS n), d AS (SELECT n FROM c) SELECT n FROM d`)
+	mustExec(t, db, `SELECT id, gen_random_uuid() FROM t`)
 }
 
 func TestRenameIdentityColumn(t *testing.T) {

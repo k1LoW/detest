@@ -2,14 +2,14 @@ package detest
 
 import (
 	"reflect"
-	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
-// sequenceFuncs are the functions whose every evaluation changes what the
-// next one returns.
-var sequenceFuncs = map[string]bool{"nextval": true, "setval": true}
+// sequenceFuncs are the functions whose every evaluation returns another
+// value or changes what the next one returns, so that evaluating them
+// another number of times than Postgres shows in the results.
+var sequenceFuncs = map[string]bool{"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true}
 
 // checkSequenceCalls refuses nextval and setval where detest evaluates them
 // another number of times than Postgres: in the WHERE of an UPDATE or a
@@ -67,10 +67,10 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 // topSequenceCalls checks a query, whose clauses detest evaluates as
 // often as Postgres does, but not its subqueries.
 func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
-	used := sqlir.TableNames(sel)
+	used := reachableCTEs(sel)
 	for _, cte := range sel.With {
 		check := x.topSequenceCalls
-		if !slices.Contains(used, cte.Name) {
+		if !used[cte.Name] {
 			// detest runs every CTE, where Postgres skips one the query
 			// does not read.
 			check = func(s *sqlir.SelectStmt) error { return x.noSequenceCalls(s) }
@@ -87,12 +87,42 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			return err
 		}
 	}
+	if len(sel.GroupBy) > 0 {
+		// A GROUP BY name or position evaluates its select list item to
+		// group the rows and again to give the output.
+		if err := x.noSequenceCalls(sel.Targets); err != nil {
+			return err
+		}
+	}
 	for _, n := range []any{sel.Values, sel.Targets, sel.From, sel.Joins, sel.Where, sel.GroupBy, sel.Having, sel.OrderBy, sel.Limit, sel.Offset, sel.DistinctOn} {
 		if err := x.rowSequenceCalls(n); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// reachableCTEs are the CTEs of sel the query reads, directly or through
+// another CTE it reads, the ones Postgres runs.
+func reachableCTEs(sel *sqlir.SelectStmt) map[string]bool {
+	body := *sel
+	body.With = nil
+	reached := map[string]bool{}
+	queue := sqlir.TableNames(&body)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if reached[name] {
+			continue
+		}
+		for _, cte := range sel.With {
+			if cte.Name == name {
+				reached[name] = true
+				queue = append(queue, sqlir.TableNames(cte.Select)...)
+			}
+		}
+	}
+	return reached
 }
 
 // rowSequenceCalls checks expressions detest evaluates as often as Postgres,
@@ -173,7 +203,7 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 		}
 		walk(reflect.ValueOf(n))
 		if found != "" {
-			return x.unsupported(found + " in a subquery or in the WHERE of an UPDATE or a DELETE, which detest evaluates another number of times than Postgres")
+			return x.unsupported(found + " where detest evaluates it another number of times than Postgres, such as a subquery or the WHERE of an UPDATE or a DELETE")
 		}
 	}
 	return nil
