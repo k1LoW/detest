@@ -244,7 +244,9 @@ func groupExpr(sel *sqlir.SelectStmt, g sqlir.Expr, inputs map[string]bool) sqli
 			return g
 		}
 		for _, t := range sel.Targets {
-			if !t.Star && t.Alias == v.Column {
+			// The name the item goes by, given or derived, as the column
+			// check resolves it.
+			if !t.Star && targetName(t) == v.Column {
 				return t.Expr
 			}
 		}

@@ -32,6 +32,7 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM ord ORDER BY 2`),
 			difftest.Q(0, `SELECT * FROM cust ORDER BY 3`),
 			difftest.Q(0, `SELECT qty % 2 AS odd, count(*) FROM ord GROUP BY odd ORDER BY odd`),
+			difftest.Q(0, `SELECT lower(name), count(*) FROM cust GROUP BY lower ORDER BY 1`),
 			difftest.Q(0, `SELECT coalesce(o.qty, 0) AS qty, count(*) FROM cust c LEFT JOIN ord o ON o.cust_id = c.id AND o.qty > 2 GROUP BY qty ORDER BY 1`),
 		},
 	},
