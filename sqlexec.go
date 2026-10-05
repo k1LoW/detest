@@ -3566,6 +3566,10 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 // when the call has the arguments its function takes. The statement alone
 // decides it, so CheckSQL asks it too.
 func arityMismatch(f *sqlir.FuncCall) string {
+	if f.Star && f.Name != "count" {
+		// now(*): no function but count takes a star.
+		return f.Name + "(*)"
+	}
 	arity, known := strictFuncs[f.Name]
 	if !known {
 		arity, known = otherArity[f.Name]

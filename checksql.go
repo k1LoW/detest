@@ -51,9 +51,11 @@ var windowFuncs = map[string][2]int{
 func windowArityMismatch(f *sqlir.FuncCall) string {
 	arity, ok := windowFuncs[f.Name]
 	switch {
-	case ok:
 	case f.Name == "count" && f.Star && len(f.Args) == 0:
 		return ""
+	case f.Star:
+		return f.Name + "(*)" // no function but count takes a star
+	case ok:
 	case aggregateFuncs[f.Name]:
 		arity = [2]int{1, 1}
 	default:

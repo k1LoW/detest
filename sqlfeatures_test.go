@@ -489,6 +489,8 @@ func TestWindowFunctionArity(t *testing.T) {
 		`SELECT sum(id, k) OVER () FROM t`,
 		`SELECT ntile(2) OVER (ORDER BY id) FROM t`,
 		`SELECT row_number(1) OVER () FROM empty_t`,
+		`SELECT row_number(*) OVER () FROM t`,
+		`SELECT now(*) FROM t`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
@@ -643,5 +645,72 @@ func TestHashtextOnlyAsAdvisoryLockKey(t *testing.T) {
 			t.Errorf("%s: got %v, want nil", q, err)
 		}
 		_ = tx.Rollback()
+	}
+}
+
+// RESET ALL clears a lock_timeout set for the session, so a lock wait after
+// it waits as the server's does, with no timeout to choose; without the
+// reset the wait may time out.
+func TestResetAllClearsLockTimeout(t *testing.T) {
+	for _, reset := range []bool{true, false} {
+		Explore(t, func(t *testing.T, s *Sim) {
+			db, _ := s.DB("app", postgres.New())
+			mustExec(t, db, `CREATE TABLE stock (sku text PRIMARY KEY, n int NOT NULL)`)
+			s.Seed(func() { mustExec(t, db, `INSERT INTO stock VALUES ('a', 1)`) })
+			var (
+				locked   chan struct{}
+				timedOut bool
+			)
+			s.Seed(func() { locked, timedOut = make(chan struct{}), false })
+			s.Manual("holder", 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.Exec(`UPDATE stock SET n = 0 WHERE sku = 'a'`); err != nil {
+					return err
+				}
+				close(locked)
+				p.WaitUntil(p.Now() + 1)
+				return tx.Commit()
+			})
+			s.Manual("waiter", 1, func(p *Proc) error {
+				<-locked
+				conn, err := db.Conn(p.Context()) // the session settings live on one connection
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				if _, err := conn.ExecContext(p.Context(), `SET lock_timeout = '1s'`); err != nil {
+					return err
+				}
+				if reset {
+					if _, err := conn.ExecContext(p.Context(), `RESET ALL`); err != nil {
+						return err
+					}
+				}
+				tx, err := conn.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.Exec(`UPDATE stock SET n = 2 WHERE sku = 'a'`); err != nil {
+					timedOut = errors.Is(err, ErrLockNotAvailable)
+					return nil
+				}
+				return tx.Commit()
+			})
+			if reset {
+				s.AtQuiescence(func(*State) error {
+					if timedOut {
+						return errors.New("the wait timed out after RESET ALL")
+					}
+					return nil
+				})
+			} else {
+				s.Sometimes("the wait times out", func(*State) bool { return timedOut })
+			}
+		})
 	}
 }

@@ -38,6 +38,9 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT * FROM t WHERE round(random(), 2) > 0.5`,
 			`SELECT * FROM t WHERE EXISTS (SELECT 1 FROM unnest(t.tags) AS u(x) WHERE x = 'a')`,
 			`SELECT * FROM t CROSS JOIN LATERAL generate_series(1) g`,
+			`SELECT now(*) FROM t`,
+			`SELECT row_number(*) OVER () FROM t`,
+			`SELECT sum(*) OVER () FROM t`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",
