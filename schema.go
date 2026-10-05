@@ -662,15 +662,13 @@ func (x *sqlExec) conflictTargets(table string, oc *sqlir.OnConflict) ([]sqlir.U
 // sameElems reports whether a unique index's elements are the inference
 // elements, in any order.
 func sameElems(index, infer []sqlir.Expr) bool {
-	if len(index) != len(infer) {
-		return false
+	// As sets: Postgres ignores the order and a repeated element.
+	within := func(a, b []sqlir.Expr) bool {
+		return !slices.ContainsFunc(a, func(e sqlir.Expr) bool {
+			return !slices.ContainsFunc(b, func(f sqlir.Expr) bool { return reflect.DeepEqual(e, f) })
+		})
 	}
-	for _, e := range index {
-		if !slices.ContainsFunc(infer, func(f sqlir.Expr) bool { return reflect.DeepEqual(e, f) }) {
-			return false
-		}
-	}
-	return true
+	return within(index, infer) && within(infer, index)
 }
 
 // checkTypes makes the checks Postgres makes when a value is stored in a
