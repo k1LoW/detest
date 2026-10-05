@@ -64,13 +64,15 @@ func numBounds(v any) (numRange, bool) {
 }
 
 // rangeValue is the range lo to hi widened to hold flt, or flt itself when
-// every reading gives it.
+// every reading gives it. The float stands for the decimal it prints as, so
+// a single value is flt only when that decimal is the value: one with more
+// digits than a float prints, though it rounds to flt, stays a range.
 func rangeValue(lo, hi *big.Rat, flt float64) any {
 	if math.IsInf(flt, 0) || math.IsNaN(flt) {
 		return flt
 	}
 	if lo.Cmp(hi) == 0 {
-		if f, _ := lo.Float64(); f == flt {
+		if q, ok := exactRat(flt); ok && q.Cmp(lo) == 0 {
 			return flt
 		}
 	}

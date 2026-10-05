@@ -1019,7 +1019,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				if _, ok := val.(numRange); ok && v.Name != "sum" && v.Name != "avg" {
+				// DISTINCT would tell ranges apart by their bounds, not by
+				// the values the server gives.
+				if _, ok := val.(numRange); ok && (v.Distinct || (v.Name != "sum" && v.Name != "avg")) {
 					return nil, x.errInexact()
 				}
 				if derefValue(val) == nil {
@@ -3019,8 +3021,11 @@ func exprNumberKind(e sqlir.Expr) numberKind {
 			return floatKind
 		}
 	case *sqlir.FuncCall:
-		if e.Name == "mysql_double" {
+		switch e.Name {
+		case "mysql_double":
 			return floatKind
+		case "mysql_dividend":
+			return exprNumberKind(e.Args[0])
 		}
 	case *sqlir.UnaryExpr:
 		if e.Op == "-" {
