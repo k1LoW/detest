@@ -47,7 +47,7 @@ func TestPostgresScriptSessionLockTimeout(t *testing.T) {
 				if beginErr != nil {
 					t.Fatal(beginErr)
 				}
-				defer tx.Rollback()
+				defer func() { _ = tx.Rollback() }()
 				if _, err = tx.Exec(tc.query); err == nil {
 					if tc.finish == "commit" {
 						err = tx.Commit()
@@ -60,7 +60,11 @@ func TestPostgresScriptSessionLockTimeout(t *testing.T) {
 				t.Fatalf("got %v, want error: %v", err, tc.wantErr)
 			}
 			if err := conn.Raw(func(dc any) error {
-				if got := dc.(*sqlConn).lockTimeout; got != tc.want {
+				c, ok := dc.(*sqlConn)
+				if !ok {
+					return fmt.Errorf("unexpected connection type %T", dc)
+				}
+				if got := c.lockTimeout; got != tc.want {
 					t.Errorf("session lock timeout: %v, want %v", got, tc.want)
 				}
 				return nil
