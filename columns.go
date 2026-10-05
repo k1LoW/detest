@@ -746,6 +746,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if p, ok := e.Array.(*sqlir.Param); ok {
 					c.params.array(p.Index, typ)
 				}
+				if sample := typeSample(typ); sample != nil && e.ElemType == "" {
+					if c.x.arrayTypes == nil {
+						c.x.arrayTypes = map[*sqlir.ArrayCmp]any{}
+					}
+					c.x.arrayTypes[e] = sample
+				}
 				walk(reflect.ValueOf(e.X))
 				return
 			case *sqlir.Param:
@@ -758,15 +764,24 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Op {
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
+					if err = c.operandTypes(sc, e.L, e.R); err != nil {
+						return
+					}
 					c.untypedOperands(sc, e.L, e.R)
 				}
 			case *sqlir.InExpr:
 				for _, item := range e.List {
+					if err = c.operandTypes(sc, e.X, item); err != nil {
+						return
+					}
 					c.untypedOperands(sc, e.X, item)
 				}
 			case *sqlir.CaseExpr:
 				if e.Arg != nil {
 					for _, w := range e.Whens {
+						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
+							return
+						}
 						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				}
@@ -818,17 +833,8 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, typ)
 	}
-	var sample any
-	switch typ {
-	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
-		sample = int64(0)
-	case "float4", "float8", "real", "double precision", "numeric", "decimal":
-		sample = float64(0)
-	case "bool", "boolean":
-		sample = false
-	case "uuid":
-		sample = uuidValue("")
-	default:
+	sample := typeSample(typ)
+	if sample == nil {
 		return
 	}
 	c.untyped = append(c.untyped, func() error {
@@ -845,6 +851,48 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		_, err := c.x.untyped(a, v, sample)
 		return err
 	})
+}
+
+// typeSample is a value of type typ, for untyped to read text as typ, or nil
+// for a type whose input detest does not read up front.
+func typeSample(typ string) any {
+	switch typ {
+	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
+		return int64(0)
+	case "float4", "float8", "real", "double precision", "numeric", "decimal":
+		return float64(0)
+	case "bool", "boolean":
+		return false
+	case "uuid":
+		return uuidValue("")
+	}
+	return nil
+}
+
+// operandTypes refuses a comparison of two typed operands Postgres has no
+// operator for, which untypedPair refuses only when it reaches a row.
+func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
+	if untypedExpr(a) || untypedExpr(b) {
+		return nil
+	}
+	family := func(typ string) string {
+		switch f := paramFamily(typ); f {
+		case "integer", "float":
+			return "number"
+		case "":
+			if typ == "timestamp" || typ == "timestamptz" {
+				return "time"
+			}
+		default:
+			return f
+		}
+		return ""
+	}
+	fa, fb := family(expressionType(a, sc.columnType)), family(expressionType(b, sc.columnType))
+	if fa == "" || fb == "" || fa == fb {
+		return nil
+	}
+	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
 }
 
 // target is the scope of the table a write targets.

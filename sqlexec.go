@@ -48,6 +48,10 @@ type sqlExec struct {
 	// arrays are the arrays the statement's = ANY and <> ALL read, read
 	// before it runs anything.
 	arrays map[*sqlir.ArrayCmp]*arrayElems
+	// arrayTypes are values of the type the column check found for the
+	// operand of an = ANY or <> ALL over an uncast array, which its
+	// elements are read as before the statement runs.
+	arrayTypes map[*sqlir.ArrayCmp]any
 	// consistent makes the statement's table reads InnoDB consistent reads,
 	// from the transaction's snapshot: a plain SELECT at Repeatable Read.
 	consistent bool

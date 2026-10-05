@@ -214,7 +214,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Comparisons and conversions*
 
 - Text compared with a number. Two cases run, a string literal or parameter that reads as an integer, which takes the number's type, and a parameter holding text or an integer compared with text, which takes the text type
-- A number, or text other than a string literal or parameter, compared with a boolean, a time or a `uuid`
+- A number, or text other than a string literal or parameter, compared with a boolean, a time or a `uuid`, a parameter holding a boolean or a time compared with a value of another of these types, and a parameter compared with operands of different types (`id = $1 OR name = $1`)
 - A string literal or parameter compared with a timestamp, through a cast too (`created_at >= '2024-01-01'`, `created_at >= '2024-01-01'::timestamptz`). Pass the time as a `time.Time` parameter
 - A cast of a `numeric` or a float to text, and `||` of one
 - `round` of a value ending in .5, and a cast of one to an integer, when the statement does not show whether it is a `numeric` or a float

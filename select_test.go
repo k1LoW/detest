@@ -851,6 +851,7 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 		{`SELECT id FROM a WHERE id < 0 AND u = $1`, []any{"nope"}},
 		{`SELECT id FROM a WHERE true OR u = $1`, []any{"nope"}},
 		{`SELECT id FROM a WHERE false AND id = $1`, []any{"abc"}},
+		{`SELECT id FROM a WHERE id < 0 AND u = ANY($1)`, []any{[]string{"nope"}}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -869,6 +870,13 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 		// comparison has no operator.
 		{`SELECT id FROM a WHERE id = $1 OR u = $1`, []any{"1"}},
 		{`SELECT id FROM a WHERE name = $1 OR id = $1`, []any{"1"}},
+		// Refused before any row, as Postgres has no operator for them.
+		{`SELECT id FROM a WHERE id < 0 AND u = name`, nil},
+		{`SELECT id FROM a WHERE id < 0 AND (u = 1 OR id = name)`, nil},
+		{`SELECT id FROM a WHERE false AND u IN (name)`, nil},
+		// A driver sends these in a form of its own.
+		{`SELECT id FROM a WHERE u = $1`, []any{true}},
+		{`SELECT id FROM a WHERE u = $1`, []any{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		{`INSERT INTO a (id, u) VALUES (3, 1)`, nil},
 		{`INSERT INTO a (id, u) VALUES (3, $1)`, []any{int64(1)}},
 	} {

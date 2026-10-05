@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -468,6 +469,12 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 		return l, r, nil // MySQL compares a string with a number as the number (mysqlOperands)
 	}
 	l, r = paramText(le, l), paramText(re, r)
+	// A driver sends a boolean or a time bound to a parameter in a form of
+	// its own, which against a value of another such type Postgres reads as
+	// that type's input or the driver refuses to encode.
+	if mismatchedParam(le, l, r) || mismatchedParam(re, r, l) {
+		return nil, nil, x.unsupported("a parameter holding a value of another type compared with a boolean, a time or a uuid")
+	}
 	// Rows are compared pair by pair in compareRows; one reaching here comes
 	// from a context that does not, such as HAVING, CASE or NULLIF.
 	if _, ok := l.([]any); ok {
@@ -621,6 +628,13 @@ func unmodeledTextParam(e sqlir.Expr, v, other any) bool {
 	}
 	_, isInt := integer(derefValue(v))
 	return !isInt
+}
+
+func mismatchedParam(e sqlir.Expr, v, other any) bool {
+	if _, ok := e.(*sqlir.Param); !ok || !isOther(v) || !isOther(other) {
+		return false
+	}
+	return reflect.TypeOf(derefValue(v)) != reflect.TypeOf(derefValue(other))
 }
 
 func untypedExpr(e sqlir.Expr) bool {
