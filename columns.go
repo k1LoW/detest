@@ -58,6 +58,9 @@ type columnChecker struct {
 	x      *sqlExec
 	ctes   []map[string]colSet
 	params paramUses
+	// untyped holds the reads of string literals and parameters, run after
+	// the walk, as Postgres types the parameters before it binds them.
+	untyped []func() error
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -84,6 +87,11 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if what := c.params.conflict(x.tx.checking); what != "" {
 		return x.unsupported(what)
+	}
+	for _, read := range c.untyped {
+		if err := read(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -708,10 +716,27 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				switch e.Op {
+				case "=", "<>", "!=", "<", "<=", ">", ">=":
+					c.untypedOperands(sc, e.L, e.R)
+				}
+			case *sqlir.InExpr:
+				for _, item := range e.List {
+					c.untypedOperands(sc, e.X, item)
+				}
+			case *sqlir.CaseExpr:
+				if e.Arg != nil {
+					for _, w := range e.Whens {
+						c.untypedOperands(sc, e.Arg, w.When)
+					}
+				}
 			case *sqlir.FuncCall:
 				if what := textArgumentMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
+				}
+				if e.Name == "nullif" && len(e.Args) == 2 {
+					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
 			case *sqlir.ColumnRef:
 				err = c.resolve(e, sc)
@@ -735,6 +760,47 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 	}
 	walk(reflect.ValueOf(n))
 	return err
+}
+
+// untypedOperands reads a string literal or parameter compared with an
+// operand of a type the statement shows, as Postgres reads it when it plans
+// or binds the statement. untypedPair reads it again for each row, but a
+// statement that reaches no row, over an empty table or behind a
+// short-circuited OR, must still fail with the input's error.
+func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
+	if untypedExpr(a) == untypedExpr(b) {
+		return
+	}
+	if untypedExpr(b) {
+		a, b = b, a
+	}
+	var sample any
+	switch expressionType(b, sc.columnType) {
+	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":
+		sample = int64(0)
+	case "float4", "float8", "real", "double precision", "numeric", "decimal":
+		sample = float64(0)
+	case "bool", "boolean":
+		sample = false
+	case "uuid":
+		sample = uuidValue("")
+	default:
+		return
+	}
+	c.untyped = append(c.untyped, func() error {
+		var v any
+		switch a := a.(type) {
+		case *sqlir.Const:
+			v = a.Value
+		case *sqlir.Param:
+			if a.Index < 0 || a.Index >= len(c.x.args) {
+				return nil
+			}
+			v = paramText(a, c.x.args[a.Index])
+		}
+		_, err := c.x.untyped(a, v, sample)
+		return err
+	})
 }
 
 // target is the scope of the table a write targets.

@@ -693,6 +693,26 @@ var valueCases = []difftest.Case{
 			difftest.S(0, `DELETE FROM u WHERE u = 'nope'`),
 		},
 	},
+	{
+		// Postgres reads a string literal by its operand's type when it
+		// plans the statement, so invalid input fails one that reaches no
+		// row too.
+		Name:   "invalid untyped input over no rows",
+		Schema: []string{`CREATE TABLE z (id int PRIMARY KEY, u uuid, b bool, f float8)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM z WHERE u = 'nope'`),
+			difftest.Q(0, `SELECT id FROM z WHERE id = 'abc'`),
+			difftest.Q(0, `SELECT id FROM z WHERE 'maybe' = b`),
+			difftest.Q(0, `SELECT id FROM z WHERE f < 'x'`),
+			difftest.Q(0, `SELECT id FROM z WHERE id IN (1, 'abc')`),
+			difftest.Q(0, `SELECT 1 WHERE true OR 1 = 'abc'`),
+			difftest.Q(0, `SELECT CASE 1 WHEN 'abc' THEN 1 END`),
+			difftest.Q(0, `SELECT nullif(1, 'abc')`),
+			difftest.S(0, `UPDATE z SET b = true WHERE u = 'nope'`),
+			difftest.Q(0, `SELECT id FROM z WHERE id = '1' AND u = '00000000-0000-0000-0000-00000000000A'`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

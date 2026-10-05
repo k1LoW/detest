@@ -847,6 +847,10 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 		{`SELECT id FROM a WHERE u = 'nope'`, nil},
 		{`SELECT id FROM a WHERE u = $1`, []any{"nope"}},
 		{`SELECT id FROM a WHERE u = ANY($1)`, []any{[]string{"nope"}}},
+		// Read when the statement is bound, before it reaches a row.
+		{`SELECT id FROM a WHERE id < 0 AND u = $1`, []any{"nope"}},
+		{`SELECT id FROM a WHERE true OR u = $1`, []any{"nope"}},
+		{`SELECT id FROM a WHERE false AND id = $1`, []any{"abc"}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
