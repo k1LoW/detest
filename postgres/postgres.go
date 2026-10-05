@@ -333,7 +333,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		if err != nil {
 			return nil, true, err
 		}
-		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts}}, true, nil
+		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,

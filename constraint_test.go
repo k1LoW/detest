@@ -569,3 +569,18 @@ CREATE SEQUENCE billing.s START 50;
 		t.Errorf("the default keeps public.s, which s named when it was stored: %d %v", id, err)
 	}
 }
+
+func TestAlterAndDropMissingSequence(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE t (id int PRIMARY KEY);
+ALTER SEQUENCE IF EXISTS missing RESTART WITH 5;
+DROP SEQUENCE IF EXISTS missing;
+`)
+	for _, q := range []string{`ALTER SEQUENCE missing RESTART WITH 5`, `DROP SEQUENCE missing`, `SELECT nextval('missing')`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}

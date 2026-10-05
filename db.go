@@ -903,6 +903,15 @@ func (db *DB) missingSequence(seq string) error {
 	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(seq)), relname(seq), "", "")
 }
 
+// noSequence is the error of ALTER or DROP SEQUENCE of a sequence that does
+// not exist, none with IF EXISTS.
+func (db *DB) noSequence(seq string, ifExists bool) error {
+	if ifExists {
+		return nil
+	}
+	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(seq)), relname(seq), "", "")
+}
+
 // notSequence is the error of a sequence function or DDL given a table or
 // view.
 func (db *DB) notSequence(seq string) error {
@@ -1067,6 +1076,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.isRelation(name) {
 			return db.notSequence(name)
 		}
+		if _, ok := db.seqDefs[name]; !ok {
+			return db.noSequence(name, ch.IfExists)
+		}
 		// The defaults drawing from it depend on it: CASCADE drops them,
 		// and the identity they make, where Postgres refuses the drop
 		// otherwise, which fails the setup that runs it.
@@ -1097,8 +1109,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			if db.isRelation(name) {
 				return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(name)), relname(name), "", "")
 			}
-		} else if db.isRelation(db.seqName(ch.Table)) {
-			return db.notSequence(db.seqName(ch.Table))
+		} else if name := db.seqName(ch.Table); db.isRelation(name) {
+			return db.notSequence(name)
+		} else if _, ok := db.seqDefs[name]; !ok {
+			return db.noSequence(name, ch.IfExists)
 		}
 		db.alterSequence(ch.Table, ch.Sequence, ch.Create)
 		return nil
