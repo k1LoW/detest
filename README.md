@@ -194,7 +194,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Query forms*
 
-- Recursive CTEs, a CTE that writes (`WITH d AS (DELETE ... RETURNING ...)`), `WITH` on `INSERT ... VALUES`, and a CTE of `UPDATE` or `DELETE` named as the table it writes. `WITH` on `SELECT`, `INSERT ... SELECT`, `UPDATE` and `DELETE` runs
+- Recursive CTEs, a CTE that writes (`WITH d AS (DELETE ... RETURNING ...)`), `WITH` on `INSERT ... VALUES`, a CTE of `UPDATE` or `DELETE` named as the table it writes, a CTE of `UPDATE` or `DELETE` that locks rows or calls a function with effects (`FOR UPDATE`, `nextval`) read other than as an item of `FROM` or `USING`, since Postgres runs it there only as far as the statement asks for its rows, and `RETURNING *` of an `UPDATE ... FROM` or a `DELETE ... USING`. `WITH` on `SELECT`, `INSERT ... SELECT`, `UPDATE` and `DELETE` runs
 - Column alias lists on a table, a CTE or a view (`FROM t AS x(a, b)`, `WITH c(a) AS (...)`)
 - `RIGHT` and `FULL` joins, `JOIN ... USING`, `NATURAL JOIN`, `TABLESAMPLE`, `SELECT INTO`, `INSERT ... DEFAULT VALUES`
 - Set-returning functions other than `generate_series` in `FROM`, such as `unnest`, and any set-returning function in the select list, `generate_series` included
