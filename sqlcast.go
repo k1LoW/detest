@@ -309,11 +309,33 @@ func castValue(v any, typ string) (any, error) {
 		}
 		return uuidValue(c), nil
 	case "interval":
-		if s, ok := v.(string); ok {
-			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {
+		switch v := v.(type) {
+		case time.Duration:
+			return v, nil
+		case string:
+			d, ierr := parseInterval(v)
+			if ierr == nil {
 				return d, nil
 			}
+			if ierr.malformed {
+				return nil, kindError{sqlir.InvalidDatetimeFormat, fmt.Sprintf("invalid input syntax for type interval: %q", v)}
+			}
+			return nil, errUnknownExpr{ierr.what}
 		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to interval", v)}
+	case "date":
+		switch v := v.(type) {
+		case time.Time:
+			return utcDate(v), nil
+		case string:
+			tm, _, ok := pgParseTime(v)
+			if !ok {
+				return nil, errUnknownExpr{fmt.Sprintf("the date %q, in a format detest does not parse", v)}
+			}
+			// The date part as written: a date drops the time and any zone.
+			return time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, time.UTC), nil
+		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to date", v)}
 	}
 	return v, nil
 }

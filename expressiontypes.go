@@ -1,6 +1,10 @@
 package detest
 
-import "github.com/k1LoW/detest/internal/sqlir"
+import (
+	"strings"
+
+	"github.com/k1LoW/detest/internal/sqlir"
+)
 
 // expressionType uses only types the statement or its declared columns tell
 // us. It never evaluates an argument while resolving a function signature.
@@ -92,6 +96,19 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "float8"
 		case "now", "clock_timestamp", "transaction_timestamp", "statement_timestamp", "current_timestamp":
 			return "timestamptz"
+		case "current_date":
+			return "date"
+		case "extract":
+			return "numeric"
+		case "date_part":
+			return "float8"
+		case "date_trunc":
+			// A timestamp's stays a timestamp, and a date's becomes a
+			// timestamptz, as any other's.
+			if len(e.Args) == 2 && expressionType(e.Args[1], column) == "timestamp" {
+				return "timestamp"
+			}
+			return "timestamptz"
 		case "gen_random_uuid", "uuid_generate_v4":
 			return "uuid"
 		}
@@ -140,6 +157,41 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " key argument"
 			}
 		}
+	case "date_trunc", "extract", "date_part":
+		if len(f.Args) != 2 {
+			break
+		}
+		switch typ := expressionType(f.Args[0], column); typ {
+		case "", "unresolved column type", "text", "varchar":
+		default:
+			return f.Name + " with a " + typ + " unit"
+		}
+		unit := ""
+		if k, ok := f.Args[0].(*sqlir.Const); ok {
+			if s, ok := k.Value.(string); ok {
+				unit = timeUnits[strings.ToLower(s)]
+			}
+		}
+		switch typ := expressionType(f.Args[1], column); typ {
+		case "", "unresolved column type", "timestamp", "timestamptz":
+		case "date":
+			// extract from a date fails for a unit of the time of day, which
+			// the value, a time at midnight, does not tell.
+			if f.Name == "extract" {
+				switch unit {
+				case "", "microseconds", "milliseconds", "second", "minute", "hour", "timezone", "timezone_hour", "timezone_minute":
+					return "extract of a time-of-day unit, or a unit given at run time, from a date"
+				}
+			}
+		case "interval":
+			// An interval keeps its days apart from its time, which the
+			// duration detest holds does not, so only its length is known.
+			if f.Name == "date_trunc" || unit != "epoch" {
+				return f.Name + " of an interval other than extract(epoch FROM ...)"
+			}
+		default:
+			return f.Name + " of a " + typ
+		}
 	case "abs", "floor", "ceil", "ceiling", "power", "pow":
 		// Postgres has no signature of these for a non-numeric argument
 		// and rejects the call before evaluating any of them, where
@@ -152,6 +204,16 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	}
+	return ""
+}
+
+// dateDifferenceMismatch refuses date - date, which Postgres gives as an
+// integer of days. A date is a time at midnight to detest, so the difference
+// would come out an interval.
+func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
+	if b.Op == "-" && expressionType(b.L, column) == "date" && expressionType(b.R, column) == "date" {
+		return "date - date"
 	}
 	return ""
 }

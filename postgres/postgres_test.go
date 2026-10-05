@@ -12,7 +12,6 @@ import (
 // differently on a real server.
 func TestUnsupportedRatherThanApproximated(t *testing.T) {
 	for _, q := range []string{
-		`SELECT CURRENT_DATE`,
 		`SELECT CURRENT_USER`,
 		`SELECT * FROM t WHERE created_by = SESSION_USER`,
 		`ALTER TABLE t ALTER COLUMN b DROP EXPRESSION`,

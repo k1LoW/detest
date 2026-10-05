@@ -935,6 +935,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if what := dateDifferenceMismatch(e, sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				switch e.Op {
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {

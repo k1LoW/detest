@@ -37,6 +37,7 @@ var (
 	ErrDivisionByZero            = sqlir.ErrDivisionByZero
 	ErrNumericValueOutOfRange    = sqlir.ErrNumericValueOutOfRange
 	ErrInvalidTextRepresentation = sqlir.ErrInvalidTextRepresentation
+	ErrInvalidDatetimeFormat     = sqlir.ErrInvalidDatetimeFormat
 	ErrSyntaxError               = sqlir.ErrSyntaxError
 	ErrUndefinedParameter        = sqlir.ErrUndefinedParameter
 	ErrInvalidColumnReference    = sqlir.ErrInvalidColumnReference

@@ -87,6 +87,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "22003", 0
 	case sqlir.InvalidTextRepresentation:
 		return "22P02", 0
+	case sqlir.InvalidDatetimeFormat:
+		return "22007", 0
 	case sqlir.SyntaxError:
 		return "42601", 0
 	case sqlir.UndefinedParameter:
@@ -190,6 +192,34 @@ func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what,
 // Committed (Read Uncommitted is Read Committed in Postgres) and READ WRITE.
 // A read-only default would fail every write with 25006, which detest does
 // not model. DEFERRABLE changes nothing outside Serializable and is ignored.
+// utcZones are the names of UTC among Postgres's time zones.
+var utcZones = map[string]bool{
+	"utc": true, "etc/utc": true, "uct": true, "etc/uct": true, "gmt": true, "etc/gmt": true,
+	"universal": true, "etc/universal": true, "zulu": true, "etc/zulu": true,
+}
+
+// timeZoneSet refuses SET TIME ZONE to a zone other than UTC. detest computes
+// the fields of a timestamptz, date_trunc and CURRENT_DATE in UTC, the
+// server's default TimeZone, and in another zone they give other days and
+// hours, so the setting cannot be ignored as the others are. The default
+// (LOCAL, DEFAULT, RESET) and an offset of 0 are UTC.
+func (c *pgConv) timeZoneSet(v *pg.VariableSetStmt) error {
+	if v.Name != "timezone" || v.Kind != pg.VariableSetKind_VAR_SET_VALUE {
+		return nil
+	}
+	if len(v.Args) == 1 {
+		if k := v.Args[0].GetAConst(); k != nil {
+			switch {
+			case k.GetSval() != nil && utcZones[strings.ToLower(k.GetSval().Sval)]:
+				return nil
+			case k.GetIval() != nil && k.GetIval().Ival == 0:
+				return nil
+			}
+		}
+	}
+	return c.unsupported("SET TIME ZONE to a zone other than UTC")
+}
+
 func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 	var level, readOnly string
 	switch v.Kind {
@@ -283,6 +313,9 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 	case *pg.Node_VariableSetStmt:
 		v := s.VariableSetStmt
 		if err := c.transactionSet(v); err != nil {
+			return nil, err
+		}
+		if err := c.timeZoneSet(v); err != nil {
 			return nil, err
 		}
 		if v.Kind == pg.VariableSetKind_VAR_RESET_ALL {
@@ -674,7 +707,7 @@ func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sq
 var mutableFuncs = map[string]bool{
 	"nextval": true, "setval": true, "currval": true, "gen_random_uuid": true, "uuid_generate_v4": true,
 	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true,
-	"statement_timestamp": true, "random": true, "concat": true,
+	"statement_timestamp": true, "current_date": true, "random": true, "concat": true,
 	"pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
 	"count": true, "sum": true, "min": true, "max": true, "avg": true,
 }
@@ -1923,6 +1956,9 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		switch e.SqlvalueFunction.Op {
 		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP:
 			return &sqlir.FuncCall{Name: "now"}, nil
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_DATE:
+			// CURRENT_DATE cannot be written as a call, so the name is free.
+			return &sqlir.FuncCall{Name: "current_date"}, nil
 		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
 			// current_timestamp with an argument cannot be written as a call,
 			// so it is free to carry the precision to round to.

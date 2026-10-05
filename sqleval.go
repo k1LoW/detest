@@ -1123,7 +1123,7 @@ func floatTyped(e sqlir.Expr) bool {
 		return slices.ContainsFunc(caseBranches(e), floatTyped)
 	case *sqlir.FuncCall:
 		switch e.Name {
-		case "floor", "ceil", "ceiling", "round", "avg", "power", "pow", "random":
+		case "floor", "ceil", "ceiling", "round", "avg", "power", "pow", "random", "extract", "date_part":
 			return true
 		case "coalesce", "greatest", "least", "nullif", "abs", "sum", "min", "max":
 			return slices.ContainsFunc(e.Args, floatTyped)
@@ -1169,7 +1169,9 @@ func exprNumberKind(e sqlir.Expr) numberKind {
 		}
 	case *sqlir.FuncCall:
 		switch e.Name {
-		case "mysql_double":
+		case "extract":
+			return numericKind
+		case "mysql_double", "date_part":
 			return floatKind
 		case "mysql_dividend":
 			return exprNumberKind(e.Args[0])
@@ -1219,6 +1221,7 @@ var strictFuncs = map[string][]int{
 	"abs": {1}, "floor": {1}, "ceil": {1}, "ceiling": {1}, "round": {1, 2}, "power": {2}, "pow": {2},
 	"nextval": {1}, "setval": {2, 3}, "pg_advisory_xact_lock": {1, 2}, "pg_try_advisory_xact_lock": {1, 2},
 	"octet_length": {1}, "left": {2}, "mysql_signed": {1}, "mysql_double": {1}, "mysql_dividend": {1},
+	"date_trunc": {2}, "extract": {2}, "date_part": {2},
 }
 
 // mysqlNullIfAnyNull are MySQL's functions of any number of arguments that
@@ -1274,7 +1277,7 @@ func roundDecimal(f float64, n int) float64 {
 var otherArity = map[string][]int{
 	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
 	"current_timestamp": {1}, "random": {0}, "nullif": {2},
-	"gen_random_uuid": {0}, "uuid_generate_v4": {0},
+	"gen_random_uuid": {0}, "uuid_generate_v4": {0}, "current_date": {0},
 }
 
 func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
@@ -1584,6 +1587,52 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if oka && okb {
 			return math.Pow(a, b), nil
 		}
+	case "current_date":
+		ts := x.tx.start
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		return utcDate(ts), nil
+	case "date_trunc":
+		unit, ok := d(0).(string)
+		if !ok {
+			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T unit", d(0))}
+		}
+		t, ok := d(1).(time.Time)
+		if !ok {
+			// An interval keeps its days apart from its time, which a
+			// duration does not.
+			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T", d(1))}
+		}
+		r, ok := dateTrunc(unit, t)
+		if !ok {
+			return nil, x.errUnit(unit)
+		}
+		return r, nil
+	case "extract", "date_part":
+		unit, ok := d(0).(string)
+		if !ok {
+			return nil, errUnknownExpr{fmt.Sprintf("%s of a %T unit", name, d(0))}
+		}
+		dec, unknown, what := extractField(unit, d(1))
+		if unknown {
+			return nil, x.errUnit(unit)
+		}
+		if what != "" {
+			return nil, errUnknownExpr{what}
+		}
+		f, err := parseNumber(dec)
+		if err != nil {
+			return nil, err
+		}
+		if name == "date_part" {
+			return f, nil // double precision
+		}
+		// extract gives a numeric, which detest keeps as a float.
+		if !exactAsFloat(dec) {
+			return nil, x.unsupported("an extract result with more digits than a float keeps")
+		}
+		return numeric(f), nil
 	case "make_interval":
 		// make_interval(secs => x) is the form that appears in backoff SQL; a
 		// single argument is taken as seconds.
