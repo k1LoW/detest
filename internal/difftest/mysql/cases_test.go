@@ -1191,6 +1191,27 @@ var cases = []difftest.Case{
 			difftest.S(0, `COMMIT`),
 		},
 	},
+	{
+		Name:   "decimal scale and arithmetic",
+		Schema: []string{`CREATE TABLE m (id INT PRIMARY KEY, price DECIMAL(10,2), small DECIMAL(4,1), whole DECIMAL)`},
+		Seed:   []string{`INSERT INTO m (id, price) VALUES (1, 100.50), (2, 10.00), (3, 0.10), (4, 0.20)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO m (id, price) VALUES (5, 1.005), (6, '2.999'), (7, -1.005)`),
+			difftest.Q(0, `SELECT id FROM m WHERE price IN (1.01, 3, -1.01) ORDER BY id`),
+			difftest.S(0, `INSERT INTO m (id, whole) VALUES (8, 2.5)`),
+			difftest.Q(0, `SELECT id FROM m WHERE whole = 3`),
+			difftest.S(0, `INSERT INTO m (id, small) VALUES (9, 999.95)`),
+			difftest.S(0, `UPDATE m SET price = price * 1.1 WHERE id = 1`),
+			difftest.S(0, `UPDATE m SET price = price / 3 WHERE id = 2`),
+			difftest.Q(0, `SELECT id FROM m WHERE price IN (110.55, 3.33) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM m WHERE id = 3 AND 0.1 + 0.2 = 0.3 AND 1 / 8 = 0.125`),
+			difftest.Q(0, `SELECT COUNT(*) FROM m WHERE id IN (3, 4) HAVING SUM(price) > 0.29`),
+			difftest.Q(0, `SELECT COUNT(*) FROM m WHERE id IN (3, 4) HAVING SUM(price) < 0.31`),
+			difftest.Q(0, `SELECT COUNT(*) FROM m WHERE id IN (3, 4) HAVING AVG(price) < 0.16`),
+			difftest.Q(0, `SELECT id FROM m WHERE price * 1.1 > 0.2 ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

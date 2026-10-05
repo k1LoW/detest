@@ -97,11 +97,11 @@ func (x *sqlExec) assignedValue(table string, a sqlir.Assignment, en *env, where
 	if _, ok := a.Value.(*sqlir.Default); ok {
 		return x.columnDefault(table, a.Column)
 	}
-	v, err := x.eval(a.Value, en)
+	v, err := x.evalRaw(a.Value, en)
 	if err != nil {
 		return nil, x.unsupportedExpr(err, where)
 	}
-	return v, nil
+	return x.columnValue(table, a.Column, v)
 }
 
 // uniqueValues returns the values row takes in the unique index u. ok is false
@@ -852,6 +852,13 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if t == "float" {
 				f = float64(float32(f)) // FLOAT keeps single precision
 			}
+			if l, ok := def.nums[col]; ok && t == "decimal" {
+				n, err := scaledNumeric(f, l)
+				if err != nil {
+					return x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, fmt.Sprintf("Out of range value for column '%s' at row 1", col), relname(table), col, "")
+				}
+				f, _ = toFloat(n)
+			}
 			row[col] = numeric(f)
 		case "uuid":
 			if s, ok := v.(string); ok && !validUUID(s) {
@@ -1100,6 +1107,17 @@ func scaledNumeric(v any, l numLimit) (any, error) {
 	if !ok {
 		return v, nil
 	}
+	scaled, err := scaledRat(r, l)
+	if err != nil {
+		return nil, err
+	}
+	out, _ := scaled.Float64()
+	return numericValue(out), nil
+}
+
+// scaledRat is r rounded to l's scale, half away from zero, and refused when
+// more than p - s digits are left before the point.
+func scaledRat(r *big.Rat, l numLimit) (*big.Rat, error) {
 	unit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(l.scale)), nil)
 	num := new(big.Int).Mul(r.Num(), unit)
 	q, rem := new(big.Int).QuoRem(num, r.Denom(), new(big.Int))
@@ -1114,8 +1132,7 @@ func scaledNumeric(v any, l numLimit) (any, error) {
 	if new(big.Int).Abs(q).Cmp(limit) >= 0 {
 		return nil, errors.New("numeric field overflow")
 	}
-	out, _ := new(big.Rat).SetFrac(q, unit).Float64()
-	return numericValue(out), nil
+	return new(big.Rat).SetFrac(q, unit), nil
 }
 
 // mysqlMember is v as an ENUM or a SET column stores it: the members it
