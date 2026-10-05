@@ -20,9 +20,9 @@ func TestCTEWrites(t *testing.T) {
 	mustExec(t, db, `INSERT INTO jobs VALUES (1, 'queued', NULL), (2, 'queued', NULL), (3, 'done', NULL)`)
 	claim := `WITH c AS (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
 		UPDATE jobs SET status = 'running', worker = $1 FROM c WHERE jobs.id = c.id RETURNING jobs.id`
-	for worker, want := range []int64{1, 2} {
-		if got := queryIDs(t, db, claim, worker); !slices.Equal(got, []int64{want}) {
-			t.Errorf("claim by worker %d: got %v, want [%d]", worker, got, want)
+	for _, tt := range []struct{ worker, job int64 }{{10, 1}, {11, 2}} {
+		if got := queryIDs(t, db, claim, tt.worker); !slices.Equal(got, []int64{tt.job}) {
+			t.Errorf("claim by worker %d: got %v, want [%d]", tt.worker, got, tt.job)
 		}
 	}
 	if got := queryIDs(t, db, claim, 9); len(got) != 0 {

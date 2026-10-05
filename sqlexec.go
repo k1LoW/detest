@@ -788,6 +788,18 @@ func (x *sqlExec) runPendingCTE(name string) error {
 	return nil
 }
 
+// viewRows runs a view's query without the statement's CTEs in scope: its
+// names were bound when it was created, so a CTE does not shadow a table it
+// reads.
+func (x *sqlExec) viewRows(view *sqlir.SelectStmt) ([]string, []Row, error) {
+	ctes, cteCols, pending, wrows, wcols := x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols
+	defer func() {
+		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = ctes, cteCols, pending, wrows, wcols
+	}()
+	x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = map[string][]Row{}, nil, nil, nil, nil
+	return x.evalSelect(view, nil)
+}
+
 // cteRows are the rows of the CTE name in scope: a query's, or a write's.
 // A query declaring a write's CTE name is refused, so the two never meet.
 func (x *sqlExec) cteRows(name string) ([]Row, bool) {
@@ -850,12 +862,7 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 		return "", nil, false, err
 	}
 	if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil {
-		// A view's names were bound when it was created, so the statement's
-		// CTEs do not shadow the tables it reads.
-		ctes, cteCols, pending, wrows, wcols := x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols
-		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = map[string][]Row{}, nil, nil, nil, nil
-		cols, rows, err := x.evalSelect(v.View, nil)
-		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = ctes, cteCols, pending, wrows, wcols
+		cols, rows, err := x.viewRows(v.View)
 		if err == nil && len(v.ViewColumns) > 0 {
 			rows = renameColumns(rows, cols, v.ViewColumns)
 			cols = renamedCols(cols, v.ViewColumns)
