@@ -11,6 +11,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // Explore declares a simulation with fn and explores every schedule of it,
@@ -49,6 +51,9 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 		timer := time.AfterFunc(maxDuration, f.expire)
 		defer timer.Stop()
 	}
+	// Work done once per process, such as compiling a parser, makes no
+	// scheduling progress, so it is done before the watchdog starts.
+	sqlir.Warmup()
 	stop := watchStall(f)
 	defer stop()
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
