@@ -664,12 +664,12 @@ func (x *sqlExec) withCTEs(ctes []sqlir.CTE, outer *env) error {
 // tableRows returns the rows of a FROM item with the alias they are known by.
 func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []Row, base bool, err error) {
 	alias = t.Alias
+	if dup := duplicateName(t.Columns); dup != "" {
+		// The rows are keyed by name, so the two columns would read the
+		// same value, where Postgres keeps both.
+		return "", nil, false, x.unsupported(fmt.Sprintf("column alias %q given twice", dup))
+	}
 	if t.Sub != nil {
-		if dup := duplicateName(t.Columns); dup != "" {
-			// The rows are keyed by name, so the two columns would read the
-			// same value, where Postgres keeps both.
-			return "", nil, false, x.unsupported(fmt.Sprintf("column alias %q given twice", dup))
-		}
 		cols, rows, err := x.evalSelect(t.Sub, outer)
 		if err == nil && len(t.Columns) > len(cols) {
 			return "", nil, false, x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", alias, len(cols), len(t.Columns)), alias, "", "")
