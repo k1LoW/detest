@@ -187,7 +187,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Isolation*
 
-- Isolation levels other than Read Committed, asked for in `BeginTx` or set by SQL (`SET TRANSACTION ISOLATION LEVEL`, `SET SESSION CHARACTERISTICS`, `transaction_isolation`, `default_transaction_isolation`)
+- Isolation levels other than Read Committed, asked for in `BeginTx` or set by SQL (`SET TRANSACTION ISOLATION LEVEL`, `SET SESSION CHARACTERISTICS`, `transaction_isolation`, `default_transaction_isolation`). `READ UNCOMMITTED` set by SQL runs, as Postgres runs it as Read Committed; `sql.LevelReadUncommitted` in `BeginTx` is refused
 
 *Query forms*
 
@@ -282,7 +282,7 @@ For MySQL, these fail with `detest.ErrUnsupportedSQL` besides the forms above.
 - A `sql_mode` without strict mode, other than the `NO_AUTO_VALUE_ON_ZERO` a dump sets, and a `time_zone` other than UTC (`'+00:00'` as a dump sets it)
 - Temporal strings in formats other than `YYYY-MM-DD[ HH:MM:SS[.ffffff]]`, and values of `TIME` columns
 - Generated columns
-- Functions other than `IF`, `IFNULL`, `COALESCE`, `NULLIF`, `NOW`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `UUID`, `LENGTH`, `CHAR_LENGTH`, `LOWER`, `UPPER`, `LEFT`, `CONCAT`, `GREATEST`, `LEAST`, `ABS`, `FLOOR`, `CEIL`, `ROUND`, `POWER` and `LAST_INSERT_ID()`, the aggregates and the window functions above. Among the refused: `INTERVAL` expressions (`NOW() - INTERVAL 1 DAY`, `DATE_SUB`, `ADDDATE`, `TIMESTAMPDIFF`), `DATE`, `UTC_TIMESTAMP`, `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `DATEDIFF`, the JSON functions and operators (`JSON_EXTRACT`, `->>`, `JSON_SET`), `GROUP_CONCAT`, `FIND_IN_SET`, `GET_LOCK`, `ROW_COUNT`, `FOUND_ROWS`, `UUID_TO_BIN` and `BIN_TO_UUID`
+- Functions other than `IF`, `IFNULL`, `COALESCE`, `NULLIF`, `NOW`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `LOCALTIME`, `UUID`, `LENGTH`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `LOWER`, `LCASE`, `UPPER`, `UCASE`, `LEFT`, `CONCAT`, `GREATEST`, `LEAST`, `ABS`, `FLOOR`, `CEIL`, `CEILING`, `ROUND`, `POWER`, `POW` and `LAST_INSERT_ID()`, the aggregates and the window functions above. Among the refused: `INTERVAL` expressions (`NOW() - INTERVAL 1 DAY`, `DATE_SUB`, `ADDDATE`, `TIMESTAMPDIFF`), `DATE`, `UTC_TIMESTAMP`, `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `DATEDIFF`, the JSON functions and operators (`JSON_EXTRACT`, `->>`, `JSON_SET`), `GROUP_CONCAT`, `FIND_IN_SET`, `GET_LOCK`, `ROW_COUNT`, `FOUND_ROWS`, `UUID_TO_BIN` and `BIN_TO_UUID`
 - `REGEXP` and `RLIKE`, `MATCH ... AGAINST`, `BINARY`, `CAST` to `UNSIGNED` or `DECIMAL`, the bit operators and `DIV`, `COLLATE` in an expression, user variables (`@x`), index hints, `WITH` on `UPDATE` or `DELETE`, `SET TRANSACTION ISOLATION LEVEL` and `SET autocommit = 0`, `SHOW`, `CREATE TEMPORARY TABLE`, and DDL or `TRUNCATE` inside a transaction
 
 ### Queue
