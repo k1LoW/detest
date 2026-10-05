@@ -164,6 +164,41 @@ func TestRefusalBeforeAnyRunIsReported(t *testing.T) {
 	}
 }
 
+// A redelivery is another process than the delivery that failed, so it
+// draws its own priority and another message can come between the two.
+func TestPrioritizedRedeliveryDrawsItsOwnPriority(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		var order []string
+		failed := false
+		s.Seed(func() { order, failed = nil, false })
+		q := s.Queue("jobs")
+		s.Manual("producer", 1, func(p *Proc) error {
+			q.Enqueue(p, Msg{"id": "A"})
+			q.Enqueue(p, Msg{"id": "B"})
+			return nil
+		})
+		s.OnMessage("worker", q, func(p *Proc, msg Msg) error {
+			id := msg.Str("id")
+			order = append(order, id)
+			if id == "A" && !failed {
+				failed = true
+				return fmt.Errorf("A fails once")
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if strings.Join(order, ",") == "A,B,A" {
+				return fmt.Errorf("B came between A and its retry")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{Prioritized(1, 1), MaxRuns(200)}, nil, 0)
+	if !res.Violated {
+		t.Fatalf("want A, B, A found, got %s", res.report())
+	}
+}
+
 func TestPrioritizedFindsViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		counterModel(s, false)

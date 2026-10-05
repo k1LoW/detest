@@ -126,8 +126,17 @@ func (p *prioritized) pick(r *run, opts []option) int {
 		// the run takes rather than end there.
 		return p.rng.IntN(len(opts))
 	}
-	if opts[best].kind != optResume {
+	if o := opts[best]; o.kind != optResume {
 		p.inherit = bestPrio
+		// The option makes a new process, which takes the priority with it.
+		// The next process the same option makes, such as a redelivery or a
+		// loop's next tick after an idle one, is another and draws its own.
+		switch o.kind {
+		case optStart:
+			delete(p.starts, startKey{o.pt, r.runs[o.pt]})
+		case optDeliver:
+			delete(p.delivers, deliverKey{o.pt, o.q.msgs[o.i]})
+		}
 	}
 	return best
 }
