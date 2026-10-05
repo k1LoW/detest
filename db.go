@@ -848,6 +848,9 @@ type seqDef struct {
 	start, inc, first int64
 	min, max          *int64
 	cache             int64
+	// owner is the table and column that own the sequence, a serial or
+	// identity column or OWNED BY, which drop it with them.
+	owner [2]string
 }
 
 // seqName is the sequence name s refers to: one qualified by a schema as
@@ -964,12 +967,29 @@ func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
 	if db.seqDefs == nil {
 		db.seqDefs = map[string]*seqDef{}
 	}
+	switch {
+	case o.OwnedNone:
+		d.owner = [2]string{}
+	case o.OwnedBy[0] != "":
+		d.owner = [2]string{db.resolve(o.OwnedBy[0]), o.OwnedBy[1]}
+	}
 	db.seqDefs[seq] = &d
 }
 
 func (db *DB) dropSequence(seq string) {
 	delete(db.seqDefs, seq)
 	delete(db.seqs, seq)
+}
+
+// dropOwnedSequences drops the sequences table's column col owns, or any of
+// its columns when col is empty, as Postgres drops them with the table or
+// the column.
+func (db *DB) dropOwnedSequences(table, col string) {
+	for name, d := range db.seqDefs {
+		if d.owner[0] == table && (col == "" || d.owner[1] == col) {
+			db.dropSequence(name)
+		}
+	}
 }
 
 // nextval returns the next value of seq, or why detest refuses to. A
@@ -1068,15 +1088,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.defs[table] == nil && !isView && !ch.IfExists {
 			return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
 		}
-		if def := db.defs[table]; def != nil {
-			// The sequences of its serial and identity columns are the
-			// table's and go with it.
-			for col, d := range def.defaults {
-				if name, ok := nextvalOf(d); ok && db.seqName(name) == db.seqName(table+"_"+col+"_seq") {
-					db.dropSequence(db.seqName(name))
-				}
-			}
-		}
+		db.dropOwnedSequences(table, "")
 		delete(db.defs, table)
 		delete(db.committed, table)
 		delete(db.history, table) // a table created again under the name starts with no versions
@@ -1210,6 +1222,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		case "":
 		case "drop":
 			delete(def.identityAlways, col.Name)
+			db.dropOwnedSequences(table, col.Name) // an identity's sequence goes with it
 		default:
 			if def.identityAlways == nil {
 				def.identityAlways = map[string]bool{}
@@ -1223,6 +1236,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			}
 			if name, ok := nextvalOf(d); ok {
 				db.alterSequence(name, col.Sequence, !col.TypeOnly)
+				if !col.TypeOnly {
+					// A serial or identity column owns the sequence it makes.
+					db.seqDefs[db.seqName(name)].owner = [2]string{table, col.Name}
+				}
 			}
 		}
 		if col.TypeOnly {
@@ -1322,9 +1339,15 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	for _, col := range ch.DropColumns {
 		def.dropColumn(col)
 		db.dropColumnInRows(table, col, tx)
+		db.dropOwnedSequences(table, col)
 	}
 	if old, nw := ch.RenameColumn[0], ch.RenameColumn[1]; old != "" {
 		def.renameColumn(old, nw)
+		for _, d := range db.seqDefs {
+			if d.owner == [2]string{table, old} {
+				d.owner[1] = nw
+			}
+		}
 		if v, ok := db.seqs[autoIncKey(table, old)]; ok {
 			delete(db.seqs, autoIncKey(table, old))
 			db.seqs[autoIncKey(table, nw)] = v
@@ -1763,6 +1786,11 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 	if def, ok := db.defs[table]; ok {
 		delete(db.defs, table)
 		db.defs[to] = def
+		for _, d := range db.seqDefs {
+			if d.owner[0] == table {
+				d.owner[0] = to
+			}
+		}
 		moved = true
 		for _, other := range db.defs { // foreign keys that reference the table
 			for i := range other.fks {

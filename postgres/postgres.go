@@ -797,6 +797,17 @@ func (c *pgConv) sequenceOptions(opts []*pg.Node) (*sqlir.SequenceOptions, strin
 			out.Cache = v
 		case "restart":
 			out.Restart, out.RestartStart = v, v == nil
+		case "owned_by":
+			var parts []string
+			for _, p := range d.Arg.GetList().GetItems() {
+				parts = append(parts, p.GetString_().GetSval())
+			}
+			switch {
+			case len(parts) == 1 && strings.EqualFold(parts[0], "none"):
+				out.OwnedNone = true
+			case len(parts) >= 2:
+				out.OwnedBy = [2]string{strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]}
+			}
 		case "sequence_name":
 			var parts []string
 			for _, p := range d.Arg.GetList().GetItems() {

@@ -252,6 +252,10 @@ type SequenceOptions struct {
 	// value, which starts over at the start value.
 	Restart      *int64
 	RestartStart bool
+	// OwnedBy is OWNED BY table.column, the column whose table or column
+	// a DROP drops the sequence with, and OwnedNone is OWNED BY NONE.
+	OwnedBy   [2]string
+	OwnedNone bool
 }
 
 // ColumnDef is a column with its default, if any. A serial or identity column
