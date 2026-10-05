@@ -3667,6 +3667,8 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		if name := x.tx.db.seqName(fmt.Sprint(derefValue(args[0]))); x.tx.db.isRelation(name) {
 			return nil, x.tx.db.notSequence(name)
+		} else if err := x.tx.db.missingSequence(name); err != nil {
+			return nil, err
 		}
 		v, refused := x.tx.db.nextval(fmt.Sprint(derefValue(args[0])))
 		if refused != "" {
@@ -3690,6 +3692,8 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		if name := x.tx.db.seqName(fmt.Sprint(derefValue(args[0]))); x.tx.db.isRelation(name) {
 			return nil, x.tx.db.notSequence(name)
+		} else if err := x.tx.db.missingSequence(name); err != nil {
+			return nil, err
 		}
 		x.tx.db.setval(fmt.Sprint(derefValue(args[0])), v, called)
 		return v, nil

@@ -1055,3 +1055,14 @@ func TestColumnCheckWithoutSchema(t *testing.T) {
 		t.Errorf("a derived table's columns are known without a schema: %v", err)
 	}
 }
+
+func TestUndeclaredSequenceIsUndefined(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	for _, q := range []string{`SELECT nextval('missing')`, `SELECT setval('missing', 3)`} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}

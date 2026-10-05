@@ -890,6 +890,19 @@ func (db *DB) isRelation(seq string) bool {
 	return db.defs[table] != nil || isView
 }
 
+// missingSequence reports a sequence function given a name no sequence has,
+// once a schema is declared; without one, any name counts from 1, as a
+// test that declares no schema runs nextval on whatever its defaults name.
+func (db *DB) missingSequence(seq string) error {
+	if db.defs == nil {
+		return nil
+	}
+	if _, ok := db.seqDefs[seq]; ok {
+		return nil
+	}
+	return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(seq)), relname(seq), "", "")
+}
+
 // notSequence is the error of a sequence function or DDL given a table or
 // view.
 func (db *DB) notSequence(seq string) error {
@@ -2448,7 +2461,18 @@ func (db *DB) pkConstraint(table string) string {
 // the search path does not take it over.
 func (db *DB) bindSequence(e sqlir.Expr) sqlir.Expr {
 	name, ok := nextvalOf(e)
-	if !ok || strings.Contains(name, ".") {
+	if !ok {
+		return e
+	}
+	if seq := db.seqName(name); !db.isRelation(seq) {
+		if _, declared := db.seqDefs[seq]; !declared {
+			// Postgres needs the sequence to exist, but ddl.From writes a
+			// serial column's default without its CREATE SEQUENCE, so one
+			// a stored default names is declared with it.
+			db.alterSequence(name, &sqlir.SequenceOptions{}, true)
+		}
+	}
+	if strings.Contains(name, ".") {
 		return e
 	}
 	resolved := db.seqName(name)
