@@ -1467,6 +1467,23 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 			return cols
 		}
 	case t.Func != nil:
+		// The value column, then the ordinality one, as functionRows names
+		// them, with no rows too.
+		names := []string{t.Func.Name}
+		switch {
+		case len(t.Columns) > 0:
+			names[0] = t.Columns[0]
+		case t.Alias != "":
+			names[0] = t.Alias
+		}
+		if t.Ordinality {
+			ord := "ordinality"
+			if len(t.Columns) > 1 {
+				ord = t.Columns[1]
+			}
+			names = append(names, ord)
+		}
+		return names
 	default:
 		if _, isCTE := x.ctes[t.Name]; isCTE {
 			if cols, ok := x.cteCols[t.Name]; ok {
