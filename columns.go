@@ -40,6 +40,9 @@ type colScope struct {
 	// anyOutput is a set operation's output whose names detest does not
 	// know, as its first query has a *, which any name may refer to.
 	anyOutput bool
+	// hidden is the target of an UPDATE or a DELETE, which its FROM or
+	// USING items may not refer to.
+	hidden string
 	// excluded are the columns of ON CONFLICT DO UPDATE's proposed row,
 	// with hasExcluded telling a table of unknown columns from none.
 	excluded    colSet
@@ -409,6 +412,11 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	if r.Table != "" {
 		cols, ok := sc.lookupItem(r.Table)
 		if !ok {
+			for s := sc; s != nil; s = s.outer {
+				if s.hidden == r.Table {
+					return c.x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("invalid reference to FROM-clause entry for table %q", r.Table), r.Table, "", "")
+				}
+			}
 			return c.missingItem(r.Table)
 		}
 		if cols == nil {
@@ -598,10 +606,8 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if err := c.assigned(up.Table, cols, assignedColumns(up.Set)); err != nil {
 		return err
 	}
-	for _, t := range up.From {
-		if err := c.item(t, sc); err != nil {
-			return err
-		}
+	if err := c.extraItems(up.From, sc, targetAlias(up.Table, up.Alias)); err != nil {
+		return err
 	}
 	if err := c.exprs(assignedValues(up.Set), sc); err != nil {
 		return err
@@ -612,12 +618,30 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	return c.returning(up.Returning, sc, targetAlias(up.Table, up.Alias))
 }
 
-func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
-	sc, _ := c.target(del.Table, del.Alias)
-	for _, t := range del.Using {
-		if err := c.item(t, sc); err != nil {
+// extraItems adds UPDATE's FROM or DELETE's USING items to the target's
+// scope. They are checked in a scope of their own, as a LATERAL one sees
+// the items before it but not the target, which Postgres does not expose
+// to them.
+func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target string) error {
+	own := &colScope{items: map[string]colSet{}, hidden: target}
+	for _, t := range items {
+		if err := c.item(t, own); err != nil {
 			return err
 		}
+	}
+	for alias, cols := range own.items {
+		if _, dup := sc.items[alias]; dup {
+			return c.x.unsupported(fmt.Sprintf("FROM items with the same name %q", alias))
+		}
+		sc.items[alias] = cols
+	}
+	return nil
+}
+
+func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
+	sc, _ := c.target(del.Table, del.Alias)
+	if err := c.extraItems(del.Using, sc, targetAlias(del.Table, del.Alias)); err != nil {
+		return err
 	}
 	if err := c.exprs(del.Where, sc); err != nil {
 		return err

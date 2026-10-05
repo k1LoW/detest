@@ -54,6 +54,8 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `SELECT sku FROM (SELECT sku AS s FROM stock) t`),
 			difftest.Q(0, `WITH c AS (SELECT sku FROM stock) SELECT n FROM c`),
 			difftest.Q(0, `SELECT typo.sku FROM stock`),
+			difftest.S(0, `UPDATE stock SET n = 1 FROM LATERAL (SELECT stock.n AS m) s`),
+			difftest.S(0, `DELETE FROM stock USING LATERAL (SELECT stock.n AS m) s`),
 			difftest.Q(0, `SELECT typo FROM (SELECT 1, 2) s(a)`),
 			difftest.Q(0, `SELECT * FROM (SELECT 1) s(a, b)`),
 			difftest.Q(0, `SELECT sku FROM stock a, stock b`),
