@@ -986,6 +986,9 @@ func (db *DB) alterSequence(seq string, o *sqlir.SequenceOptions, create bool) {
 	case o.Restart != nil:
 		d.first = *o.Restart
 	}
+	if o.RestartStart || o.Restart != nil {
+		delete(db.seqs, seq) // the next nextval returns first again
+	}
 	if db.seqDefs == nil {
 		db.seqDefs = map[string]*seqDef{}
 	}
@@ -1262,7 +1265,14 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		switch col.Identity {
 		case "":
-		case "drop":
+		case "drop", "drop if exists":
+			if _, identity := def.identityAlways[col.Name]; !identity {
+				if col.Identity == "drop if exists" {
+					continue // the column, its default included, stays as it is
+				}
+				// Postgres fails the statement, and the setup with it.
+				return unsupported(fmt.Sprintf("DROP IDENTITY of column %q, which is no identity column", col.Name), "")
+			}
 			delete(def.identityAlways, col.Name)
 			db.dropOwnedSequences(table, col.Name) // an identity's sequence goes with it
 		default:

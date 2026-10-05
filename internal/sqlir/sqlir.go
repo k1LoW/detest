@@ -281,7 +281,8 @@ type ColumnDef struct {
 	// Sequence are the options of an identity column's sequence, the one
 	// its Default calls nextval of. Identity is "always" for GENERATED
 	// ALWAYS, which takes no value but DEFAULT, "by default" for GENERATED
-	// BY DEFAULT, "drop" for DROP IDENTITY and empty to leave it as it is.
+	// BY DEFAULT, "drop" for DROP IDENTITY, "drop if exists" for DROP
+	// IDENTITY IF EXISTS and empty to leave it as it is.
 	Sequence *SequenceOptions
 	Identity string
 	// AutoIncrement is MySQL's AUTO_INCREMENT: an insert that leaves the

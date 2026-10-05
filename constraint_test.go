@@ -605,6 +605,28 @@ CREATE TABLE c (id int PRIMARY KEY, pid int UNIQUE DEFERRABLE REFERENCES p (id) 
 	}
 }
 
+func TestDropIdentityIfExistsAndRestart(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE t (id serial PRIMARY KEY, v text);
+ALTER TABLE t ALTER COLUMN id DROP IDENTITY IF EXISTS;
+`)
+	// A serial column is no identity: its default stays.
+	var id int64
+	if err := db.QueryRow(`INSERT INTO t (v) VALUES ('a') RETURNING id`).Scan(&id); err != nil || id != 1 {
+		t.Errorf("serial after DROP IDENTITY IF EXISTS: %d %v", id, err)
+	}
+	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN id DROP IDENTITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("DROP IDENTITY of a serial column: %v", err)
+	}
+	mustExec(t, db, `SELECT setval('t_id_seq', 40)`)
+	mustExec(t, db, `ALTER SEQUENCE t_id_seq RESTART WITH 10`)
+	if err := db.QueryRow(`SELECT nextval('t_id_seq')`).Scan(&id); err != nil || id != 10 {
+		t.Errorf("nextval after RESTART: %d %v", id, err)
+	}
+}
+
 func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())

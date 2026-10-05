@@ -933,7 +933,11 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, TypeOnly: true, Sequence: seq, Identity: mode})
 		case pg.AlterTableType_AT_DropIdentity:
 			// The default goes as with DROP DEFAULT, and the identity with it.
-			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Identity: "drop"})
+			mode := "drop"
+			if cmd.MissingOk {
+				mode = "drop if exists"
+			}
+			ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: cmd.Name, Identity: mode})
 		case pg.AlterTableType_AT_AddColumn:
 			col, cons, checks, err := c.columnDef(ch.Table, cmd.Def.GetColumnDef())
 			if err != nil {
