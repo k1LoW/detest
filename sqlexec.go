@@ -45,6 +45,9 @@ type sqlExec struct {
 	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
 	// before each query runs anything.
 	bounds map[*sqlir.SelectStmt][2]int
+	// arrays are the arrays the statement's = ANY and <> ALL read, read
+	// before it runs anything.
+	arrays map[*sqlir.ArrayCmp]*arrayElems
 	// consistent makes the statement's table reads InnoDB consistent reads,
 	// from the transaction's snapshot: a plain SELECT at Repeatable Read.
 	consistent bool
@@ -284,6 +287,11 @@ func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
 	if err := x.checkColumns(stmt); err != nil {
+		return nil, err
+	}
+	// After the column check, which refuses what Postgres refuses when it
+	// plans the statement, as Postgres reads the arrays only at bind time.
+	if err := x.checkArrays(stmt); err != nil {
 		return nil, err
 	}
 	switch st := stmt.(type) {
@@ -1077,6 +1085,8 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.InExpr:
 		return hasAggregate(v.X) || slices.ContainsFunc(v.List, hasAggregate)
+	case *sqlir.ArrayCmp:
+		return hasAggregate(v.X)
 	case *sqlir.RowExpr:
 		return slices.ContainsFunc(v.Items, hasAggregate)
 	case *sqlir.CaseExpr:

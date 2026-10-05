@@ -53,9 +53,17 @@ func BlockFuncCalls(e Expr) []*FuncCall {
 	return out
 }
 
-// find returns the nodes of type T in e. It walks the expression by
-// reflection, so it needs no case for each kind of node.
-func find[T any](e Expr) []T {
+// ArrayCmps returns the comparisons with an array value under n, a statement
+// or an expression, subqueries included.
+func ArrayCmps(n any) []*ArrayCmp { return find[*ArrayCmp](n) }
+
+// Params returns the parameter references under n, a statement or an
+// expression, subqueries included.
+func Params(n any) []*Param { return find[*Param](n) }
+
+// find returns the nodes of type T in e, an expression or a statement. It
+// walks by reflection, so it needs no case for each kind of node.
+func find[T any](e any) []T {
 	var out []T
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {

@@ -358,6 +358,8 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			return err
 		}
 		return c.selectStmt(v.Sub)
+	case *sqlir.ArrayCmp:
+		return c.expr(v.X)
 	case *sqlir.IsNull:
 		return c.expr(v.X)
 	case *sqlir.SubQuery:

@@ -1078,6 +1078,8 @@ func windowsIn(e sqlir.Expr) []*sqlir.WindowFunc {
 			for _, e := range v.List {
 				walk(e)
 			}
+		case *sqlir.ArrayCmp:
+			walk(v.X)
 		case *sqlir.RowExpr:
 			for _, e := range v.Items {
 				walk(e)

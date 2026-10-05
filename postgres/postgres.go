@@ -2020,6 +2020,69 @@ func plainTextCast(tc *pg.TypeCast, array bool, types ...string) (string, bool) 
 	return typ, slices.Contains(types, typ)
 }
 
+// arrayElemTypes are the element types of the array casts that
+// x = ANY ($1::T[]) runs with. The cast converts each element as the scalar
+// cast does, which detest's casts do for these types; for others, such as
+// bpchar or numeric, it pads or keeps digits as detest's casts do not.
+var arrayElemTypes = []string{"int2", "int4", "int8", "text", "varchar", "uuid"}
+
+// arrayCmp converts x = ANY (a) and x <> ALL (a) over an array that is a
+// value, a parameter or a string literal, cast to an array type or not. ok
+// is false for any other array, which the caller converts as ARRAY[...] or
+// refuses.
+func (c *pgConv) arrayCmp(e *pg.A_Expr, isAny bool) (sqlir.Expr, bool, error) {
+	arr, elemType := e.Rexpr, ""
+	if tc := arr.GetTypeCast(); tc != nil {
+		arr = tc.Arg
+		if !arrayValue(arr) {
+			return nil, false, nil
+		}
+		if len(tc.TypeName.GetArrayBounds()) == 0 {
+			return nil, true, c.unsupported("ANY or ALL over a value cast to a type other than an array")
+		}
+		typ, ok := plainTextCast(tc, true, arrayElemTypes...)
+		if !ok {
+			return nil, true, c.unsupported("ANY or ALL over an array cast to " + typ + "[]")
+		}
+		elemType = typ
+	}
+	if !arrayValue(arr) {
+		return nil, false, nil
+	}
+	a, err := c.expr(arr)
+	if err != nil {
+		return nil, true, err
+	}
+	l, err := c.expr(e.Lexpr)
+	if err != nil {
+		return nil, true, err
+	}
+	// Postgres takes the array's element type from x, so with neither typed,
+	// as in $1 = ANY ($2), it resolves both to text or fails, by rules detest
+	// does not model.
+	if elemType == "" && untypedOperand(l) {
+		return nil, true, c.unsupported("ANY or ALL with neither side typed")
+	}
+	return &sqlir.ArrayCmp{X: l, Array: a, ElemType: elemType, All: !isAny}, true, nil
+}
+
+// arrayValue reports whether n is an array given as a value: a parameter or
+// a string literal.
+func arrayValue(n *pg.Node) bool {
+	return n.GetParamRef() != nil || n.GetAConst() != nil && n.GetAConst().GetSval() != nil
+}
+
+func untypedOperand(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.Param:
+		return true
+	case *sqlir.Const:
+		_, ok := e.Value.(string)
+		return ok
+	}
+	return false
+}
+
 func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 	op := ""
 	if len(e.Name) > 0 {
@@ -2083,6 +2146,9 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		isAny := e.Kind == pg.A_Expr_Kind_AEXPR_OP_ANY
 		if (!isAny || op != "=") && (isAny || op != "<>") {
 			return nil, c.unsupported("operator " + op + " with ANY or ALL")
+		}
+		if cmp, ok, err := c.arrayCmp(e, isAny); ok {
+			return cmp, err
 		}
 		arr := e.Rexpr
 		var casts []string // outermost first

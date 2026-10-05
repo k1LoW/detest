@@ -893,8 +893,12 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			}
 			row[col] = numeric(f)
 		case "uuid":
-			if s, ok := v.(string); ok && !validUUID(s) {
-				return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")
+			if s, ok := v.(string); ok {
+				c, ok := canonicalUUID(s)
+				if !ok {
+					return x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), relname(table), col, "")
+				}
+				row[col] = c
 			}
 		case "int1", "int2", "int3", "int4", "int8", "uint1", "uint2", "uint3", "uint4", "uint8":
 			if x.tx.db.kind.InnoDB() {
@@ -1317,24 +1321,38 @@ func numericValue(v any) any {
 	return v
 }
 
-// validUUID accepts what Postgres's uuid input does: 32 hex digits, with or
-// without hyphens between groups of four, optionally in braces.
-func validUUID(s string) bool {
-	s = strings.TrimSuffix(strings.TrimPrefix(s, "{"), "}")
-	n := 0
-	for i, c := range s {
-		switch {
+// canonicalUUID reads s as Postgres's uuid input does, 32 hex digits, with
+// or without hyphens between groups of four, optionally in braces, and
+// returns the form Postgres stores and prints it in: lower case, in groups of
+// 8-4-4-4-12. Keeping that form makes equal uuids equal values.
+func canonicalUUID(s string) (string, bool) {
+	t := s
+	if strings.HasPrefix(t, "{") || strings.HasSuffix(t, "}") {
+		if len(t) < 2 || !strings.HasPrefix(t, "{") || !strings.HasSuffix(t, "}") {
+			return "", false
+		}
+		t = t[1 : len(t)-1]
+	}
+	hex := make([]byte, 0, 32)
+	for i := range len(t) {
+		switch c := t[i]; {
 		case c == '-':
-			if i == 0 || n%4 != 0 || strings.HasSuffix(s[:i], "-") {
-				return false
+			if i == 0 || len(hex)%4 != 0 || strings.HasSuffix(t[:i], "-") {
+				return "", false
 			}
-		case (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'):
-			n++
+		case (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'):
+			hex = append(hex, c)
+		case c >= 'A' && c <= 'F':
+			hex = append(hex, c-'A'+'a')
 		default:
-			return false
+			return "", false
 		}
 	}
-	return n == 32 && !strings.HasSuffix(s, "-")
+	if len(hex) != 32 || strings.HasSuffix(t, "-") {
+		return "", false
+	}
+	h := string(hex)
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], true
 }
 
 // generate sets the generated columns of row from the other columns.
