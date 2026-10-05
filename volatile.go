@@ -12,7 +12,7 @@ import (
 // Postgres shows in the results.
 var effectFuncs = map[string]bool{
 	"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true,
-	"pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
+	"clock_timestamp": true, "pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
 }
 
 // checkSequenceCalls refuses effectFuncs where detest evaluates them
