@@ -22,6 +22,7 @@ depsdev:
 credits:
 	go install github.com/Songmu/gocredits/cmd/gocredits@v1.0.0
 	gocredits . > CREDITS
+	cat _EXTRA_CREDITS >> CREDITS
 
 prerelease:
 	git pull origin main --tag
