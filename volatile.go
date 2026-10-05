@@ -170,3 +170,30 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 	}
 	return nil
 }
+
+// effectFuncs are the functions whose call changes state: sequences, the
+// generated values detest counts, and advisory locks.
+var effectFuncs = map[string]bool{
+	"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true, "random": true,
+	"pg_advisory_xact_lock": true, "pg_try_advisory_xact_lock": true,
+}
+
+// hasEffects reports whether evaluating e changes state, by such a function
+// or by a subquery, which may lock rows.
+func hasEffects(e sqlir.Expr) bool {
+	for _, x := range sqlir.Exprs(e) {
+		switch v := x.(type) {
+		case *sqlir.FuncCall:
+			if effectFuncs[v.Name] {
+				return true
+			}
+		case *sqlir.SubQuery, *sqlir.Exists:
+			return true
+		case *sqlir.InExpr:
+			if v.Sub != nil {
+				return true
+			}
+		}
+	}
+	return false
+}

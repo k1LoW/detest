@@ -644,6 +644,11 @@ func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
 	// Once per row, as on the server.
 	mustExec(t, db, `INSERT INTO t VALUES (nextval('s'), 1)`)
 	mustExec(t, db, `UPDATE t SET b = nextval('s')`)
+	// The trace does not evaluate SET for its preview.
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 3 {
+		t.Errorf("nextval after one INSERT and an UPDATE of one row: %d %v, want 3", n, err)
+	}
 	mustExec(t, db, `INSERT INTO t SELECT nextval('s'), 2`)
 	mustExec(t, db, `SELECT id FROM t WHERE id < nextval('s')`)
 }

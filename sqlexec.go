@@ -1740,8 +1740,10 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		row := Row{}
 		for _, a := range up.Set {
 			// A value computed from the row it updates is not known before
-			// the row is read, so the trace shows the expression instead.
-			if len(sqlir.ColumnRefs(a.Value)) > 0 {
+			// the row is read, and one with effects, such as nextval's or a
+			// subquery's locks, must not happen for the trace, so the trace
+			// shows the expression instead.
+			if len(sqlir.ColumnRefs(a.Value)) > 0 || hasEffects(a.Value) {
 				row[a.Column] = x.exprString(a.Value)
 				continue
 			}
