@@ -281,6 +281,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 	}
 	for _, t := range sel.Targets {
+		if t.Star && t.Table == "" && sel.From == nil {
+			return nil, c.x.tx.db.kind.Error(sqlir.SyntaxError, "SELECT * with no tables specified is not valid", "", "", "")
+		}
 		if t.Star {
 			if t.Table != "" {
 				if _, ok := sc.lookupItem(t.Table); !ok {
