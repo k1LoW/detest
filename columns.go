@@ -62,6 +62,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
+	if err := x.checkSequenceCalls(stmt); err != nil {
+		return err
+	}
 	c := &columnChecker{x: x}
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:

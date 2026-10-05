@@ -604,3 +604,24 @@ CREATE TABLE c (id int PRIMARY KEY, pid int UNIQUE DEFERRABLE REFERENCES p (id) 
 		t.Errorf("cascade into a deferrable key: %v", err)
 	}
 }
+
+func TestSequenceCallsWhereEvaluationCountsDiffer(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, b int); CREATE SEQUENCE s`)
+	for _, q := range []string{
+		`UPDATE t SET b = 1 WHERE id = (SELECT nextval('s'))`,
+		`DELETE FROM t WHERE id = nextval('s')`,
+		`SELECT (SELECT nextval('s'))`,
+		`INSERT INTO t VALUES ((SELECT nextval('s')), 1)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// Once per row, as on the server.
+	mustExec(t, db, `INSERT INTO t VALUES (nextval('s'), 1)`)
+	mustExec(t, db, `UPDATE t SET b = nextval('s')`)
+	mustExec(t, db, `INSERT INTO t SELECT nextval('s'), 2`)
+	mustExec(t, db, `SELECT id FROM t WHERE id < nextval('s')`)
+}
