@@ -501,10 +501,11 @@ func TestWindowFunctionArity(t *testing.T) {
 	}
 }
 
-// SET search_path runs when it names the whole path postgres.SearchPath
-// declares, as a migration does, or the empty path a dump sets, and is
-// refused for any other path, since detest resolves every name on the
-// declared path and would read and write other tables than the server.
+// SET search_path, and the set_config('search_path', ...) a dump writes, run
+// when they name the whole path postgres.SearchPath declares or the empty
+// path, and are refused for any other path, since detest resolves every name
+// on the declared path and would read and write other tables than the
+// server. Any other call of set_config is a function detest does not run.
 func TestSearchPathSetBySQL(t *testing.T) {
 	for _, tc := range []struct {
 		srv      Server
@@ -513,8 +514,10 @@ func TestSearchPathSetBySQL(t *testing.T) {
 	}{
 		{
 			postgres.New(),
-			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`},
-			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`},
+			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`,
+				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
+			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
+				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`},
 		},
 		{
 			postgres.New(postgres.SearchPath("app", "public")),
@@ -530,7 +533,7 @@ func TestSearchPathSetBySQL(t *testing.T) {
 			}
 		}
 		for _, q := range tc.refused {
-			if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			if _, err := db.Exec(q, "tenant_1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 				t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 			}
 			if err := CheckSQL(tc.srv, q); !errors.As(err, new(*ErrUnsupportedSQL)) {

@@ -241,9 +241,10 @@ func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 	switch s := n.Node.(type) {
 	case *pg.Node_SelectStmt:
-		if isSetConfig(s.SelectStmt) {
-			// A schema dump sets search_path with SELECT pg_catalog.set_config(...).
-			return &sqlir.SchemaStmt{}, nil
+		if path, ok := setConfigSearchPath(s.SelectStmt); ok {
+			// A schema dump sets search_path with SELECT pg_catalog.set_config(...),
+			// which is checked as SET search_path is.
+			return &sqlir.SetStmt{Name: "search_path", Value: path}, nil
 		}
 		return c.selectStmt(s.SelectStmt)
 	case *pg.Node_CreateTableAsStmt:
@@ -430,15 +431,29 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 	return nil, false, nil
 }
 
-func isSetConfig(sel *pg.SelectStmt) bool {
+// setConfigSearchPath recognizes SELECT [pg_catalog.]set_config('search_path',
+// <value>, ...), which a schema dump writes to set the path, and returns the
+// value. Any other call of set_config is a function call, which detest does
+// not run and refuses, so that a setting it would change is not ignored.
+func setConfigSearchPath(sel *pg.SelectStmt) (string, bool) {
 	if sel == nil || sel.FromClause != nil || len(sel.TargetList) != 1 {
-		return false
+		return "", false
 	}
 	fc := sel.TargetList[0].GetResTarget().GetVal().GetFuncCall()
-	if fc == nil || len(fc.Funcname) == 0 {
-		return false
+	if fc == nil || len(fc.Funcname) == 0 || len(fc.Funcname) > 2 || len(fc.Args) != 3 {
+		return "", false
 	}
-	return fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval() == "set_config"
+	if len(fc.Funcname) == 2 && fc.Funcname[0].GetString_().GetSval() != "pg_catalog" {
+		return "", false
+	}
+	if fc.Funcname[len(fc.Funcname)-1].GetString_().GetSval() != "set_config" {
+		return "", false
+	}
+	name, value := fc.Args[0].GetAConst().GetSval(), fc.Args[1].GetAConst().GetSval()
+	if name == nil || name.GetSval() != "search_path" || value == nil {
+		return "", false
+	}
+	return value.GetSval(), true
 }
 
 // rangeVarName is the table name as written, schema-qualified when it is.
