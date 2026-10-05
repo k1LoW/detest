@@ -1141,6 +1141,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
 		}
+		if !knownFunc(v.Name, x.tx.db.kind.InnoDB()) {
+			return nil, errUnknownExpr{v.Name + "(...)"} // as in evalRaw, before the arguments
+		}
 		if err := x.checkArity(v); err != nil {
 			return nil, err
 		}
@@ -2434,6 +2437,12 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
+		if !knownFunc(v.Name, x.tx.db.kind.InnoDB()) {
+			// Before the arguments, which may have effects (nextval),
+			// where the server resolves the function first and runs none
+			// of them.
+			return nil, errUnknownExpr{v.Name + "(...)"}
+		}
 		if err := x.checkArity(v); err != nil {
 			return nil, err
 		}

@@ -731,3 +731,27 @@ func TestResetAllClearsLockTimeout(t *testing.T) {
 		})
 	}
 }
+
+// A function detest does not run is refused before its arguments are
+// evaluated, as the server resolves the function first, so an argument with
+// an effect, such as nextval, leaves no trace.
+func TestUnknownFunctionRefusedBeforeItsArguments(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1)`)
+	for _, q := range []string{
+		`SELECT md5(nextval('s')::text)`,
+		`SELECT md5(nextval('s')::text) FROM t`,
+		`SELECT k, md5(max(nextval('s'))::text) FROM t GROUP BY k`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("nextval after the refused calls: %d, %v; want 1, the sequence untouched", n, err)
+	}
+}
