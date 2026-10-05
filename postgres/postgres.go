@@ -247,7 +247,7 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 		if path, ok := setConfigSearchPath(s.SelectStmt); ok {
 			// A schema dump sets search_path with SELECT pg_catalog.set_config(...),
 			// which is checked as SET search_path is.
-			return &sqlir.SetStmt{Name: "search_path", Value: path}, nil
+			return &sqlir.SetStmt{Name: "search_path", Value: path, Returns: true}, nil
 		}
 		return c.selectStmt(s.SelectStmt)
 	case *pg.Node_CreateTableAsStmt:
@@ -256,6 +256,11 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 		v := s.VariableSetStmt
 		if err := c.transactionSet(v); err != nil {
 			return nil, err
+		}
+		if v.Kind == pg.VariableSetKind_VAR_RESET_ALL {
+			// Resets every setting, among them lock_timeout, the one
+			// detest acts on; "all" is no setting's name.
+			return &sqlir.SetStmt{Name: "all"}, nil
 		}
 		out := &sqlir.SetStmt{Name: v.Name, Local: v.IsLocal}
 		// The constants as written, joined as a list setting such as

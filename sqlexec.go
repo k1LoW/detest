@@ -312,6 +312,9 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// matter, as detest's waits have no length.
 			x.tx.lockTimeout = st.Value != "" && st.Value != "0" && st.Value != "0ms" && st.Value != "0s"
 		}
+		if st.Name == "all" {
+			x.tx.lockTimeout = false // RESET ALL
+		}
 		if st.Name == "no_auto_value_on_zero" {
 			x.tx.noAutoZero = st.Value == "true"
 		}
@@ -344,6 +347,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			if len(path) > 0 && !slices.Equal(path, x.tx.db.kind.SearchPath()) {
 				return nil, x.unsupported("SET search_path to a path other than postgres.SearchPath's (" + strings.Join(x.tx.db.kind.SearchPath(), ", ") + ")")
 			}
+		}
+		if st.Returns {
+			// set_config returns the value it set, as text.
+			return &sqlResult{cols: []string{"set_config"}, rows: [][]driver.Value{{st.Value}}}, nil
 		}
 		return &sqlResult{}, nil
 	case *sqlir.SetConstraintsStmt:

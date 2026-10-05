@@ -405,6 +405,9 @@ type SetStmt struct {
 	Name  string
 	Value string
 	Local bool
+	// Returns is set for SELECT set_config(...), which returns the value
+	// it set as a row.
+	Returns bool
 }
 
 // SetConstraintsStmt is SET CONSTRAINTS ... DEFERRED | IMMEDIATE. No names

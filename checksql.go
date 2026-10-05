@@ -234,8 +234,12 @@ func (c *staticCheck) tableRef(t *sqlir.TableRef) error {
 		return err
 	}
 	if t.Func != nil {
-		// The executor runs generate_series in FROM and refuses the other
-		// set-returning functions itself, rows or no rows.
+		// The executor runs generate_series in FROM alone, and refuses the
+		// other set-returning functions when it reaches them, which a
+		// subquery with no rows to run over never does.
+		if t.Func.Name != "generate_series" {
+			return unsupported("set-returning function "+t.Func.Name+" in FROM", c.query)
+		}
 		return c.exprs(t.Func.Args)
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -512,11 +513,13 @@ func TestWindowFunctionArity(t *testing.T) {
 func TestSearchPathSetBySQL(t *testing.T) {
 	for _, tc := range []struct {
 		srv      Server
+		path     []string
 		accepted []string
 		refused  []string
 	}{
 		{
 			postgres.New(),
+			[]string{"public"},
 			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`,
 				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
 			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
@@ -524,6 +527,7 @@ func TestSearchPathSetBySQL(t *testing.T) {
 		},
 		{
 			postgres.New(postgres.SearchPath("app", "public")),
+			[]string{"app", "public"},
 			[]string{`SET search_path TO app, public`, `SET search_path TO "$user", app, public, pg_catalog`},
 			[]string{`SET search_path TO public`, `SET search_path TO app`, `SET search_path TO app, tenant`, `SET search_path TO public, app`},
 		},
@@ -531,6 +535,19 @@ func TestSearchPathSetBySQL(t *testing.T) {
 		s := newSim(t)
 		db, _ := s.DB("app", tc.srv)
 		for _, q := range tc.accepted {
+			if _, err := db.Exec(q); err != nil {
+				t.Errorf("%s: got %v, want nil", q, err)
+			}
+		}
+		// set_config returns the value it set, as the server does.
+		var got string
+		path := strings.Join(tc.path, ", ")
+		if err := db.QueryRow(`SELECT set_config('search_path', '` + path + `', true)`).Scan(&got); err != nil || got != path {
+			t.Errorf("set_config returned %q, %v; want %q", got, err, path)
+		}
+		// RESET and TO DEFAULT go back to the declared path, which is the
+		// session's default, so they change nothing and run.
+		for _, q := range []string{`RESET search_path`, `SET search_path TO DEFAULT`, `RESET ALL`} {
 			if _, err := db.Exec(q); err != nil {
 				t.Errorf("%s: got %v, want nil", q, err)
 			}

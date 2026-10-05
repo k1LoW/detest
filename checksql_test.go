@@ -36,6 +36,7 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT * FROM t WHERE a <=> b`,
 			`SELECT lower(name, name) FROM t`,
 			`SELECT * FROM t WHERE round(random(), 2) > 0.5`,
+			`SELECT * FROM t WHERE EXISTS (SELECT 1 FROM unnest(t.tags) AS u(x) WHERE x = 'a')`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",

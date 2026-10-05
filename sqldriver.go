@@ -348,7 +348,7 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 	if err == nil && res.hasLastID {
 		c.lastInsertID = res.lastID
 	}
-	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && set.Name == "lock_timeout" && !set.Local {
+	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
 		// A session setting outlives the statement's transaction. MySQL's
 		// takes effect at once; Postgres's, run in a transaction, only
 		// when the transaction commits.
