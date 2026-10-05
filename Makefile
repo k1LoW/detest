@@ -1,13 +1,16 @@
 default: test
 
+# The race detector runs in its own CI job: coverage under -race is atomic,
+# and the parallel explorations contending on its counters run several times
+# slower than either alone.
 ci:
-	go test ./... -race -timeout 30m -coverprofile=coverage.out -covermode=atomic
+	go test ./... -timeout 30m -coverprofile=coverage.out -covermode=count
 
 test:
 	go test ./... -coverprofile=coverage.out -covermode=count
 
 race:
-	go test ./... -race
+	go test ./... -race -timeout 30m
 
 lint:
 	golangci-lint run ./...
