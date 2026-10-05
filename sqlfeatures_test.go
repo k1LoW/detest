@@ -531,6 +531,7 @@ func TestSearchPathSetBySQL(t *testing.T) {
 			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`,
 				`SELECT pg_catalog.set_config('search_path', '', false)`, `SELECT set_config('search_path', 'public', true)`},
 			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`,
+				`SET search_path TO pg_catalog`, `SET search_path TO "$user"`, `SELECT set_config('search_path', 'pg_catalog', false)`,
 				`SELECT pg_catalog.set_config('search_path', 'tenant_1', false)`, `SELECT set_config('search_path', $1, true)`, `SELECT set_config('app.tenant', 't1', true)`, `SELECT app.set_config('search_path', '', false)`,
 				`SELECT set_config('search_path', 'public', 1)`, `SELECT set_config('search_path', 'public', $1)`,
 				`SELECT set_config(DISTINCT 'search_path', 'public', true)`, `SELECT set_config('search_path', 'public', true) OVER ()`},

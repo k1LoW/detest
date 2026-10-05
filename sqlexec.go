@@ -344,7 +344,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 					path = append(path, s)
 				}
 			}
-			if len(path) > 0 && !slices.Equal(path, x.tx.db.kind.SearchPath()) {
+			// The empty path is the one written empty; a path of "$user"
+			// or pg_catalog alone leaves the server no schema to find an
+			// application table in, where detest would still find it.
+			if strings.TrimSpace(st.Value) != "" && !slices.Equal(path, x.tx.db.kind.SearchPath()) {
 				return nil, x.unsupported("SET search_path to a path other than postgres.SearchPath's (" + strings.Join(x.tx.db.kind.SearchPath(), ", ") + ")")
 			}
 		}
