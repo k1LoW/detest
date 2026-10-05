@@ -42,7 +42,7 @@ func envOptions() ([]Option, error) {
 			return nil, fmt.Errorf("detest: bad DETEST_SEED %q, want an unsigned integer", v)
 		}
 		// Which strategy a test explores with is part of what it checks, so
-		// the seed applies to a test under Random only.
+		// the seed applies to a test under Random or Prioritized only.
 		opts = append(opts, func(s *Sim) {
 			if s.strategy.random {
 				s.strategy.seed = seed

@@ -341,7 +341,7 @@ func (r *result) outcome() string {
 			runs = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint,", r.Runs, r.Runs+r.PriorRuns)
 		}
 		if r.strategy.random {
-			workers += fmt.Sprintf(", random seed %d", r.strategy.seed)
+			workers += ", " + r.strategy.String()
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		if r.CutRuns > 0 {
@@ -365,7 +365,7 @@ func (r *result) outcome() string {
 	}
 	seed := ""
 	if r.strategy.random && !r.Replay { // a replay draws nothing from the seed
-		seed = fmt.Sprintf(" of random seed %d", r.strategy.seed)
+		seed = " of " + r.strategy.String()
 	}
 	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		what, r.Runs, seed, choices, r.Schedule, r.Trace)
@@ -373,7 +373,8 @@ func (r *result) outcome() string {
 
 // refuse records a statement refused as unsupported, for the report.
 func (s *Sim) refuse(err *ErrUnsupportedSQL) {
-	if s.frontier != nil {
+	// A statement the declaration runs is refused before any run exists.
+	if s.frontier != nil && (s.run == nil || !s.run.measuring) {
 		s.frontier.refuse(err.Error())
 	}
 }

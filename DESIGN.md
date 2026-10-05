@@ -161,7 +161,7 @@ Determinism is a precondition of the search, so detest asks a few things of a te
 
 ## Decisions not taken
 
-- **Random search as the default.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need. `Random(seed)` is there for trees too large for a depth-first search to get past the first choices within `MaxRuns`, and its result is never reported as complete.
+- **Random search as the default.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need. `Prioritized(seed, depth)`, after PCT, and `Random(seed)` are there for trees too large for a depth-first search to get past the first choices within `MaxRuns`, and their results are never reported as complete.
 - **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code.
 - **A store for shared variables.** Replacing in-memory variables of production code with detest types would make their accesses yield points, at the cost of changing the code under test more than injecting a mutex does.
 - **Static analysis of read and write sets.** With real code running through the driver, the explorer needs no declared read and write sets.

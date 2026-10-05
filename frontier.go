@@ -351,6 +351,21 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 	f.declareSometimes(names)
 	runs, maxDepth := 0, 0
 	seen := seenChoices{}
+	k := 0
+	if s.strategy.prioritized {
+		// The run's length is measured on a run every worker makes alike,
+		// so that the runs drawn do not depend on Workers. It picks by
+		// priority without switches or faults, as a fault such as a loss
+		// listed first would end it early and put every run's faults at its
+		// start. It is no run of the exploration, and what it finds is left
+		// to the runs that are, but it goes through the nondeterminism check,
+		// as state it leaves behind shows in the next run.
+		r := s.newRunMeasuring(nil, true)
+		r.rng, r.seen, r.path = s.measuringRng(), seen, fnvOffset
+		r.prio = newPrioritized(r.rng, 1, 1, 0, 0)
+		r.execute()
+		k = r.steps
+	}
 	for {
 		prefix, index, ok := f.take(worker)
 		if !ok {
@@ -360,6 +375,13 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		r := s.newRun(prefix)
 		if f.random {
 			r.rng, r.seen, r.path = s.rngFor(index), seen, fnvOffset
+			if s.strategy.prioritized {
+				losses := 0
+				for _, q := range s.queues {
+					losses += q.lossBudget
+				}
+				r.prio = newPrioritized(r.rng, s.strategy.depth, k, s.maxCrashes, losses)
+			}
 		}
 		r.tracing = s.verbose
 		v := r.execute()
