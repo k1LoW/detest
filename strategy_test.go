@@ -25,6 +25,8 @@ func TestRandomRunsUntilMaxRuns(t *testing.T) {
 // Parallel workers report the violation a single worker reports: the one of
 // the lowest run index.
 func TestRandomWorkersReportTheFirstViolation(t *testing.T) {
+	// The comparison below assumes the unsharded sequence of runs.
+	t.Setenv("DETEST_SHARD", "")
 	model := func(t *testing.T, s *Sim) { counterModel(s, false) }
 	// Under seed 17 the first runs pass, so the 4 workers find violations
 	// in other runs before the first one.
