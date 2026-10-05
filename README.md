@@ -332,6 +332,9 @@ These environment variables override or add to them.
 | --- | --- |
 | `DETEST_REPLAY` | Replay one run, given the choices printed with a violation |
 | `DETEST_WORKERS` | Number of workers, overriding `detest.Workers` |
+| `DETEST_MAX_RUNS` | Cap on runs, overriding `detest.MaxRuns` |
+| `DETEST_MAX_DURATION` | Wall-clock cap such as `10m`, overriding `detest.MaxDuration` |
+| `DETEST_SEED` | Seed of a test under `detest.Random`, overriding the one it passes. A test under `detest.DepthFirst` is left as it is |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
 | `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, and to resume from on the next run |
 | `DETEST_STALL` | How long a process may block outside the scheduler before it is reported (default `30s`) |

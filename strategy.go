@@ -30,7 +30,8 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // then, which differs from one execution to the next. Shard splits the runs
 // rather than the tree: shard index of total makes the runs whose index
 // leaves index when divided by total, and depth is not used. Of DepthFirst
-// and Random, the one passed last applies.
+// and Random, the one passed last applies. DETEST_SEED overrides seed, and
+// leaves a test under DepthFirst as it is.
 func Random(seed uint64) Option {
 	return func(s *Sim) { s.strategy = strategy{random: true, seed: seed} }
 }

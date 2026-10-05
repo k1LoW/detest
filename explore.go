@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,11 @@ import (
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	start := time.Now()
+	env, err := envOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts = append(slices.Clip(opts), env...)
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
 	f := newFrontier(n, maxRuns)
@@ -106,11 +112,6 @@ func workerCount(opts []Option) int {
 		o(probe)
 	}
 	n := probe.workers
-	if s := os.Getenv("DETEST_WORKERS"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil {
-			n = v
-		}
-	}
 	if sched, _ := replaySchedule(probe.schedule); sched != "" || n < 1 {
 		return 1 // a replay is one run
 	}
