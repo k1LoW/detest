@@ -121,7 +121,7 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 // refuses, or the reverse.
 func TestKnownFuncsMatchCallFunc(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "sqlexec.go", nil, 0)
+	f, err := parser.ParseFile(fset, "sqleval.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
