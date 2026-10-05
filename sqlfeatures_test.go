@@ -475,6 +475,7 @@ func TestWindowFunctionArity(t *testing.T) {
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 1), (2, 1)`)
+	mustExec(t, db, `CREATE TABLE empty_t (id int PRIMARY KEY)`)
 	for _, q := range []string{
 		`SELECT row_number(1) OVER () FROM t`,
 		`SELECT lag() OVER (ORDER BY id) FROM t`,
@@ -482,6 +483,7 @@ func TestWindowFunctionArity(t *testing.T) {
 		`SELECT first_value() OVER (ORDER BY id) FROM t`,
 		`SELECT sum(id, k) OVER () FROM t`,
 		`SELECT ntile(2) OVER (ORDER BY id) FROM t`,
+		`SELECT row_number(1) OVER () FROM empty_t`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
@@ -499,10 +501,10 @@ func TestWindowFunctionArity(t *testing.T) {
 	}
 }
 
-// SET search_path runs when it names the path postgres.SearchPath declares,
-// as a migration or a dump does, and is refused when it would put another
-// schema first, since detest resolves every name on the declared path and
-// would read and write other tables than the server.
+// SET search_path runs when it names the whole path postgres.SearchPath
+// declares, as a migration does, or the empty path a dump sets, and is
+// refused for any other path, since detest resolves every name on the
+// declared path and would read and write other tables than the server.
 func TestSearchPathSetBySQL(t *testing.T) {
 	for _, tc := range []struct {
 		srv      Server
@@ -512,12 +514,12 @@ func TestSearchPathSetBySQL(t *testing.T) {
 		{
 			postgres.New(),
 			[]string{`SET search_path TO public`, `SET search_path = public, pg_catalog`, `SET search_path TO "$user", public`, `SET search_path = ''`, `SET LOCAL search_path TO public`},
-			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET LOCAL search_path TO app`},
+			[]string{`SET search_path TO tenant_1`, `SET search_path TO tenant_1, public`, `SET search_path TO public, tenant_1`, `SET LOCAL search_path TO app`},
 		},
 		{
 			postgres.New(postgres.SearchPath("app", "public")),
-			[]string{`SET search_path TO app`, `SET search_path TO app, public`},
-			[]string{`SET search_path TO public`},
+			[]string{`SET search_path TO app, public`, `SET search_path TO "$user", app, public, pg_catalog`},
+			[]string{`SET search_path TO public`, `SET search_path TO app`, `SET search_path TO app, tenant`, `SET search_path TO public, app`},
 		},
 	} {
 		s := newSim(t)

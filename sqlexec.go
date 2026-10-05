@@ -326,20 +326,23 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		}
 		if st.Name == "search_path" {
 			// Names resolve on the path postgres.SearchPath declares, for
-			// every connection, so a SET that puts another schema first
-			// would read and write other tables than the server. One
-			// that names the declared path again, as a migration does,
-			// changes nothing; an empty path, as pg_dump sets, leaves
-			// only qualified names, which resolve the same either way.
-			first := ""
+			// every connection, so a SET of another path would read and
+			// write other tables than the server, or find a table the
+			// server does not. One that names the declared path again,
+			// as a migration does, changes nothing. An empty path, as
+			// pg_dump sets, leaves the server only qualified names,
+			// which resolve the same either way; a dump writes nothing
+			// else after it, and refusing it would stop dumps loading.
+			var path []string
 			for _, s := range strings.Split(st.Value, ",") {
-				if s = strings.Trim(strings.TrimSpace(s), `"`); s != "" && s != "$user" {
-					first = s
-					break
+				// "$user" names a schema no test declares, and pg_catalog
+				// is on every path whether written or not.
+				if s = strings.Trim(strings.TrimSpace(s), `"`); s != "" && s != "$user" && s != "pg_catalog" {
+					path = append(path, s)
 				}
 			}
-			if first != "" && first != x.tx.db.kind.SearchPath()[0] {
-				return nil, x.unsupported("SET search_path to a schema other than the first of postgres.SearchPath (" + x.tx.db.kind.SearchPath()[0] + ")")
+			if len(path) > 0 && !slices.Equal(path, x.tx.db.kind.SearchPath()) {
+				return nil, x.unsupported("SET search_path to a path other than postgres.SearchPath's (" + strings.Join(x.tx.db.kind.SearchPath(), ", ") + ")")
 			}
 		}
 		return &sqlResult{}, nil

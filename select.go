@@ -1098,6 +1098,14 @@ func windowsIn(e sqlir.Expr) []*sqlir.WindowFunc {
 // computeWindows evaluates each window function for every item and keeps the
 // value in the item's context, where eval finds it.
 func (x *sqlExec) computeWindows(wins []*sqlir.WindowFunc, items []*selItem) error {
+	// Before the partitions, which a table with no rows has none of, so
+	// that a call with other arguments than its function takes fails on an
+	// empty table as on the server.
+	for _, w := range wins {
+		if what := windowArityMismatch(w.Func); what != "" {
+			return x.unsupported(what)
+		}
+	}
 	for _, it := range items {
 		if it.ctx.win == nil {
 			it.ctx.win = map[*sqlir.WindowFunc]any{}
@@ -1134,9 +1142,6 @@ func (x *sqlExec) computeWindows(wins []*sqlir.WindowFunc, items []*selItem) err
 }
 
 func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
-	if what := windowArityMismatch(w.Func); what != "" {
-		return x.unsupported(what)
-	}
 	keys := make([][]any, len(part))
 	for i, it := range part {
 		keys[i] = make([]any, len(w.Order))
