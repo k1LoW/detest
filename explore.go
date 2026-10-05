@@ -13,7 +13,8 @@ import (
 )
 
 // Explore declares a simulation with fn and explores every schedule of it,
-// failing the test on a violation. fn registers simulated resources,
+// depth first, failing the test on a violation. Under Random it runs
+// schedules drawn from a seed instead. fn registers simulated resources,
 // processes, seeds and invariants on s and returns; the exploration starts
 // after it returns.
 //

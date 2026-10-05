@@ -5,6 +5,7 @@
 // services, whose semantics detest implements. Every operation on them is a
 // scheduling point, and detest enumerates the schedules, the failure outcomes
 // and the duplicate deliveries, checking user-supplied invariants on each run.
+// Random draws them from a seed instead, for spaces too large to enumerate.
 //
 // Explore is the only entry point. It runs the declaration function and the
 // exploration inside a testing/synctest bubble.
