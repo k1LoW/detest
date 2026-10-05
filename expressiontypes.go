@@ -129,6 +129,17 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	case "pg_advisory_xact_lock", "pg_try_advisory_xact_lock":
+		// The one-bigint and two-integer overloads are the only signatures
+		// Postgres defines; it rejects any other key type before locking,
+		// where callFunc would otherwise key the lock on the value as given.
+		for _, a := range f.Args {
+			switch typ := expressionType(a, column); typ {
+			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
+			default:
+				return f.Name + " with a " + typ + " key argument"
+			}
+		}
 	}
 	return ""
 }
