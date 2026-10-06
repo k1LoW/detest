@@ -2406,6 +2406,9 @@ func (tx *Tx) enterOp(p *Proc) func() {
 	for c.by != nil && c.by != p {
 		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
 	}
+	if c.by != p {
+		p.conns = append(p.conns, c)
+	}
 	c.by = p
 	c.depth++
 	return func() {
@@ -2416,6 +2419,7 @@ func (tx *Tx) enterOp(p *Proc) func() {
 			return
 		}
 		c.by = nil
+		p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
 		if tx.p.r.over() {
 			return
 		}

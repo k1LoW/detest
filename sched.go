@@ -260,6 +260,9 @@ type Proc struct {
 	// the deadlock victim. It is per process, since several goroutines may
 	// wait on behalf of one transaction, and each must see the abort.
 	victimOf *Tx
+	// conns are the connections of hand-written transactions the process
+	// runs an operation on, which its crash gives back (see enterOp).
+	conns []*txConn
 	// lingering marks a process detest started whose goroutine was still
 	// running when its run ended and reap gave up on it. It is turned away
 	// in later runs as a retired adopted goroutine is.
@@ -1031,6 +1034,13 @@ func (r *run) crash(p *Proc) {
 			r.finish(m)
 			m.waitRow, m.waitLock = nil, nil
 		}
+		// The connection of a hand-written transaction it ran an operation
+		// on is free again, for a process of another pod sharing it.
+		for _, c := range m.conns {
+			c.by, c.depth = nil, 0
+			freed = true
+		}
+		m.conns = nil
 		// A goroutine that returned may still hold a mutex, which Go lets
 		// another goroutine of the pod unlock later, so it is freed too.
 		for _, l := range r.s.locks {

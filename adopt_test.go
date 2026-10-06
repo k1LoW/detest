@@ -1635,3 +1635,36 @@ func TestDeclaredProcessesSharingSQLTxRefused(t *testing.T) {
 		t.Error("no run refused the other process's statement as unsupported")
 	}
 }
+
+// A process running an operation on another process's hand-written
+// transaction that crashes gives the transaction back, so the process
+// waiting to use it goes on.
+func TestCrashGivesBackTransactionInUse(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
+		var shared *Tx
+		s.Seed(func() { shared = nil })
+		s.Manual("z", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+					return err
+				}
+				p.Step("hold the row")
+				return nil
+			})
+		})
+		s.Manual("x", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				shared = tx
+				p.Step("hand it over")
+				tx.Get("counters", "a")
+				return nil
+			})
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			_, _, _ = shared.GetForUpdate("counters", "a")
+			return nil
+		}, After(func(*State) bool { return shared != nil }))
+	}, MaxCrashes(1), MaxPreemptions(2))
+}
