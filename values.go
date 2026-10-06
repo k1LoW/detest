@@ -338,8 +338,12 @@ func valueKind(v any) string {
 	switch v.(type) {
 	case bool:
 		return "boolean"
-	case time.Time, instant:
+	case time.Time:
 		return "time"
+	case instant:
+		// A timestamptz beside a timestamp in a set operation is converted
+		// in the session's TimeZone, which the set operation does not do.
+		return "timestamptz"
 	}
 	return "other"
 }

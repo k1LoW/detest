@@ -1468,7 +1468,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		return nil, nil
 	case "nullif":
-		if len(args) == 2 && equalValues(args[0], args[1]) {
+		// The arguments compare as = does, a timestamp beside a timestamptz
+		// read in the session's TimeZone, and the first is returned as it is.
+		if len(args) == 2 && equalValues(x.comparable(args[0], args[1])) {
 			return nil, nil
 		}
 		return args[0], nil

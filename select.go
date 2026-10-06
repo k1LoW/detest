@@ -1262,6 +1262,7 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 			if err != nil {
 				return err
 			}
+			v = x.toTimeType(v, x.exprTypes[w.Func])
 		default:
 			return x.unsupported("window function " + name)
 		}

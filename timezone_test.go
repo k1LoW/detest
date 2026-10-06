@@ -41,6 +41,9 @@ func TestServerTimeZone(t *testing.T) {
 		{`SELECT id FROM ev WHERE at = $1 ORDER BY id`, []any{at}, []int64{1, 2, 3, 4}},
 		{`SELECT id FROM ev WHERE at = ANY($1) ORDER BY id`, []any{[]time.Time{at.UTC()}}, []int64{1, 2, 3, 4}},
 		{`SELECT id FROM ev WHERE ts = $1 ORDER BY id`, []any{at}, []int64{1, 2, 3}},
+		{`SELECT id FROM ev WHERE ts = ANY($1) ORDER BY id`, []any{[]time.Time{at}}, []int64{1, 2, 3}},
+		// NULLIF compares a timestamp with a timestamptz as = does.
+		{`SELECT id FROM ev WHERE nullif(ts, at) IS NULL ORDER BY id`, nil, []int64{1, 2, 3}},
 		{`SELECT count(*) FROM ev WHERE LOCALTIMESTAMP = now()::timestamp AND CURRENT_DATE = now()::date`, nil, []int64{4}},
 	} {
 		if got := queryIDs(t, db, tt.q, tt.args...); !slices.Equal(got, tt.want) {
@@ -55,6 +58,21 @@ func TestServerTimeZone(t *testing.T) {
 	}
 	if !tz.Equal(at) || ts != time.Date(2024, 5, 20, 0, 30, 0, 0, time.UTC) {
 		t.Errorf("got %v, %v", tz, ts)
+	}
+	// LAG and LEAD give their value and default one type, a timestamptz
+	// here, whichever of the two a row returns.
+	for _, q := range []string{
+		`SELECT lag(ts, 0, at) OVER (ORDER BY id) FROM ev WHERE id = 1`,
+		`SELECT lead(ts, 1, at) OVER (ORDER BY id) FROM ev WHERE id = 1`,
+	} {
+		var got time.Time
+		if err := db.QueryRow(q).Scan(&got); err != nil || !got.Equal(at) {
+			t.Errorf("%s: got %v, %v, want %v", q, got, err, at)
+		}
+	}
+	// A set operation does not convert a timestamp beside a timestamptz.
+	if _, err := db.Exec(`SELECT ts FROM ev UNION SELECT at FROM ev`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("UNION of a timestamp and a timestamptz: got %v, want ErrUnsupportedSQL", err)
 	}
 	// SET TIME ZONE overrides the server's for the session, and LOCAL,
 	// DEFAULT and RESET return to the server's, not to UTC.

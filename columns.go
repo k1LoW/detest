@@ -1041,6 +1041,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(fmt.Sprintf("= ANY or <> ALL of a %s against an array of %s", orUnknown(typ), e.ElemType))
 					return
 				}
+				c.x.noteType(e, typ)
 				if p, ok := e.Array.(*sqlir.Param); ok {
 					c.params.array(p.Index, typ)
 				}
@@ -1117,6 +1118,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					if len(e.Args) == 2 {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
 					}
+				case "lag", "lead":
+					// The value and the default take one type, as the
+					// arguments of COALESCE do.
+					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
 				}
 			case *sqlir.Cast:
 				c.castInput(e)
