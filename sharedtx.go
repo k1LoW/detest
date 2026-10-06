@@ -18,14 +18,13 @@ import (
 // outcome could depend on its order with another goroutine's stops the
 // exploration, as nondeterminism does.
 //
-// A statement of the process itself is not compared. One that parks at its
-// yield point runs only once the scheduler resumes it, after the step's
-// goroutines are done. One that does not, such as a SET, may run in the same
-// step after its goroutines, ordered by a WaitGroup, or alongside them, and
-// the two look alike from here. Such a statement touches its own connection
-// and transaction, and one on the transaction the goroutines share waits for
-// database/sql's lock of it, so it is left unchecked rather than stop the
-// common case of a process that sets something after its goroutines finish.
+// A statement of the process itself is not compared. Before it enters the
+// engine, the process lets every goroutine running alongside it get to where
+// it blocks (see Proc.drain), so the goroutines' statements in flight come
+// first, whatever the runtime does, and its own pre-yield work, such as an
+// insert taking a sequence's value, comes after them. Comparing it instead
+// would stop the common case of a process that runs a statement after its
+// goroutines finished, which a WaitGroup orders but which looks the same.
 
 // sharedAccess is what a statement on a shared transaction touched.
 type sharedAccess struct {

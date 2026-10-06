@@ -52,6 +52,7 @@ const (
 	evBlocked
 	evDone
 	evSync // a process back from outside detest asks to be run now (see syncOutside)
+	evDrain // the resumed process asks to go on once every other goroutine settled (see drain)
 )
 
 type procEvent struct {
@@ -887,14 +888,21 @@ func (r *run) resume(p *Proc) {
 // which is not a durable block. Such a hang is left to the stall watchdog;
 // inspecting goroutine stacks here instead stops the world on every step.
 func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
-	r.s.settled()
-	select {
-	case ev := <-p.ev:
-		return ev, true
-	default:
-		return procEvent{}, false
+	for {
+		r.s.settled()
+		select {
+		case ev := <-p.ev:
+			if ev.kind == evDrain {
+				p.resume <- struct{}{}
+				continue
+			}
+			return ev, true
+		default:
+			return procEvent{}, false
+		}
 	}
 }
+
 
 // settle takes in the goroutines adopted since the last step and the
 // processes back from outside detest, until none is left. Each one it runs
@@ -1356,6 +1364,21 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 // is canceled when the run ends, which lets database/sql roll back a
 // transaction the process left open when the run was cut short.
 func (p *Proc) Context() context.Context { return p.r.ctx }
+
+// drain lets every goroutine running alongside p, such as one it started
+// that runs a statement on a transaction it shares with p, get to where it
+// blocks before p goes on into the engine. It is no yield point: the
+// scheduler runs p on at once, without a choice. Without it, what p does in
+// the engine before its yield point, such as an insert taking a sequence's
+// value, would race those goroutines for the engine mutex, and the Go
+// runtime would decide the order.
+func (p *Proc) drain() {
+	if p.r.over() {
+		return
+	}
+	p.send(procEvent{kind: evDrain})
+	p.wait()
+}
 
 func (p *Proc) main() {
 	defer close(p.exited)

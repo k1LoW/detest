@@ -418,6 +418,7 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 			return nil, 0, errRunOver
 		}
 		p.syncOutside()
+		p.drain()
 	}
 	defer c.db.s.enter(p)()
 	// The context may have ended while the statement waited above.

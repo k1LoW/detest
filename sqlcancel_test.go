@@ -534,3 +534,40 @@ func TestGoroutinesSharingSQLTxEffectfulCheckStop(t *testing.T) {
 		t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
 	}
 }
+
+// A process that inserts on another connection right after waking a
+// goroutine that inserts on their shared transaction takes its sequence
+// value after the goroutine's, in every run, rather than in the order the
+// Go runtime hands out the engine.
+func TestProcessInsertAfterGoroutineOnSharedSQLTx(t *testing.T) {
+	for range 10 {
+		Explore(t, func(t *testing.T, s *Sim) {
+			db, store := s.DB("app", postgres.New())
+			if _, err := db.Exec(`CREATE TABLE marks (id serial PRIMARY KEY, who text NOT NULL)`); err != nil {
+				t.Fatal(err)
+			}
+			s.Manual("pod", 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				var wg sync.WaitGroup
+				wg.Go(func() { _, _ = tx.Exec(`INSERT INTO marks (who) VALUES ('goroutine')`) })
+				if _, err := db.Exec(`INSERT INTO marks (who) VALUES ('process')`); err != nil {
+					return err
+				}
+				wg.Wait()
+				return tx.Commit()
+			})
+			s.AtQuiescence(func(st *State) error {
+				for _, r := range st.Rows(store, "marks") {
+					if r.Str("who") == "goroutine" && r.Int64("id") != 1 {
+						return fmt.Errorf("the goroutine's insert got id %d", r.Int64("id"))
+					}
+				}
+				return nil
+			})
+		})
+	}
+}
