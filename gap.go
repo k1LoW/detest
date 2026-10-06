@@ -225,6 +225,17 @@ func (tx *Tx) releaseGaps() {
 	if len(tables) == 0 || tx.p == nil {
 		return
 	}
+	if tx.shared != "" {
+		// As in wake, the scheduler wakes them for a shared statement.
+		tx.p.r.postCancel(txCancel{tx: tx, gaps: tables})
+		return
+	}
+	tx.wakeGaps(tables)
+}
+
+// wakeGaps makes the inserts waiting on a gap of tables ready; each
+// re-checks when resumed.
+func (tx *Tx) wakeGaps(tables map[string]bool) {
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && p.waitRow.key.key == gapWaitKey && tables[p.waitRow.key.table] {
 			p.state, p.waitRow = stateReady, nil

@@ -1468,8 +1468,10 @@ type txCancel struct {
 	p  *Proc
 	tx *Tx
 	// wake holds the locks a statement on a shared transaction let go of,
-	// whose waiters the scheduler wakes, rather than roll tx back.
+	// and gaps the tables of the gap locks it let go of, whose waiters the
+	// scheduler wakes, rather than roll tx back.
 	wake map[lockKey]bool
+	gaps map[string]bool
 	// why says in the trace why tx rolls back, when no statement of p was
 	// canceled.
 	why string
@@ -1500,6 +1502,10 @@ func (r *run) takeCancels() bool {
 	for _, c := range cs {
 		if c.wake != nil {
 			c.tx.wakeNow(c.wake)
+			continue
+		}
+		if c.gaps != nil {
+			c.tx.wakeGaps(c.gaps)
 			continue
 		}
 		if p := c.p; p != nil {
