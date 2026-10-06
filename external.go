@@ -210,7 +210,9 @@ func (t *transport) serve(req *http.Request) *http.Response {
 // fan-out send for different items. The body is read only from the copy
 // GetBody gives, as connect and http.NewRequest set it for a buffered body,
 // since reading the body itself could block on a stream while the scheduler
-// does not yet see the goroutine.
+// does not yet see the goroutine. connect's GetBody rewinds and returns the
+// body the request itself reads, so the request is handed a fresh copy
+// afterwards, which leaves it as it was either way.
 func requestKey(req *http.Request) string {
 	key := req.Method + " " + req.URL.String()
 	if req.GetBody == nil {
@@ -220,8 +222,11 @@ func requestKey(req *http.Request) string {
 	if err != nil {
 		return key
 	}
-	defer func() { _ = body.Close() }()
 	b, err := io.ReadAll(body)
+	_ = body.Close()
+	if fresh, ferr := req.GetBody(); ferr == nil {
+		req.Body = fresh
+	}
 	if err != nil {
 		return key
 	}

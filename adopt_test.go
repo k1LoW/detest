@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -1225,4 +1226,49 @@ func TestAdoptedGoroutineReturnsAfterTrailingSleep(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+// rewindBody is a request body whose GetBody rewinds and returns the body
+// itself, as connect's does.
+type rewindBody struct{ *strings.Reader }
+
+func (rewindBody) Close() error { return nil }
+
+// A goroutine adopted at a request whose GetBody hands back the request's own
+// body, as connect's does, still sends the whole body.
+func TestAdoptedAtRequestKeepsItsBody(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		ext := s.External("svc", ReadOnly())
+		var got []string
+		s.Seed(func() { got = nil })
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			got = append(got, string(b))
+		})
+		client := &http.Client{Transport: ext.Transport(h)}
+		s.Manual("pod", 1, func(p *Proc) error {
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				body := rewindBody{strings.NewReader("payload")}
+				req, _ := http.NewRequest(http.MethodPost, "http://svc/", body)
+				req.GetBody = func() (io.ReadCloser, error) {
+					_, err := body.Seek(0, io.SeekStart)
+					return body, err
+				}
+				if resp, err := client.Do(req); err == nil {
+					_ = resp.Body.Close()
+				}
+			})
+			wg.Wait()
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			for _, b := range got {
+				if b != "payload" {
+					return fmt.Errorf("the service got %q", b)
+				}
+			}
+			return nil
+		})
+	}, MaxFailures(0))
 }
