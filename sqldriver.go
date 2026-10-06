@@ -546,7 +546,7 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 		if !ok {
 			panic(rec)
 		}
-		err = c.cancel(sc.p, tx, ctx.Err())
+		err = c.cancel(sc.p, tx, query)
 	}()
 	tx.lastInsertID = &c.lastInsertID
 	innodb := c.db.kind.InnoDB() && !auto
@@ -618,14 +618,19 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 	return &sqlRows{cols: res.cols, rows: res.rows, lastID: res.lastID}, res.affected, nil
 }
 
-// cancel ends a statement of p parked in the driver whose context ended, as
-// a real driver cancels the query. It returns the context's error, which
-// releases the locks database/sql holds while the driver runs, so that its
-// own goroutine can roll the transaction back. pgx and go-sql-driver close
-// the connection then, so the transaction ends with it, which the scheduler
-// carries out at its next step, as p now runs alongside the process it
-// resumed. p is blocked outside detest until then.
-func (c *sqlConn) cancel(p *Proc, tx *Tx, err error) error {
+// cancel ends a statement of p parked in the driver whose context ended. It
+// has to return, as database/sql holds the transaction's locks until it
+// does, and its own goroutine waits for them to roll the transaction back.
+// It is refused rather than given the context's error. pgx and go-sql-driver
+// only close the connection, and the server goes on running the statement:
+// a canceled autocommit UPDATE waiting for a row is applied once the row is
+// free, on Postgres and on MySQL alike, and a MySQL transaction keeps its
+// locks until then. When that happens depends on the lock wait and on when
+// the server notices the closed connection, which detest does not model.
+// The connection is dropped and its transaction rolled back by the
+// scheduler at its next step, as p now runs alongside the process it
+// resumed, and p is blocked outside detest until then.
+func (c *sqlConn) cancel(p *Proc, tx *Tx, query string) error {
 	c.bad = true
 	if c.tx == tx {
 		c.tx = nil
@@ -636,7 +641,7 @@ func (c *sqlConn) cancel(p *Proc, tx *Tx, err error) error {
 		r.outside.Add(1) // as parkOutside
 	}
 	r.postCancel(txCancel{p: p, tx: tx})
-	return err
+	return unsupported("a statement whose context ended while it ran or waited in the database, which the server goes on running", query)
 }
 
 type sqlStmt struct {

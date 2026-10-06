@@ -14,8 +14,8 @@ import (
 	"github.com/k1LoW/detest/postgres"
 )
 
-// A statement waiting for a row lock fails with its context's error when the
-// context ends, as a real driver cancels the query, and the run goes on.
+// A statement waiting for a row lock whose context ends is refused, as the
+// server goes on running it once the row is free, and the run goes on.
 func TestStatementWaitingForLockCanceledByDeadline(t *testing.T) {
 	for _, srv := range []Server{postgres.New(), mysql.New()} {
 		t.Run(fmt.Sprintf("%T", srv), func(t *testing.T) {
@@ -55,8 +55,9 @@ func TestStatementWaitingForLockCanceledByDeadline(t *testing.T) {
 					}
 					return tx.Commit()
 				})
-				s.Sometimes("the waiting statement ended with its deadline", func(*State) bool {
-					return errors.Is(waitErr, context.DeadlineExceeded)
+				s.Sometimes("the waiting statement was refused when its deadline passed", func(*State) bool {
+					_, ok := errors.AsType[*ErrUnsupportedSQL](waitErr)
+					return ok
 				})
 				s.AtQuiescence(func(st *State) error {
 					row, _ := st.Row(store, "counters", "1")

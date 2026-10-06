@@ -168,7 +168,7 @@ A queue is at least once and unordered. A consumer whose handler returns an erro
 Determinism is a precondition of the search, so detest asks a few things of a test.
 
 - Build everything the code under test uses inside the declaration function. Channels and timers created outside the bubble are not durably blocking inside it.
-- Pass `p.Context()` to production code. It is canceled when a run ends, so `database/sql` can roll back the transactions of an aborted run. A statement parked in detest returns its context's error when its context ends, as a real driver cancels the query, and its connection is dropped with its transaction, as pgx and go-sql-driver drop it.
+- Pass `p.Context()` to production code. It is canceled when a run ends, so `database/sql` can roll back the transactions of an aborted run. A statement parked in detest whose context ends returns, so that `database/sql` releases its locks, but fails as unsupported: the drivers only close the connection, and when the server then runs or abandons the statement is not modeled.
 - Inject `detest.Mutex` where the code takes a mutex across a yield point.
 - Reset state kept outside simulated resources in a seed. The declaration function runs once per worker, not once per run.
 
