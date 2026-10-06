@@ -185,12 +185,14 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
-	if r := rw.s.run; r != nil && r.over() {
-		return // as Mutex.Unlock, the next run resets the read locks
-	}
+	// Resolved first, as a goroutine of an ended run must not read s.run,
+	// which the scheduler may be setting for the next run.
 	p := rw.s.Current()
 	if p.stale() {
 		return
+	}
+	if r := rw.s.run; r != nil && r.over() {
+		return // as Mutex.Unlock, the next run resets the read locks
 	}
 	switch {
 	case p != nil && rw.readers[p] > 0:
