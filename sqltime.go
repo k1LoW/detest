@@ -101,7 +101,7 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		if num == "" {
 			// ISO 8601 (P1D) and infinity are interval text Postgres reads;
 			// any other word without a number is malformed.
-			if f == "infinity" || f == "-infinity" || f == "+infinity" || strings.HasPrefix(f, "p") {
+			if f == "infinity" || f == "-infinity" || f == "+infinity" || isoInterval(f) {
 				return 0, &intervalError{fmt.Sprintf("interval text %q", s), false}
 			}
 			return 0, &intervalError{fmt.Sprintf("interval text %q", s), true}
@@ -177,6 +177,12 @@ func parseClock(f string) (*big.Rat, *intervalError) {
 		total.Neg(total)
 	}
 	return total, nil
+}
+
+// isoInterval reports whether f looks like ISO 8601 interval text, such as
+// P1D or PT1H: a P followed by a digit or a T.
+func isoInterval(f string) bool {
+	return len(f) > 1 && f[0] == 'p' && (f[1] == 't' || f[1] >= '0' && f[1] <= '9')
 }
 
 // splitNumber splits a field such as "10min" into its number and its unit.
