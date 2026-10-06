@@ -3,6 +3,7 @@ package detest
 import (
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,6 +85,96 @@ func (s *Sim) retireUnknown(gid string) *Proc {
 	s.stale[gid] = p
 	s.recount()
 	return p
+}
+
+// canonical describes values for ordering goroutines adopted at a call, by
+// walking them with reflect rather than formatting them, so that no method of
+// the application's types, such as a String method, runs before the goroutine
+// is registered and parked: one that blocks would go unseen by the scheduler,
+// and one that called into detest would be adopted twice.
+func canonical(parts ...any) string {
+	var b strings.Builder
+	for i, p := range parts {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		writeCanonical(&b, reflect.ValueOf(p), 0)
+	}
+	return b.String()
+}
+
+var timeType = reflect.TypeFor[time.Time]()
+
+func writeCanonical(b *strings.Builder, v reflect.Value, depth int) {
+	if !v.IsValid() {
+		b.WriteString("nil")
+		return
+	}
+	if depth > 8 {
+		b.WriteString("...") // a value nested this deep, or a cycle
+		return
+	}
+	if v.Type() == timeType && v.CanInterface() {
+		t, _ := reflect.TypeAssert[time.Time](v)
+		b.WriteString(t.UTC().Format(time.RFC3339Nano))
+		return
+	}
+	switch v.Kind() {
+	case reflect.Bool:
+		b.WriteString(strconv.FormatBool(v.Bool()))
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		b.WriteString(strconv.FormatInt(v.Int(), 10))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		b.WriteString(strconv.FormatUint(v.Uint(), 10))
+	case reflect.Float32, reflect.Float64:
+		b.WriteString(strconv.FormatFloat(v.Float(), 'g', -1, 64))
+	case reflect.Complex64, reflect.Complex128:
+		b.WriteString(strconv.FormatComplex(v.Complex(), 'g', -1, 128))
+	case reflect.String:
+		b.WriteString(strconv.Quote(v.String()))
+	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			b.WriteString(strconv.Quote(string(v.Bytes())))
+			return
+		}
+		b.WriteByte('[')
+		for i := range v.Len() {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			writeCanonical(b, v.Index(i), depth+1)
+		}
+		b.WriteByte(']')
+	case reflect.Map:
+		entries := make([]string, 0, v.Len())
+		it := v.MapRange()
+		for it.Next() {
+			var e strings.Builder
+			writeCanonical(&e, it.Key(), depth+1)
+			e.WriteByte(':')
+			writeCanonical(&e, it.Value(), depth+1)
+			entries = append(entries, e.String())
+		}
+		slices.Sort(entries)
+		b.WriteString("{" + strings.Join(entries, " ") + "}")
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			b.WriteString("nil")
+			return
+		}
+		writeCanonical(b, v.Elem(), depth+1)
+	case reflect.Struct:
+		b.WriteByte('{')
+		for i := range v.NumField() {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			writeCanonical(b, v.Field(i), depth+1)
+		}
+		b.WriteByte('}')
+	default:
+		b.WriteString(v.Type().String()) // a channel or a func says nothing stable
+	}
 }
 
 // goroutineCreator returns the calling goroutine's id and the id of the

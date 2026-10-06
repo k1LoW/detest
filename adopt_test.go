@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1667,4 +1668,35 @@ func TestCrashGivesBackTransactionInUse(t *testing.T) {
 			return nil
 		}, After(func(*State) bool { return shared != nil }))
 	}, MaxCrashes(1), MaxPreemptions(2))
+}
+
+// stringSpy counts the calls of its String method, which a String method
+// that blocks or calls into detest would make harmful.
+type stringSpy struct{ id int }
+
+var stringSpyCalls atomic.Int64
+
+func (stringSpy) String() string {
+	stringSpyCalls.Add(1)
+	return "spy"
+}
+
+// The description that orders goroutines adopted at a call runs no method of
+// the call's values, so an application's String method does not run before
+// the goroutine is registered.
+func TestAdoptionKeyRunsNoStringMethod(t *testing.T) {
+	stringSpyCalls.Store(0)
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.Manual("pod", 1, func(p *Proc) error {
+			var wg sync.WaitGroup
+			for i := range 2 {
+				wg.Go(func() { p.Step("step %v", stringSpy{i}) })
+			}
+			wg.Wait()
+			return nil
+		})
+	})
+	if n := stringSpyCalls.Load(); n > 0 {
+		t.Errorf("String ran %d times while goroutines were adopted", n)
+	}
 }

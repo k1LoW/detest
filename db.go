@@ -1905,7 +1905,7 @@ func (tx *Tx) Insert(table string, row Row) (err error) {
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
-	if caller = tx.caller(func() string { return fmt.Sprint("insert ", table, row) }); caller.stale() {
+	if caller = tx.caller(func() string { return canonical("insert", table, row) }); caller.stale() {
 		return errRunOver
 	}
 	defer tx.enterOp(caller)()
@@ -1919,7 +1919,7 @@ func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
-	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", key, fields) }); caller.stale() {
+	if caller = tx.caller(func() string { return canonical("update", table, key, fields) }); caller.stale() {
 		return false, errRunOver
 	}
 	defer tx.enterOp(caller)()
@@ -1934,7 +1934,7 @@ func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
-	if caller = tx.caller(func() string { return fmt.Sprint("cas ", table, " ", key, " ", field, from, to) }); caller.stale() {
+	if caller = tx.caller(func() string { return canonical("cas", table, key, field, from, to) }); caller.stale() {
 		return false, errRunOver
 	}
 	defer tx.enterOp(caller)()
@@ -2058,7 +2058,7 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
-	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", desc, fields) }); caller.stale() {
+	if caller = tx.caller(func() string { return canonical("update", table, desc, fields) }); caller.stale() {
 		return 0, errRunOver
 	}
 	defer tx.enterOp(caller)()
@@ -2092,7 +2092,7 @@ func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	defer func() { absorbAbort(recover(), caller, nil) }()
 	// It does not yield, so resolving the caller here is what adopts a
 	// goroutine calling for the first time.
-	if caller = tx.caller(func() string { return fmt.Sprint("enqueue ", q.name, msg) }); caller.stale() {
+	if caller = tx.caller(func() string { return canonical("enqueue", q.name, msg) }); caller.stale() {
 		runtime.Goexit()
 	}
 	defer tx.enterOp(caller)()
@@ -2340,7 +2340,7 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return
 	}
-	tx.procAs(func() string { return fmt.Sprintf(format, args...) }).yieldf(format, args...)
+	tx.procAs(func() string { return canonical(format, args) }).yieldf(format, args...)
 }
 
 // caller resolves the caller of an operation of the transaction before the

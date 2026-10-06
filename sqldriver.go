@@ -111,7 +111,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	// The caller is resolved before anything else, as a goroutine of an
 	// ended run must not read the connection's state, nor s.run, which the
 	// scheduler may be setting for the next run.
-	p := c.db.s.currentAs(func() string { return fmt.Sprint(c.db.name, " begin ", opts.Isolation, opts.ReadOnly) })
+	p := c.db.s.currentAs(func() string { return canonical(c.db.name, "begin", opts.Isolation, opts.ReadOnly) })
 	if p.stale() {
 		return nil, errRunOver
 	}
@@ -349,7 +349,7 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
-	if p := c.db.s.currentAs(func() string { return fmt.Sprint(c.db.name, " ", query, args) }); p != nil {
+	if p := c.db.s.currentAs(func() string { return canonical(c.db.name, query, args) }); p != nil {
 		if p.stale() {
 			return nil, 0, errRunOver
 		}

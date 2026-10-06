@@ -806,7 +806,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 func (p *Proc) Step(format string, args ...any) {
 	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p = p.resolve(func() string { return fmt.Sprintf(format, args...) })
+	p = p.resolve(func() string { return canonical(format, args) })
 	goneStale(p)
 	p.yieldf(format, args...)
 }
@@ -1284,7 +1284,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 func (p *Proc) WaitUntil(t int64) {
 	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p = p.resolve(func() string { return fmt.Sprint("wait until ", t) })
+	p = p.resolve(func() string { return canonical("wait until", t) })
 	goneStale(p)
 	if p.r.clock >= t {
 		return
