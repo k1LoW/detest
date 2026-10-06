@@ -1,8 +1,10 @@
 package detest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 )
@@ -163,7 +165,7 @@ type transport struct {
 }
 
 func (t *transport) RoundTrip(req *http.Request) (_ *http.Response, err error) {
-	p := t.e.s.Current()
+	p := t.e.s.currentAs(func() string { return requestKey(req) })
 	if p == nil {
 		return t.serve(req), nil // outside any process, such as in a seed
 	}
@@ -202,4 +204,21 @@ func (t *transport) serve(req *http.Request) *http.Response {
 	resp := rec.Result()
 	resp.Request = req
 	return resp
+}
+
+// requestKey describes a request for ordering goroutines adopted at it, by
+// its method, URL and body, which tells apart the requests goroutines of a
+// fan-out send for different items. The body is read and put back.
+func requestKey(req *http.Request) string {
+	key := req.Method + " " + req.URL.String()
+	if req.Body == nil || req.Body == http.NoBody {
+		return key
+	}
+	b, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(b))
+	if err != nil {
+		return key
+	}
+	return key + " " + string(b)
 }

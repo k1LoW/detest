@@ -233,8 +233,11 @@ type Proc struct {
 	adopted bool
 	parent  *Proc
 	creator string // the id of the goroutine that started an adopted one
-	family  *Proc
-	kids    int // goroutines adopted from this process, for naming them
+	// first describes the call an adopted goroutine was adopted at, which
+	// orders the goroutines of a parent taken in at the same step.
+	first  string
+	family *Proc
+	kids   int // goroutines adopted from this process, for naming them
 	// returned marks an adopted goroutine seen to have returned. Done alone
 	// does not tell, since one that crashed with its family is done while its
 	// goroutine still runs.
@@ -265,7 +268,13 @@ func (p *Proc) Name() string { return p.name }
 // boundaries (clients, drivers) use this instead. A goroutine the code under
 // test started itself is adopted as a process of its own the first time it
 // calls (see adopt).
-func (s *Sim) Current() *Proc {
+func (s *Sim) Current() *Proc { return s.currentAs(nil) }
+
+// currentAs is Current for an entry point that can describe the call it is
+// about to make, such as a statement with its arguments. A goroutine adopted
+// at the call is ordered among its siblings by the description, which is
+// built only then.
+func (s *Sim) currentAs(first func() string) *Proc {
 	r := s.live.Load()
 	if r == nil {
 		return nil
@@ -291,7 +300,7 @@ func (s *Sim) Current() *Proc {
 	if onProc && r.outside.Load() == 0 && s.lingerN.Load() == 0 {
 		return r.current
 	}
-	p := s.lookup(r, onProc)
+	p := s.lookup(r, onProc, first)
 	if p == nil {
 		return nil
 	}

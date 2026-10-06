@@ -95,7 +95,7 @@ func liveGoroutines() map[string]bool {
 // lookup resolves the calling goroutine when it may not be the resumed
 // process, as when a process woke outside detest or the caller is not a
 // goroutine detest started.
-func (s *Sim) lookup(r *run, onProc bool) *Proc {
+func (s *Sim) lookup(r *run, onProc bool, first func() string) *Proc {
 	gid := goroutineID()
 	r.gidMu.Lock()
 	p, ok := r.byGid[gid]
@@ -112,17 +112,20 @@ func (s *Sim) lookup(r *run, onProc bool) *Proc {
 		// as before.
 		return r.current
 	}
-	return r.adopt(gid)
+	return r.adopt(gid, first)
 }
 
 // adopt registers the calling goroutine as a process and parks it until the
 // scheduler takes it in. It does not return before then, so that nothing it
 // does in detest, not even a choice made before its first yield point, runs
 // alongside the scheduler.
-func (r *run) adopt(gid string) *Proc {
+func (r *run) adopt(gid string, first func() string) *Proc {
 	_, creator := goroutineCreator()
 	np := &Proc{r: r, gid: gid, creator: creator, adopted: true,
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{})}
+	if first != nil {
+		np.first = first()
+	}
 	r.gidMu.Lock()
 	if r.over() {
 		// Its run ended before it first called, so it is turned away at
@@ -168,9 +171,13 @@ func (p *Proc) handshake() {
 // takeAdopted takes in the goroutines that called into detest since the last
 // step, and runs each to its first yield point. They arrived in the order the
 // runtime ran them, so they are ordered by their parents and, between the
-// goroutines of one parent, by goroutine id, which the runtime hands out in
-// the order a goroutine starts them. A misordering would make the replay of a
-// schedule take another path, which detest reports as nondeterminism.
+// goroutines of one parent, by the call each was adopted at, such as a
+// statement with its arguments, which tells apart goroutines a loop started
+// for different items. Only goroutines making the same first call are
+// ordered by goroutine id, which mostly follows the order they were started
+// in but not always, since the runtime hands ids out from per-processor
+// caches. A misordering would make the replay of a schedule take another
+// path, which detest reports as nondeterminism.
 func (r *run) takeAdopted() bool {
 	r.gidMu.Lock()
 	pending := r.adopting
@@ -218,6 +225,9 @@ func (r *run) takeAdopted() bool {
 			a, b := ready[i], ready[j]
 			if a.parent != b.parent {
 				return parentName(a) < parentName(b)
+			}
+			if a.first != b.first {
+				return a.first < b.first
 			}
 			ai, _ := strconv.ParseUint(a.gid, 10, 64)
 			bi, _ := strconv.ParseUint(b.gid, 10, 64)

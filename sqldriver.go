@@ -329,7 +329,7 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
-	if p := c.current(); p != nil {
+	if p := c.db.s.currentAs(func() string { return fmt.Sprint(query, args) }); p != nil {
 		if p.stale() {
 			return nil, 0, errRunOver
 		}

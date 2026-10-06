@@ -2007,7 +2007,7 @@ func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	// goroutine calling for the first time and takes back one that woke
 	// outside detest before the transaction changes.
 	if tx.p != nil && !tx.atomic {
-		goneStale(tx.db.s.Current())
+		goneStale(tx.db.s.currentAs(func() string { return fmt.Sprint("enqueue ", q.name, msg) }))
 	}
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
@@ -2248,7 +2248,7 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return
 	}
-	tx.proc().yieldf(format, args...)
+	tx.procAs(func() string { return fmt.Sprintf(format, args...) }).yieldf(format, args...)
 }
 
 // proc returns the process running the calling operation of the
@@ -2257,8 +2257,11 @@ func (tx *Tx) yieldf(format string, args ...any) {
 // which yields and waits for locks itself while p keeps owning the
 // transaction and its locks. It is resolved from the caller each time rather
 // than kept on the transaction, which two goroutines may use at once.
-func (tx *Tx) proc() *Proc {
-	if c := tx.db.s.Current(); c != nil && c != tx.p && c.r == tx.p.r {
+func (tx *Tx) proc() *Proc { return tx.procAs(nil) }
+
+// procAs is proc for an operation that can describe itself (see currentAs).
+func (tx *Tx) procAs(first func() string) *Proc {
+	if c := tx.db.s.currentAs(first); c != nil && c != tx.p && c.r == tx.p.r {
 		return c
 	}
 	return tx.p

@@ -36,7 +36,7 @@ func (s *Sim) Mutex(name string) *Mutex {
 
 // Lock acquires the mutex, waiting while another process holds it.
 func (mu *Mutex) Lock() {
-	p := mu.s.Current()
+	p := mu.s.currentAs(func() string { return "lock " + mu.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
 	if p == nil {
