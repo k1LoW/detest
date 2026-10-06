@@ -800,3 +800,76 @@ func TestPendingGoroutineRetired(t *testing.T) {
 		s.ExpectViolation("x mark")
 	})
 }
+
+// Two goroutines a process started may use its hand-written transaction at
+// once, each waiting for locks as itself.
+func TestHandWrittenTxRunByTwoGoroutinesAtOnce(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() {
+			store.SeedRow("counters", Row{"id": "a", "n": int64(0)})
+			store.SeedRow("counters", Row{"id": "b", "n": int64(0)})
+		})
+		s.Manual("x", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i, id := range []string{"a", "b"} {
+					wg.Go(func() { _, _, errs[i] = tx.GetForUpdate("counters", id) })
+				}
+				wg.Wait()
+				return errors.Join(errs...)
+			})
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				_, _, err := tx.GetForUpdate("counters", "b")
+				return err
+			})
+		})
+	})
+}
+
+// Goroutines running two processes' hand-written transactions that take
+// row locks in opposite orders deadlock, which the database detects.
+func TestHandWrittenTxGoroutinesDeadlock(t *testing.T) {
+	var mu sync.Mutex
+	deadlocks := 0
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() {
+			store.SeedRow("counters", Row{"id": "a", "n": int64(0)})
+			store.SeedRow("counters", Row{"id": "b", "n": int64(0)})
+		})
+		for _, w := range []struct {
+			name  string
+			order []string
+		}{{"x", []string{"a", "b"}}, {"y", []string{"b", "a"}}} {
+			order := w.order
+			s.Manual(w.name, 1, func(p *Proc) error {
+				err := store.Tx(p, func(tx *Tx) error {
+					var err error
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for _, id := range order {
+							if _, _, err = tx.GetForUpdate("counters", id); err != nil {
+								return
+							}
+						}
+					})
+					wg.Wait()
+					return err
+				})
+				if errors.Is(err, ErrDeadlock) {
+					mu.Lock()
+					deadlocks++
+					mu.Unlock()
+				}
+				return nil
+			})
+		}
+	})
+	if deadlocks == 0 {
+		t.Error("no run detected the deadlock between the goroutines")
+	}
+}

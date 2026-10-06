@@ -215,10 +215,11 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 			tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
-		markPassedOver(v.proc().waitRow.blockers())
+		w := v.waiter()
+		markPassedOver(w.waitRow.blockers())
 		v.deadlockVictim = true
-		v.proc().state = stateReady
-		v.proc().waitRow = nil
+		w.state = stateReady
+		w.waitRow = nil
 	}
 	// A cycle left after another victim was picked is one the database
 	// detects too, once that victim's abort wakes this wait.
@@ -459,10 +460,15 @@ func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
 	waitsFor := func(w *Tx) []*Tx {
 		// The process's wait may be another transaction's of the same process:
 		// one it keeps open while a second connection waits.
-		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil || w.p.waitRow.tx != w {
+		// The waiting process may also be a goroutine w's process handed it to.
+		if w.p == nil {
 			return nil
 		}
-		return w.p.waitRow.blockers()
+		p := w.waiter()
+		if p.state != stateBlockedLock || p.waitRow == nil || p.waitRow.tx != w {
+			return nil
+		}
+		return p.waitRow.blockers()
 	}
 	// The transactions tx would wait for, directly or through their waits,
 	// and for each one the transactions waiting for it among them.

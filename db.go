@@ -1706,11 +1706,6 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 type Tx struct {
 	db *DB
 	p  *Proc
-	// run is the process running the transaction's current operation when
-	// it is another than p, such as a goroutine p started that a fake's
-	// hand-written transaction is handed to. It yields and waits for locks,
-	// while p keeps owning the transaction and its locks.
-	run *Proc
 	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
 	// transaction holds. Letting a lock go or weakening it then changes what
 	// such a read finds, so an idle loop may tick again even if no row
@@ -2253,17 +2248,29 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return
 	}
-	tx.run = nil
-	if c := tx.db.s.Current(); c != nil && c != tx.p && c.r == tx.p.r {
-		tx.run = c
-	}
 	tx.proc().yieldf(format, args...)
 }
 
-// proc returns the process running the transaction's current operation.
+// proc returns the process running the calling operation of the
+// transaction. It is p unless p handed the transaction to another goroutine,
+// such as one it started that a fake's hand-written transaction runs on,
+// which yields and waits for locks itself while p keeps owning the
+// transaction and its locks. It is resolved from the caller each time rather
+// than kept on the transaction, which two goroutines may use at once.
 func (tx *Tx) proc() *Proc {
-	if tx.run != nil {
-		return tx.run
+	if c := tx.db.s.Current(); c != nil && c != tx.p && c.r == tx.p.r {
+		return c
+	}
+	return tx.p
+}
+
+// waiter returns the process waiting for a lock on the transaction's
+// behalf, which a deadlock victim's abort wakes.
+func (tx *Tx) waiter() *Proc {
+	for _, w := range tx.p.r.procs {
+		if w.state == stateBlockedLock && w.waitRow != nil && w.waitRow.tx == tx {
+			return w
+		}
 	}
 	return tx.p
 }
