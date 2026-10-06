@@ -51,7 +51,7 @@ const (
 	evYield eventKind = iota
 	evBlocked
 	evDone
-	evSync // a process back from outside detest asks to be run now (see syncOutside)
+	evSync  // a process back from outside detest asks to be run now (see syncOutside)
 	evDrain // the resumed process asks to go on once every other goroutine settled (see drain)
 )
 
@@ -902,7 +902,6 @@ func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
 		}
 	}
 }
-
 
 // settle takes in the goroutines adopted since the last step and the
 // processes back from outside detest, until none is left. Each one it runs
