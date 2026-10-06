@@ -234,6 +234,10 @@ type Proc struct {
 	parent  *Proc
 	family  *Proc
 	kids    int // goroutines adopted from this process, for naming them
+	// returned marks an adopted goroutine seen to have returned. Done alone
+	// does not tell, since one that crashed with its family is done while its
+	// goroutine still runs.
+	returned bool
 	// away is awayOutside while the process is blocked outside detest, and
 	// awayCrashed once it crashed with its family there. Its goroutine reads
 	// it when it wakes, alongside the scheduler, hence atomic.

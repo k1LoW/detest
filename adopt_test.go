@@ -403,3 +403,31 @@ func TestProcessSleepsForMinutes(t *testing.T) {
 		})
 	})
 }
+
+// A goroutine that crashed with its pod at a yield point gets errRunOver once
+// the run ends and goes on, and must be turned away when it calls again during
+// a later run.
+func TestCrashedGoroutineNotAdoptedLater(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			// A later run sleeps here while the goroutine of a crashed run
+			// wakes.
+			time.Sleep(5 * time.Second)
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('a')`)
+				time.Sleep(3 * time.Second)
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			_, a := st.Row(store, "marks", "a")
+			_, late := st.Row(store, "marks", "late")
+			if late && !a {
+				return errors.New("a goroutine of an ended run wrote in this one")
+			}
+			return nil
+		})
+	}, MaxCrashes(1))
+}

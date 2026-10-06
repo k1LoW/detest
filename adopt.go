@@ -262,6 +262,7 @@ func (r *run) reapAdopted() bool {
 			continue
 		}
 		r.finish(p)
+		p.returned = true
 		r.note(p, "done")
 		done = true
 	}
@@ -289,7 +290,9 @@ func (r *run) finish(p *Proc) {
 func (r *run) retire() {
 	var keep []*Proc
 	for _, p := range r.procs {
-		if p.adopted && p.state != stateDone {
+		// A goroutine that crashed with its family is done but may still run,
+		// such as one asleep or one its cut call returned errRunOver to.
+		if p.adopted && !p.returned {
 			keep = append(keep, p)
 		}
 	}
