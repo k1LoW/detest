@@ -84,6 +84,11 @@ type sqlExec struct {
 	// paramTimeTypes are the date and timestamp types Postgres gives
 	// parameters compared with operands of those types (wallClock).
 	paramTimeTypes map[int]string
+	// exprTypes are the types the column check resolved for expressions
+	// whose value a run converts by type: the time type CASE, COALESCE,
+	// GREATEST and LEAST resolve a timestamp and a timestamptz to, and the
+	// source of date_trunc.
+	exprTypes map[sqlir.Expr]string
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -337,6 +342,14 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 		}
 		if st.Name == "all" {
 			x.tx.lockTimeout = false // RESET ALL
+		}
+		if !tx.db.kind.InnoDB() && (st.Name == "timezone" || st.Name == "all") {
+			// SET TIME ZONE holds from here on in the transaction; a
+			// session setting, unlike SET LOCAL, outlives it once it commits.
+			x.tx.timeZone = st.Zone
+			if !st.Local {
+				tx.pendingTimeZone = &zoneSetting{st.Zone}
+			}
 		}
 		if !tx.db.kind.InnoDB() && !st.Local && (st.Name == "lock_timeout" || st.Name == "all") {
 			// Record each script substatement, before a later SET LOCAL can
@@ -1285,6 +1298,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
 				return nil, err
 			}
+		}
+		if err := x.timeArgs(v, args); err != nil {
+			return nil, err
 		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
@@ -2270,6 +2286,8 @@ func toDriverValue(v any) driver.Value {
 	switch x := v.(type) {
 	case nil, int64, float64, bool, []byte, string, time.Time:
 		return x
+	case instant:
+		return x.Time
 	case pgInterval:
 		return x.String()
 	case uuidValue:

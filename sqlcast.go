@@ -159,6 +159,14 @@ func (x *sqlExec) paramTextCast(c *sqlir.Cast, v any) error {
 // cast is castValue with the error a cast of text that does not read as the
 // type raises.
 func (x *sqlExec) cast(v any, typ string) (any, error) {
+	if !x.tx.db.kind.InnoDB() {
+		switch typ {
+		case "timestamptz", "timestamp", "date":
+			if out, ok := x.castTime(v, typ); ok {
+				return out, nil
+			}
+		}
+	}
 	out, err := castValue(v, typ)
 	if ke := (kindError{}); errors.As(err, &ke) {
 		return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
@@ -315,7 +323,7 @@ func castValue(v any, typ string) (any, error) {
 		switch x := v.(type) {
 		case float64, float32:
 			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
-		case time.Time:
+		case time.Time, instant:
 			return nil, errUnknownExpr{"a cast of a timestamp to text"}
 		case pgInterval:
 			return x.String(), nil
@@ -369,15 +377,13 @@ func castValue(v any, typ string) (any, error) {
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to interval", v)}
 	case "timestamptz", "timestamp":
-		// A time is kept in UTC, the session's TimeZone: an instant as a
-		// timestamptz, and the clock a timestamptz shows there as a
-		// timestamp. Text is left as it is, as before.
+		// A clock, as a timestamp holds it; text is read without its zone.
+		// On Postgres a cast to timestamptz, and of one, is castTime's,
+		// which converts in the session's TimeZone.
 		switch v := v.(type) {
 		case time.Time:
 			return v.UTC(), nil
 		case string:
-			// Text without a zone stays text for a timestamptz, as a column
-			// write refuses it: the server's TimeZone is not modeled there.
 			if tm, hasZone, ok := pgParseTime(v); ok && (typ == "timestamp" || hasZone) {
 				if typ == "timestamp" {
 					return time.Date(tm.Year(), tm.Month(), tm.Day(), tm.Hour(), tm.Minute(), tm.Second(), tm.Nanosecond(), time.UTC), nil

@@ -526,7 +526,7 @@ func mysqlArithOperand(v any) any {
 // mysqlOperands. Postgres compares them as they are.
 func (x *sqlExec) comparable(l, r any) (any, any) {
 	if !x.tx.db.kind.InnoDB() {
-		return l, r
+		return x.timeOperands(l, r)
 	}
 	return mysqlOperands(l, r)
 }

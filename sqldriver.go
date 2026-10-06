@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -73,6 +74,9 @@ type sqlConn struct {
 	// SET innodb_lock_wait_timeout), which every later transaction of the
 	// connection starts with.
 	lockTimeout bool
+	// timeZone is Postgres's TimeZone set for the session (SET TIME ZONE),
+	// nil for the server's, which every later transaction starts in.
+	timeZone *time.Location
 	// noAutoZero is the session's NO_AUTO_VALUE_ON_ZERO, and noFKChecks its
 	// FOREIGN_KEY_CHECKS=0.
 	noAutoZero, noFKChecks bool
@@ -118,6 +122,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	// The session's settings hold for a transaction it begins, inside a
 	// process or not.
 	tx.block, tx.iso, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = true, iso, c.lockTimeout, c.noAutoZero, c.noFKChecks
+	tx.timeZone = c.timeZone
 	if p == nil {
 		tx.atomic = true
 		c.tx = tx
@@ -173,6 +178,9 @@ func (t *sqlTx) Commit() (err error) {
 	tx.commit()
 	if tx.pendingLockTimeout != nil {
 		t.c.lockTimeout = *tx.pendingLockTimeout
+	}
+	if tx.pendingTimeZone != nil {
+		t.c.timeZone = tx.pendingTimeZone.loc
 	}
 	return nil
 }
@@ -257,6 +265,7 @@ func (c *sqlConn) dropStaleTx() {
 	// current, sees the change of run as well.
 	if r := c.db.s.run; r != nil && r != c.lastRun {
 		c.lastRun, c.lastInsertID, c.lockTimeout, c.noAutoZero, c.noFKChecks = r, 0, false, false, false
+		c.timeZone = nil
 	}
 }
 
@@ -268,6 +277,7 @@ func (c *sqlConn) statementTx() (tx *Tx, auto bool) {
 	p := c.current()
 	tx = c.db.newTx(p)
 	tx.atomic, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = p == nil, c.lockTimeout, c.noAutoZero, c.noFKChecks
+	tx.timeZone = c.timeZone
 	return tx, true
 }
 
@@ -385,6 +395,9 @@ func (c *sqlConn) exec(stmt *parsedStatement, args []driver.Value) (*sqlRows, in
 			tx.commit()
 			if tx.pendingLockTimeout != nil {
 				c.lockTimeout = *tx.pendingLockTimeout
+			}
+			if tx.pendingTimeZone != nil {
+				c.timeZone = tx.pendingTimeZone.loc
 			}
 		}
 	case err != nil:

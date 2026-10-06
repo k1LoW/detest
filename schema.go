@@ -1079,6 +1079,9 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 		switch v := v.(type) {
 		case time.Time:
 			return time.Date(v.Year(), v.Month(), v.Day(), 0, 0, 0, 0, time.UTC), nil
+		case instant:
+			// A timestamptz's date in the session's TimeZone.
+			return dateIn(v.Time, x.tx.zone()), nil
 		case string:
 			tm, _, ok := pgParseTime(v)
 			if !ok {
@@ -1095,38 +1098,55 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 	// A timestamp(p) rounds to p digits. Six, the default, is left alone:
 	// Postgres rounds to microseconds as well, which differs only in the
 	// nanoseconds a Go time carries.
-	if fsp < 6 {
-		tm = tm.Round(time.Duration(math.Pow10(9 - fsp)))
+	round := func(t time.Time) time.Time {
+		if fsp < 6 {
+			return t.Round(time.Duration(math.Pow10(9 - fsp)))
+		}
+		return t
+	}
+	switch t := tm.(type) {
+	case instant:
+		return instant{round(t.Time)}, nil
+	case time.Time:
+		return round(t), nil
 	}
 	return tm, nil
 }
 
-func (x *sqlExec) pgStoredTime(t, col string, v any) (time.Time, error) {
+// pgStoredTime is v as a timestamp column stores it, a clock, or as a
+// timestamptz column does, an instant. The two convert in the session's
+// TimeZone.
+func (x *sqlExec) pgStoredTime(t, col string, v any) (any, error) {
+	loc := x.tx.zone()
 	switch v := v.(type) {
 	case time.Time:
-		// A timestamp keeps the time's own clock, as the driver sends it,
-		// and a timestamptz the instant, kept in UTC.
-		if w, ok := wallClock(t, v).(time.Time); ok && t == "timestamp" {
-			return w, nil
+		// A clock: a timestamp's, a date's, or a time bound to a parameter
+		// Postgres types as a timestamp, whose own clock the driver sends.
+		if t == "timestamp" {
+			return wallClock(t, v), nil
 		}
-		return v.UTC(), nil
+		return instantAt(v, loc), nil
+	case instant:
+		if t == "timestamp" {
+			return wallIn(v.Time, loc), nil
+		}
+		return v, nil
 	case string:
 		tm, hasZone, ok := pgParseTime(v)
 		if !ok {
-			return time.Time{}, x.unsupported(fmt.Sprintf("the %s value %q, in a format detest does not parse", t, v))
+			return nil, x.unsupported(fmt.Sprintf("the %s value %q, in a format detest does not parse", t, v))
 		}
 		if t == "timestamp" {
 			// A timestamp keeps the time as written and ignores a zone.
 			return time.Date(tm.Year(), tm.Month(), tm.Day(), tm.Hour(), tm.Minute(), tm.Second(), tm.Nanosecond(), time.UTC), nil
 		}
 		if !hasZone {
-			// Postgres reads it in the session's TimeZone, which comes from
-			// the server's configuration and is not modeled.
-			return time.Time{}, x.unsupported(fmt.Sprintf("a timestamptz value %q without a time zone", v))
+			// Text without a zone is the clock in the session's TimeZone.
+			return instantAt(tm, loc), nil
 		}
-		return tm.UTC(), nil
+		return newInstant(tm), nil
 	}
-	return time.Time{}, x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, t, col))
+	return nil, x.unsupported(fmt.Sprintf("a %T written to the %s column %q", v, t, col))
 }
 
 // pgParseTime reads the ISO forms of a timestamp: a date, optionally with a

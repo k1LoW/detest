@@ -96,15 +96,30 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 					return typ
 				}
 			}
-		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
+		case "min", "max", "abs", "coalesce", "greatest", "least":
 			return commonType(e.Args, column, subquery)
+		case "nullif":
+			// NULLIF returns its first argument, of its own type: a
+			// timestamp compared with a timestamptz by the cross-type =
+			// stays a timestamp.
+			if len(e.Args) > 0 {
+				return expressionTypeIn(e.Args[0], column, subquery)
+			}
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
 			return "int4"
 		case "nextval", "setval", "count", "row_number", "rank", "dense_rank":
 			return "int8"
-		case "lag", "lead", "first_value", "last_value":
+		case "lag", "lead":
+			// The value and the default resolve to one type.
+			if args := branchArgs(e); len(args) > 0 {
+				return commonType(args, column, subquery)
+			}
+			if len(e.Args) > 0 {
+				return expressionTypeIn(e.Args[0], column, subquery)
+			}
+		case "first_value", "last_value":
 			if len(e.Args) > 0 {
 				return expressionTypeIn(e.Args[0], column, subquery)
 			}
@@ -112,6 +127,8 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "float8"
 		case "now", "clock_timestamp", "transaction_timestamp", "statement_timestamp", "current_timestamp":
 			return "timestamptz"
+		case "localtimestamp":
+			return "timestamp"
 		case "current_date":
 			return "date"
 		case "extract":
@@ -325,7 +342,7 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 
 // untypedBranch reports a string literal or a parameter, or a CASE or
 // COALESCE of nothing else or of NULL only, which Postgres resolves to
-// text, as in COALESCE('bogus', '') and COALESCE(NULL, NULL).
+// text, as in COALESCE('bogus', 'x') and COALESCE(NULL, NULL).
 func untypedBranch(e sqlir.Expr) bool {
 	var branches []sqlir.Expr
 	switch e := e.(type) {

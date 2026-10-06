@@ -65,7 +65,7 @@ type columnChecker struct {
 	// where expressionType does not know one, for a FROM item, a CTE, a
 	// view or a scalar subquery made of it.
 	outTypes map[*sqlir.SelectStmt][]string
-	params paramUses
+	params   paramUses
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
 	untyped []func() error
@@ -1041,6 +1041,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(fmt.Sprintf("= ANY or <> ALL of a %s against an array of %s", orUnknown(typ), e.ElemType))
 					return
 				}
+				c.x.noteType(e, typ)
 				if p, ok := e.Array.(*sqlir.Param); ok {
 					c.params.array(p.Index, typ)
 				}
@@ -1084,7 +1085,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				// The branches take the type of the typed ones.
-				c.timeParams(expressionType(e, sc.columnType), caseBranches(e)...)
+				typ := expressionType(e, sc.columnType)
+				c.timeParams(typ, caseBranches(e)...)
+				c.x.noteType(e, typ)
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
@@ -1108,7 +1111,17 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					// The arguments take the type of the typed ones.
-					c.timeParams(expressionType(e, sc.columnType), e.Args...)
+					typ := commonType(e.Args, sc.columnType, nil)
+					c.timeParams(typ, e.Args...)
+					c.x.noteType(e, typ)
+				case "date_trunc":
+					if len(e.Args) == 2 {
+						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
+					}
+				case "lag", "lead":
+					// The value and the default take one type, as the
+					// arguments of COALESCE do.
+					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
 				}
 			case *sqlir.Cast:
 				c.castInput(e)
@@ -1226,6 +1239,25 @@ func (c *columnChecker) timeParams(typ string, exprs ...sqlir.Expr) {
 			c.timeConflict = fmt.Sprintf("parameter $%d typed as both %s and %s", p.Index+1, first, typ)
 		} else if !ok {
 			c.x.paramTimeTypes[p.Index] = typ
+		}
+	}
+}
+
+// assignedParams types the parameters written to table's columns, cols in
+// order or the table's own without a column list, as Postgres types them
+// by the column: the driver then sends a time for a date or a timestamp
+// column as its own clock, and for a timestamptz column as the instant.
+func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqlir.Expr) {
+	def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]
+	if def == nil {
+		return
+	}
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	for i, e := range exprs {
+		if i < len(cols) {
+			c.timeParams(def.types[cols[i]], e)
 		}
 	}
 }
@@ -1364,10 +1396,18 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(row, values); err != nil {
 			return err
 		}
+		c.assignedParams(ins.Table, ins.Columns, row)
 	}
 	if ins.Select != nil {
 		if _, err := c.query(ins.Select, nil); err != nil {
 			return err
+		}
+		if ins.Select.SetOp == "" && len(ins.Select.Values) == 0 && !slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return t.Star }) {
+			exprs := make([]sqlir.Expr, len(ins.Select.Targets))
+			for i, t := range ins.Select.Targets {
+				exprs[i] = t.Expr
+			}
+			c.assignedParams(ins.Table, ins.Columns, exprs)
 		}
 	}
 	if oc := ins.OnConflict; oc != nil {
@@ -1385,6 +1425,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set), false); err != nil {
 			return err
 		}
+		c.assignedParams(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
@@ -1416,6 +1457,7 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if err := c.exprs(assignedValues(up.Set), sc); err != nil {
 		return err
 	}
+	c.assignedParams(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
 	if err := c.exprs(up.Where, sc); err != nil {
 		return err
 	}
