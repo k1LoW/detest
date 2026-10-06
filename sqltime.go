@@ -23,8 +23,8 @@ import (
 // saving tells apart from 24 hours, so a day is 24 hours here. Months and
 // years are calendar units that a duration does not hold.
 var intervalUnits = map[string]int64{
-	"microsecond": 1, "microseconds": 1, "us": 1, "usec": 1, "usecs": 1, "useconds": 1,
-	"millisecond": 1e3, "milliseconds": 1e3, "ms": 1e3, "msec": 1e3, "msecs": 1e3, "mseconds": 1e3,
+	"microsecond": 1, "microseconds": 1, "microsecon": 1, "us": 1, "usec": 1, "usecs": 1, "usecond": 1, "useconds": 1,
+	"millisecond": 1e3, "milliseconds": 1e3, "millisecon": 1e3, "ms": 1e3, "msec": 1e3, "msecs": 1e3, "msecond": 1e3, "mseconds": 1e3,
 	"second": 1e6, "seconds": 1e6, "s": 1e6, "sec": 1e6, "secs": 1e6,
 	"minute": 60e6, "minutes": 60e6, "m": 60e6, "min": 60e6, "mins": 60e6,
 	"hour": 3600e6, "hours": 3600e6, "h": 3600e6, "hr": 3600e6, "hrs": 3600e6,
@@ -39,6 +39,7 @@ var calendarUnits = map[string]bool{
 	"decade": true, "decades": true, "dec": true, "decs": true,
 	"century": true, "centuries": true, "c": true, "cent": true,
 	"millennium": true, "millennia": true, "mil": true, "mils": true,
+	"quarter": true, "qtr": true,
 }
 
 // intervalError is why interval text was not read: malformed is text Postgres
@@ -94,7 +95,12 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		}
 		num, unit := splitNumber(f)
 		if num == "" {
-			return 0, &intervalError{fmt.Sprintf("interval text %q", s), false}
+			// ISO 8601 (P1D) and infinity are interval text Postgres reads;
+			// any other word without a number is malformed.
+			if f == "infinity" || f == "-infinity" || f == "+infinity" || strings.HasPrefix(f, "p") {
+				return 0, &intervalError{fmt.Sprintf("interval text %q", s), false}
+			}
+			return 0, &intervalError{fmt.Sprintf("interval text %q", s), true}
 		}
 		n, ok := new(big.Rat).SetString(num)
 		if !ok || strings.ContainsAny(num, "eE/") {
@@ -112,7 +118,10 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		}
 		us, ok := intervalUnits[unit]
 		if !ok {
-			return 0, &intervalError{fmt.Sprintf("the interval unit %q", unit), false}
+			// A number in exponent form, which detest does not read, is left
+			// unread rather than called malformed.
+			exponent := len(unit) > 1 && unit[0] == 'e' && (startsNumber(unit[1:]) || unit[1] == '+' || unit[1] == '-')
+			return 0, &intervalError{fmt.Sprintf("the interval unit %q", unit), !exponent}
 		}
 		if err := add(n, us); err != nil {
 			return 0, err
@@ -135,7 +144,9 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 // parseClock reads [+|-]h:m[:s[.f]] in microseconds.
 func parseClock(f string) (*big.Rat, *intervalError) {
 	neg := strings.HasPrefix(f, "-")
-	f = strings.TrimLeft(f, "+-")
+	if neg || strings.HasPrefix(f, "+") {
+		f = f[1:] // one sign: another is malformed
+	}
 	parts := strings.Split(f, ":")
 	if len(parts) > 3 {
 		return nil, &intervalError{"a time of more than three parts", true}

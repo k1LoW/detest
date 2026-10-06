@@ -166,10 +166,17 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		default:
 			return f.Name + " with a " + typ + " unit"
 		}
+		// unit is "" when it is given at run time, and unknownUnit for a
+		// constant Postgres does not take, which fails with 22023 whatever
+		// the source, so it is left to the run.
+		const unknownUnit = "?"
 		unit := ""
 		if k, ok := f.Args[0].(*sqlir.Const); ok {
 			if s, ok := k.Value.(string); ok {
-				unit = timeUnits[strings.ToLower(s)]
+				unit = unknownUnit
+				if u, known := timeUnits[strings.ToLower(s)]; known {
+					unit = u
+				}
 			}
 		}
 		switch typ := expressionType(f.Args[1], column); typ {
@@ -186,7 +193,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		case "interval":
 			// An interval keeps its days apart from its time, which the
 			// duration detest holds does not, so only its length is known.
-			if f.Name == "date_trunc" || unit != "epoch" {
+			if unit != unknownUnit && (f.Name == "date_trunc" || unit != "epoch") {
 				return f.Name + " of an interval other than extract(epoch FROM ...)"
 			}
 		default:

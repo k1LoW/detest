@@ -115,6 +115,20 @@ func paramBool(c *sqlir.Cast, v any) any {
 	return v
 }
 
+// paramDate is a time bound to a parameter cast to date as the date it
+// holds. Postgres types the parameter as a date, and the driver sends the
+// time's own year, month and day, where a timestamptz cast to date takes the
+// date in UTC.
+func paramDate(c *sqlir.Cast, v any) any {
+	if _, ok := c.X.(*sqlir.Param); !ok || c.Type != "date" {
+		return v
+	}
+	if t, ok := derefValue(v).(time.Time); ok {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	return v
+}
+
 // paramTextCast refuses a cast to text of a parameter holding a value other
 // than text or an integer, such as one ANY (ARRAY['x', $1]) makes: the text
 // a driver sends for a float, a boolean or a time is not modeled.

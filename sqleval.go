@@ -108,7 +108,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
+		return x.cast(x.halfToInteger(v, paramDate(v, paramBool(v, val))), v.Type)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -1597,6 +1597,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		unit, ok := d(0).(string)
 		if !ok {
 			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T unit", d(0))}
+		}
+		if u, known := timeUnits[strings.ToLower(unit)]; !known || extractOnly[u] {
+			return nil, x.errUnit(unit) // whatever the source, as in Postgres
 		}
 		t, ok := d(1).(time.Time)
 		if !ok {

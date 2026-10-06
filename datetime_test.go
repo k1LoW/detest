@@ -42,12 +42,12 @@ func TestParseInterval(t *testing.T) {
 			t.Errorf("%q: got %v, %v; want %v", tt.in, got, err, tt.want)
 		}
 	}
-	for _, in := range []string{"1 day 1 day", "1 2", ""} {
+	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "1 dayz", "--1:00", "day"} {
 		if _, err := parseInterval(in); err == nil || !err.malformed {
 			t.Errorf("%q: got %v, want malformed", in, err)
 		}
 	}
-	for _, in := range []string{"1 month", "2 years", "1 decade", "P1D", "1.0000005 seconds", "1 dayz", "1e3 seconds", "1 hour 2:00"} {
+	for _, in := range []string{"1 month", "2 years", "1 decade", "1 quarter", "P1D", "infinity", "1.0000005 seconds", "1e3 seconds", "1 hour 2:00"} {
 		if _, err := parseInterval(in); err == nil || err.malformed {
 			t.Errorf("%q: got %v, want unread", in, err)
 		}
@@ -97,9 +97,14 @@ func TestDatetimeFunctions(t *testing.T) {
 		{`SELECT extract(epoch FROM at - on_day)::bigint FROM ev ORDER BY id`, []int64{49512, 0, 3600}},
 		{`SELECT date_part('hour', at)::int FROM ev ORDER BY id`, []int64{13, 0, 1}},
 		{`SELECT count(*) FROM ev WHERE CURRENT_DATE = now()::date`, []int64{3}},
+		// A time bound for a date is the date it holds, not its date in UTC.
+		{`SELECT id FROM ev WHERE on_day = $1::date ORDER BY id`, []int64{3}},
 	} {
 		var args []any
-		if strings.Contains(tt.q, "$1") {
+		switch {
+		case strings.Contains(tt.q, "$1::date"):
+			args = []any{time.Date(2024, 5, 20, 0, 30, 0, 0, time.FixedZone("JST", 9*3600))}
+		case strings.Contains(tt.q, "$1"):
 			args = []any{time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC)}
 		}
 		if got := ints(tt.q, args...); !eq(got, tt.want) {
@@ -125,6 +130,10 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		{`SELECT $1::interval`, ErrInvalidDatetimeFormat},
 		{`SELECT date_trunc('fortnight', at) FROM ev`, ErrInvalidParameterValue},
 		{`SELECT extract(fortnight FROM at) FROM ev`, ErrInvalidParameterValue},
+		{`SELECT extract(fortnight FROM on_day) FROM ev`, ErrInvalidParameterValue},
+		{`SELECT extract(fortnight FROM interval '1 day')`, ErrInvalidParameterValue},
+		{`SELECT date_trunc('fortnight', interval '1 day')`, ErrInvalidParameterValue},
+		{`SELECT interval 'nonsense'`, ErrInvalidDatetimeFormat},
 	} {
 		var args []any
 		if tt.q == `SELECT $1::interval` {
