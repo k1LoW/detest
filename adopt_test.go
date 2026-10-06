@@ -218,6 +218,14 @@ func TestAdoptedGoroutinesAbortedInCalls(t *testing.T) {
 						return tx.Insert("flags", Row{"id": "g"})
 					})
 				},
+				func() error {
+					store.Get(s.Current(), "flags", "f")
+					return nil
+				},
+				func() error {
+					store.Select(s.Current(), "flags", func(Row) bool { return true })
+					return nil
+				},
 			}
 			var wg sync.WaitGroup
 			for _, c := range calls {

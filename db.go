@@ -346,6 +346,10 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
+	defer func() { absorbAbort(recover(), p, nil) }()
+	if p.stale() {
+		return nil, false
+	}
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
 	r, ok := db.committed[table][key]
@@ -371,6 +375,10 @@ func sequenceName(s string) string {
 
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
+	defer func() { absorbAbort(recover(), p, nil) }()
+	if p.stale() {
+		return nil
+	}
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
 	return db.selectCommitted(table, pred)
