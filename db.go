@@ -319,6 +319,7 @@ func encodeKey(vals []any) string {
 
 // Tx runs fn in a transaction: commit on nil, rollback on error.
 func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
+	defer db.s.leave()
 	defer func() { absorbAbort(recover(), p, &err) }()
 	p = p.resolve(func() string { return db.name + " tx" })
 	if p.stale() {
@@ -357,6 +358,7 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
+	defer db.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return db.name + " get " + table + " " + key })
 	goneStale(p)
@@ -385,6 +387,7 @@ func sequenceName(s string) string {
 
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
+	defer db.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return db.name + " select " + table })
 	goneStale(p)
@@ -401,6 +404,7 @@ func (db *DB) Peek(table string) []Row { return publicRows(db.selectCommitted(ta
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, nil) }()
@@ -1853,6 +1857,7 @@ type savepoint struct {
 
 // Get reads one row.
 func (tx *Tx) Get(table, key string) (Row, bool) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, nil) }()
@@ -1874,6 +1879,7 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 
 // GetForUpdate reads one row and takes its lock (SELECT ... FOR UPDATE).
 func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -1895,6 +1901,7 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
 func (tx *Tx) Insert(table string, row Row) (err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -1908,6 +1915,7 @@ func (tx *Tx) Insert(table string, row Row) (err error) {
 
 // Update sets columns of one row. Returns false when the row does not exist.
 func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -1922,6 +1930,7 @@ func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 // CAS updates one row only if column field equals from (UPDATE ... WHERE id=?
 // AND field=?). Returns whether a row was updated.
 func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -2045,6 +2054,7 @@ func (db *DB) duplicateKey(table, constraint string) error {
 // matching row is locked, then pred is re-evaluated on the version visible after
 // the lock is granted.
 func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (_ int, err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -2057,6 +2067,7 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 
 // Delete removes one row. Returns whether it existed.
 func (tx *Tx) Delete(table, key string) (_ bool, err error) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
@@ -2075,6 +2086,7 @@ func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
+	defer tx.db.s.leave()
 	// Another goroutine than its owner's may run it (see run).
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, nil) }()

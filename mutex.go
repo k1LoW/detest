@@ -36,6 +36,7 @@ func (s *Sim) Mutex(name string) *Mutex {
 
 // Lock acquires the mutex, waiting while another process holds it.
 func (mu *Mutex) Lock() {
+	defer mu.s.leave()
 	p := mu.s.currentAs(func() string { return "lock " + mu.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
@@ -55,6 +56,7 @@ func (mu *Mutex) Lock() {
 
 // Unlock releases the mutex. As with sync.Mutex, any goroutine may unlock it.
 func (mu *Mutex) Unlock() {
+	defer mu.s.leave()
 	// A goroutine of an ended run ends here, as at any entry point with
 	// no error to return, its deferred calls running.
 	goneStale(mu.s.currentAs(func() string { return "unlock " + mu.name }))
@@ -113,6 +115,7 @@ func (s *Sim) RWMutex(name string) *RWMutex {
 
 // Lock acquires the write lock, waiting while any reader or writer holds it.
 func (rw *RWMutex) Lock() {
+	defer rw.s.leave()
 	p := rw.s.currentAs(func() string { return "lock " + rw.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
@@ -138,6 +141,7 @@ func (rw *RWMutex) Lock() {
 
 // Unlock releases the write lock.
 func (rw *RWMutex) Unlock() {
+	defer rw.s.leave()
 	goneStale(rw.s.currentAs(func() string { return "unlock " + rw.name }))
 	if r := rw.s.run; r != nil && r.over() {
 		rw.writing, rw.writer = false, nil // as Mutex.Unlock
@@ -153,6 +157,7 @@ func (rw *RWMutex) Unlock() {
 // RLock acquires a read lock, waiting while a writer holds the lock or waits
 // for it.
 func (rw *RWMutex) RLock() {
+	defer rw.s.leave()
 	p := rw.s.currentAs(func() string { return "rlock " + rw.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
@@ -177,6 +182,7 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
+	defer rw.s.leave()
 	// Resolved first, as a goroutine of an ended run must not read s.run,
 	// which the scheduler may be setting for the next run.
 	p := rw.s.currentAs(func() string { return "runlock " + rw.name })

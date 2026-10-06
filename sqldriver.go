@@ -97,6 +97,7 @@ func (c *sqlConn) Ping(context.Context) error {
 }
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.Tx, err error) {
+	defer c.db.s.leave()
 	defer func() {
 		// A begin cut short by the end of the run returns no Tx, so
 		// database/sql never rolls it back: the connection must not keep it.
@@ -143,6 +144,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 // ExecContext and QueryContext return database errors as the server's Errors
 // option converts them, the type the production code's driver returns.
 func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
+	defer c.db.s.leave()
 	defer recoverRunOver(&err)
 	rows, affected, err := c.run(query, args)
 	if err != nil {
@@ -157,6 +159,7 @@ func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.N
 type sqlTx struct{ c *sqlConn }
 
 func (t *sqlTx) Commit() (err error) {
+	defer t.c.db.s.leave()
 	defer recoverRunOver(&err)
 	// The caller is resolved first, so that a goroutine of an ended run is
 	// turned away before it reads the connection.
@@ -215,6 +218,7 @@ func (t *sqlTx) Commit() (err error) {
 }
 
 func (t *sqlTx) Rollback() (err error) {
+	defer t.c.db.s.leave()
 	defer recoverRunOver(&err)
 	// database/sql rolls back from a goroutine of its own when the context
 	// ends, which Current would adopt, so a stale caller is only looked up.
@@ -256,6 +260,7 @@ func (p *Proc) forgetTx(tx *Tx) {
 }
 
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
+	defer c.db.s.leave()
 	defer recoverRunOver(&err)
 	rows, _, err := c.run(query, args)
 	if err != nil {

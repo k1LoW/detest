@@ -518,7 +518,7 @@ func (s *Sim) drainAdopted() {
 			return
 		}
 		time.Sleep(reapLimit) // on the bubble's clock, which costs no real time
-		synctest.Wait()
+		s.settled()
 	}
 }
 
@@ -629,6 +629,20 @@ func (p *Proc) resolve(first func() string) *Proc {
 	}
 	p.comeBack()
 	return p
+}
+
+// leave records that a call into detest returns to the code under test, and
+// settled, called by the scheduler, reads it once synctest.Wait returned.
+// The pair makes what a process did in detest happen before what the
+// scheduler does next for the race detector. synctest records that when a
+// goroutine parks, but sync.WaitGroup.Wait turns race annotations off while it
+// parks, so a process that waits for its goroutines with a WaitGroup, as
+// errgroup does, right after a call into detest would be reported racing.
+func (s *Sim) leave() { s.hb.Add(1) }
+
+func (s *Sim) settled() {
+	synctest.Wait()
+	s.hb.Load()
 }
 
 // goneStale ends a stale goroutine at an entry point that has no error to

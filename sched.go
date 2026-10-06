@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing/synctest"
 	"time"
 )
 
@@ -425,7 +424,7 @@ func (r *run) execute() (v *violation) {
 		// Let the processes left parked unwind, and database/sql roll back the
 		// transactions they left open, before the next run resets the simulated resources.
 		r.cancel()
-		synctest.Wait()
+		r.s.settled()
 		r.reap()
 		r.retire()
 		if rec := recover(); rec != nil {
@@ -802,6 +801,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 // Step records a step with no effect on a simulated resource, such as a decision made
 // by an external environment. It is a yield point.
 func (p *Proc) Step(format string, args ...any) {
+	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return fmt.Sprintf(format, args...) })
 	goneStale(p)
@@ -864,7 +864,7 @@ func (r *run) resume(p *Proc) {
 // which is not a durable block. Such a hang is left to the stall watchdog;
 // inspecting goroutine stacks here instead stops the world on every step.
 func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
-	synctest.Wait()
+	r.s.settled()
 	select {
 	case ev := <-p.ev:
 		return ev, true
@@ -903,7 +903,7 @@ func (r *run) settleOutside() {
 	if len(outside) == 0 {
 		return
 	}
-	synctest.Wait()
+	r.s.settled()
 	for _, p := range outside {
 		select {
 		case ev := <-p.ev:
@@ -993,14 +993,14 @@ func (r *run) waitOutside() bool {
 	case len(waiting):
 		return false // nothing reported back in time: left to the quiescence check
 	case len(waiting) + 1:
-		synctest.Wait() // the goroutines woken with it reach detest too
-		return true     // taken in by settle
+		r.s.settled() // the goroutines woken with it reach detest too
+		return true   // taken in by settle
 	}
 	// The process ran alongside nothing detest schedules, but goroutines it
 	// started may still be on their way to detest. Taking them in only once
 	// they all got there keeps which ones are taken in this step independent
 	// of the runtime's timing.
-	synctest.Wait()
+	r.s.settled()
 	ev, _ := reflect.TypeAssert[procEvent](v) // p.ev carries only procEvent
 	r.takeOutside(waiting[chosen], ev)
 	return true
@@ -1272,6 +1272,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // WaitUntil blocks until the simulated clock reaches t. The clock advances only when
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
+	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return fmt.Sprint("wait until ", t) })
 	goneStale(p)
@@ -1287,6 +1288,7 @@ func (p *Proc) WaitUntil(t int64) {
 
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
+	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "choose " + label })
 	goneStale(p)
@@ -1296,6 +1298,7 @@ func (p *Proc) Choose(label string, n int) int {
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
+	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow

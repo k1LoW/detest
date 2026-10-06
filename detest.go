@@ -231,6 +231,8 @@ type Sim struct {
 	// staleN is len(stale), read without staleMu by Current while a seed
 	// runs, which looks a goroutine up only when some is retired.
 	staleN atomic.Int32
+	// hb carries happens-before from processes to the scheduler (see leave).
+	hb atomic.Uint64
 	// lingerN counts the processes detest started among stale, whose
 	// goroutines would otherwise take Current's fast path in a later run.
 	lingerN atomic.Int32

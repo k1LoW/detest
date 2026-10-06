@@ -68,6 +68,7 @@ func (s *Sim) External(name string, opts ...ExternalOption) *External {
 // effect's returned error is an application error (NotFound, FailedPrecondition)
 // and rolls the effect back; ErrUnavailable is a transport failure.
 func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) (err error) {
+	defer e.s.leave()
 	defer func() { absorbAbort(recover(), p, &err) }()
 	p = p.resolve(func() string { return e.name + " " + desc })
 	if p.stale() {
@@ -113,6 +114,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 // SQL issued through detest's driver, happen and yield as usual) and then
 // returns ErrUnavailable, modeling a response lost after the callee committed.
 func (e *External) Do(p *Proc, desc string, call func() error) (err error) {
+	defer e.s.leave()
 	defer func() { absorbAbort(recover(), p, &err) }()
 	p = p.resolve(func() string { return e.name + " " + desc })
 	if p.stale() {
