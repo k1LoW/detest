@@ -17,6 +17,15 @@ import (
 // statements each step's goroutines ran are kept, and a statement whose
 // outcome could depend on its order with another goroutine's stops the
 // exploration, as nondeterminism does.
+//
+// A statement of the process itself is not compared. One that parks at its
+// yield point runs only once the scheduler resumes it, after the step's
+// goroutines are done. One that does not, such as a SET, may run in the same
+// step after its goroutines, ordered by a WaitGroup, or alongside them, and
+// the two look alike from here. Such a statement touches its own connection
+// and transaction, and one on the transaction the goroutines share waits for
+// database/sql's lock of it, so it is left unchecked rather than stop the
+// common case of a process that sets something after its goroutines finish.
 
 // sharedAccess is what a statement on a shared transaction touched.
 type sharedAccess struct {
@@ -107,26 +116,6 @@ func (r *run) recordShared(a *sharedAccess) {
 		return
 	}
 	r.sharedLog = append(r.sharedLog, *a)
-}
-
-// checkUnshared stops the exploration when a process ran a statement that
-// did not park, such as a SET, in a step after goroutines sharing a
-// transaction ran theirs, which it may have run alongside. A statement that
-// parked runs only once the scheduler resumes it, before anything it starts,
-// and one before the goroutines' statements in the step is ordered before
-// them by starting them, so only this order is told, and the statement is
-// not kept for the ones after it.
-func (r *run) checkUnshared(a *sharedAccess) {
-	if r.s.epoch.Load() != r.sharedEpoch {
-		return
-	}
-	for i := range r.sharedLog {
-		b := &r.sharedLog[i]
-		if a.conflicts(b) && r.pending == nil {
-			r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a process ran %q alongside goroutines sharing a transaction, which ran %q in the same step, so their order is the Go runtime's rather than the schedule's, and a replay would not reproduce it", a.query, b.query)}
-			return
-		}
-	}
 }
 
 // pointTable returns the table a statement touches only the rows of, by its

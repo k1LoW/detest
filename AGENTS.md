@@ -57,6 +57,7 @@ Anything that would change the outcome if detest ran it with other semantics tha
 - An expression detest cannot evaluate where the application observes its value, such as an operator or function it does not know in `VALUES`, `SET` or `ORDER BY`. A placeholder would be read back as the column's value, and a dropped sort key would return other rows under `LIMIT`.
 - DDL whose result detest cannot reproduce in the schema or rows the processes see, such as adding a generated column to a table that already has rows.
 - `BEGIN`, `COMMIT` and `ROLLBACK` sent as SQL, which bypass the transaction tracking that `database/sql` gives detest.
+- A statement whose context ends while it waits for a lock or stands at its yield point. The drivers only close the connection and the server goes on running it, at a time detest does not model.
 - Functions, clauses and syntax that applications rarely write in request handling, and the exact reproduction of rare syntax, such as type coercion in array casts. Rarity is a reason not to implement them, not a reason to approximate them. A rare clause in DML still decides which rows match or lock, so it is refused.
 - Changes that need a large rework of the engine, such as row version IDs. Until the rework is done, the forms that need it are refused.
 

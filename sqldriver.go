@@ -433,12 +433,7 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	}
 	p.stmtDone = ctx.Done()
 	defer func() { p.stmtDone = nil }()
-	parks := p.parks
-	rows, n, err := c.parseExec(ctx, query, args)
-	if p.parks == parks && !p.r.over() {
-		p.r.checkUnshared(c.access(p.gid, query, err))
-	}
-	return rows, n, err
+	return c.parseExec(ctx, query, args)
 }
 
 // access describes a statement that touched the database as a whole, which
@@ -479,14 +474,20 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	tx.shared = query
 	defer func() { tx.shared = "" }()
 	c.db.s.countShared(tx.p.r)
-	mark := tx.markShared()
+	// Only a statement that pins its rows has keys worth telling apart, so
+	// the rest skip copying what the transaction holds.
+	var mark *sharedMark
+	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
+		if _, ok := pointTable(c.db, stmt.stmt); ok {
+			m := tx.markShared()
+			mark = &m
+		}
+	}
 	rows, n, err := c.parseExec(ctx, query, args)
 	a := c.access(goroutineID(), query, err)
-	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
-		if _, ok := pointTable(c.db, stmt.stmt); ok && err == nil {
-			if keys := tx.sinceShared(mark); len(keys) > 0 {
-				a.keys = keys
-			}
+	if mark != nil && err == nil {
+		if keys := tx.sinceShared(*mark); len(keys) > 0 {
+			a.keys = keys
 		}
 	}
 	tx.p.r.recordShared(a)

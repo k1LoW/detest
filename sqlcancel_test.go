@@ -455,3 +455,37 @@ func TestGoroutinesSharingSQLTxUniqueUpdatesStop(t *testing.T) {
 		t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
 	}
 }
+
+// A process that runs a statement without a yield point, such as a SET,
+// after its goroutines sharing its transaction finished goes on, as the
+// WaitGroup orders it after them.
+func TestSetAfterGoroutinesSharingSQLTx(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE marks (id bigint PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var wg sync.WaitGroup
+			for _, id := range []int64{1, 2} {
+				wg.Go(func() { _, _ = tx.Exec(`INSERT INTO marks (id) VALUES ($1)`, id) })
+			}
+			wg.Wait()
+			if _, err := tx.Exec(`SET LOCAL lock_timeout = '1s'`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if n := len(st.Rows(store, "marks")); n != 2 {
+				return fmt.Errorf("%d marks", n)
+			}
+			return nil
+		})
+	})
+}

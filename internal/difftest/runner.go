@@ -122,6 +122,16 @@ func (s *session) run(ctx context.Context, st Step, outcome func(error) (string,
 	return "UNEXPECTED " + err.Error()
 }
 
+// endTxContext ends the context of the transaction s has open, and fails
+// when none is open, as the step is then written wrong.
+func (s *session) endTxContext() error {
+	if s.tx == nil || s.cancelTx == nil {
+		return errors.New("difftest: no transaction is open to end the context of")
+	}
+	s.cancelTx()
+	return nil
+}
+
 func (s *session) exec(ctx context.Context, st Step) (string, error) {
 	switch st.kind() {
 	case kindBegin:
@@ -143,8 +153,9 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 		}
 		tx := s.tx
 		s.tx = nil
-		if s.cancelTx != nil {
-			defer s.cancelTx()
+		if cancel := s.cancelTx; cancel != nil {
+			s.cancelTx = nil
+			defer cancel()
 		}
 		if st.kind() == kindCommit {
 			return "OK", tx.Commit()
@@ -321,7 +332,9 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 			}
 			for k, st := range c.Steps {
 				if st.CancelTx {
-					sessions[st.Conn].cancelTx()
+					if err := sessions[st.Conn].endTxContext(); err != nil {
+						return fmt.Errorf("step %d: %w", k, err)
+					}
 					res[k].text, done[k] = "OK", true
 					p.WaitUntil(p.Now() + 1)
 					continue
@@ -410,7 +423,9 @@ func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) stri
 	for k, st := range c.Steps {
 		if st.CancelTx {
 			time.Sleep(pauses[k])
-			sessions[st.Conn].cancelTx()
+			if err := sessions[st.Conn].endTxContext(); err != nil {
+				t.Fatalf("step %d: %v", k, err)
+			}
 			res[k].text = "OK"
 			if err := settle(ctx, b, db, ids, pending, results, res); err != nil {
 				t.Fatalf("step %d: %v", k, err)
