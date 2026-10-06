@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,6 +186,16 @@ type run struct {
 	// measuring marks the run Prioritized measures k on, which is no run of
 	// the exploration and so reports nothing of what it reached or refused.
 	measuring bool
+	// spinProc took the last step, and is the spinner once its own count of
+	// steps without a change reaches MaxSpins (see MaxSpins).
+	spinProc *Proc
+	// handoffs counts the times a spinning process gave way with committed
+	// state at handoffVersion, and spinners and gaveTo are the processes on
+	// either side, so that processes taking turns at spinning are caught too.
+	handoffs       int
+	handoffVersion int
+	spinners       []*Proc
+	gaveTo         []*Proc
 	// outside counts the processes blocked outside detest, which may wake and
 	// call into detest without being resumed. Those calls run concurrently with
 	// the resumed process, hence atomic.
@@ -266,6 +277,13 @@ type Proc struct {
 	// time it finds nothing to do would wake its loop forever.
 	started int
 	bumps   int
+	// spins counts the steps the process took with committed state at
+	// spinVersion, for MaxSpins. It is kept across the steps other processes
+	// take in between, or a schedule that switches at almost every step, as
+	// Random does, would never let a count reach MaxSpins, and processes
+	// taking turns at waiting for each other would go on for ever.
+	spins       int
+	spinVersion int
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -429,7 +447,10 @@ func (r *run) execute() (v *violation) {
 			return r.checkAlways()
 		}
 		opts := r.enabled()
-		if len(opts) == 0 {
+		// With a spinner kept out, crashes and losses left alone are no step
+		// another process takes, and taking one would stand in for the
+		// progress violation every run without it ends in.
+		if len(opts) == 0 || (r.spinner() != nil || r.turnsSpent()) && onlyFaults(opts) {
 			if r.advanceClock() {
 				continue
 			}
@@ -446,7 +467,15 @@ func (r *run) execute() (v *violation) {
 			if r.reapAdopted() {
 				continue
 			}
-			break
+			if r.turnsSpent() {
+				return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between while nothing else could run, so they would go on for ever; raise MaxSpins if they do that much work without committing", procNames(r.spinners), procNames(r.gaveTo), r.handoffs)}
+			}
+			if p := r.spinner(); p != nil {
+				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
+			}
+			if len(opts) == 0 {
+				break
+			}
 		}
 		r.steps++
 		i := 0
@@ -465,7 +494,14 @@ func (r *run) execute() (v *violation) {
 		}
 		o := opts[i]
 		cur := r.current
-		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
+		gaveWay, before := r.spinner(), r.version
+		// Moving off a spinner is fairness, not a preemption: it could not
+		// have gone on, so the switch spends none of the budget.
+		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
+		r.countSpin(o, before)
+		if gaveWay != nil {
+			r.handoff(gaveWay, before)
+		}
 		if r.pending != nil {
 			return r.pending
 		}
@@ -489,6 +525,107 @@ func (r *run) execute() (v *violation) {
 		if err := fn(st); err != nil {
 			return &violation{kind: "quiescence invariant", err: err}
 		}
+	}
+	return nil
+}
+
+func onlyFaults(opts []option) bool {
+	for _, o := range opts {
+		if o.kind != optCrash && o.kind != optLose {
+			return false
+		}
+	}
+	return true
+}
+
+// countSpin counts the steps a process takes without changing committed
+// state, for MaxSpins.
+func (r *run) countSpin(o option, before int) {
+	switch {
+	case o.kind != optResume || o.p.state != stateReady:
+		// A process that blocked or ended waits rather than spins, and what
+		// it waited for ends the streak and the turns.
+		r.endSpin()
+	case r.version != before:
+		// The step changed committed state, which is no spin: the count
+		// starts after it. No spinner is kept at a count of zero, which
+		// MaxSpins(0) would take for a spin.
+		o.p.spins, o.p.spinVersion = 0, r.version
+		r.spinProc = nil
+	default:
+		if o.p.spinVersion != r.version {
+			o.p.spins, o.p.spinVersion = 0, r.version
+		}
+		o.p.spins++
+		r.spinProc = o.p
+	}
+}
+
+// handoff counts a spinning process giving way. Giving way lets another
+// process take a step, which may make true what the spinner waits for
+// without changing committed state, so the spinner may run again after it.
+// Processes that only take turns at spinning would then go on for ever, so
+// past MaxSpins handoffs with no change in between the spinners are kept out
+// as well (see turnsSpent).
+func (r *run) handoff(p *Proc, before int) {
+	// The step it gave way to changed something, or the process it gave way
+	// to blocked or ended there, which ends the turns as it ends a spin.
+	if to := r.current; r.version != before || to == nil || to.state != stateReady {
+		r.endSpin()
+		return
+	}
+	if before != r.handoffVersion {
+		r.handoffs, r.handoffVersion, r.spinners, r.gaveTo = 0, before, nil, nil
+	}
+	r.handoffs++
+	if !slices.Contains(r.spinners, p) {
+		r.spinners = append(r.spinners, p)
+	}
+	if !slices.Contains(r.gaveTo, r.current) {
+		r.gaveTo = append(r.gaveTo, r.current)
+	}
+}
+
+// turnsSpent reports whether the spinners gave way more than MaxSpins times
+// with no change in between. They are then kept out while any other process
+// can take a step, as a real scheduler would eventually run that one too,
+// and a progress violation only once none can.
+func (r *run) turnsSpent() bool {
+	return r.handoffs > r.s.maxSpins && r.version == r.handoffVersion
+}
+
+// keptOut reports whether p is kept from taking the next step for spinning.
+func (r *run) keptOut(p *Proc) bool {
+	return p == r.spinner() || r.turnsSpent() && slices.Contains(r.spinners, p)
+}
+
+func procNames(ps []*Proc) string {
+	names := make([]string, len(ps))
+	for i, p := range ps {
+		names[i] = p.name
+	}
+	return strings.Join(names, ", ")
+}
+
+// endSpin ends the counts of every process and the turns processes take at
+// spinning. Any left behind would count against a later spin that has
+// nothing to do with it.
+func (r *run) endSpin() {
+	r.spinProc = nil
+	for _, p := range r.procs {
+		p.spins = 0
+	}
+	r.handoffs, r.spinners, r.gaveTo = 0, nil, nil
+}
+
+// spinner returns the process that took the last step and MaxSpins steps
+// without changing committed state, and can still run, or nil. The version is checked
+// here too, as a change made outside a step, such as the rollback of a
+// transaction a process outside detest left open, is no step that countSpin
+// sees.
+func (r *run) spinner() *Proc {
+	if p := r.spinProc; p != nil && p.spins >= r.s.maxSpins && p.state == stateReady && r.version == p.spinVersion {
+		return p
 	}
 	return nil
 }
@@ -552,9 +689,11 @@ func (r *run) enabled() []option {
 	// the current process keeps running while it is runnable.
 	cur := r.current
 	curRunnable := cur != nil && cur.state == stateReady
-	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable
+	// A spinning process gives way, spent preemption budget or not, as the
+	// switch is the scheduler's fairness rather than a choice to explore.
+	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable && !r.keptOut(cur)
 	for _, p := range r.procs {
-		if p.state != stateReady {
+		if p.state != stateReady || r.keptOut(p) {
 			continue
 		}
 		if bounded && p != cur {
@@ -775,6 +914,10 @@ func (r *run) settleOutside() {
 // takeOutside handles the event of a process that was blocked outside detest.
 func (r *run) takeOutside(p *Proc, ev procEvent) {
 	r.leaveOutside(p)
+	// A process outside detest took a step, which may have made true what a
+	// spinning process waits for, so the spin and the turns end as when
+	// another is resumed.
+	r.endSpin()
 	r.note(p, "resumes from the primitive it blocked on")
 	if ev.kind != evSync {
 		r.handleEvent(p, ev)

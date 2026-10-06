@@ -315,7 +315,9 @@ type ColumnDef struct {
 	Scale     int
 	// FSP is the fractional seconds a MySQL DATETIME or TIMESTAMP column
 	// keeps, 0 without one declared, or a Postgres timestamp or timestamptz
-	// keeps, 6 without one declared.
+	// keeps, 6 without one declared. A Postgres interval declared with a
+	// precision or fields, interval(0) or interval day, has -1, as detest
+	// does not store what such a column keeps.
 	FSP int
 	// Collation is a MySQL text column's collation as declared, or the
 	// default one of the character set it declares; empty for the table's.
@@ -515,6 +517,9 @@ type RowExpr struct{ Items []Expr }
 type Cast struct {
 	X    Expr
 	Type string
+	// Len is the length of a Postgres varchar(n) or char(n) cast, which
+	// cuts longer text to n characters; 0 for none.
+	Len int
 }
 
 // CaseExpr is CASE [x] WHEN ... THEN ... ELSE ... END.

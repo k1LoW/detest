@@ -876,6 +876,11 @@ func (c *pgConv) columnLimits(col *sqlir.ColumnDef, t *pg.TypeName) error {
 		if len(mods) == 1 && mods[0] < 6 {
 			col.FSP = mods[0]
 		}
+	case "interval":
+		// The table loads so that a dump builds, and a write is refused.
+		if len(t.GetTypmods()) > 0 {
+			col.FSP = -1
+		}
 	}
 	return nil
 }
@@ -1786,7 +1791,32 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		names := e.TypeCast.TypeName.GetNames()
 		typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
-		return &sqlir.Cast{X: x, Type: typ}, nil
+		switch typ {
+		case "interval", "timestamp", "timestamptz":
+			// interval '1.5 months' month drops the days and ::timestamp(0)
+			// rounds the seconds, which the cast without them does not.
+			if len(e.TypeCast.TypeName.GetTypmods()) > 0 {
+				return nil, c.unsupported("a cast to " + typ + " with a precision or fields")
+			}
+		}
+		cast := &sqlir.Cast{X: x, Type: typ}
+		if len(e.TypeCast.TypeName.GetTypmods()) > 0 {
+			switch typ {
+			case "bpchar":
+				// char(n), and char alone, which is char(1), pads text with
+				// spaces it then compares without, which detest's strings
+				// do not follow. A bare ::bpchar, as dumps write defaults,
+				// has no length and stays text.
+				return nil, c.unsupported("a cast to char(n)")
+			case "varchar":
+				mods := typmods(e.TypeCast.TypeName)
+				if len(mods) != 1 || mods[0] < 1 {
+					return nil, c.unsupported("a cast to varchar with a length other than a positive integer")
+				}
+				cast.Len = mods[0]
+			}
+		}
+		return cast, nil
 	case *pg.Node_AExpr:
 		return c.aExpr(e.AExpr)
 	case *pg.Node_BoolExpr:

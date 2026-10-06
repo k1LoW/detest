@@ -47,6 +47,9 @@ func keyString(v any) string {
 			return strconv.FormatInt(int64(v), 10)
 		}
 		return strconv.FormatFloat(v, 'g', -1, 64)
+	case pgInterval:
+		// Equal intervals, '1 day' and '24 hours', are one key.
+		return pgInterval{micros: v.span()}.String()
 	}
 	return fmt.Sprint(v)
 }

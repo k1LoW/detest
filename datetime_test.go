@@ -10,51 +10,68 @@ import (
 	"github.com/k1LoW/detest/postgres"
 )
 
+func iv(months, days int64, d time.Duration) pgInterval {
+	return pgInterval{months, days, d.Microseconds()}
+}
+
 func TestParseInterval(t *testing.T) {
 	for _, tt := range []struct {
 		in   string
-		want time.Duration
+		want pgInterval
 	}{
-		{"1 day", 24 * time.Hour},
-		{"2 days 3 hours", 51 * time.Hour},
-		{"1.5 days", 36 * time.Hour},
-		{"1 week", 7 * 24 * time.Hour},
-		{"1.5 weeks", 252 * time.Hour},
-		{"90 minutes", 90 * time.Minute},
-		{"10min", 10 * time.Minute},
-		{"1h", time.Hour},
-		{"2 hrs", 2 * time.Hour},
-		{"3 mins 2 secs", 3*time.Minute + 2*time.Second},
-		{"30", 30 * time.Second},
-		{"1 hour 30", time.Hour + 30*time.Second},
-		{"1:30", 90 * time.Minute},
-		{"1 day 2:03:04.5", 26*time.Hour + 3*time.Minute + 4500*time.Millisecond},
-		{"-1 day", -24 * time.Hour},
-		{"1 day ago", -24 * time.Hour},
-		{"@ 1 day", 24 * time.Hour},
-		{"1 day -2 hours", 22 * time.Hour},
-		{"+3 hours", 3 * time.Hour},
-		{"1.5 hours", 90 * time.Minute},
-		{"0.000001 seconds", time.Microsecond},
-		{"1 D", 24 * time.Hour},
-		{"+ 1 day", 24 * time.Hour},
-		{"- 2 hours", -2 * time.Hour},
-		{". seconds", 0},
-		{"1:2.5", time.Minute + 2500*time.Millisecond},
-		{"1 week 2:00", 7*24*time.Hour + 2*time.Hour},
-		{"1. seconds", time.Second},
+		{"1 day", iv(0, 1, 0)},
+		{"2 days 3 hours", iv(0, 2, 3*time.Hour)},
+		{"1.5 days", iv(0, 1, 12*time.Hour)},
+		{"1 week", iv(0, 7, 0)},
+		{"1.5 weeks", iv(0, 10, 12*time.Hour)},
+		{"90 minutes", iv(0, 0, 90*time.Minute)},
+		{"10min", iv(0, 0, 10*time.Minute)},
+		{"1h", iv(0, 0, time.Hour)},
+		{"2 hrs", iv(0, 0, 2*time.Hour)},
+		{"3 mins 2 secs", iv(0, 0, 3*time.Minute+2*time.Second)},
+		{"30", iv(0, 0, 30*time.Second)},
+		{"1 hour 30", iv(0, 0, time.Hour+30*time.Second)},
+		{"1:30", iv(0, 0, 90*time.Minute)},
+		{"1 day 2:03:04.5", iv(0, 1, 2*time.Hour+3*time.Minute+4500*time.Millisecond)},
+		{"-1 day", iv(0, -1, 0)},
+		{"1 day ago", iv(0, -1, 0)},
+		{"@ 1 day", iv(0, 1, 0)},
+		{"1 day -2 hours", iv(0, 1, -2*time.Hour)},
+		{"+3 hours", iv(0, 0, 3*time.Hour)},
+		{"1.5 hours", iv(0, 0, 90*time.Minute)},
+		{"0.000001 seconds", iv(0, 0, time.Microsecond)},
+		{"1 D", iv(0, 1, 0)},
+		{"+ 1 day", iv(0, 1, 0)},
+		{"- 2 hours", iv(0, 0, -2*time.Hour)},
+		{". seconds", iv(0, 0, 0)},
+		{"1:2.5", iv(0, 0, time.Minute+2500*time.Millisecond)},
+		{"1 week 2:00", iv(0, 7, 2*time.Hour)},
+		{"1. seconds", iv(0, 0, time.Second)},
+		{"1 month", iv(1, 0, 0)},
+		{"2 years", iv(24, 0, 0)},
+		{"1 decade", iv(120, 0, 0)},
+		{"1 year 2 months 3 days 04:05:06.5", iv(14, 3, 4*time.Hour+5*time.Minute+6500*time.Millisecond)},
+		{"1.5 months", iv(1, 15, 0)},
+		{"1.25 months", iv(1, 7, 12*time.Hour)},
+		{"1.5 years", iv(18, 0, 0)},
+		{"1 week 2 days", iv(0, 9, 0)},
+		{"-1 year 2 mons", iv(-10, 0, 0)},
+		// Each unit's fraction is carried down before the next is added.
+		{"1 year -0.5 months", iv(12, -15, 0)},
+		{"1 month -0.5 days", iv(1, 0, -12*time.Hour)},
+		{"1.5 months -0.5 days", iv(1, 15, -12*time.Hour)},
 	} {
 		got, err := parseInterval(tt.in)
 		if err != nil || got != tt.want {
 			t.Errorf("%q: got %v, %v; want %v", tt.in, got, err, tt.want)
 		}
 	}
-	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "pizza", "1 dayz", "--1:00", "day", "1.2.3 seconds", "1.2.3", "1e3 seconds", "1.5e2 min", "- seconds", "1 hour 2:00", "2:00 1 minute", "1:00 2:00", "1:2:3:4", "1.5:00"} {
+	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "pizza", "1 dayz", "--1:00", "day", "1.2.3 seconds", "1.2.3", "1e3 seconds", "1.5e2 min", "- seconds", "1 hour 2:00", "2:00 1 minute", "1:00 2:00", "1:2:3:4", "1.5:00", "1 quarter", "1 month 1 mon"} {
 		if _, err := parseInterval(in); err == nil || !err.malformed {
 			t.Errorf("%q: got %v, want malformed", in, err)
 		}
 	}
-	for _, in := range []string{"1 month", "2 years", "1 decade", "1 quarter", "P1D", "PT1H", "infinity", "1.0000005 seconds"} {
+	for _, in := range []string{"1.3 years", "P1D", "PT1H", "infinity", "1.0000005 seconds"} {
 		if _, err := parseInterval(in); err == nil || err.malformed {
 			t.Errorf("%q: got %v, want unread", in, err)
 		}
@@ -231,14 +248,15 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		}
 	}
 	for _, q := range []string{
-		`SELECT id FROM ev WHERE at > now() - interval '1 month'`,
+		`SELECT interval '1.3 years'`,
 		`SELECT interval 'P1D'`,
 		`SELECT on_day - on_day FROM ev`,
 		`SELECT CURRENT_DATE - CURRENT_DATE`,
 		`SELECT CURRENT_DATE - 1`,
 		`SELECT extract(hour FROM on_day) FROM ev`,
-		`SELECT extract(day FROM interval '27 hours')`,
-		`SELECT date_trunc('day', interval '1 day')`,
+		// An interval has no calendar position.
+		`SELECT extract(dow FROM interval '27 hours')`,
+		`SELECT date_trunc('week', interval '1 day')`,
 		`SELECT extract(julian FROM at) FROM ev`,
 		`SELECT extract(timezone FROM at) FROM ev`,
 		`SELECT date_trunc('day', at, 'Asia/Tokyo') FROM ev`,
@@ -266,5 +284,238 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("%s: got %v, want nil", q, err)
 		}
+	}
+}
+
+// Each expected value is what Postgres 18 returns for the query.
+func TestIntervals(t *testing.T) {
+	s := datetimeDB(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL)`)
+	mustExec(t, db, `INSERT INTO plan VALUES (1, '1 month'), (2, '30 days'), (3, $1), (4, '1 year')`, "720:00:00")
+	mustExec(t, db, `CREATE VIEW plan_view AS SELECT id, every FROM plan`)
+	mustExec(t, db, `CREATE SEQUENCE seq`)
+	mustExec(t, db, `CREATE TABLE periods (every interval)`)
+
+	for _, tt := range []struct{ q, want string }{
+		// A derived interval column beside an interval or NULL runs.
+		{`SELECT COALESCE(v.every, interval '0') FROM (SELECT every FROM plan WHERE id = 2) v`, "30 days"},
+		{`WITH v AS (SELECT every FROM plan) SELECT max(COALESCE(every, NULL)) FROM v`, "1 year"},
+		{`SELECT CASE WHEN id = 4 THEN every ELSE interval '0' END FROM plan_view WHERE id = 4`, "1 year"},
+		{`SELECT COALESCE((SELECT every FROM plan WHERE id = 2), interval '0', NULL)`, "30 days"},
+		{`SELECT COALESCE(s.a, NULL) FROM (SELECT interval '1 month' AS v, 'ok'::text AS v) s(a, b)`, "1 mon"},
+		// LAG and LEAD evaluate their value once a row and the default only
+		// when it is returned.
+		{`SELECT max(n)::text FROM (SELECT id, lead(nextval('seq'), 0, '0') OVER (ORDER BY id) AS n FROM plan) w`, "4"},
+		{`SELECT nextval('seq')::text`, "5"},
+		{`SELECT (interval '1 month' = interval '30 days')::text`, "true"},
+		{`SELECT (interval '1 day' = interval '24 hours')::text`, "true"},
+		{`SELECT (interval '1 year' > interval '360 days')::text`, "false"},
+		{`SELECT (interval '1 year' < interval '366 days')::text`, "true"},
+		{`SELECT interval '1 year 2 months 3 days 04:05:06.5'`, "1 year 2 mons 3 days 04:05:06.5"},
+		{`SELECT interval '-1 day 2 hours'`, "-1 days +02:00:00"},
+		{`SELECT interval '1.5 months'`, "1 mon 15 days"},
+		{`SELECT interval '27 hours'`, "27:00:00"},
+		{`SELECT interval '-1 year -2 mons'`, "-1 years -2 mons"},
+		{`SELECT interval '0'`, "00:00:00"},
+		{`SELECT interval '-00:00:01.25'`, "-00:00:01.25"},
+		{`SELECT ((timestamp '2024-01-31' + interval '1 month') = timestamp '2024-02-29')::text`, "true"},
+		{`SELECT ((timestamp '2024-03-31' - interval '1 month') = timestamp '2024-02-29')::text`, "true"},
+		{`SELECT ((timestamp '2024-02-29' + interval '1 year') = timestamp '2025-02-28')::text`, "true"},
+		{`SELECT timestamp '2024-05-20 10:00' - timestamp '2024-05-18 08:30'`, "2 days 01:30:00"},
+		{`SELECT timestamp '2024-05-18' - timestamp '2024-05-20 10:00'`, "-2 days -10:00:00"},
+		{`SELECT interval '1 month' * 1.5`, "1 mon 15 days"},
+		{`SELECT interval '1 day' * 0.5`, "12:00:00"},
+		{`SELECT interval '1 month' * 0.3333333333`, "10 days"},
+		{`SELECT interval '1 mon 1 day' * 0.3333333333`, "10 days 07:59:59.999997"},
+		{`SELECT interval '1 month' * 0.1234567`, "3 days 16:53:19.7664"},
+		{`SELECT 2 * interval '1 hour 30 minutes'`, "03:00:00"},
+		{`SELECT interval '1 year' + interval '3 days' - interval '1 hour'`, "1 year 3 days -01:00:00"},
+		{`SELECT -interval '1 month 1 day'`, "-1 mons -1 days"},
+		{`SELECT extract(day FROM interval '27 hours')::text`, "0"},
+		{`SELECT extract(hour FROM interval '27 hours')::text`, "27"},
+		{`SELECT extract(week FROM interval '15 days')::text`, "2"},
+		{`SELECT extract(month FROM interval '14 months')::text`, "2"},
+		{`SELECT extract(year FROM interval '14 months')::text`, "1"},
+		{`SELECT extract(quarter FROM interval '7 months')::text`, "3"},
+		{`SELECT extract(epoch FROM interval '1 month 1 day')::bigint::text`, "2678400"},
+		{`SELECT extract(epoch FROM interval '1 year')::bigint::text`, "31557600"},
+		{`SELECT date_trunc('day', interval '3 days 04:05')`, "3 days"},
+		{`SELECT date_trunc('year', interval '14 months 3 days')`, "1 year"},
+		{`SELECT date_trunc('hour', interval '27 hours 30 minutes')`, "27:00:00"},
+		{`SELECT date_trunc('quarter', interval '7 months 3 days')`, "6 mons"},
+		{`SELECT date_trunc('decade', interval '25 years')`, "20 years"},
+		{`SELECT greatest(interval '2 months', interval '40 days')`, "2 mons"},
+		{`SELECT least(interval '40 days', NULL, interval '2 months')`, "40 days"},
+		{`SELECT COALESCE(NULL, every, interval '1 day') FROM plan WHERE id = 2`, "30 days"},
+		{`SELECT CASE WHEN id = 2 THEN every ELSE NULL END FROM plan WHERE id = 2`, "30 days"},
+		{`SELECT lead(every, 1, interval '0') OVER (ORDER BY id) FROM plan WHERE id = 4`, "00:00:00"},
+		// An explicit cast to varchar(n) or char(n) cuts longer text.
+		{`SELECT CAST(interval '1 month' AS varchar(1))`, "1"},
+		{`SELECT 'abc'::varchar(2)`, "ab"},
+		{`SELECT 'abc'::varchar`, "abc"},
+		{`SELECT 'abc'::bpchar`, "abc"},
+		{`SELECT max(every)::varchar(1) FROM plan`, "1"},
+		{`SELECT count(*)::text FROM plan HAVING max(every)::varchar(1) = '1'`, "4"},
+		// date_trunc of an interval is an interval, so a date moved by it
+		// is a timestamp, whose hour extract reads.
+		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
+		// A column compares by the span, as the index of an interval does.
+		{`SELECT count(*)::text FROM plan WHERE every = interval '720 hours'`, "3"},
+		{`SELECT every FROM plan WHERE id = 3`, "720:00:00"},
+	} {
+		var got string
+		if err := db.QueryRow(tt.q).Scan(&got); err != nil {
+			t.Errorf("%s: %v", tt.q, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.q, got, tt.want)
+		}
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every < interval '1 year' ORDER BY id`); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Errorf("every < 1 year: got %v", got)
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every <= interval '1 year' ORDER BY every, id`); !slices.Equal(got, []int64{1, 2, 3, 4}) {
+		t.Errorf("every <= 1 year: got %v", got)
+	}
+
+	// The unique key of an interval is its span too.
+	// A column declared with a precision or fields loads, and a value
+	// written to it is refused, as Postgres rounds or drops part of it.
+	mustExec(t, db, `CREATE TABLE narrow (id int PRIMARY KEY, secs interval(0), days interval day, hm interval hour to minute)`)
+	mustExec(t, db, `INSERT INTO narrow (id) VALUES (1)`)
+	for _, q := range []string{
+		`INSERT INTO narrow (id, secs) VALUES (2, '1.6 seconds')`,
+		`INSERT INTO narrow (id, days) VALUES (3, '3 days 04:05')`,
+		`UPDATE narrow SET hm = interval '1 hour' WHERE id = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+
+	mustExec(t, db, `CREATE TABLE once (every interval PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO once VALUES ('1 day')`)
+	if _, err := db.Exec(`INSERT INTO once VALUES ('24 hours')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("a duplicate span: got %v, want ErrUniqueViolation", err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan VALUES (5, 'nonsense')`); !errors.Is(err, ErrInvalidDatetimeFormat) {
+		t.Errorf("malformed interval text: got %v, want ErrInvalidDatetimeFormat", err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan VALUES (6, $1)`, time.Hour); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a time.Duration: got %v, want ErrUnsupportedSQL", err)
+	}
+	// Postgres sums and averages intervals as intervals, which detest does
+	// not, so these are refused rather than computed as 0.
+	for _, q := range []string{
+		`SELECT sum(every) FROM plan`,
+		`SELECT avg(every) FROM plan`,
+		`SELECT sum(every) OVER () FROM plan`,
+		`SELECT avg(every) OVER (ORDER BY id) FROM plan`,
+		// A cast with a precision or fields rounds or cuts the value.
+		`SELECT interval '1.5 months' MONTH`,
+		`SELECT CAST(interval '1 month 1.6 seconds' AS interval(0))`,
+		`SELECT '2024-01-31 23:59:59.6'::timestamp(0)`,
+		`SELECT now()::timestamptz(0)`,
+		// Postgres reads the text beside an interval as an interval.
+		`SELECT greatest(interval '2 months', '40 days')`,
+		`SELECT least(interval '2 months', '40 days')`,
+		`SELECT greatest('40 days', interval '2 months')`,
+		`SELECT least('40 days', every) FROM plan`,
+		`SELECT COALESCE(interval '1 month', 'bogus')`,
+		`SELECT min(COALESCE(every, '40 days')) FROM plan`,
+		`SELECT CASE WHEN id = 1 THEN every ELSE '1 day' END FROM plan`,
+		`SELECT nullif(every, '1 month') FROM plan`,
+		// A branch of another type fails with 42804 on Postgres.
+		`SELECT COALESCE(interval '1 month', 'bogus'::text)`,
+		`SELECT CASE WHEN true THEN interval '1 month' ELSE 'bogus'::text END`,
+		`SELECT COALESCE(every, 1) FROM plan`,
+		// LAG and LEAD resolve their value and default to one type.
+		`SELECT lead(every, 1, '30 days') OVER (ORDER BY id) FROM plan`,
+		`SELECT lag(every, 1, 'bogus'::text) OVER (ORDER BY id) FROM plan`,
+		// A CASE or COALESCE of untyped values only is text.
+		`SELECT COALESCE(interval '1 month', COALESCE('bogus', ''))`,
+		`SELECT COALESCE(every, CASE WHEN id = 1 THEN '1 day' ELSE NULL END) FROM plan`,
+		// A column of a subquery, a CTE or a view has the type of its
+		// select list item, so these are refused before the run, over an
+		// empty result, a NULL value and a branch no row takes alike.
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT greatest(v.every, '40 days') FROM (SELECT every FROM plan) v`,
+		`SELECT CASE WHEN false THEN v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT CASE WHEN true THEN v.every ELSE 'bogus'::text END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT CASE WHEN true THEN -v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT NULL::interval AS every) v`,
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT every FROM plan WHERE false) v`,
+		`SELECT lead(v.every, 1, 'bogus') OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lead(v.every, 1, 'bogus'::text) OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lead(v.every, 0, 'bogus'::text) OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lag(v.every, 1, '1 day') OVER (ORDER BY v.id) FROM (SELECT id, every FROM plan) v`,
+		`WITH v AS (SELECT every FROM plan) SELECT COALESCE(every, '1 day') FROM v`,
+		`SELECT COALESCE(every, '1 day') FROM plan_view`,
+		// Output types go by position, so a name two columns have does
+		// not take the other's type.
+		`SELECT COALESCE(s.a, 'bogus') FROM (SELECT interval '1 month' AS v, 'ok'::text AS v) s(a, b)`,
+		// A scalar subquery's column is read in its own scope, and a
+		// string literal there is text.
+		`SELECT COALESCE((SELECT every FROM plan WHERE id = 1), 'bogus')`,
+		`SELECT COALESCE(interval '1 month', (SELECT 'bogus'))`,
+		`SELECT CASE WHEN false THEN (SELECT every FROM plan WHERE id = 1) ELSE 'bogus' END`,
+		// ... through the expressions around it too.
+		`SELECT COALESCE(COALESCE((SELECT every FROM plan LIMIT 1), NULL), 'bogus')`,
+		`SELECT COALESCE(-(SELECT every FROM plan LIMIT 1), 'bogus'::text)`,
+		// A scalar set operation's or *'s column may be an interval.
+		`SELECT COALESCE((SELECT interval '1 month' UNION SELECT interval '1 month'), 'bogus')`,
+		`SELECT COALESCE((SELECT * FROM periods), 'bogus'::text)`,
+		// A CASE or COALESCE of NULL only is text.
+		`SELECT COALESCE(interval '1 month', COALESCE(NULL, NULL))`,
+		`SELECT COALESCE(interval '1 month', CASE WHEN true THEN NULL END)`,
+		// A column of a * or a set operation is of a type the check does
+		// not resolve, which may be an interval.
+		`SELECT COALESCE(s.every, '1 day') FROM (SELECT * FROM plan) s`,
+		`SELECT COALESCE(u.every, '1 day') FROM (SELECT every FROM plan UNION ALL SELECT every FROM plan) u`,
+		// char(n) pads text with spaces it compares without, which
+		// detest's strings do not.
+		`SELECT 'ab'::char(3)`,
+		`SELECT 'abc'::char`,
+		`SELECT 'ab '::char(3) = 'ab'::char(2)`,
+		`SELECT 'a'::varchar(0)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+
+	mustExec(t, db, `CREATE TABLE tagged (id int PRIMARY KEY, every interval, label text)`)
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		// A time.Duration, an integer to detest, is refused over an empty
+		// table too.
+		{`SELECT id FROM tagged WHERE every = $1`, time.Hour},
+		{`SELECT id FROM plan WHERE every < $1`, int64(3600)},
+		// Postgres gives $1 one type, which an interval and a text operand
+		// cannot share.
+		{`SELECT id FROM tagged WHERE every = $1 AND label = $1`, "1 day"},
+	} {
+		if _, err := db.Exec(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
+		}
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every = $1 ORDER BY id`, "720 hours"); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Errorf("every = $1 with interval text: got %v", got)
+	}
+	if err := CheckSQL(postgres.New(), `SELECT COALESCE(interval '1 month', $1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CheckSQL of COALESCE(interval, $1): got %v, want ErrUnsupportedSQL", err)
+	}
+
+	// A timestamptz parameter in another zone moves by a month in UTC, the
+	// session's TimeZone: 2024-01-31 00:30+09 is January 30 there.
+	mustExec(t, db, `CREATE TABLE renewal (id int PRIMARY KEY, at timestamptz NOT NULL)`)
+	mustExec(t, db, `INSERT INTO renewal VALUES (1, '2024-02-29 15:30:00+00'), (2, '2024-02-28 15:30:00+00')`)
+	jst := time.Date(2024, 1, 31, 0, 30, 0, 0, time.FixedZone("JST", 9*3600))
+	if got := queryIDs(t, db, `SELECT id FROM renewal WHERE at = COALESCE($1, now()) + interval '1 month'`, jst); !slices.Equal(got, []int64{1}) {
+		t.Errorf("a JST parameter plus a month: got %v, want [1]", got)
 	}
 }
