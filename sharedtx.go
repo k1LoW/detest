@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -108,6 +109,26 @@ func (r *run) recordShared(a *sharedAccess) {
 	r.sharedLog = append(r.sharedLog, *a)
 }
 
+// checkUnshared stops the exploration when a process ran a statement that
+// did not park, such as a SET, in a step after goroutines sharing a
+// transaction ran theirs, which it may have run alongside. A statement that
+// parked runs only once the scheduler resumes it, before anything it starts,
+// and one before the goroutines' statements in the step is ordered before
+// them by starting them, so only this order is told, and the statement is
+// not kept for the ones after it.
+func (r *run) checkUnshared(a *sharedAccess) {
+	if r.s.epoch.Load() != r.sharedEpoch {
+		return
+	}
+	for i := range r.sharedLog {
+		b := &r.sharedLog[i]
+		if a.conflicts(b) && r.pending == nil {
+			r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a process ran %q alongside goroutines sharing a transaction, which ran %q in the same step, so their order is the Go runtime's rather than the schedule's, and a replay would not reproduce it", a.query, b.query)}
+			return
+		}
+	}
+}
+
 // pointTable returns the table a statement touches only the rows of, by its
 // primary key, so that which rows it touches cannot depend on another
 // statement: an INSERT of given keys, or an UPDATE, a DELETE or a locking
@@ -163,7 +184,23 @@ func pointTable(db *DB, stmt sqlir.Statement) (table string, ok bool) {
 				return "", false
 			}
 		}
-		return pinnedTable(db, s.Table, s.Alias, s.Where)
+		table, ok := pinnedTable(db, s.Table, s.Alias, s.Where)
+		if !ok {
+			return "", false
+		}
+		def := db.defs[table]
+		// A unique value one row gives up or takes decides whether another
+		// row's update fails, which no key of the two tells, and a new
+		// primary key or AUTO_INCREMENT value moves the row or the counter.
+		if len(def.uniques) > 0 {
+			return "", false
+		}
+		for _, a := range s.Set {
+			if slices.Contains(def.pk, a.Column) || def.autoInc[a.Column] {
+				return "", false
+			}
+		}
+		return table, true
 	case *sqlir.DeleteStmt:
 		if len(s.With) > 0 || len(s.Using) > 0 || len(s.OrderBy) > 0 || s.Limit != nil || s.Truncate || !simpleTargets(s.Returning) {
 			return "", false

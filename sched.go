@@ -303,6 +303,9 @@ type Proc struct {
 	// inSim marks that the process holds the Sim's engine mutex, which it
 	// gives up while parked (see enter).
 	inSim bool
+	// parks counts the times the process was resumed from a park, which
+	// tells a statement that ran without one (see checkUnshared).
+	parks int
 	// dead marks a process that crashed while parked in detest, which a
 	// statement context ending later must not wake.
 	dead atomic.Bool
@@ -1463,6 +1466,7 @@ func (p *Proc) wait() {
 		}
 		panic(stmtCanceled{p: p})
 	}
+	p.parks++
 	if held {
 		p.r.s.em.Lock()
 		p.inSim = true

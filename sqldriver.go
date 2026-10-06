@@ -196,6 +196,11 @@ func (t *sqlTx) Commit() (err error) {
 		// next statement to run in.
 		t.c.tx = nil
 		tx.p.r.postCancel(txCancel{tx: tx, why: "rolls back, as its commit by a goroutine sharing it was refused"})
+		// The siblings' statements after it no longer run in the
+		// transaction, so it does not commute with them.
+		exit := t.c.db.s.enter(nil)
+		tx.p.r.recordShared(&sharedAccess{gid: goroutineID(), db: t.c.db, query: "COMMIT", write: true})
+		exit()
 		err := unsupported("a transaction committed by another goroutine than the one that began it", "COMMIT")
 		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
 			t.c.db.s.refuse(u)
@@ -278,6 +283,11 @@ func (t *sqlTx) Rollback() (err error) {
 		why := "rolls back, as its context ended"
 		if t.ctx.Err() == nil {
 			why = "rolls back, by a goroutine sharing it"
+			// As a refused commit, it ends the transaction for the siblings'
+			// statements after it.
+			exit := t.c.db.s.enter(nil)
+			tx.p.r.recordShared(&sharedAccess{gid: goroutineID(), db: t.c.db, query: "ROLLBACK", write: true})
+			exit()
 		}
 		tx.p.r.postCancel(txCancel{tx: tx, why: why})
 		return nil
@@ -418,11 +428,32 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	if p != nil {
-		p.stmtDone = ctx.Done()
-		defer func() { p.stmtDone = nil }()
+	if p == nil {
+		return c.parseExec(ctx, query, args)
 	}
-	return c.parseExec(ctx, query, args)
+	p.stmtDone = ctx.Done()
+	defer func() { p.stmtDone = nil }()
+	parks := p.parks
+	rows, n, err := c.parseExec(ctx, query, args)
+	if p.parks == parks && !p.r.over() {
+		p.r.checkUnshared(c.access(p.gid, query, err))
+	}
+	return rows, n, err
+}
+
+// access describes a statement that touched the database as a whole, which
+// writes unless it is a plain read that succeeded.
+func (c *sqlConn) access(gid, query string, err error) *sharedAccess {
+	a := &sharedAccess{gid: gid, db: c.db, query: query, write: true}
+	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
+		if sel, ok := stmt.stmt.(*sqlir.SelectStmt); ok && err == nil {
+			// A read alone commutes with other reads. One that locks or calls
+			// a function such as nextval does not, and a failed statement may
+			// have aborted the transaction.
+			a.write = queryHasEffects(sel)
+		}
+	}
+	return a
 }
 
 // runShared runs a statement of a goroutine on a transaction another process
@@ -450,14 +481,8 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	c.db.s.countShared(tx.p.r)
 	mark := tx.markShared()
 	rows, n, err := c.parseExec(ctx, query, args)
-	a := &sharedAccess{gid: goroutineID(), db: c.db, query: query, write: true}
+	a := c.access(goroutineID(), query, err)
 	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
-		if sel, ok := stmt.stmt.(*sqlir.SelectStmt); ok && err == nil {
-			// A read alone commutes with other reads. One that locks or calls
-			// a function such as nextval does not, and a failed statement may
-			// have aborted the transaction.
-			a.write = queryHasEffects(sel)
-		}
 		if _, ok := pointTable(c.db, stmt.stmt); ok && err == nil {
 			if keys := tx.sinceShared(mark); len(keys) > 0 {
 				a.keys = keys

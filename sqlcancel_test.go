@@ -423,3 +423,34 @@ func TestGoroutinesSharingSQLTxGeneratedValuesStop(t *testing.T) {
 		})
 	}
 }
+
+// Goroutines sharing a transaction that update rows of their own in a table
+// with a unique constraint may each decide whether the other's update fails,
+// which their keys do not tell, so the exploration stops.
+func TestGoroutinesSharingSQLTxUniqueUpdatesStop(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE u (id bigint PRIMARY KEY, code text NOT NULL UNIQUE)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Seed(func() {
+			store.SeedRow("u", Row{"id": int64(1), "code": "a"})
+			store.SeedRow("u", Row{"id": int64(2), "code": "b"})
+		})
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var wg sync.WaitGroup
+			wg.Go(func() { _, _ = tx.Exec(`UPDATE u SET code = 'c' WHERE id = 1`) })
+			wg.Go(func() { _, _ = tx.Exec(`UPDATE u SET code = 'a' WHERE id = 2`) })
+			wg.Wait()
+			return tx.Commit()
+		})
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "depends on their order") {
+		t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
+	}
+}
