@@ -469,8 +469,9 @@ func (r *run) countSpin(o option, before int) {
 		r.spinProc = nil
 	case r.version != before:
 		// The step changed committed state, which is no spin: the streak
-		// starts after it.
-		r.spinProc, r.spinCount, r.spinVersion = o.p, 0, r.version
+		// starts after it. No streak is kept at zero, which MaxSpins(0)
+		// would take for a spin.
+		r.spinProc = nil
 	case o.p == r.spinProc && r.version == r.spinVersion:
 		r.spinCount++
 	default:
