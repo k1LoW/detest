@@ -141,7 +141,7 @@ func paramFamily(typ string) string {
 		return "integer"
 	case "float4", "float8", "real", "double precision", "numeric", "decimal":
 		return "float"
-	case "bool", "boolean", "uuid":
+	case "bool", "boolean", "uuid", "interval":
 		return typ
 	case "text", "varchar":
 		return "text"

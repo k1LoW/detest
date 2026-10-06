@@ -729,16 +729,22 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			s = k
 		case []byte:
 			s = string(k)
-		case int64:
+		case nil:
+			return v, nil
+		default:
+			if _, isInterval := derefValue(other).(pgInterval); isInterval {
+				// A time.Duration reaches detest as an integer, which pgx
+				// and lib/pq encode as an interval differently.
+				return nil, x.unsupported(fmt.Sprintf("a %T parameter compared with an interval", k))
+			}
+			n, isInt := k.(int64)
+			if _, isBool := derefValue(other).(bool); !isInt || !isBool {
+				return v, nil
+			}
 			// An integer bound to a parameter Postgres infers as boolean
 			// reaches it as the text the driver sends, so active = $1
 			// with 1 is true and with 2 fails as boolean input does.
-			if _, isBool := derefValue(other).(bool); !isBool {
-				return v, nil
-			}
-			s = strconv.FormatInt(k, 10)
-		default:
-			return v, nil
+			s = strconv.FormatInt(n, 10)
 		}
 	default:
 		return v, nil
