@@ -497,3 +497,33 @@ func TestAdoptedGoroutineBlockedForeverReported(t *testing.T) {
 		s.ExpectViolation("pod#1.1 is blocked on a channel")
 	})
 }
+
+// A goroutine may return holding a mutex its pod unlocks later, as Go allows.
+// A crash of the pod after the goroutine returned frees that mutex too.
+func TestCrashFreesMutexOfReturnedGoroutine(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mu := s.Mutex("mu")
+		s.Manual("pod", 1, func(p *Proc) error {
+			var wg sync.WaitGroup
+			wg.Go(func() { mu.Lock() })
+			wg.Go(func() {
+				time.Sleep(time.Second) // after its sibling returned
+				for _, id := range []string{"a", "b"} {
+					_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ($1)`, id)
+				}
+			})
+			wg.Wait()
+			mu.Unlock()
+			return nil
+		})
+		s.Manual("other", 1, func(p *Proc) error {
+			mu.Lock()
+			defer mu.Unlock()
+			return nil
+		}, After(func(st *State) bool {
+			_, ok := st.Row(store, "marks", "a")
+			return ok
+		}))
+	}, MaxCrashes(1))
+}

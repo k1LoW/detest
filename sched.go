@@ -853,15 +853,19 @@ func (r *run) crash(p *Proc) {
 	wasDone := p.state == stateDone
 	freed := false
 	for _, m := range r.procs {
-		if m != p && (!m.adopted || m.family != p || m.state == stateDone) {
+		if m != p && (!m.adopted || m.family != p) {
 			continue
 		}
 		if m.state == stateBlockedOutside {
 			r.leaveOutside(m)
 			m.away.Store(awayCrashed)
 		}
-		r.finish(m)
-		m.waitRow, m.waitLock = nil, nil
+		if m.state != stateDone {
+			r.finish(m)
+			m.waitRow, m.waitLock = nil, nil
+		}
+		// A goroutine that returned may still hold a mutex, which Go lets
+		// another goroutine of the pod unlock later, so it is freed too.
 		for _, l := range r.s.locks {
 			if l.crash(m) {
 				freed = true
