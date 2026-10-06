@@ -245,6 +245,12 @@ type Sim struct {
 	// ended is a run that is over, which goroutines of earlier runs turned
 	// away before they were ever known are given as theirs.
 	ended *run
+	// em is held by whoever runs in the simulated databases' engine, so that
+	// a goroutine running a statement on a transaction it shares with its
+	// process (see sqlConn.runShared) does not run alongside the process the
+	// scheduler resumed. Everything else in detest runs one goroutine at a
+	// time by the scheduler's design and needs no lock.
+	em sync.Mutex
 }
 
 func newSimDefaults() *Sim {
@@ -315,6 +321,24 @@ func (s *Sim) ExpectViolation(substr string) { s.declare("ExpectViolation"); s.e
 // Now returns the simulated clock of the current run.
 func (s *Sim) Now() int64 { return s.run.clock }
 
+// enter takes the engine mutex for p, or for a goroutine that is no process
+// when p is nil, and returns the function that gives it back. p gives it up
+// while it is parked (see Proc.wait), so it must be the process of the
+// calling goroutine.
+func (s *Sim) enter(p *Proc) func() {
+	s.em.Lock()
+	if p == nil {
+		return s.em.Unlock
+	}
+	p.inSim = true
+	return func() {
+		if p.inSim {
+			p.inSim = false
+			s.em.Unlock()
+		}
+	}
+}
+
 // declare panics when a declaration method is called after the declaration
 // function returned: the exploration has started and would ignore it.
 func (s *Sim) declare(what string) {
@@ -350,9 +374,13 @@ type result struct {
 	// Unsupported are the statements refused with ErrUnsupportedSQL in any
 	// run, which an application that does not report the error hides.
 	Unsupported []string
-	Schedule    string
-	Trace       string
-	Elapsed     time.Duration
+	// Shared counts the statements goroutines ran on a transaction they share
+	// with their process, each at once, so that its interleaving with other
+	// processes was not explored.
+	Shared   int64
+	Schedule string
+	Trace    string
+	Elapsed  time.Duration
 }
 
 // report formats the outcome for humans, with the statements refused as
@@ -360,6 +388,9 @@ type result struct {
 func (r *result) report() string {
 	var msg strings.Builder
 	msg.WriteString(r.outcome())
+	if r.Shared > 0 {
+		fmt.Fprintf(&msg, "\ndetest: %d statements ran from goroutines sharing a transaction with their process, each at once, without interleaving with other processes", r.Shared)
+	}
 	if len(r.Unsupported) > 0 {
 		msg.WriteString("\ndetest: statements refused as unsupported (ErrUnsupportedSQL), which the application got as an error:")
 		for _, u := range r.Unsupported {
@@ -424,6 +455,14 @@ func (s *Sim) refuse(err *ErrUnsupportedSQL) {
 	// A statement the declaration runs is refused before any run exists.
 	if s.frontier != nil && (s.run == nil || !s.run.measuring) {
 		s.frontier.refuse(err.Error())
+	}
+}
+
+// countShared counts a statement run at once on a shared transaction, for
+// the report.
+func (s *Sim) countShared(r *run) {
+	if s.frontier != nil && !r.measuring {
+		s.frontier.shared.Add(1)
 	}
 }
 

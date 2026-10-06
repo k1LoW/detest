@@ -48,6 +48,8 @@ Production code often starts goroutines of its own, such as an `errgroup` pollin
 - A goroutine gives no sign when it returns. One that stops reporting back is first taken as blocked outside detest, and once nothing else can run, a dump of the goroutines tells the ones that returned from the ones still blocked.
 - A goroutine still alive when its run ends, such as one asleep on a timer, unwinds as a process of that run when it wakes in a later one, and is never adopted by the later run.
 
+A goroutine that runs a statement on a `*sql.Tx` another process began, such as an `errgroup` inside a transaction, is not adopted. database/sql holds the connection's and the transaction's locks while it calls the driver, and a goroutine blocked on them is not durably blocked, so a statement parked at a yield point would keep its siblings from ever settling. The statement runs at once instead, in the transaction and in the step of whichever process woke the goroutine, under a mutex that keeps it apart from the process running in that step. Its result is the server's, but its interleaving with other processes is not explored, which the report states as a bound, and a statement that would wait for a lock, or a commit, fails as unsupported. The scheduler wakes the processes such a statement releases, at its next step.
+
 A goroutine whose creator never called into detest belongs to the first process up its chain of creators, which is read from the goroutines still alive. When a creator on the chain has already returned, the chain cannot be followed, and the process of the step the goroutine arrived in stands for its owner. A goroutine that sleeps before its first call into detest is invisible until it makes that call, so the run may end at quiescence without it. Likewise, a goroutine started in one run whose first call comes after that run ended is adopted by the run it calls in, unless it calls while that run's seeds run, before any of its processes, when it can only be an earlier run's and is turned away.
 
 ### Choices
@@ -166,7 +168,7 @@ A queue is at least once and unordered. A consumer whose handler returns an erro
 Determinism is a precondition of the search, so detest asks a few things of a test.
 
 - Build everything the code under test uses inside the declaration function. Channels and timers created outside the bubble are not durably blocking inside it.
-- Pass `p.Context()` to production code. It is canceled when a run ends, so `database/sql` can roll back the transactions of an aborted run.
+- Pass `p.Context()` to production code. It is canceled when a run ends, so `database/sql` can roll back the transactions of an aborted run. A statement parked in detest returns its context's error when its context ends, as a real driver cancels the query, and its connection is dropped with its transaction, as pgx and go-sql-driver drop it.
 - Inject `detest.Mutex` where the code takes a mutex across a yield point.
 - Reset state kept outside simulated resources in a seed. The declaration function runs once per worker, not once per run.
 

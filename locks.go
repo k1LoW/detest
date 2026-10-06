@@ -150,6 +150,9 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 			}
 			return nil
 		}
+		if err := tx.refuseShared(); err != nil {
+			return err
+		}
 		what := fmt.Sprintf("a lock on %s/%s", lk.table, lk.key)
 		if err := tx.selfWait(conflict, what, "a row lock"); err != nil {
 			return err
@@ -588,6 +591,18 @@ func (tx *Tx) wake(keys map[lockKey]bool) {
 	if tx.p == nil || len(keys) == 0 {
 		return
 	}
+	if tx.shared != "" {
+		// A statement on a shared transaction runs alongside the process the
+		// scheduler resumed, which may change the same processes' states, so
+		// the scheduler wakes them at its next step. Only it resumes them, so
+		// nothing tells the two apart.
+		tx.p.r.postCancel(txCancel{tx: tx, wake: keys})
+		return
+	}
+	tx.wakeNow(keys)
+}
+
+func (tx *Tx) wakeNow(keys map[lockKey]bool) {
 	if tx.passedOver {
 		tx.p.r.bump(tx.p)
 	}

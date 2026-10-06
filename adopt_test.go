@@ -568,50 +568,41 @@ func TestAdoptedGoroutineWokenBySeedNotRun(t *testing.T) {
 	})
 }
 
-// A goroutine that runs a statement or commits on a transaction its parent
-// began is refused, rather than scheduled as the parent.
-func TestAdoptedGoroutineOnParentTxRefused(t *testing.T) {
-	for _, commit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("commit=%v", commit), func(t *testing.T) {
-			var mu sync.Mutex
-			var got error
-			Explore(t, func(t *testing.T, s *Sim) {
-				db, store := s.DB("app", postgres.New())
-				s.Manual("pod", 1, func(p *Proc) error {
-					tx, err := db.BeginTx(p.Context(), nil)
-					if err != nil {
-						return err
-					}
-					defer func() { _ = tx.Rollback() }()
-					var gerr error
-					var wg sync.WaitGroup
-					wg.Go(func() {
-						if commit {
-							gerr = tx.Commit()
-						} else {
-							_, gerr = tx.Exec(`INSERT INTO "marks" ("id") VALUES ('g')`)
-						}
-					})
-					wg.Wait()
-					mu.Lock()
-					got = gerr
-					mu.Unlock()
-					// A refused commit leaves no transaction on the pooled
-					// connection for this statement to run in.
-					_, err = db.Exec(`INSERT INTO "marks" ("id") VALUES ('after')`)
-					return err
-				})
-				s.AtQuiescence(func(st *State) error {
-					if _, ok := st.Row(store, "marks", "after"); !ok {
-						return errors.New("a statement after the refused commit was not committed")
-					}
-					return nil
-				})
-			})
-			if _, ok := errors.AsType[*ErrUnsupportedSQL](got); !ok {
-				t.Errorf("the goroutine got %v, want an unsupported error", got)
+// A goroutine that commits a transaction its parent began is refused, since
+// where the commit lands among the other processes could not be explored,
+// and the transaction does not stay on the pooled connection.
+func TestGoroutineCommitOnParentTxRefused(t *testing.T) {
+	var mu sync.Mutex
+	var got error
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
 			}
+			defer func() { _ = tx.Rollback() }()
+			var gerr error
+			var wg sync.WaitGroup
+			wg.Go(func() { gerr = tx.Commit() })
+			wg.Wait()
+			mu.Lock()
+			got = gerr
+			mu.Unlock()
+			// A refused commit leaves no transaction on the pooled
+			// connection for this statement to run in.
+			_, err = db.Exec(`INSERT INTO "marks" ("id") VALUES ('after')`)
+			return err
 		})
+		s.AtQuiescence(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "after"); !ok {
+				return errors.New("a statement after the refused commit was not committed")
+			}
+			return nil
+		})
+	})
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](got); !ok {
+		t.Errorf("the goroutine got %v, want an unsupported error", got)
 	}
 }
 
@@ -1601,15 +1592,14 @@ func TestGoroutineWaitsForItsProcessesOtherTransaction(t *testing.T) {
 	})
 }
 
-// Two processes the test declared that share a *sql.Tx, one beginning it and
-// the other running a statement on it, are refused as well.
-func TestDeclaredProcessesSharingSQLTxRefused(t *testing.T) {
-	var mu sync.Mutex
-	var got error
+// A process the test declared that runs a statement on a *sql.Tx another
+// one began runs it in that transaction, as a goroutine sharing it does.
+func TestDeclaredProcessesSharingSQLTx(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", postgres.New())
+		db, store := s.DB("app", postgres.New())
 		var shared *sql.Tx
-		s.Seed(func() { shared = nil })
+		var inserted bool
+		s.Seed(func() { shared, inserted = nil, false })
 		s.Manual("owner", 1, func(p *Proc) error {
 			tx, err := db.BeginTx(p.Context(), nil)
 			if err != nil {
@@ -1617,24 +1607,22 @@ func TestDeclaredProcessesSharingSQLTxRefused(t *testing.T) {
 			}
 			shared = tx
 			p.Step("hand it over")
-			return tx.Rollback()
+			return tx.Commit()
 		})
 		s.Manual("user", 1, func(p *Proc) error {
-			if shared == nil {
-				return nil
-			}
+			// After the owner committed, database/sql refuses it as done.
 			_, err := shared.Exec(`INSERT INTO "marks" ("id") VALUES ('u')`)
-			if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
-				mu.Lock()
-				got = err
-				mu.Unlock()
-			}
+			inserted = err == nil
 			return nil
 		}, After(func(*State) bool { return shared != nil }))
+		s.AtQuiescence(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "u"); ok != inserted {
+				return fmt.Errorf("mark committed %v, statement succeeded %v", ok, inserted)
+			}
+			return nil
+		})
+		s.Sometimes("the statement ran in the shared transaction", func(*State) bool { return inserted })
 	})
-	if got == nil {
-		t.Error("no run refused the other process's statement as unsupported")
-	}
 }
 
 // A process running an operation on another process's hand-written

@@ -181,6 +181,9 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 		if tx.p == nil {
 			return fmt.Errorf("detest: an insert outside any process waits for a gap lock held by %s", procName(holders[0].p))
 		}
+		if err := tx.refuseShared(); err != nil {
+			return err
+		}
 		what := "a gap lock on " + table
 		if err := tx.selfWait(holders, what, "a gap lock"); err != nil {
 			return err

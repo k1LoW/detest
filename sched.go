@@ -206,6 +206,13 @@ type run struct {
 	adopting []*Proc
 	// adoptCh wakes waitOutside when a goroutine is adopted.
 	adoptCh chan struct{}
+	// cancels holds the statements whose context ended while they were
+	// parked, and the transactions database/sql rolled back from a goroutine
+	// of its own, for the scheduler to apply (see takeCancels), guarded by
+	// cancelMu. cancelCh wakes waitOutside for them.
+	cancelMu sync.Mutex
+	cancels  []txCancel
+	cancelCh chan struct{}
 	// began is set once the scheduler first resumes a process. Goroutines
 	// woken outside detest read it, unlike current, which the scheduler
 	// changes while they run.
@@ -286,6 +293,15 @@ type Proc struct {
 	// taking turns at waiting for each other would go on for ever.
 	spins       int
 	spinVersion int
+	// stmtDone is the Done channel of the context of the statement the
+	// process runs in the driver, which ends its parks there (see wait).
+	stmtDone <-chan struct{}
+	// inSim marks that the process holds the Sim's engine mutex, which it
+	// gives up while parked (see enter).
+	inSim bool
+	// dead marks a process that crashed while parked in detest, which a
+	// statement context ending later must not wake.
+	dead atomic.Bool
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -881,12 +897,16 @@ func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
 // may start or wake another.
 func (r *run) settle() {
 	for {
+		canceled := r.takeCancels()
 		took := r.takeAdopted()
 		r.settleOutside()
 		r.gidMu.Lock()
 		more := len(r.adopting) > 0
 		r.gidMu.Unlock()
-		if !took && !more {
+		r.cancelMu.Lock()
+		more = more || len(r.cancels) > 0
+		r.cancelMu.Unlock()
+		if !canceled && !took && !more {
 			return
 		}
 	}
@@ -935,6 +955,9 @@ func (r *run) takeOutside(p *Proc, ev procEvent) {
 // event as part of the current step, as it would have run alongside the
 // process that woke or started it, but alone.
 func (r *run) runSync(p *Proc) {
+	// A context that ended on the clock may have woken p together with
+	// database/sql's rollback of p's transaction, which p must find done.
+	r.takeCancels()
 	prev := r.current
 	p.state = stateReady
 	r.current = p
@@ -991,11 +1014,16 @@ func (r *run) waitOutside() bool {
 	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timeout.C)})
 	// A goroutine one of them started may call into detest first.
 	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.adoptCh)})
+	// A statement's context may end on the clock, such as a deadline.
+	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.cancelCh)})
 	chosen, v, _ := reflect.Select(cases)
 	switch chosen {
 	case len(waiting):
+		// A goroutine woken by a timer of the same instant may still be on
+		// its way, such as one running a statement on a shared transaction.
+		r.s.settled()
 		return false // nothing reported back in time: left to the quiescence check
-	case len(waiting) + 1:
+	case len(waiting) + 1, len(waiting) + 2:
 		r.s.settled() // the goroutines woken with it reach detest too
 		return true   // taken in by settle
 	}
@@ -1031,6 +1059,9 @@ func (r *run) crash(p *Proc) {
 			m.away.Store(awayCrashed)
 		}
 		if m.state != stateDone {
+			if m.state != stateBlockedOutside {
+				m.dead.Store(true)
+			}
 			r.finish(m)
 			m.waitRow, m.waitLock = nil, nil
 		}
@@ -1397,11 +1428,97 @@ func (p *Proc) send(ev procEvent) {
 }
 
 func (p *Proc) wait() {
+	held := p.inSim
+	if held {
+		p.inSim = false
+		p.r.s.em.Unlock()
+	}
 	select {
 	case <-p.resume:
 	case <-p.r.abort:
 		panic(abortSentinel{})
+	case <-p.stmtDone:
+		select {
+		case <-p.r.abort:
+			// The run ended, which cancels p.Context() right after, and the
+			// process unwinds as at any other park.
+			panic(abortSentinel{})
+		default:
+		}
+		if p.dead.Load() {
+			// It crashed where it stood, and stays there until its run ends.
+			<-p.r.abort
+			panic(abortSentinel{})
+		}
+		panic(stmtCanceled{p: p})
 	}
+	if held {
+		p.r.s.em.Lock()
+		p.inSim = true
+	}
+}
+
+// stmtCanceled unwinds a statement parked in the driver whose context ended,
+// to the driver's entry point (see sqlConn.exec).
+type stmtCanceled struct{ p *Proc }
+
+// txCancel is a transaction for the scheduler to roll back, with the process
+// whose parked statement ended with its context, if any.
+type txCancel struct {
+	p  *Proc
+	tx *Tx
+	// wake holds the locks a statement on a shared transaction let go of,
+	// whose waiters the scheduler wakes, rather than roll tx back.
+	wake map[lockKey]bool
+	// why says in the trace why tx rolls back, when no statement of p was
+	// canceled.
+	why string
+}
+
+// postCancel hands c to the scheduler. It is called by a goroutine running
+// alongside the scheduler's current process, so it changes nothing else.
+func (r *run) postCancel(c txCancel) {
+	r.cancelMu.Lock()
+	r.cancels = append(r.cancels, c)
+	r.cancelMu.Unlock()
+	select {
+	case r.cancelCh <- struct{}{}:
+	default:
+	}
+}
+
+// takeCancels applies the cancellations posted since the last step. A
+// process whose statement was canceled left detest with the context's error
+// and runs on outside it, so it is blocked outside until it reports back. Its
+// transaction rolls back, as both pgx and go-sql-driver close the connection
+// of a canceled query, which ends the transaction on the server.
+func (r *run) takeCancels() bool {
+	r.cancelMu.Lock()
+	cs := r.cancels
+	r.cancels = nil
+	r.cancelMu.Unlock()
+	for _, c := range cs {
+		if c.wake != nil {
+			c.tx.wakeNow(c.wake)
+			continue
+		}
+		if p := c.p; p != nil {
+			if p.state != stateDone {
+				p.state = stateBlockedOutside
+				p.waitRow, p.victimOf = nil, nil
+			}
+			r.note(p, "statement canceled by its context: the connection drops and its transaction rolls back")
+		} else {
+			r.note(c.tx.p, "its transaction %s", c.why)
+		}
+		if !c.tx.closed {
+			c.tx.rollback()
+		}
+		if c.tx.p != nil {
+			c.tx.p.forgetTx(c.tx)
+		}
+	}
+	return len(cs) > 0
 }
 
 // note records an operation in the trace. The trace is kept only by a run that
@@ -1615,7 +1732,7 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.

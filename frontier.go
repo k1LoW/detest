@@ -60,6 +60,9 @@ type frontier struct {
 	// refused is the statements detest refused as unsupported in any run,
 	// which the application saw as an error there.
 	refused map[string]bool
+	// shared counts the statements goroutines ran at once on a transaction
+	// they share with their process (see sqlConn.runShared).
+	shared atomic.Int64
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -425,7 +428,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 // merge combines the workers' results: the best violation if one was found,
 // else the run counts with whether the exploration finished.
 func (f *frontier) merge(results []*result, workers int) *result {
-	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached(), CutRuns: f.cutRuns(), Unsupported: f.refusals()}
+	merged := &result{Complete: !f.incomplete, Workers: workers, Fatal: f.fatal, Unreached: f.unreached(), CutRuns: f.cutRuns(), Unsupported: f.refusals(), Shared: f.shared.Load()}
 	for _, r := range results {
 		merged.Runs += r.Runs
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
@@ -451,7 +454,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.strategy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.strategy
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy
 		return &v
 	}
 	return merged

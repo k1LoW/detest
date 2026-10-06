@@ -1558,7 +1558,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if existing != nil {
 			if ins.OnConflict.DoNothing {
 				if x.tx.p != nil {
-					x.tx.p.r.note(x.tx.p, "on conflict do nothing: row skipped")
+					x.tx.note("on conflict do nothing: row skipped")
 				}
 				continue
 			}
@@ -1575,7 +1575,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				}
 				if !ok {
 					if x.tx.p != nil {
-						x.tx.p.r.note(x.tx.p, "on conflict do update: WHERE false, row skipped")
+						x.tx.note("on conflict do update: WHERE false, row skipped")
 					}
 					continue
 				}
@@ -1628,7 +1628,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			written[lk.key] = true
 			x.tx.endUpdates()
 			if x.tx.p != nil {
-				x.tx.p.r.note(x.tx.p, "on conflict do update: %s", updated)
+				x.tx.note("on conflict do update: %s", updated)
 			}
 			switch {
 			case !x.tx.db.kind.InnoDB():

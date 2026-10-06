@@ -743,3 +743,22 @@ func goneStale(p *Proc) {
 		runtime.Goexit()
 	}
 }
+
+// isCaller reports whether the calling goroutine is p's, without adopting it
+// or taking it back from outside detest as Current would. A goroutine the
+// code under test handed p's transaction to must not park while database/sql
+// holds the transaction's locks (see sqlConn.runShared), so it is told apart
+// before anything else.
+func (p *Proc) isCaller() bool {
+	onProc, sure := onProcGoroutine()
+	if sure && onProc == p.adopted {
+		return false
+	}
+	r := p.r
+	if onProc && r.outside.Load() == 0 && r.s.lingerN.Load() == 0 {
+		// Every process detest started but the resumed one is parked in
+		// detest, as Current's fast path assumes.
+		return r.current == p
+	}
+	return goroutineID() == p.gid
+}
