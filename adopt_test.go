@@ -769,3 +769,34 @@ func TestHandWrittenTxEnqueueByGoroutine(t *testing.T) {
 		t.Errorf("the goroutine was not taken in:\n%s", res.Trace)
 	}
 }
+
+// A goroutine started in the step that ends the run is still waiting to be
+// taken in, and is retired with the others.
+func TestPendingGoroutineRetired(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			// The rerun sleeps here while the goroutine of the first run wakes.
+			time.Sleep(2 * time.Second)
+			if _, err := db.Exec(`INSERT INTO "marks" ("id") VALUES ('x')`); err != nil {
+				return err
+			}
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('g')`)
+				time.Sleep(time.Second)
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "late"); ok {
+				return errors.New("late mark")
+			}
+			if _, ok := st.Row(store, "marks", "x"); ok {
+				return errors.New("x mark")
+			}
+			return nil
+		})
+		s.ExpectViolation("x mark")
+	})
+}

@@ -323,7 +323,12 @@ func (r *run) finish(p *Proc) {
 // one waking in a later run unwinds as a process of its own ended run instead
 // of being adopted by the later one.
 func (r *run) retire() {
-	var keep []*Proc
+	// A goroutine that registered in the run's last step is still pending,
+	// its handshake released by the end of the run, and may call again.
+	r.gidMu.Lock()
+	keep := r.adopting
+	r.adopting = nil
+	r.gidMu.Unlock()
 	for _, p := range r.procs {
 		// A goroutine that crashed with its family is done but may still run,
 		// such as one asleep or one its cut call returned errRunOver to.
@@ -412,6 +417,16 @@ func (s *Sim) recount() {
 	}
 	s.staleN.Store(int32(len(s.stale))) //nolint:gosec // far below 2^31
 	s.lingerN.Store(int32(linger))      //nolint:gosec // far below 2^31
+}
+
+// staleCaller reports whether the calling goroutine is retired, without
+// adopting it as Current would. It reads the goroutine id only while some
+// goroutine is retired.
+func (s *Sim) staleCaller() bool {
+	if s.staleN.Load() == 0 {
+		return false
+	}
+	return s.retired(goroutineID()) != nil
 }
 
 func (s *Sim) retired(gid string) *Proc {
