@@ -141,7 +141,7 @@ func (r *run) stopEnding(what string) {
 // sqlConn.runShared). It is called with the engine mutex held.
 func (r *run) stopCanceled(query string) {
 	if r.pending == nil {
-		r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a goroutine sharing a transaction with its process ran %q after its context ended, such as by a sibling canceling an errgroup, and whether it ran before or after the cancel is decided by database/sql and the Go runtime rather than the schedule, so a replay would not reproduce it", query)}
+		r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a goroutine sharing a transaction with its process ran %q after its context ended, such as by a sibling canceling a context they share, and whether it ran before or after the cancel is decided by database/sql and the Go runtime rather than the schedule, so a replay would not reproduce it", query)}
 	}
 }
 

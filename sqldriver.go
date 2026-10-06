@@ -471,8 +471,8 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 		return nil, 0, driver.ErrBadConn
 	}
 	// A goroutine sharing a transaction whose context ended, such as by a
-	// sibling canceling an errgroup, would not send its statement, as in
-	// runQuery. Whether it got here before or after the cancel is the
+	// sibling canceling a context they share, would not send its statement,
+	// as in runQuery. Whether it got here before or after the cancel is the
 	// runtime's choice, and so is which siblings' statements ran in the
 	// transaction, so the exploration stops. One that database/sql turns
 	// away before the driver, having seen the context end first, never gets
