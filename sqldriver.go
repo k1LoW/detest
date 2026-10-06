@@ -153,15 +153,23 @@ type sqlTx struct{ c *sqlConn }
 
 func (t *sqlTx) Commit() (err error) {
 	defer recoverRunOver(&err)
+	// The caller is resolved first, so that a goroutine of an ended run is
+	// turned away before it reads the connection.
+	caller := t.c.current()
+	if caller.stale() {
+		return errRunOver
+	}
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
 		return nil
 	}
-	if tx.p.stale() {
-		return errRunOver // the run's databases are reset, or are a later run's
+	if tx.p != nil && tx.p.r.over() {
+		// The run's databases are reset, or are a later run's, and a commit
+		// after the end of its run never counts.
+		return errRunOver
 	}
-	if borrowedTx(tx, t.c.current()) {
+	if borrowedTx(tx, caller) {
 		t.c.tx = tx // still open, for database/sql to roll back
 		err := unsupported("a transaction used by another goroutine than the one that began it", "COMMIT")
 		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
@@ -196,6 +204,11 @@ func (t *sqlTx) Commit() (err error) {
 
 func (t *sqlTx) Rollback() (err error) {
 	defer recoverRunOver(&err)
+	// database/sql rolls back from a goroutine of its own when the context
+	// ends, which Current would adopt, so a stale caller is only looked up.
+	if t.c.db.s.staleCaller() {
+		return errRunOver
+	}
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
