@@ -71,13 +71,17 @@ func TestStatementWaitingForLockCanceledByDeadline(t *testing.T) {
 	}
 }
 
-// A goroutine's statement parked at its yield point fails with the context's
-// error when a sibling cancels the group's context, its transaction rolls
-// back, and the run goes on.
+// A goroutine's statement parked at its yield point is refused when a
+// sibling cancels the group's context, as the server goes on running it, its
+// transaction rolls back, and the run goes on.
 func TestStatementAtYieldCanceledBySibling(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, store := s.DB("app", postgres.New())
-		s.Seed(func() { store.SeedRow("counters", Row{"id": "c", "n": int64(0)}) })
+		var workErr error
+		s.Seed(func() {
+			workErr = nil
+			store.SeedRow("counters", Row{"id": "c", "n": int64(0)})
+		})
 		s.Manual("pod", 1, func(p *Proc) error {
 			ctx, cancel := context.WithCancel(p.Context())
 			defer cancel()
@@ -100,13 +104,21 @@ func TestStatementAtYieldCanceledBySibling(t *testing.T) {
 			var wg sync.WaitGroup
 			for _, fail := range []bool{false, true} {
 				wg.Go(func() {
-					if err := work(fail); err != nil {
+					err := work(fail)
+					if !fail {
+						workErr = err
+					}
+					if err != nil {
 						cancel()
 					}
 				})
 			}
 			wg.Wait()
 			return nil
+		})
+		s.Sometimes("the parked statement was refused when its context ended", func(*State) bool {
+			_, ok := errors.AsType[*ErrUnsupportedSQL](workErr)
+			return ok
 		})
 		s.AtQuiescence(func(st *State) error {
 			row, _ := st.Row(store, "counters", "c")
@@ -488,4 +500,37 @@ func TestSetAfterGoroutinesSharingSQLTx(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+// Goroutines sharing a transaction whose writes to rows of their own run a
+// CHECK that changes a sequence leave its value to their order, so the
+// exploration stops.
+func TestGoroutinesSharingSQLTxEffectfulCheckStop(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		for _, ddl := range []string{
+			`CREATE SEQUENCE s`,
+			`CREATE TABLE marks (id bigint PRIMARY KEY, CHECK (setval('s', id) > 0))`,
+		} {
+			if _, err := db.Exec(ddl); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var wg sync.WaitGroup
+			for _, id := range []int64{1, 2} {
+				wg.Go(func() { _, _ = tx.Exec(`INSERT INTO marks (id) VALUES ($1)`, id) })
+			}
+			wg.Wait()
+			return tx.Commit()
+		})
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "depends on their order") {
+		t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
+	}
 }
