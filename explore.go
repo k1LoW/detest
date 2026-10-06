@@ -283,11 +283,27 @@ func watchStall(f *frontier) (stop func()) {
 			if !stalled {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "detest: no scheduling progress for %s. A process is blocked on something detest does not model, such as a sync.Mutex held across a yield point or real I/O; inject a detest.Mutex or detest.RWMutex, or keep the I/O out of the code under test. Goroutines blocked in the bubble:\n\n%s", limit, nonDurableStacks())
+			stacks := nonDurableStacks()
+			cause := "A process is blocked on something detest does not model, such as a sync.Mutex held across a yield point or real I/O; inject a detest.Mutex or detest.RWMutex, or keep the I/O out of the code under test."
+			if onSQLLock(stacks) {
+				cause = "A goroutine is blocked on a lock database/sql holds while a statement of the same connection or transaction stands at a yield point in detest, such as a process running a statement on a *sql.Tx that goroutines it started use at the same time; let one goroutine use the transaction at a time."
+			}
+			fmt.Fprintf(os.Stderr, "detest: no scheduling progress for %s. %s Goroutines blocked in the bubble:\n\n%s", limit, cause, stacks)
 			panic("detest: stalled")
 		}
 	}()
 	return func() { close(done) }
+}
+
+// onSQLLock reports whether one of stacks waits for a lock of database/sql,
+// which detest cannot release, rather than for one of the application.
+func onSQLLock(stacks string) bool {
+	for g := range strings.SplitSeq(stacks, "\n\n") {
+		if strings.Contains(g, "sync.(*") && (strings.Contains(g, "database/sql.withLock") || strings.Contains(g, "database/sql.(*Tx).")) {
+			return true
+		}
+	}
+	return false
 }
 
 // nonDurableStacks returns the stacks of bubble goroutines that are blocked

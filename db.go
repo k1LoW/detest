@@ -328,10 +328,13 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
+	exit := db.s.enter(p)
 	tx := db.newTx(p)
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
+	exit()
 	err = fn(tx)
+	defer db.s.enter(p)()
 	if tx.closed {
 		p.tx = nil
 		return err
@@ -362,6 +365,7 @@ func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return db.name + " get " + table + " " + key })
 	goneStale(p)
+	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
 	r, ok := db.committed[table][key]
@@ -391,6 +395,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return db.name + " select " + table })
 	goneStale(p)
+	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
 	return publicRows(db.selectCommitted(table, publicPred(pred)))
@@ -400,7 +405,10 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 // that need to observe another database's state (for example a fake runtime that
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
-func (db *DB) Peek(table string) []Row { return publicRows(db.selectCommitted(table, nil)) }
+func (db *DB) Peek(table string) []Row {
+	defer db.s.enterAny()()
+	return publicRows(db.selectCommitted(table, nil))
+}
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
@@ -787,6 +795,7 @@ func (def *tableDef) reads(col string) bool {
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
 func (db *DB) SeedRowNow(table string, row Row) {
+	defer db.s.enterAny()()
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
 		return
@@ -1731,6 +1740,10 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 type Tx struct {
 	db *DB
 	p  *Proc
+	// shared is the statement a goroutine sharing the transaction with p
+	// runs at once, without yielding (see sqlConn.runShared), and empty
+	// otherwise.
+	shared string
 	// conn serializes the operations of a hand-written transaction several
 	// goroutines of its process use, as a connection runs one statement at
 	// a time (see enterOp).
@@ -2337,7 +2350,7 @@ func (tx *Tx) releaseInsertLocks(from int) {
 }
 
 func (tx *Tx) yieldf(format string, args ...any) {
-	if tx.atomic || tx.p == nil {
+	if tx.atomic || tx.p == nil || tx.shared != "" {
 		return
 	}
 	tx.procAs(func() string { return canonical(format, args) }).yieldf(format, args...)
@@ -2393,6 +2406,10 @@ func (tx *Tx) enterOp(p *Proc) func() {
 	if p == nil || tx.p == nil || tx.atomic {
 		return func() {}
 	}
+	exit := func() {}
+	if !p.inSim {
+		exit = tx.db.s.enter(p)
+	}
 	c := &tx.conn
 	if p != tx.p && c.by != p {
 		// Goroutines the process handed the transaction to reach here in an
@@ -2412,6 +2429,7 @@ func (tx *Tx) enterOp(p *Proc) func() {
 	c.by = p
 	c.depth++
 	return func() {
+		defer exit()
 		if c.by != p {
 			return
 		}
@@ -2441,10 +2459,31 @@ func (tx *Tx) proc() *Proc { return tx.procAs(nil) }
 
 // procAs is proc for an operation that can describe itself (see currentAs).
 func (tx *Tx) procAs(first func() string) *Proc {
+	if tx.shared != "" {
+		return tx.p
+	}
 	if c := tx.db.s.currentAs(first); c != nil && c != tx.p && c.r == tx.p.r {
 		return c
 	}
 	return tx.p
+}
+
+// note records an operation of the transaction's statement in the trace,
+// except one a goroutine sharing the transaction runs, which is not a step of
+// the schedule and may run alongside the process that is.
+func (tx *Tx) note(format string, args ...any) {
+	if tx.shared == "" {
+		tx.p.r.note(tx.p, format, args...)
+	}
+}
+
+// refuseShared fails a wait of a statement that runs at once on a shared
+// transaction (see sqlConn.runShared), which cannot park.
+func (tx *Tx) refuseShared() error {
+	if tx.shared == "" {
+		return nil
+	}
+	return unsupported("a goroutine sharing a transaction with its process would wait for a lock", tx.shared)
 }
 
 // waiters returns the processes waiting for a row lock on the transaction's

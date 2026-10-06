@@ -732,8 +732,22 @@ func (p *Proc) resolve(first func() string) *Proc {
 func (s *Sim) leave() { s.hb.Add(1) }
 
 func (s *Sim) settled() {
+	s.publish()
 	synctest.Wait()
 	s.hb.Load()
+	s.epoch.Add(1)
+}
+
+// publish makes what the scheduler changed in the engine, such as a
+// transaction it rolled back, happen before what a goroutine running a
+// statement on a shared transaction reads under the engine mutex next. The
+// scheduler changes the engine only while every such goroutine is blocked,
+// so it needs no mutex for that, but nothing else orders the two for the
+// race detector, as such a goroutine may wake from a timer rather than from
+// detest.
+func (s *Sim) publish() {
+	s.em.Lock()
+	s.em.Unlock() //nolint:staticcheck // an empty critical section is the point
 }
 
 // goneStale ends a stale goroutine at an entry point that has no error to
@@ -742,4 +756,23 @@ func goneStale(p *Proc) {
 	if p.stale() {
 		runtime.Goexit()
 	}
+}
+
+// isCaller reports whether the calling goroutine is p's, without adopting it
+// or taking it back from outside detest as Current would. A goroutine the
+// code under test handed p's transaction to must not park while database/sql
+// holds the transaction's locks (see sqlConn.runShared), so it is told apart
+// before anything else.
+func (p *Proc) isCaller() bool {
+	onProc, sure := onProcGoroutine()
+	if sure && onProc == p.adopted {
+		return false
+	}
+	r := p.r
+	if onProc && r.outside.Load() == 0 && r.s.lingerN.Load() == 0 {
+		// Every process detest started but the resumed one is parked in
+		// detest, as Current's fast path assumes.
+		return r.current == p
+	}
+	return goroutineID() == p.gid
 }

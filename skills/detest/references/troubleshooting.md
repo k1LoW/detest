@@ -26,6 +26,7 @@ A process is blocked on something detest does not see. The stacks printed show w
 - Real network I/O: an HTTP client with the default transport, a Redis or cloud SDK client. Replace it with `External.Transport`, a fake, or `store.Ignore` for tables.
 - Objects created outside the declaration function (pools, channels, timers). Create them inside.
 - A connection pool limit (`db.SetMaxOpenConns(1)` copied from production) with a transaction open while another statement waits for a connection.
+- The message names database/sql's locks. A process runs a statement on its `*sql.Tx` while goroutines it started use the same transaction. Let one goroutine use the transaction at a time, such as the process only after its goroutines finished.
 
 `DETEST_STALL=5s` shortens the wait while debugging; `DETEST_DEBUG=1` prints scheduler events.
 
