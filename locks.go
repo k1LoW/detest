@@ -79,13 +79,6 @@ func (tx *Tx) lock(lk lockKey) error { return tx.lockMode(lk, lockUpdate) }
 // a deadlock error, as Postgres's detector does; a cycle through a mutex or
 // another transaction of this process hangs in Postgres and is reported.
 func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
-	// Another goroutine using the transaction may have had it aborted, such
-	// as by a deadlock, while this operation stood at its yield point after
-	// its own check. Postgres refuses any statement of an aborted
-	// transaction, so the operation fails here rather than take the lock.
-	if err := tx.check(); err != nil {
-		return err
-	}
 	var key lockStruct
 	if !strings.HasPrefix(lk.table, "\x00") {
 		key = structKey(lk.table, "PRIMARY", mode, "record")
@@ -110,6 +103,14 @@ func (tx *Tx) lockImplicit(lk lockKey, wait lockStruct) error {
 // lockWith takes a lock that InnoDB keeps in the struct grant once granted,
 // none for an implicit lock, and in the struct wait while it waits.
 func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error {
+	// Another goroutine using the transaction may have had it aborted, such
+	// as by a deadlock, while this operation stood at its yield point after
+	// its own check. Postgres refuses any statement of an aborted
+	// transaction, so the operation fails here rather than take the lock,
+	// explicit or the implicit one a write takes.
+	if err := tx.check(); err != nil {
+		return err
+	}
 	tx.started = true
 	table, _ := entryIndex(lk)
 	tx.noteTableLock(table, mode)

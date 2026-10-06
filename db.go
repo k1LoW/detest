@@ -2448,6 +2448,11 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 		return 0, err
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
+	// Aborted by another goroutine while it stood at its yield point. An
+	// update matching no row takes no lock that would tell.
+	if err := tx.check(); err != nil {
+		return 0, err
+	}
 	n := 0
 	cols := make([]string, 0, len(fields))
 	for c := range fields {

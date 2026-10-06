@@ -106,7 +106,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	// The caller is resolved before anything else, as a goroutine of an
 	// ended run must not read the connection's state, nor s.run, which the
 	// scheduler may be setting for the next run.
-	p := c.current()
+	p := c.db.s.currentAs(func() string { return fmt.Sprint(c.db.name, " begin ", opts.Isolation, opts.ReadOnly) })
 	if p.stale() {
 		return nil, errRunOver
 	}

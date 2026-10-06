@@ -1307,3 +1307,106 @@ func TestUnknownGoroutineWokenBySeedNotRun(t *testing.T) {
 		})
 	})
 }
+
+// A goroutine of an ended run that releases a mutex during a later run ends
+// there, rather than go on with the code after the release. The goroutine
+// holding the mutex sorts before the one breaking the invariant, so it takes
+// the mutex before the run ends.
+func TestStaleGoroutineEndsAtUnlock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mu := s.Mutex("mu")
+		after := 0
+		s.Seed(func() { after = 0 })
+		s.Manual("pod", 1, func(p *Proc) error {
+			time.Sleep(2 * time.Second)
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('b')`)
+				mu.Lock()
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('c')`) // cut here
+				time.Sleep(time.Second)
+				mu.Unlock()
+				after++
+			}()
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('z')`)
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if after > 0 {
+				return errors.New("a goroutine of an ended run went on after Unlock")
+			}
+			if _, ok := st.Row(store, "marks", "z"); ok {
+				return errors.New("z mark")
+			}
+			return nil
+		})
+		s.ExpectViolation("z mark")
+	})
+}
+
+// A write of a hand-written transaction that another goroutine had aborted
+// while the write stood at its yield point fails, whether it takes a lock on
+// a row or matches none.
+func TestHandWrittenTxWriteAfterSiblingAbort(t *testing.T) {
+	for _, op := range []string{"insert", "update none"} {
+		t.Run(op, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				_, store := s.DB("app", postgres.New())
+				s.Seed(func() {
+					for _, id := range []string{"a", "b"} {
+						store.SeedRow("counters", Row{"id": id, "n": int64(0)})
+					}
+				})
+				var stale []string
+				s.Seed(func() { stale = nil })
+				s.Manual("x", 1, func(p *Proc) error {
+					_ = store.Tx(p, func(tx *Tx) error {
+						if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+							return err
+						}
+						var wg sync.WaitGroup
+						var lockErr error
+						aborted := false
+						wg.Go(func() {
+							_, _, lockErr = tx.GetForUpdate("counters", "b")
+							aborted = errors.Is(lockErr, ErrDeadlock)
+						})
+						wg.Go(func() {
+							var err error
+							if op == "insert" {
+								err = tx.Insert("counters", Row{"id": "c", "n": int64(0)})
+							} else {
+								_, err = tx.Update("counters", "none", Row{"n": int64(1)})
+							}
+							if err == nil && aborted {
+								stale = append(stale, op+" succeeded after its transaction was aborted")
+							}
+						})
+						wg.Wait()
+						return lockErr
+					})
+					return nil
+				})
+				s.Manual("y", 1, func(p *Proc) error {
+					_ = store.Tx(p, func(tx *Tx) error {
+						for _, id := range []string{"b", "a"} {
+							if _, _, err := tx.GetForUpdate("counters", id); err != nil {
+								return err
+							}
+						}
+						return nil
+					})
+					return nil
+				})
+				s.AtQuiescence(func(st *State) error {
+					if len(stale) > 0 {
+						return errors.New(stale[0])
+					}
+					return nil
+				})
+			}, MaxPreemptions(2))
+		})
+	}
+}
