@@ -80,6 +80,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if v.Index < 0 || v.Index >= len(x.args) {
 			return nil, x.tx.db.kind.Error(sqlir.UndefinedParameter, fmt.Sprintf("there is no parameter $%d", v.Index+1), "", "", "")
 		}
+		if typ, ok := x.paramTimeTypes[v.Index]; ok {
+			return wallClock(typ, x.args[v.Index]), nil
+		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
 		return v.Value, nil

@@ -115,16 +115,30 @@ func paramBool(c *sqlir.Cast, v any) any {
 	return v
 }
 
-// paramDate is a time bound to a parameter cast to date as the date it
-// holds. Postgres types the parameter as a date, and the driver sends the
-// time's own year, month and day, where a timestamptz cast to date takes the
-// date in UTC.
+// paramDate is a time bound to a parameter cast to date or timestamp as the
+// value the driver sends for it (wallClock).
 func paramDate(c *sqlir.Cast, v any) any {
-	if _, ok := c.X.(*sqlir.Param); !ok || c.Type != "date" {
+	if _, ok := c.X.(*sqlir.Param); !ok {
 		return v
 	}
-	if t, ok := derefValue(v).(time.Time); ok {
+	return wallClock(c.Type, v)
+}
+
+// wallClock is a time bound for a date or a timestamp as the driver sends it
+// once Postgres has typed the parameter: pgx takes the time's own year,
+// month, day and clock, and lib/pq sends its text, whose zone a date's and a
+// timestamp's input drop. A timestamptz is the instant, which detest keeps
+// as it is, and so does a date or a timestamp's own time in UTC.
+func wallClock(typ string, v any) any {
+	t, ok := derefValue(v).(time.Time)
+	if !ok {
+		return v
+	}
+	switch typ {
+	case "date":
 		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	case "timestamp":
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
 	}
 	return v
 }

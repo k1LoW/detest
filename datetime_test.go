@@ -2,6 +2,7 @@ package detest
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,38 @@ func TestDatetimeFunctions(t *testing.T) {
 	var ms, sec float64
 	if err := db.QueryRow(`SELECT extract(milliseconds FROM at), extract(second FROM at) FROM ev WHERE id = 1`).Scan(&ms, &sec); err != nil || ms != 12345.678 || sec != 12.345678 {
 		t.Errorf("extract of a fraction: got %v, %v, %v", ms, sec, err)
+	}
+}
+
+// A time bound for a date or a timestamp is the value the driver sends once
+// Postgres has typed the parameter: pgx takes the time's own date and clock
+// (discardTimeZone), whatever its zone. A timestamptz keeps the instant.
+func TestTimeParametersTypedAsDateOrTimestamp(t *testing.T) {
+	s := datetimeDB(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE ev (id int PRIMARY KEY, ts timestamp, tz timestamptz, on_day date)`)
+	jst := time.FixedZone("JST", 9*3600)
+	at := time.Date(2024, 5, 20, 0, 30, 0, 0, jst) // 2024-05-19 15:30 UTC
+	mustExec(t, db, `INSERT INTO ev VALUES (1, $1, $1, $1)`, at)
+	for _, tt := range []struct {
+		q    string
+		want []int64
+	}{
+		{`SELECT extract(day FROM ts)::int FROM ev`, []int64{20}},
+		{`SELECT extract(hour FROM ts)::int FROM ev`, []int64{0}},
+		{`SELECT extract(day FROM tz)::int FROM ev`, []int64{19}},
+		{`SELECT extract(day FROM on_day)::int FROM ev`, []int64{20}},
+		{`SELECT id FROM ev WHERE ts = $1`, []int64{1}},
+		{`SELECT id FROM ev WHERE $1 = ts`, []int64{1}},
+		{`SELECT id FROM ev WHERE tz = $1`, []int64{1}},
+		{`SELECT id FROM ev WHERE on_day = $1`, []int64{1}},
+		{`SELECT id FROM ev WHERE on_day IN ($1)`, []int64{1}},
+		{`SELECT id FROM ev WHERE ts = $1::timestamp`, []int64{1}},
+		{`SELECT id FROM ev WHERE date_trunc('day', ts) = $1::date`, []int64{1}},
+	} {
+		if got := queryIDs(t, db, tt.q, at); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
 	}
 }
 

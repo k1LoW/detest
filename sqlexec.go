@@ -81,6 +81,9 @@ type sqlExec struct {
 	pendingCTEs map[string]sqlir.CTE
 	writeRows   map[string][]Row
 	writeCols   map[string][]string
+	// paramTimeTypes are the date and timestamp types Postgres gives
+	// parameters compared with operands of those types (wallClock).
+	paramTimeTypes map[int]string
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter

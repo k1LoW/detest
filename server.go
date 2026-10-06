@@ -67,6 +67,7 @@ const (
 	UndefinedColumn           = sqlir.UndefinedColumn
 	AmbiguousColumn           = sqlir.AmbiguousColumn
 	DuplicateColumn           = sqlir.DuplicateColumn
+	InvalidDatetimeFormat     = sqlir.InvalidDatetimeFormat
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.

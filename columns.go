@@ -1009,6 +1009,14 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	typ := expressionType(b, sc.columnType)
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, typ)
+		if typ == "date" || typ == "timestamp" {
+			if c.x.paramTimeTypes == nil {
+				c.x.paramTimeTypes = map[int]string{}
+			}
+			if _, ok := c.x.paramTimeTypes[p.Index]; !ok {
+				c.x.paramTimeTypes[p.Index] = typ // the first, as Postgres types it
+			}
+		}
 	}
 	sample := typeSample(typ)
 	if sample == nil {
