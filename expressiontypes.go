@@ -195,7 +195,11 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		if k, ok := f.Args[0].(*sqlir.Const); ok {
 			if s, ok := k.Value.(string); ok {
 				unit = unknownUnit
-				if u, known := timeUnits[strings.ToLower(s)]; known {
+				u, known := timeUnits[strings.ToLower(s)]
+				if f.Name != "date_trunc" {
+					u, known = extractUnit(s)
+				}
+				if known {
 					unit = u
 				}
 			}
@@ -246,7 +250,12 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 // integer of days. A date is a time at midnight to detest, so the difference
 // would come out an interval.
 func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
-	if b.Op == "-" && expressionType(b.L, column) == "date" && expressionType(b.R, column) == "date" {
+	if b.Op != "-" {
+		return ""
+	}
+	l, r := expressionType(b.L, column), expressionType(b.R, column)
+	// A parameter or a string literal beside a date is read as a date too.
+	if l == "date" && (r == "date" || untypedExpr(b.R)) || r == "date" && untypedExpr(b.L) {
 		return "date - date"
 	}
 	return ""

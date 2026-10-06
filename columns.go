@@ -62,6 +62,8 @@ type columnChecker struct {
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
 	untyped []func() error
+	// timeConflict names a parameter given two date and time types.
+	timeConflict string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -88,6 +90,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if what := c.params.conflict(x.tx.checking); what != "" {
 		return x.unsupported(what)
+	}
+	if c.timeConflict != "" {
+		return x.unsupported(c.timeConflict)
 	}
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
@@ -980,6 +985,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 			case *sqlir.Cast:
 				c.castInput(e)
+				c.timeParams(e.Type, e.X)
 			case *sqlir.ColumnRef:
 				err = c.resolve(e, sc)
 				return
@@ -1072,8 +1078,13 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 // timeParams records the date or timestamp type, typ, that Postgres gives
 // the parameters among exprs, for a parameter to be read as the driver sends
 // a time for it (wallClock). Any other type leaves them as they are.
+//
+// Postgres types a parameter where it first meets it in the statement. A
+// parameter given two date and time types, by casts or by the operands it is
+// compared with, is refused instead of following that order; timestamptz,
+// which keeps the time as bound, is recorded for that alone.
 func (c *columnChecker) timeParams(typ string, exprs ...sqlir.Expr) {
-	if typ != "date" && typ != "timestamp" {
+	if typ != "date" && typ != "timestamp" && typ != "timestamptz" {
 		return
 	}
 	for _, e := range exprs {
@@ -1084,8 +1095,10 @@ func (c *columnChecker) timeParams(typ string, exprs ...sqlir.Expr) {
 		if c.x.paramTimeTypes == nil {
 			c.x.paramTimeTypes = map[int]string{}
 		}
-		if _, ok := c.x.paramTimeTypes[p.Index]; !ok {
-			c.x.paramTimeTypes[p.Index] = typ // the first, as Postgres types it
+		if first, ok := c.x.paramTimeTypes[p.Index]; ok && first != typ {
+			c.timeConflict = fmt.Sprintf("parameter $%d typed as both %s and %s", p.Index+1, first, typ)
+		} else if !ok {
+			c.x.paramTimeTypes[p.Index] = typ
 		}
 	}
 }

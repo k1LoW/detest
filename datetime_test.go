@@ -218,6 +218,8 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		{`SELECT extract(fortnight FROM on_day) FROM ev`, ErrInvalidParameterValue},
 		{`SELECT extract(fortnight FROM interval '1 day')`, ErrInvalidParameterValue},
 		{`SELECT date_trunc('fortnight', interval '1 day')`, ErrInvalidParameterValue},
+		// mm is extract's minute, and no unit of date_trunc's.
+		{`SELECT date_trunc('mm', at) FROM ev`, ErrInvalidParameterValue},
 		{`SELECT interval 'nonsense'`, ErrInvalidDatetimeFormat},
 	} {
 		var args []any
@@ -245,6 +247,13 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		`SELECT extract(year FROM $1)`,
 		`SELECT date_part('year', $1)`,
 		`SELECT date_trunc('day', '2024-05-20')`,
+		// A parameter or a literal beside a date is a date, and the
+		// difference of two dates is days.
+		`SELECT $1 - on_day FROM ev`,
+		`SELECT on_day - '2024-05-01' FROM ev`,
+		// A parameter given two date and time types.
+		`SELECT at = $1::timestamptz FROM ev WHERE on_day = $1`,
+		`SELECT extract(j FROM at) FROM ev`,
 		`SET TIME ZONE 'Asia/Tokyo'`,
 		`SET timezone = 'America/New_York'`,
 		`SELECT CURRENT_TIME`,

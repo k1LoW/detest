@@ -234,6 +234,20 @@ var timeUnits = map[string]string{
 	"julian": "julian", "timezone": "timezone", "timezone_h": "timezone_hour", "timezone_hour": "timezone_hour", "timezone_m": "timezone_minute", "timezone_minute": "timezone_minute",
 }
 
+// extractAliases are spellings extract and date_part take, from Postgres's
+// table of special tokens, which date_trunc does not.
+var extractAliases = map[string]string{"mm": "minute", "j": "julian", "jd": "julian"}
+
+// extractUnit is the unit extract and date_part read unit as.
+func extractUnit(unit string) (string, bool) {
+	unit = strings.ToLower(unit)
+	if u, ok := timeUnits[unit]; ok {
+		return u, true
+	}
+	u, ok := extractAliases[unit]
+	return u, ok
+}
+
 // extractOnly are the units extract reads that date_trunc does not.
 var extractOnly = map[string]bool{"epoch": true, "dow": true, "isodow": true, "doy": true, "isoyear": true, "julian": true, "timezone": true, "timezone_hour": true, "timezone_minute": true}
 
@@ -290,7 +304,7 @@ func dateTrunc(unit string, t time.Time) (time.Time, bool) {
 // result holds, for a time or an interval. unknown is a unit Postgres does
 // not take, and what a unit or a source detest does not compute.
 func extractField(unit string, v any) (dec string, unknown bool, what string) {
-	u, ok := timeUnits[strings.ToLower(unit)]
+	u, ok := extractUnit(unit)
 	if !ok {
 		return "", true, ""
 	}
