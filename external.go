@@ -91,6 +91,9 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
 	}
+	// The effect runs in the engine like a statement, and its transaction is
+	// atomic, so its operations do not take the mutex themselves.
+	defer e.s.enter(p)()
 	tx := db.newTx(p)
 	tx.atomic = true
 	err = effect(tx)

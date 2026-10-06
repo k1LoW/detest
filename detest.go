@@ -324,8 +324,12 @@ func (s *Sim) Now() int64 { return s.run.clock }
 // enter takes the engine mutex for p, or for a goroutine that is no process
 // when p is nil, and returns the function that gives it back. p gives it up
 // while it is parked (see Proc.wait), so it must be the process of the
-// calling goroutine.
+// calling goroutine. A p that holds it already, such as one inside an
+// external call's effect, keeps it.
 func (s *Sim) enter(p *Proc) func() {
+	if p != nil && p.inSim {
+		return func() {}
+	}
 	s.em.Lock()
 	if p == nil {
 		return s.em.Unlock
