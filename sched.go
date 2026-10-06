@@ -1125,6 +1125,9 @@ func (p *Proc) Choose(label string, n int) int {
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
+	if p.stale() {
+		return // its run is over and must not grow
+	}
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
