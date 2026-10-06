@@ -111,7 +111,11 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, paramDate(v, paramBool(v, val))), v.Type)
+		out, err := x.cast(x.halfToInteger(v, paramDate(v, paramBool(v, val))), v.Type)
+		if err != nil || v.Len == 0 {
+			return out, err
+		}
+		return x.castLength(v, out)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -1032,6 +1036,14 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, vals []any, v any) (any, error
 	if x.tx.db.kind.InnoDB() {
 		return commonNumber(exprs, v), nil
 	}
+	isInterval := func(a any) bool { _, ok := derefValue(a).(pgInterval); return ok }
+	if slices.ContainsFunc(vals, isInterval) && slices.ContainsFunc(vals, func(a any) bool { return !isInterval(a) && derefValue(a) != nil }) {
+		// Postgres reads '40 days' beside an interval as an interval, which
+		// detest does not. The column check refuses the branches whose
+		// types it knows; this catches a derived column, whose type it
+		// does not, in the rows where it holds one.
+		return nil, x.unsupported("an interval and a value of another type among the arguments of COALESCE, GREATEST, LEAST or NULLIF")
+	}
 	// A column's type shows only in its value, so a float there makes the
 	// integer of another branch a float, as 1 ELSE amount is a numeric; a
 	// row where the column is NULL leaves the integer, as the type is not
@@ -1439,12 +1451,6 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		return args[0], nil
 	case "greatest", "least":
-		if slices.ContainsFunc(args, func(a any) bool { _, ok := derefValue(a).(pgInterval); return ok }) &&
-			slices.ContainsFunc(args, func(a any) bool { _, ok := derefValue(a).(pgInterval); return !ok && derefValue(a) != nil }) {
-			// Postgres reads '40 days' beside an interval as an interval,
-			// which compareValues does not, and would keep the first.
-			return nil, x.unsupported(name + " of an interval and a value of another type")
-		}
 		var best any
 		for i := range args {
 			v := d(i)

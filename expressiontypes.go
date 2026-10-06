@@ -291,7 +291,7 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 			continue
 		}
 		switch typ := expressionType(e, column); {
-		case untypedExpr(e):
+		case untypedBranch(e):
 			other = true
 		case typ == "interval":
 			interval = true
@@ -303,6 +303,35 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 		return "a value other than an interval beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"
 	}
 	return ""
+}
+
+// untypedBranch reports a string literal or a parameter, or a CASE or
+// COALESCE of nothing else, which Postgres resolves to text, as in
+// COALESCE('bogus', '').
+func untypedBranch(e sqlir.Expr) bool {
+	var branches []sqlir.Expr
+	switch e := e.(type) {
+	case *sqlir.CaseExpr:
+		branches = caseBranches(e)
+	case *sqlir.FuncCall:
+		if e.Name == "lag" || e.Name == "lead" {
+			return false
+		}
+		branches = branchArgs(e)
+	default:
+		return untypedExpr(e)
+	}
+	untyped := false
+	for _, b := range branches {
+		if k, ok := b.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		if !untypedBranch(b) {
+			return false
+		}
+		untyped = true
+	}
+	return untyped
 }
 
 // branchArgs are the arguments of f that Postgres resolves to one type, for
