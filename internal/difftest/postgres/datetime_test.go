@@ -43,6 +43,7 @@ var datetimeCases = []difftest.Case{
 			difftest.Q(0, `SELECT interval '1.2.3 seconds'`),
 			difftest.Q(0, `SELECT interval '1 hour 2:00'`),
 			difftest.Q(0, `SELECT interval '1:00 2:00'`),
+			difftest.Q(0, `SELECT interval '1.5:00'`),
 			difftest.Q(0, `SELECT interval '1:2.5' = interval '62.5 seconds', interval '1 week 2:00' = interval '170 hours'`),
 			difftest.Q(0, `SELECT id FROM ev WHERE false AND 'nonsense'::interval > interval '0'`),
 			difftest.Q(0, `SELECT id FROM ev WHERE id = 9 AND interval 'pizza' > interval '0'`),

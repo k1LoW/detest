@@ -170,7 +170,8 @@ func parseClock(f string) (*big.Rat, *intervalError) {
 			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), true}
 		}
 		if i < len(parts)-1 && strings.Contains(p, ".") {
-			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), false}
+			// A fraction before a colon, as in 1.5:00, is malformed.
+			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), true}
 		}
 		n, ok := new(big.Rat).SetString(p)
 		if !ok {

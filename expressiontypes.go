@@ -81,11 +81,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 				}
 			}
 		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
-			for _, arg := range e.Args {
-				if typ := expressionType(arg, column); typ != "" {
-					return typ
-				}
-			}
+			return commonType(e.Args, column)
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -119,11 +115,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 	case *sqlir.WindowFunc:
 		return expressionType(e.Func, column)
 	case *sqlir.CaseExpr:
-		for _, branch := range caseBranches(e) {
-			if typ := expressionType(branch, column); typ != "" {
-				return typ
-			}
-		}
+		return commonType(caseBranches(e), column)
 	case *sqlir.SubQuery:
 		if e.Select != nil && len(e.Select.Targets) == 1 {
 			return expressionType(e.Select.Targets[0].Expr, column)
@@ -132,6 +124,31 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 		return "bool"
 	}
 	return ""
+}
+
+// commonType is the type Postgres resolves exprs to together, as the
+// arguments of COALESCE or the branches of CASE: the first one known, except
+// that dates and timestamps meet at the widest of them, a timestamptz over a
+// timestamp over a date.
+func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
+	best := ""
+	for _, e := range exprs {
+		typ := expressionType(e, column)
+		if typ == "" {
+			continue
+		}
+		if first == "" {
+			first = typ
+		}
+		if rank[typ] > rank[best] {
+			best = typ
+		}
+	}
+	if rank[first] > 0 && best != "" {
+		return best
+	}
+	return first
 }
 
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
