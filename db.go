@@ -403,6 +403,11 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 		return nil
 	}
 	tx.yieldf("%s: select %s where ...", tx.db.name, table)
+	// Another goroutine using the transaction may have had it aborted
+	// while this one stood at its yield point.
+	if tx.check() != nil {
+		return nil
+	}
 	seen := map[string]bool{}
 	var keys []string
 	for k := range tx.db.committed[table] {
@@ -1834,6 +1839,9 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 		return nil, false
 	}
 	tx.yieldf("%s: select %s id=%s", tx.db.name, table, key)
+	if tx.check() != nil {
+		return nil, false // aborted while it stood at its yield point, as Select
+	}
 	return tx.view(table, key)
 }
 

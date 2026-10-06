@@ -1092,3 +1092,58 @@ func TestRUnlockByGoroutineReleasesItsFamilysLock(t *testing.T) {
 		})
 	}, MaxCrashes(1), MaxPreemptions(2))
 }
+
+// A read of a hand-written transaction that another goroutine had aborted
+// while the read stood at its yield point returns nothing, as one made after
+// the abort does.
+func TestHandWrittenTxReadAfterSiblingAbort(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() {
+			for _, id := range []string{"a", "b"} {
+				store.SeedRow("counters", Row{"id": id, "n": int64(0)})
+			}
+		})
+		var stale []string
+		s.Seed(func() { stale = nil })
+		s.Manual("x", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+					return err
+				}
+				var wg sync.WaitGroup
+				var lockErr error
+				aborted := false // the lock's deadlock error came back first
+				wg.Go(func() {
+					_, _, lockErr = tx.GetForUpdate("counters", "b")
+					aborted = errors.Is(lockErr, ErrDeadlock)
+				})
+				wg.Go(func() {
+					if read, _ := tx.Get("counters", "a"); read != nil && aborted {
+						stale = append(stale, "a read returned a row after its transaction was aborted")
+					}
+				})
+				wg.Wait()
+				return lockErr
+			})
+			return nil
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				for _, id := range []string{"b", "a"} {
+					if _, _, err := tx.GetForUpdate("counters", id); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(stale) > 0 {
+				return errors.New(stale[0])
+			}
+			return nil
+		})
+	}, MaxPreemptions(2))
+}
