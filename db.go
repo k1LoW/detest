@@ -320,7 +320,7 @@ func encodeKey(vals []any) string {
 // Tx runs fn in a transaction: commit on nil, rollback on error.
 func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 	defer func() { absorbAbort(recover(), p, &err) }()
-	p.comeBack()
+	p = p.resolve(func() string { return db.name + " tx" })
 	if p.stale() {
 		return errRunOver
 	}
@@ -358,7 +358,7 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return db.name + " get " + table + " " + key })
 	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
@@ -386,7 +386,7 @@ func sequenceName(s string) string {
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return db.name + " select " + table })
 	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)

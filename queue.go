@@ -91,7 +91,7 @@ func (q *Queue) SeedMsg(msg Msg) { q.push(nil, msg) }
 // Enqueue publishes a message immediately (outside a transaction).
 func (q *Queue) Enqueue(p *Proc, msg Msg) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return fmt.Sprint("enqueue ", q.name, msg) })
 	goneStale(p)
 	p.yieldf("%s: enqueue %s", q.name, msg)
 	q.push(p, msg)

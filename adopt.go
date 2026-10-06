@@ -615,6 +615,22 @@ func (p *Proc) comeBack() {
 	}
 }
 
+// resolve returns the process a call handed p is actually made by, taken
+// back from outside detest as comeBack does. A fake may close over the *Proc
+// of the process that built it while code under test calls it from a
+// goroutine of its own, which is then adopted and runs the call, rather than
+// the call running on the channels of a parent waiting for that goroutine.
+func (p *Proc) resolve(first func() string) *Proc {
+	if p == nil {
+		return nil
+	}
+	if c := p.r.s.currentAs(first); c != nil && c != p && c.r == p.r {
+		return c
+	}
+	p.comeBack()
+	return p
+}
+
 // goneStale ends a stale goroutine at an entry point that has no error to
 // return, as absorbAbort does.
 func goneStale(p *Proc) {

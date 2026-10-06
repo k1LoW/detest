@@ -1516,3 +1516,32 @@ func TestMySQLSharedTxStatementsSerialized(t *testing.T) {
 		})
 	})
 }
+
+// A fake that closes over the *Proc of the process that built it, called
+// from a goroutine of that process, runs the call as the goroutine, rather
+// than on the channels of the parent waiting for it.
+func TestFakeWithParentsProcCalledFromGoroutine(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		ext := s.External("svc", ReadOnly())
+		s.Manual("pod", 1, func(p *Proc) error {
+			call := func() error { // a fake built with the process's *Proc
+				p.Step("prepare")
+				return ext.Do(p, "call", func() error { return nil })
+			}
+			var wg sync.WaitGroup
+			var err error
+			wg.Go(func() { err = call() })
+			wg.Wait()
+			return err
+		})
+		s.AtQuiescence(func(st *State) error { return errors.New("done") })
+	}, []Option{MaxFailures(0)}, nil, 0)
+	if !res.Violated || !strings.Contains(fmt.Sprint(res.Err), "done") {
+		t.Fatalf("expected the run to reach quiescence, got %v\n%s", res.Err, res.Trace)
+	}
+	for _, step := range []string{"pod#1.1  prepare", "pod#1.1  calls svc(call)"} {
+		if !strings.Contains(res.Trace, step) {
+			t.Errorf("the trace lacks %q:\n%s", step, res.Trace)
+		}
+	}
+}

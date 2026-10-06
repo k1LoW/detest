@@ -803,7 +803,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 // by an external environment. It is a yield point.
 func (p *Proc) Step(format string, args ...any) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return fmt.Sprintf(format, args...) })
 	goneStale(p)
 	p.yieldf(format, args...)
 }
@@ -1273,7 +1273,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(nil)
 	goneStale(p)
 	if p.r.clock >= t {
 		return
@@ -1288,7 +1288,7 @@ func (p *Proc) WaitUntil(t int64) {
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return "choose " + label })
 	goneStale(p)
 	return p.r.choose(label, n)
 }
@@ -1297,7 +1297,7 @@ func (p *Proc) Choose(label string, n int) int {
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p.comeBack()
+	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
