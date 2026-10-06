@@ -150,7 +150,9 @@ func TestTimeParametersTypedAsDateOrTimestamp(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE ev (id int PRIMARY KEY, ts timestamp, tz timestamptz, on_day date)`)
 	jst := time.FixedZone("JST", 9*3600)
 	at := time.Date(2024, 5, 20, 0, 30, 0, 0, jst) // 2024-05-19 15:30 UTC
-	mustExec(t, db, `INSERT INTO ev VALUES (1, $1, $1, $1)`, at)
+	// One parameter for the three columns fails on Postgres with 42P08, as
+	// it deduces inconsistent types for it.
+	mustExec(t, db, `INSERT INTO ev VALUES (1, $1, $2, $3)`, at, at, at)
 	for _, tt := range []struct {
 		q    string
 		want []int64
@@ -272,8 +274,6 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		// A parameter given two date and time types.
 		`SELECT at = $1::timestamptz FROM ev WHERE on_day = $1`,
 		`SELECT extract(j FROM at) FROM ev`,
-		`SET TIME ZONE 'Asia/Tokyo'`,
-		`SET timezone = 'America/New_York'`,
 		`SELECT CURRENT_TIME`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {

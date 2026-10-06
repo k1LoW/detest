@@ -74,6 +74,11 @@ func sameValue(a, b any) bool {
 			return ta.Equal(tb)
 		}
 	}
+	if ta, ok := a.(instant); ok {
+		if tb, ok := b.(instant); ok {
+			return ta.Equal(tb.Time)
+		}
+	}
 	if ia, ok := a.(pgInterval); ok {
 		if ib, ok := b.(pgInterval); ok {
 			return ia.span() == ib.span()
@@ -107,6 +112,13 @@ func compareValues(a, b any) (int, bool) {
 			return 0, false
 		}
 		return ta.Compare(tb), true
+	}
+	if ta, ok := a.(instant); ok {
+		tb, ok := b.(instant)
+		if !ok {
+			return 0, false
+		}
+		return ta.Compare(tb.Time), true
 	}
 	if ia, ok := a.(pgInterval); ok {
 		ib, ok := b.(pgInterval)
@@ -219,6 +231,8 @@ func valueKey(v any) string {
 		return "b0"
 	case time.Time:
 		return "t" + t.UTC().Format(time.RFC3339Nano)
+	case instant:
+		return "z" + t.UTC().Format(time.RFC3339Nano)
 	case pgInterval:
 		// Equal intervals, '1 mon' and '30 days', are one key, as in an
 		// index or a DISTINCT.
@@ -324,7 +338,7 @@ func valueKind(v any) string {
 	switch v.(type) {
 	case bool:
 		return "boolean"
-	case time.Time:
+	case time.Time, instant:
 		return "time"
 	}
 	return "other"

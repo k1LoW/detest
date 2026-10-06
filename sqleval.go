@@ -80,8 +80,14 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if v.Index < 0 || v.Index >= len(x.args) {
 			return nil, x.tx.db.kind.Error(sqlir.UndefinedParameter, fmt.Sprintf("there is no parameter $%d", v.Index+1), "", "", "")
 		}
-		if typ, ok := x.paramTimeTypes[v.Index]; ok {
+		if typ, ok := x.paramTimeTypes[v.Index]; ok && typ != "timestamptz" {
 			return wallClock(typ, x.args[v.Index]), nil
+		}
+		if t, ok := derefValue(x.args[v.Index]).(time.Time); ok && !x.tx.db.kind.InnoDB() {
+			// A time bound to a parameter is an instant, as pgx sends one
+			// for a timestamptz; one Postgres types as a date or a
+			// timestamp takes the time's own clock above.
+			return newInstant(t), nil
 		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
@@ -408,7 +414,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), x.toTimeType(out, x.exprTypes[v]))
 			}
 		}
 		if v.Else != nil {
@@ -416,7 +422,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), x.toTimeType(out, x.exprTypes[v]))
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -446,6 +452,23 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			var err error
 			if args[0], args[1], err = x.untypedPair(v.Args[0], args[0], v.Args[1], args[1]); err != nil {
 				return nil, err
+			}
+		}
+		switch v.Name {
+		case "coalesce", "greatest", "least":
+			// A timestamp beside a timestamptz is read as one before the
+			// arguments are compared or returned.
+			if typ := x.exprTypes[v]; typ != "" {
+				for i := range args {
+					args[i] = x.toTimeType(args[i], typ)
+				}
+			}
+		case "date_trunc":
+			// A date is truncated as the timestamptz Postgres casts it to.
+			if len(v.Args) == 2 && !x.tx.db.kind.InnoDB() && x.sourceType(v.Args[1]) == "date" {
+				if t, ok := x.asInstant(args[1]); ok {
+					args[1] = t
+				}
 			}
 		}
 		if v.Name == "round" && len(args) == 1 {
@@ -691,7 +714,7 @@ func trailingSpaceLiteral(e sqlir.Expr) bool {
 
 func isTemporal(v any) bool {
 	switch derefValue(v).(type) {
-	case time.Time, pgInterval:
+	case time.Time, instant, pgInterval:
 		return true
 	}
 	return false
@@ -771,10 +794,18 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type boolean: %q", s), "", "", "")
 		}
 		return b, nil
+	case instant:
+		// Postgres reads the text as a timestamptz, in the session's
+		// TimeZone when it has no zone of its own.
+		if t, ok := x.castTime(s, "timestamptz"); ok {
+			if _, isText := t.(string); !isText {
+				return t, nil
+			}
+		}
+		return nil, x.unsupported(fmt.Sprintf("the timestamptz text %q, in a format detest does not parse", s))
 	case time.Time:
-		// Postgres reads the text as the other side's timestamp type, in
-		// the session's time zone when it has none, and a value does not
-		// tell timestamp from timestamptz.
+		// Postgres reads the text as the other side's type, a date or a
+		// timestamp, which a value does not tell apart.
 		return nil, x.unsupported("a string literal or parameter compared with a timestamp")
 	}
 	if !isNumber(other) {
@@ -885,6 +916,9 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if x.tx.db.kind.InnoDB() {
 			// MySQL's arithmetic takes a string as the number it starts with.
 			l, r = mysqlArithOperand(l), mysqlArithOperand(r)
+		}
+		if v, ok := x.instantArith(op, l, r); ok {
+			return v, nil
 		}
 		v, err := arith(op, l, r)
 		if ke := (kindError{}); errors.As(err, &ke) && ke.kind == sqlir.DivisionByZero && x.selectStmt && x.tx.db.kind.InnoDB() {
@@ -1303,7 +1337,7 @@ func roundDecimal(f float64, n int) float64 {
 // converter passes for CURRENT_TIMESTAMP(p), which SQL cannot call itself.
 var otherArity = map[string][]int{
 	"now": {0}, "clock_timestamp": {0}, "transaction_timestamp": {0}, "statement_timestamp": {0},
-	"current_timestamp": {1}, "random": {0}, "nullif": {2},
+	"current_timestamp": {1}, "localtimestamp": {0, 1}, "random": {0}, "nullif": {2},
 	"gen_random_uuid": {0}, "uuid_generate_v4": {0}, "current_date": {0},
 }
 
@@ -1534,7 +1568,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			return x.tx.db.newUUID(), nil // MySQL's UUID() returns text
 		}
 		return uuidValue(x.tx.db.newUUID()), nil
-	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp":
+	case "now", "clock_timestamp", "current_timestamp", "transaction_timestamp", "statement_timestamp", "localtimestamp":
 		// Postgres fixes now() at the start of the transaction, which a
 		// transaction that starts early and commits late depends on.
 		ts := x.tx.start
@@ -1563,21 +1597,25 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			}
 			return ts.Truncate(time.Duration(math.Pow10(9 - int(p)))), nil
 		}
-		// A timestamptz is kept in UTC, the session's TimeZone, so a write
-		// of it to a date or a timestamp takes its date and clock there,
-		// where a time bound to a parameter keeps its own (wallClock).
-		ts = ts.UTC()
+		var now any = newInstant(ts)
+		if name == "localtimestamp" {
+			now = wallIn(ts, x.tx.zone())
+		}
 		if len(args) == 0 {
-			return ts, nil
+			return now, nil
 		}
 		// Only CURRENT_TIMESTAMP(p) and LOCALTIMESTAMP(p) take an argument,
 		// which the converter passes as current_timestamp's.
 		p, ok := toFloat(d(0))
-		if name != "current_timestamp" || len(args) > 1 || !ok || p < 0 {
+		if name != "current_timestamp" && name != "localtimestamp" || len(args) > 1 || !ok || p < 0 {
 			return nil, x.unsupported(name + " with these arguments")
 		}
 		// Postgres reduces a precision above 6 to 6, with a warning.
-		return ts.Round(time.Duration(math.Pow10(9 - int(min(p, 6))))), nil
+		round := time.Duration(math.Pow10(9 - int(min(p, 6))))
+		if w, ok := now.(time.Time); ok {
+			return w.Round(round), nil
+		}
+		return newInstant(ts.Round(round)), nil
 	case "random":
 		return 0.5, nil
 	case "abs":
@@ -1623,7 +1661,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		return utcDate(ts), nil
+		return dateIn(ts, x.tx.zone()), nil
 	case "date_trunc":
 		unit, ok := d(0).(string)
 		if !ok {
@@ -1641,7 +1679,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			}
 			return r, nil
 		}
-		t, ok := d(1).(time.Time)
+		t, ok := x.timeOf(d(1))
 		if !ok {
 			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T", d(1))}
 		}
@@ -1649,13 +1687,28 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !ok {
 			return nil, x.errUnit(unit)
 		}
+		if _, tz := d(1).(instant); tz {
+			// A timestamptz is truncated on its clock in the session's
+			// TimeZone, and stays a timestamptz.
+			return instantAt(r, x.tx.zone()), nil
+		}
 		return r, nil
 	case "extract", "date_part":
 		unit, ok := d(0).(string)
 		if !ok {
 			return nil, errUnknownExpr{fmt.Sprintf("%s of a %T unit", name, d(0))}
 		}
-		dec, unknown, what := extractField(unit, d(1))
+		src := d(1)
+		if t, ok := src.(instant); ok {
+			// A timestamptz's fields are those of its clock in the
+			// session's TimeZone, and its epoch the instant's.
+			if u, _ := extractUnit(unit); u == "epoch" {
+				src = t.Time
+			} else {
+				src, _ = x.timeOf(t)
+			}
+		}
+		dec, unknown, what := extractField(unit, src)
 		if unknown {
 			return nil, x.errUnit(unit)
 		}

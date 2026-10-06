@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 )
 
 // Parser parses a query string of one engine's SQL into detest's statement IR.
@@ -405,12 +406,16 @@ type SavepointStmt struct {
 	Name string
 }
 
-// SetStmt is SET [LOCAL] name = value. detest acts on lock_timeout, and on
-// database, which MySQL's USE sets; other settings do nothing.
+// SetStmt is SET [LOCAL] name = value. detest acts on lock_timeout, on
+// Postgres's timezone, and on database, which MySQL's USE sets; other
+// settings do nothing.
 type SetStmt struct {
 	Name  string
 	Value string
 	Local bool
+	// Zone is the zone SET TIME ZONE sets, nil for the server's TimeZone,
+	// which LOCAL, DEFAULT and RESET return to.
+	Zone *time.Location
 	// Returns is set for SELECT set_config(...), which returns the value
 	// it set as a row, under Column when the SELECT names one.
 	Returns bool
@@ -624,6 +629,8 @@ type Impl struct {
 	convert    func(*DBError) error
 	innodb     bool
 	collation  string
+	timeZone   *time.Location
+	zoneErr    error
 }
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
@@ -649,6 +656,11 @@ type ServerSpec struct {
 	// Collation is MySQL's server default collation, which a text column
 	// that neither it nor its table declares one for takes.
 	Collation string
+	// TimeZone is Postgres's server TimeZone, which a session starts in;
+	// nil is UTC. TimeZoneErr is why the zone asked for could not be
+	// loaded, which declaring a database on the server reports.
+	TimeZone    *time.Location
+	TimeZoneErr error
 }
 
 // Server is a kind of database server as the code using detest holds it,
@@ -659,7 +671,8 @@ type Server struct{ impl *Impl }
 // NewServer describes a server.
 func NewServer(spec ServerSpec) Server {
 	return Server{impl: &Impl{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
-		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB, collation: spec.Collation}}
+		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB, collation: spec.Collation,
+		timeZone: spec.TimeZone, zoneErr: spec.TimeZoneErr}}
 }
 
 // ImplOf returns the description behind s, nil for the zero Server.
@@ -819,6 +832,15 @@ func (s *Impl) InnoDB() bool { return s.innodb }
 // Collation is the server's default collation, for MySQL.
 func (s *Impl) Collation() string { return s.collation }
 
+// TimeZone is the TimeZone a session on the server starts in, UTC unless
+// the server is given another.
+func (s *Impl) TimeZone() *time.Location {
+	if s.timeZone == nil {
+		return time.UTC
+	}
+	return s.timeZone
+}
+
 // Parser parses the server's SQL.
 func (s *Impl) Parser() Parser { return s.parser }
 
@@ -828,8 +850,12 @@ func (s *Impl) Isolation() IsolationLevel { return s.isolation }
 // SearchPath is the schemas an unqualified table name is looked up in.
 func (s *Impl) SearchPath() []string { return s.searchPath }
 
-// Check reports whether detest implements level for the server.
+// Check reports whether detest implements level for the server, and
+// whether the server's TimeZone could be loaded.
 func (s *Impl) Check(level IsolationLevel) error {
+	if s.zoneErr != nil {
+		return s.zoneErr
+	}
 	if !slices.Contains(s.supported, level) {
 		return fmt.Errorf("detest: %s at %s is not implemented", s.name, level)
 	}

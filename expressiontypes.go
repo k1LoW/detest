@@ -112,6 +112,8 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "float8"
 		case "now", "clock_timestamp", "transaction_timestamp", "statement_timestamp", "current_timestamp":
 			return "timestamptz"
+		case "localtimestamp":
+			return "timestamp"
 		case "current_date":
 			return "date"
 		case "extract":
@@ -325,7 +327,7 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 
 // untypedBranch reports a string literal or a parameter, or a CASE or
 // COALESCE of nothing else or of NULL only, which Postgres resolves to
-// text, as in COALESCE('bogus', '') and COALESCE(NULL, NULL).
+// text, as in COALESCE('bogus', ”) and COALESCE(NULL, NULL).
 func untypedBranch(e sqlir.Expr) bool {
 	var branches []sqlir.Expr
 	switch e := e.(type) {

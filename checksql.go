@@ -14,7 +14,7 @@ var knownFuncs = map[string]bool{
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
 	"left": true, "lower": true, "upper": true, "length": true, "char_length": true, "octet_length": true, "concat": true, "hashtext": true,
 	"nextval": true, "setval": true, "gen_random_uuid": true, "uuid_generate_v4": true,
-	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true, "statement_timestamp": true,
+	"now": true, "clock_timestamp": true, "current_timestamp": true, "transaction_timestamp": true, "statement_timestamp": true, "localtimestamp": true,
 	"random": true, "abs": true, "floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true,
 	"make_interval": true, "pg_try_advisory_xact_lock": true, "pg_advisory_xact_lock": true,
 	"current_date": true, "date_trunc": true, "extract": true, "date_part": true,

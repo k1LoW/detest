@@ -1336,6 +1336,9 @@ func (v RowView) Get(col string) (any, bool) {
 	if b, isBytes := x.([]byte); isBytes {
 		x = append([]byte(nil), b...) // the database's bytes stay unchanged
 	}
+	if t, isInstant := x.(instant); isInstant {
+		x = t.Time // a timestamptz is a time.Time to the code under test
+	}
 	return x, ok
 }
 
@@ -1357,7 +1360,7 @@ func (v RowView) Key() string { return v.r.Key() }
 func (v RowView) String() string { return v.r.String() }
 
 // Clone returns a copy of the row to change.
-func (v RowView) Clone() Row { return v.r.clone() }
+func (v RowView) Clone() Row { return publicRow(v.r.clone()) }
 
 // Queue returns the messages currently in a queue.
 func (st *State) Queue(q *Queue) []Msg { return st.queues[q.name] }

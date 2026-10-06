@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -137,6 +138,9 @@ func (x *sqlExec) readArray(c *sqlir.ArrayCmp) (*arrayElems, error) {
 		return out, nil
 	case arrayParam:
 		for _, el := range v {
+			if t, ok := el.(time.Time); ok && !x.tx.db.kind.InnoDB() {
+				el = newInstant(t) // as a time bound to a parameter is
+			}
 			if c.ElemType == "" {
 				out.exprs = append(out.exprs, &sqlir.Param{})
 				out.vals = append(out.vals, el)

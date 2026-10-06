@@ -49,6 +49,8 @@ func keyString(v any) string {
 	case pgInterval:
 		// Equal intervals, '1 day' and '24 hours', are one key.
 		return pgInterval{micros: v.span()}.String()
+	case instant:
+		return v.UTC().Format(time.RFC3339Nano)
 	}
 	return fmt.Sprint(v)
 }
@@ -351,7 +353,7 @@ func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	if !ok {
 		return nil, false
 	}
-	return r.clone(), true
+	return publicRow(r.clone()), true
 }
 
 // sequenceName normalizes how a sequence is written in nextval and setval
@@ -372,14 +374,14 @@ func sequenceName(s string) string {
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
-	return db.selectCommitted(table, pred)
+	return publicRows(db.selectCommitted(table, publicPred(pred)))
 }
 
 // Peek returns the committed rows of a table without yielding. It is for fakes
 // that need to observe another database's state (for example a fake runtime that
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
-func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
+func (db *DB) Peek(table string) []Row { return publicRows(db.selectCommitted(table, nil)) }
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
@@ -400,11 +402,12 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 		}
 	}
 	sort.Strings(keys)
+	pred = publicPred(pred)
 	var out []Row
 	for _, k := range keys {
 		r, ok := tx.view(table, k)
 		if ok && (pred == nil || pred(r)) {
-			out = append(out, r)
+			out = append(out, publicRow(r))
 		}
 	}
 	return out
@@ -1761,6 +1764,12 @@ type Tx struct {
 	// lockTimeout is set by SET LOCAL lock_timeout: a lock wait may then fail
 	// with 55P03 instead of waiting on, which the explorer chooses.
 	lockTimeout bool
+	// timeZone is the session's TimeZone the transaction runs in, nil for
+	// the server's (zone). pendingTimeZone is a session SET TIME ZONE run in
+	// the transaction, which the session keeps only once the transaction
+	// commits, as pendingLockTimeout is.
+	timeZone        *time.Location
+	pendingTimeZone *zoneSetting
 	// noAutoZero is MySQL's NO_AUTO_VALUE_ON_ZERO, set for the session as a
 	// dump sets it: an explicit 0 in an AUTO_INCREMENT column is kept.
 	noAutoZero bool
@@ -1794,10 +1803,14 @@ type savepoint struct {
 	pending *bool // the transaction's pendingLockTimeout
 	undo    int   // and the undo records it had written
 	timeout bool  // and its lockTimeout
-	writes  map[lockKey]Row
-	deleted map[lockKey]bool
-	moved   map[lockKey]string
-	locks   int
+	// zone and pendingZone are the transaction's timeZone and
+	// pendingTimeZone.
+	zone        *time.Location
+	pendingZone *zoneSetting
+	writes      map[lockKey]Row
+	deleted     map[lockKey]bool
+	moved       map[lockKey]string
+	locks       int
 	// modes is the strength each lock held then had, since a lock taken
 	// before the savepoint may be strengthened after it.
 	modes    map[lockKey]lockMode
@@ -1816,7 +1829,8 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 		return nil, false
 	}
 	tx.yieldf("%s: select %s id=%s", tx.db.name, table, key)
-	return tx.view(table, key)
+	r, ok := tx.view(table, key)
+	return publicRow(r), ok
 }
 
 // GetForUpdate reads one row and takes its lock (SELECT ... FOR UPDATE).
@@ -1830,11 +1844,12 @@ func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
 		return nil, false, err
 	}
 	r, ok := tx.view(table, key)
-	return r, ok, nil
+	return publicRow(r), ok, nil
 }
 
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
 func (tx *Tx) Insert(table string, row Row) error {
+	row = tx.db.typedRow(table, row)
 	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
 
@@ -1847,6 +1862,8 @@ func (tx *Tx) Update(table, key string, fields Row) (bool, error) {
 // CAS updates one row only if column field equals from (UPDATE ... WHERE id=?
 // AND field=?). Returns whether a row was updated.
 func (tx *Tx) CAS(table, key, field string, from, to any) (bool, error) {
+	from, _ = tx.db.typedValue(table, field, from)
+	to, _ = tx.db.typedValue(table, field, to)
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
 		lazyString(func() string { return fmt.Sprintf("id=%s and %s=%v -> %v", key, field, from, to) }))
 	return n == 1, err
@@ -1961,7 +1978,7 @@ func (db *DB) duplicateKey(table, constraint string) error {
 // matching row is locked, then pred is re-evaluated on the version visible after
 // the lock is granted.
 func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (int, error) {
-	return tx.updateWhere(table, pred, fields, desc)
+	return tx.updateWhere(table, publicPred(pred), tx.db.typedRow(table, fields), desc)
 }
 
 // Delete removes one row. Returns whether it existed.
@@ -2114,6 +2131,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
 		sp.pending, sp.timeout, sp.undo, sp.inserts, sp.entries = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts), len(tx.entries)
+		sp.zone, sp.pendingZone = tx.timeZone, tx.pendingTimeZone
 		sp.unstarted = !tx.started
 		tx.saves = append(tx.saves, sp)
 		return nil
@@ -2149,6 +2167,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
 	tx.pendingLockTimeout, tx.undo = sp.pending, sp.undo
+	tx.timeZone, tx.pendingTimeZone = sp.zone, sp.pendingZone
 	if !tx.db.kind.InnoDB() {
 		tx.lockTimeout = sp.timeout // MySQL's setting is the session's, which no rollback undoes
 	}
