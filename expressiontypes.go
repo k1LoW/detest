@@ -45,6 +45,15 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
 				return "timestamp"
 			}
+			isTime := func(t string) bool { return t == "timestamp" || t == "timestamptz" }
+			switch {
+			case isTime(l) && isTime(r) && e.Op == "-":
+				return "interval"
+			case l == "interval" && isTime(r) && e.Op == "+":
+				return r
+			case (l == "interval" || r == "interval") && e.Op == "*":
+				return "interval"
+			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
 					return typ
@@ -222,10 +231,15 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				}
 			}
 		case "interval":
-			// An interval keeps its days apart from its time, which the
-			// duration detest holds does not, so only its length is known.
-			if unit != unknownUnit && (f.Name == "date_trunc" || unit != "epoch") {
-				return f.Name + " of an interval other than extract(epoch FROM ...)"
+			// Units of a calendar position Postgres refuses for an interval,
+			// which has none.
+			switch unit {
+			case "week":
+				if f.Name == "date_trunc" {
+					return "date_trunc of an interval to week"
+				}
+			case "dow", "isodow", "doy", "isoyear", "julian", "timezone", "timezone_hour", "timezone_minute":
+				return f.Name + " of " + unit + " from an interval"
 			}
 		default:
 			return f.Name + " of a " + typ

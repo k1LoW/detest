@@ -2270,7 +2270,7 @@ func toDriverValue(v any) driver.Value {
 	switch x := v.(type) {
 	case nil, int64, float64, bool, []byte, string, time.Time:
 		return x
-	case time.Duration:
+	case pgInterval:
 		return x.String()
 	case uuidValue:
 		return string(x)

@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/k1LoW/detest/internal/difftest"
@@ -8,8 +9,9 @@ import (
 
 // The date and time cases compare interval text, date columns, CURRENT_DATE,
 // date_trunc and extract with Postgres, whose TimeZone is UTC as detest
-// takes it. Steps take no parameters and detest does not cast text to a
-// timestamp, so the times are column values; a numeric result is compared
+// takes it. Steps take no parameters and detest does not cast text without
+// a zone to a timestamptz, so the instants are column values and the times
+// written in a step are timestamps; a numeric result is compared
 // or cast to an integer, as the server renders it as text. now() and
 // CURRENT_DATE read the fake clock of the bubble under detest, so they are
 // compared with each other only.
@@ -110,6 +112,51 @@ var datetimeCases = []difftest.Case{
 			difftest.S(0, `SET TIME ZONE 'Etc/UTC'`),
 			difftest.S(0, `SET TIME ZONE LOCAL`),
 			difftest.Q(0, `SELECT id, at::date = on_day FROM ev ORDER BY id`),
+		},
+	},
+	{
+		Name: "months, days and the clock of an interval",
+		Schema: append(slices.Clip(evSchema),
+			`CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL, renews_at timestamp NOT NULL)`,
+			`CREATE TABLE once (every interval PRIMARY KEY)`),
+		Seed: append(slices.Clip(evSeed),
+			`INSERT INTO plan VALUES (1, '1 month', '2024-01-31'), (2, '30 days', '2024-03-31'), (3, '720:00:00', '2024-02-29 12:00'), (4, '1 year', '2024-02-29')`),
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT interval '1 month' = interval '30 days', interval '1 day' = interval '24 hours', interval '1 year' > interval '360 days', interval '1 year' < interval '366 days'`),
+			difftest.Q(0, `SELECT interval '1 year 2 months 3 days 04:05:06.5', interval '-1 day 2 hours', interval '1.5 months', interval '27 hours', interval '-1 year 2 mons', interval '0', interval '-00:00:01.25'`),
+			difftest.Q(0, `SELECT interval '1 month' * 1.5, interval '1 day' * 0.5, 2 * interval '1 hour 30 minutes', interval '1 year' + interval '3 days' - interval '1 hour', -interval '1 month 1 day'`),
+			difftest.Q(0, `SELECT timestamp '2024-05-20 10:00' - timestamp '2024-05-18 08:30', timestamp '2024-05-18' - timestamp '2024-05-20 10:00'`),
+			difftest.Q(0, `SELECT id, renews_at + every = timestamp '2024-02-29', renews_at + every = timestamp '2025-02-28', renews_at - every < renews_at FROM plan ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM plan WHERE every = interval '720 hours' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM plan WHERE every < interval '1 year' ORDER BY every DESC, id`),
+			difftest.Q(0, `SELECT count(DISTINCT every) FROM plan`),
+			difftest.Q(0, `SELECT every FROM plan ORDER BY id`),
+			difftest.Q(0, `SELECT extract(day FROM interval '27 hours')::int, extract(hour FROM interval '27 hours')::int, extract(week FROM interval '15 days')::int, extract(month FROM interval '14 months')::int, extract(year FROM interval '14 months')::int, extract(quarter FROM interval '7 months')::int`),
+			difftest.Q(0, `SELECT extract(epoch FROM interval '1 month 1 day')::bigint, extract(epoch FROM interval '1 year')::bigint, extract(epoch FROM interval '-1 year 2 months')::bigint`),
+			difftest.Q(0, `SELECT date_trunc('day', interval '3 days 04:05'), date_trunc('year', interval '14 months 3 days'), date_trunc('hour', interval '27 hours 30 minutes'), date_trunc('quarter', interval '7 months 3 days'), date_trunc('decade', interval '25 years')`),
+			difftest.Q(0, `SELECT interval '1 quarter'`),
+			difftest.Q(0, `SELECT interval '1 month 1 mon'`),
+			difftest.S(0, `INSERT INTO once VALUES ('1 day')`),
+			difftest.S(0, `INSERT INTO once VALUES ('24 hours')`),
+			difftest.S(0, `INSERT INTO plan VALUES (5, 'nonsense', '2024-01-01')`),
+		},
+	},
+	{
+		// Two renewals of one plan by a month each: the second waits for the
+		// first and then moves the row it committed.
+		Name: "a renewal by a month waits and rechecks",
+		Schema: append(slices.Clip(evSchema),
+			`CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL, renews_at timestamp NOT NULL)`),
+		Seed: append(slices.Clip(evSeed),
+			`INSERT INTO plan VALUES (1, '1 month', '2024-01-31')`),
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE plan SET renews_at = renews_at + every WHERE id = 1 AND renews_at < timestamp '2024-02-15'`),
+			difftest.S(1, `UPDATE plan SET renews_at = renews_at + every WHERE id = 1 AND renews_at < timestamp '2024-03-15'`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT renews_at = timestamp '2024-03-29' FROM plan`),
 		},
 	},
 	{

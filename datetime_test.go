@@ -10,51 +10,64 @@ import (
 	"github.com/k1LoW/detest/postgres"
 )
 
+func iv(months, days int64, d time.Duration) pgInterval {
+	return pgInterval{months, days, d.Microseconds()}
+}
+
 func TestParseInterval(t *testing.T) {
 	for _, tt := range []struct {
 		in   string
-		want time.Duration
+		want pgInterval
 	}{
-		{"1 day", 24 * time.Hour},
-		{"2 days 3 hours", 51 * time.Hour},
-		{"1.5 days", 36 * time.Hour},
-		{"1 week", 7 * 24 * time.Hour},
-		{"1.5 weeks", 252 * time.Hour},
-		{"90 minutes", 90 * time.Minute},
-		{"10min", 10 * time.Minute},
-		{"1h", time.Hour},
-		{"2 hrs", 2 * time.Hour},
-		{"3 mins 2 secs", 3*time.Minute + 2*time.Second},
-		{"30", 30 * time.Second},
-		{"1 hour 30", time.Hour + 30*time.Second},
-		{"1:30", 90 * time.Minute},
-		{"1 day 2:03:04.5", 26*time.Hour + 3*time.Minute + 4500*time.Millisecond},
-		{"-1 day", -24 * time.Hour},
-		{"1 day ago", -24 * time.Hour},
-		{"@ 1 day", 24 * time.Hour},
-		{"1 day -2 hours", 22 * time.Hour},
-		{"+3 hours", 3 * time.Hour},
-		{"1.5 hours", 90 * time.Minute},
-		{"0.000001 seconds", time.Microsecond},
-		{"1 D", 24 * time.Hour},
-		{"+ 1 day", 24 * time.Hour},
-		{"- 2 hours", -2 * time.Hour},
-		{". seconds", 0},
-		{"1:2.5", time.Minute + 2500*time.Millisecond},
-		{"1 week 2:00", 7*24*time.Hour + 2*time.Hour},
-		{"1. seconds", time.Second},
+		{"1 day", iv(0, 1, 0)},
+		{"2 days 3 hours", iv(0, 2, 3*time.Hour)},
+		{"1.5 days", iv(0, 1, 12*time.Hour)},
+		{"1 week", iv(0, 7, 0)},
+		{"1.5 weeks", iv(0, 10, 12*time.Hour)},
+		{"90 minutes", iv(0, 0, 90*time.Minute)},
+		{"10min", iv(0, 0, 10*time.Minute)},
+		{"1h", iv(0, 0, time.Hour)},
+		{"2 hrs", iv(0, 0, 2*time.Hour)},
+		{"3 mins 2 secs", iv(0, 0, 3*time.Minute+2*time.Second)},
+		{"30", iv(0, 0, 30*time.Second)},
+		{"1 hour 30", iv(0, 0, time.Hour+30*time.Second)},
+		{"1:30", iv(0, 0, 90*time.Minute)},
+		{"1 day 2:03:04.5", iv(0, 1, 2*time.Hour+3*time.Minute+4500*time.Millisecond)},
+		{"-1 day", iv(0, -1, 0)},
+		{"1 day ago", iv(0, -1, 0)},
+		{"@ 1 day", iv(0, 1, 0)},
+		{"1 day -2 hours", iv(0, 1, -2*time.Hour)},
+		{"+3 hours", iv(0, 0, 3*time.Hour)},
+		{"1.5 hours", iv(0, 0, 90*time.Minute)},
+		{"0.000001 seconds", iv(0, 0, time.Microsecond)},
+		{"1 D", iv(0, 1, 0)},
+		{"+ 1 day", iv(0, 1, 0)},
+		{"- 2 hours", iv(0, 0, -2*time.Hour)},
+		{". seconds", iv(0, 0, 0)},
+		{"1:2.5", iv(0, 0, time.Minute+2500*time.Millisecond)},
+		{"1 week 2:00", iv(0, 7, 2*time.Hour)},
+		{"1. seconds", iv(0, 0, time.Second)},
+		{"1 month", iv(1, 0, 0)},
+		{"2 years", iv(24, 0, 0)},
+		{"1 decade", iv(120, 0, 0)},
+		{"1 year 2 months 3 days 04:05:06.5", iv(14, 3, 4*time.Hour+5*time.Minute+6500*time.Millisecond)},
+		{"1.5 months", iv(1, 15, 0)},
+		{"1.25 months", iv(1, 7, 12*time.Hour)},
+		{"1.5 years", iv(18, 0, 0)},
+		{"1 week 2 days", iv(0, 9, 0)},
+		{"-1 year 2 mons", iv(-10, 0, 0)},
 	} {
 		got, err := parseInterval(tt.in)
 		if err != nil || got != tt.want {
 			t.Errorf("%q: got %v, %v; want %v", tt.in, got, err, tt.want)
 		}
 	}
-	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "pizza", "1 dayz", "--1:00", "day", "1.2.3 seconds", "1.2.3", "1e3 seconds", "1.5e2 min", "- seconds", "1 hour 2:00", "2:00 1 minute", "1:00 2:00", "1:2:3:4", "1.5:00"} {
+	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "pizza", "1 dayz", "--1:00", "day", "1.2.3 seconds", "1.2.3", "1e3 seconds", "1.5e2 min", "- seconds", "1 hour 2:00", "2:00 1 minute", "1:00 2:00", "1:2:3:4", "1.5:00", "1 quarter", "1 month 1 mon"} {
 		if _, err := parseInterval(in); err == nil || !err.malformed {
 			t.Errorf("%q: got %v, want malformed", in, err)
 		}
 	}
-	for _, in := range []string{"1 month", "2 years", "1 decade", "1 quarter", "P1D", "PT1H", "infinity", "1.0000005 seconds"} {
+	for _, in := range []string{"1.3 years", "P1D", "PT1H", "infinity", "1.0000005 seconds"} {
 		if _, err := parseInterval(in); err == nil || err.malformed {
 			t.Errorf("%q: got %v, want unread", in, err)
 		}
@@ -231,14 +244,15 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		}
 	}
 	for _, q := range []string{
-		`SELECT id FROM ev WHERE at > now() - interval '1 month'`,
+		`SELECT interval '1.3 years'`,
 		`SELECT interval 'P1D'`,
 		`SELECT on_day - on_day FROM ev`,
 		`SELECT CURRENT_DATE - CURRENT_DATE`,
 		`SELECT CURRENT_DATE - 1`,
 		`SELECT extract(hour FROM on_day) FROM ev`,
-		`SELECT extract(day FROM interval '27 hours')`,
-		`SELECT date_trunc('day', interval '1 day')`,
+		// An interval has no calendar position.
+		`SELECT extract(dow FROM interval '27 hours')`,
+		`SELECT date_trunc('week', interval '1 day')`,
 		`SELECT extract(julian FROM at) FROM ev`,
 		`SELECT extract(timezone FROM at) FROM ev`,
 		`SELECT date_trunc('day', at, 'Asia/Tokyo') FROM ev`,
@@ -266,5 +280,81 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("%s: got %v, want nil", q, err)
 		}
+	}
+}
+
+// Each expected value is what Postgres 18 returns for the query.
+func TestIntervals(t *testing.T) {
+	s := datetimeDB(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL)`)
+	mustExec(t, db, `INSERT INTO plan VALUES (1, '1 month'), (2, '30 days'), (3, $1), (4, '1 year')`, "720:00:00")
+
+	for _, tt := range []struct{ q, want string }{
+		{`SELECT (interval '1 month' = interval '30 days')::text`, "true"},
+		{`SELECT (interval '1 day' = interval '24 hours')::text`, "true"},
+		{`SELECT (interval '1 year' > interval '360 days')::text`, "false"},
+		{`SELECT (interval '1 year' < interval '366 days')::text`, "true"},
+		{`SELECT interval '1 year 2 months 3 days 04:05:06.5'`, "1 year 2 mons 3 days 04:05:06.5"},
+		{`SELECT interval '-1 day 2 hours'`, "-1 days +02:00:00"},
+		{`SELECT interval '1.5 months'`, "1 mon 15 days"},
+		{`SELECT interval '27 hours'`, "27:00:00"},
+		{`SELECT interval '-1 year -2 mons'`, "-1 years -2 mons"},
+		{`SELECT interval '0'`, "00:00:00"},
+		{`SELECT interval '-00:00:01.25'`, "-00:00:01.25"},
+		{`SELECT ((timestamp '2024-01-31' + interval '1 month') = timestamp '2024-02-29')::text`, "true"},
+		{`SELECT ((timestamp '2024-03-31' - interval '1 month') = timestamp '2024-02-29')::text`, "true"},
+		{`SELECT ((timestamp '2024-02-29' + interval '1 year') = timestamp '2025-02-28')::text`, "true"},
+		{`SELECT timestamp '2024-05-20 10:00' - timestamp '2024-05-18 08:30'`, "2 days 01:30:00"},
+		{`SELECT timestamp '2024-05-18' - timestamp '2024-05-20 10:00'`, "-2 days -10:00:00"},
+		{`SELECT interval '1 month' * 1.5`, "1 mon 15 days"},
+		{`SELECT interval '1 day' * 0.5`, "12:00:00"},
+		{`SELECT 2 * interval '1 hour 30 minutes'`, "03:00:00"},
+		{`SELECT interval '1 year' + interval '3 days' - interval '1 hour'`, "1 year 3 days -01:00:00"},
+		{`SELECT -interval '1 month 1 day'`, "-1 mons -1 days"},
+		{`SELECT extract(day FROM interval '27 hours')::text`, "0"},
+		{`SELECT extract(hour FROM interval '27 hours')::text`, "27"},
+		{`SELECT extract(week FROM interval '15 days')::text`, "2"},
+		{`SELECT extract(month FROM interval '14 months')::text`, "2"},
+		{`SELECT extract(year FROM interval '14 months')::text`, "1"},
+		{`SELECT extract(quarter FROM interval '7 months')::text`, "3"},
+		{`SELECT extract(epoch FROM interval '1 month 1 day')::bigint::text`, "2678400"},
+		{`SELECT extract(epoch FROM interval '1 year')::bigint::text`, "31557600"},
+		{`SELECT date_trunc('day', interval '3 days 04:05')`, "3 days"},
+		{`SELECT date_trunc('year', interval '14 months 3 days')`, "1 year"},
+		{`SELECT date_trunc('hour', interval '27 hours 30 minutes')`, "27:00:00"},
+		{`SELECT date_trunc('quarter', interval '7 months 3 days')`, "6 mons"},
+		{`SELECT date_trunc('decade', interval '25 years')`, "20 years"},
+		// A column compares by the span, as the index of an interval does.
+		{`SELECT count(*)::text FROM plan WHERE every = interval '720 hours'`, "3"},
+		{`SELECT every FROM plan WHERE id = 3`, "720:00:00"},
+	} {
+		var got string
+		if err := db.QueryRow(tt.q).Scan(&got); err != nil {
+			t.Errorf("%s: %v", tt.q, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.q, got, tt.want)
+		}
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every < interval '1 year' ORDER BY id`); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Errorf("every < 1 year: got %v", got)
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every <= interval '1 year' ORDER BY every, id`); !slices.Equal(got, []int64{1, 2, 3, 4}) {
+		t.Errorf("every <= 1 year: got %v", got)
+	}
+
+	// The unique key of an interval is its span too.
+	mustExec(t, db, `CREATE TABLE once (every interval PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO once VALUES ('1 day')`)
+	if _, err := db.Exec(`INSERT INTO once VALUES ('24 hours')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Errorf("a duplicate span: got %v, want ErrUniqueViolation", err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan VALUES (5, 'nonsense')`); !errors.Is(err, ErrInvalidDatetimeFormat) {
+		t.Errorf("malformed interval text: got %v, want ErrInvalidDatetimeFormat", err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan VALUES (6, $1)`, time.Hour); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a time.Duration: got %v, want ErrUnsupportedSQL", err)
 	}
 }

@@ -1115,6 +1115,8 @@ func typeSample(typ string) any {
 		return false
 	case "uuid":
 		return uuidValue("")
+	case "interval":
+		return pgInterval{}
 	}
 	return nil
 }

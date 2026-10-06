@@ -297,11 +297,13 @@ func castValue(v any, typ string) (any, error) {
 		// A numeric's text keeps the digits it was written or computed
 		// with (1.50, 3.0) and a float's is formatted by Postgres's own
 		// rules, neither of which the float detest keeps gives.
-		switch v.(type) {
+		switch x := v.(type) {
 		case float64, float32:
 			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
-		case time.Time, time.Duration:
-			return nil, errUnknownExpr{"a cast of a timestamp or an interval to text"}
+		case time.Time:
+			return nil, errUnknownExpr{"a cast of a timestamp to text"}
+		case pgInterval:
+			return x.String(), nil
 		}
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":
@@ -338,7 +340,7 @@ func castValue(v any, typ string) (any, error) {
 		return uuidValue(c), nil
 	case "interval":
 		switch v := v.(type) {
-		case time.Duration:
+		case pgInterval:
 			return v, nil
 		case string:
 			d, ierr := parseInterval(v)
@@ -355,8 +357,18 @@ func castValue(v any, typ string) (any, error) {
 		// A time is kept in UTC, the session's TimeZone: an instant as a
 		// timestamptz, and the clock a timestamptz shows there as a
 		// timestamp. Text is left as it is, as before.
-		if t, ok := v.(time.Time); ok {
-			return t.UTC(), nil
+		switch v := v.(type) {
+		case time.Time:
+			return v.UTC(), nil
+		case string:
+			// Text without a zone stays text for a timestamptz, as a column
+			// write refuses it: the server's TimeZone is not modeled there.
+			if tm, hasZone, ok := pgParseTime(v); ok && (typ == "timestamp" || hasZone) {
+				if typ == "timestamp" {
+					return time.Date(tm.Year(), tm.Month(), tm.Day(), tm.Hour(), tm.Minute(), tm.Second(), tm.Nanosecond(), time.UTC), nil
+				}
+				return tm.UTC(), nil
+			}
 		}
 	case "date":
 		switch v := v.(type) {

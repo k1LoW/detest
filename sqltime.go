@@ -17,30 +17,41 @@ import (
 // and SET TIME ZONE to another zone is refused (postgres.go). A timestamp and
 // a timestamptz are both a time.Time in UTC, so they compute the same.
 
-// intervalUnits are the units of interval text detest reads, by the names
-// Postgres accepts for them, in microseconds. Postgres keeps an interval's
-// days apart from its time, which only a session TimeZone with daylight
-// saving tells apart from 24 hours, so a day is 24 hours here. Months and
-// years are calendar units that a duration does not hold.
-var intervalUnits = map[string]int64{
-	"microsecond": 1, "microseconds": 1, "microsecon": 1, "us": 1, "usec": 1, "usecs": 1, "usecond": 1, "useconds": 1,
-	"millisecond": 1e3, "milliseconds": 1e3, "millisecon": 1e3, "ms": 1e3, "msec": 1e3, "msecs": 1e3, "msecond": 1e3, "mseconds": 1e3,
-	"second": 1e6, "seconds": 1e6, "s": 1e6, "sec": 1e6, "secs": 1e6,
-	"minute": 60e6, "minutes": 60e6, "m": 60e6, "min": 60e6, "mins": 60e6,
-	"hour": 3600e6, "hours": 3600e6, "h": 3600e6, "hr": 3600e6, "hrs": 3600e6,
-	"day": 86400e6, "days": 86400e6, "d": 86400e6,
-	"week": 7 * 86400e6, "weeks": 7 * 86400e6, "w": 7 * 86400e6,
+// intervalUnit is a unit of interval text: the field of the interval it
+// counts in, months, days or microseconds, and how many of them it is.
+type intervalUnit struct {
+	name  string
+	field byte // 'M', 'D' or 'U'
+	per   int64
 }
 
-// calendarUnits are units Postgres accepts that detest does not read.
-var calendarUnits = map[string]bool{
-	"month": true, "months": true, "mon": true, "mons": true,
-	"year": true, "years": true, "y": true, "yr": true, "yrs": true,
-	"decade": true, "decades": true, "dec": true, "decs": true,
-	"century": true, "centuries": true, "c": true, "cent": true,
-	"millennium": true, "millennia": true, "mil": true, "mils": true,
-	"quarter": true, "qtr": true,
-}
+// intervalUnits are the units of interval text, by the names Postgres
+// accepts for them.
+var intervalUnits = func() map[string]intervalUnit {
+	m := map[string]intervalUnit{}
+	for _, u := range []struct {
+		unit  intervalUnit
+		names string
+	}{
+		{intervalUnit{"microsecond", 'U', 1}, "microsecond microseconds microsecon us usec usecs usecond useconds"},
+		{intervalUnit{"millisecond", 'U', 1e3}, "millisecond milliseconds millisecon ms msec msecs msecond mseconds"},
+		{intervalUnit{"second", 'U', 1e6}, "second seconds s sec secs"},
+		{intervalUnit{"minute", 'U', 60e6}, "minute minutes m min mins"},
+		{intervalUnit{"hour", 'U', 3600e6}, "hour hours h hr hrs"},
+		{intervalUnit{"day", 'D', 1}, "day days d"},
+		{intervalUnit{"week", 'D', 7}, "week weeks w"},
+		{intervalUnit{"month", 'M', 1}, "month months mon mons"},
+		{intervalUnit{"year", 'M', 12}, "year years y yr yrs"},
+		{intervalUnit{"decade", 'M', 120}, "decade decades dec decs"},
+		{intervalUnit{"century", 'M', 1200}, "century centuries c cent"},
+		{intervalUnit{"millennium", 'M', 12000}, "millennium millennia mil mils"},
+	} {
+		for n := range strings.FieldsSeq(u.names) {
+			m[n] = u.unit
+		}
+	}
+	return m
+}()
 
 // intervalError is why interval text was not read: malformed is text Postgres
 // refuses too (22007), and otherwise it is a form detest does not read.
@@ -55,7 +66,7 @@ type intervalError struct {
 // 'ago'. A unit given twice is malformed, as in Postgres. ISO 8601 ('P1D'),
 // months and years, and a fraction of a microsecond, which Postgres rounds,
 // are not read.
-func parseInterval(s string) (time.Duration, *intervalError) {
+func parseInterval(s string) (pgInterval, *intervalError) {
 	fields := strings.Fields(strings.ToLower(s))
 	if len(fields) > 0 && fields[0] == "@" {
 		fields = fields[1:]
@@ -65,48 +76,40 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		ago, fields = true, fields[:len(fields)-1]
 	}
 	if len(fields) == 0 {
-		return 0, &intervalError{"empty interval text", true}
+		return pgInterval{}, &intervalError{"empty interval text", true}
 	}
-	total := new(big.Rat)
-	seen := map[int64]bool{}
-	add := func(n *big.Rat, unit int64) *intervalError {
-		if seen[unit] {
-			return &intervalError{"a unit given twice", true}
-		}
-		seen[unit] = true
-		total.Add(total, new(big.Rat).Mul(n, new(big.Rat).SetInt64(unit)))
-		return nil
-	}
+	months, days, us := new(big.Rat), new(big.Rat), new(big.Rat)
+	seen := map[string]bool{}
 	for i := 0; i < len(fields); i++ {
 		f := fields[i]
 		if strings.Contains(f, ":") {
 			d, err := parseClock(f)
 			if err != nil {
-				return 0, err
+				return pgInterval{}, err
 			}
-			for _, u := range []int64{3600e6, 60e6, 1e6} {
+			for _, u := range []string{"hour", "minute", "second"} {
 				if seen[u] {
 					// Postgres fails a time with an hour, a minute or a second
 					// given apart, and a second time, as malformed.
-					return 0, &intervalError{"a time with an hour, minute or second unit", true}
+					return pgInterval{}, &intervalError{"a time with an hour, minute or second unit", true}
 				}
 				seen[u] = true
 			}
-			total.Add(total, d)
+			us.Add(us, d)
 			continue
 		}
 		if (f == "+" || f == "-") && i+1 < len(fields) && startsNumber(fields[i+1]) {
 			fields[i+1] = f + fields[i+1] // '+ 1 day' is '+1 day'
 			continue
 		}
-		num, unit := splitNumber(f)
+		num, unitName := splitNumber(f)
 		if num == "" {
 			// ISO 8601 (P1D) and infinity are interval text Postgres reads;
 			// any other word without a number is malformed.
 			if f == "infinity" || f == "-infinity" || f == "+infinity" || isoInterval(f) {
-				return 0, &intervalError{fmt.Sprintf("interval text %q", s), false}
+				return pgInterval{}, &intervalError{fmt.Sprintf("interval text %q", s), false}
 			}
-			return 0, &intervalError{fmt.Sprintf("interval text %q", s), true}
+			return pgInterval{}, &intervalError{fmt.Sprintf("interval text %q", s), true}
 		}
 		if strings.TrimLeft(num, "+-") == "." {
 			num = "0" // Postgres reads a point alone as zero
@@ -115,39 +118,61 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		if !ok {
 			// num holds a sign, digits and points only, so it is malformed,
 			// such as 1.2.3.
-			return 0, &intervalError{fmt.Sprintf("the number %q in interval text", num), true}
+			return pgInterval{}, &intervalError{fmt.Sprintf("the number %q in interval text", num), true}
 		}
-		if unit == "" && i+1 < len(fields) && !startsNumber(fields[i+1]) {
+		if unitName == "" && i+1 < len(fields) && !startsNumber(fields[i+1]) {
 			i++
-			unit = fields[i]
+			unitName = fields[i]
 		}
-		if unit == "" {
-			unit = "second" // a number alone is seconds
+		if unitName == "" {
+			unitName = "second" // a number alone is seconds
 		}
-		if calendarUnits[unit] {
-			return 0, &intervalError{"an interval in " + unit, false}
-		}
-		us, ok := intervalUnits[unit]
+		u, ok := intervalUnits[unitName]
 		if !ok {
-			// A number in exponent form, such as 1e3, is malformed too.
-			return 0, &intervalError{fmt.Sprintf("the interval unit %q", unit), true}
+			// A number in exponent form, such as 1e3, is malformed too, and
+			// so is a quarter, which Postgres has no interval unit for.
+			return pgInterval{}, &intervalError{fmt.Sprintf("the interval unit %q", unitName), true}
 		}
-		if err := add(n, us); err != nil {
-			return 0, err
+		if seen[u.name] {
+			return pgInterval{}, &intervalError{"a unit given twice", true}
+		}
+		seen[u.name] = true
+		v := new(big.Rat).Mul(n, new(big.Rat).SetInt64(u.per))
+		switch {
+		case u.field == 'M' && u.name != "month" && !v.IsInt():
+			// Postgres rounds a fraction of a year to whole months.
+			return pgInterval{}, &intervalError{"a fraction of a " + u.name + " that is no whole number of months", false}
+		case u.field == 'M':
+			months.Add(months, v)
+		case u.field == 'D':
+			days.Add(days, v)
+		default:
+			us.Add(us, v)
 		}
 	}
-	if !total.IsInt() {
-		return 0, &intervalError{"an interval with a fraction of a microsecond", false}
+	// A fraction of a month is days at 30 a month, and a fraction of a day
+	// time at 24 hours, as Postgres carries them.
+	m, mfrac := splitRat(months)
+	days.Add(days, mfrac.Mul(mfrac, big.NewRat(daysPerMonth, 1)))
+	d, dfrac := splitRat(days)
+	us.Add(us, dfrac.Mul(dfrac, new(big.Rat).SetInt64(usecsPerDay)))
+	if !us.IsInt() {
+		return pgInterval{}, &intervalError{"an interval with a fraction of a microsecond", false}
 	}
-	us := total.Num()
-	if !us.IsInt64() || us.Int64() > (1<<63-1)/1000 || us.Int64() < -(1<<63-1)/1000 {
-		return 0, &intervalError{"an interval beyond what a duration holds", false}
+	if !us.Num().IsInt64() || !m.IsInt64() || !d.IsInt64() {
+		return pgInterval{}, &intervalError{"an interval beyond the range detest reads", false}
 	}
-	d := time.Duration(us.Int64()) * time.Microsecond
+	iv := pgInterval{m.Int64(), d.Int64(), us.Num().Int64()}
 	if ago {
-		d = -d
+		iv = iv.neg()
 	}
-	return d, nil
+	return iv, nil
+}
+
+// splitRat is r's whole part, toward zero, and the fraction left.
+func splitRat(r *big.Rat) (*big.Int, *big.Rat) {
+	whole := new(big.Int).Quo(r.Num(), r.Denom())
+	return whole, new(big.Rat).Sub(r, new(big.Rat).SetInt(whole))
 }
 
 // parseClock reads [+|-]h:m[:s[.f]] in microseconds.
@@ -309,13 +334,9 @@ func extractField(unit string, v any) (dec string, unknown bool, what string) {
 		return "", true, ""
 	}
 	switch v := v.(type) {
-	case time.Duration:
-		// An interval keeps its days apart from its time, which a duration
-		// does not, so only its length in seconds is known.
-		if u != "epoch" {
-			return "", false, "extract of " + u + " from an interval"
-		}
-		return micros(v.Round(time.Microsecond).Microseconds()), false, ""
+	case pgInterval:
+		dec, what := v.extract(u)
+		return dec, false, what
 	case time.Time:
 		t := v.UTC().Round(time.Microsecond)
 		y, mo, d := t.Date()
