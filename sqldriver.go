@@ -398,19 +398,19 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	if c.bad {
 		return nil, 0, driver.ErrBadConn
 	}
-	// A statement whose context ended before it reached the driver, such as
-	// one waiting for database/sql's lock of the connection meanwhile, is not
-	// sent, as pgx and go-sql-driver check the context first. The connection
-	// and its transaction stay as they were.
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
 	if tx := c.tx; tx != nil && tx.p != nil && !tx.p.r.over() && !tx.p.isCaller() {
 		return c.runShared(ctx, tx, query, args)
+	}
+	// A statement whose context ended before it reached the driver, such as
+	// one waiting for database/sql's lock of the connection meanwhile, is not
+	// sent, as pgx and go-sql-driver check the context first. The connection
+	// and its transaction stay as they were.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	p := c.db.s.currentAs(func() string { return canonical(c.db.name, query, args) })
 	if p != nil {
@@ -470,9 +470,15 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	if tx.closed {
 		return nil, 0, driver.ErrBadConn
 	}
-	// As in runQuery, the context may have ended while it waited for the
-	// mutex.
+	// A goroutine sharing a transaction whose context ended, such as by a
+	// sibling canceling an errgroup, would not send its statement, as in
+	// runQuery. Whether it got here before or after the cancel is the
+	// runtime's choice, and so is which siblings' statements ran in the
+	// transaction, so the exploration stops. One that database/sql turns
+	// away before the driver, having seen the context end first, never gets
+	// here, which detest cannot tell.
 	if err := ctx.Err(); err != nil {
+		tx.p.r.stopCanceled(query)
 		return nil, 0, err
 	}
 	tx.shared = query

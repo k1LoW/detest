@@ -615,3 +615,40 @@ func TestGoroutineOnSharedSQLTxAfterItsProcessReturned(t *testing.T) {
 		}
 	}
 }
+
+// endedOnArrival is a context database/sql's own check passes, as it has no
+// Done channel, but which has ended by the time the driver asks, as one a
+// sibling cancels while the statement waits for database/sql's lock of the
+// connection.
+type endedOnArrival struct{ context.Context }
+
+func (endedOnArrival) Done() <-chan struct{} { return nil }
+func (endedOnArrival) Err() error            { return context.Canceled }
+
+// A goroutine sharing a transaction whose statement reaches the driver after
+// its context ended stops the exploration, as whether it got there before or
+// after the cancel is the runtime's.
+func TestGoroutineOnSharedSQLTxCanceledOnArrivalStops(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE marks (id bigint PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				_, _ = tx.ExecContext(endedOnArrival{context.Background()}, `INSERT INTO marks (id) VALUES (1)`)
+			})
+			wg.Wait()
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "after its context ended") {
+		t.Fatalf("want the exploration stopped for a canceled shared statement, got:\n%s", res.report())
+	}
+}

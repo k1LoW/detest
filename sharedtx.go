@@ -129,6 +129,15 @@ func (r *run) stopEnding(what string) {
 	}
 }
 
+// stopCanceled stops the exploration when a goroutine sharing a
+// transaction reached the driver after its statement's context ended (see
+// sqlConn.runShared). It is called with the engine mutex held.
+func (r *run) stopCanceled(query string) {
+	if r.pending == nil {
+		r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a goroutine sharing a transaction with its process ran %q after its context ended, such as by a sibling canceling an errgroup, and whether it ran before or after the cancel is decided by database/sql and the Go runtime rather than the schedule, so a replay would not reproduce it", query)}
+	}
+}
+
 // pointTable returns the table a statement touches only the rows of, by its
 // primary key, so that which rows it touches cannot depend on another
 // statement: an INSERT of given keys, or an UPDATE, a DELETE or a locking
