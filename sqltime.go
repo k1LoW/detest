@@ -64,8 +64,8 @@ type intervalError struct {
 // with units, such as '2 days 3 hours' or '10min', a time such as '1:30' or
 // '02:03:04.5', a number alone as seconds, a leading '@' and a trailing
 // 'ago'. A unit given twice is malformed, as in Postgres. ISO 8601 ('P1D'),
-// months and years, and a fraction of a microsecond, which Postgres rounds,
-// are not read.
+// a fraction of a year that is no whole number of months and a fraction of
+// a microsecond, both of which Postgres rounds, are not read.
 func parseInterval(s string) (pgInterval, *intervalError) {
 	fields := strings.Fields(strings.ToLower(s))
 	if len(fields) > 0 && fields[0] == "@" {
@@ -138,27 +138,30 @@ func parseInterval(s string) (pgInterval, *intervalError) {
 		}
 		seen[u.name] = true
 		v := new(big.Rat).Mul(n, new(big.Rat).SetInt64(u.per))
-		switch {
-		case u.field == 'M' && u.name != "month" && !v.IsInt():
+		if u.field == 'M' && u.name != "month" && !v.IsInt() {
 			// Postgres rounds a fraction of a year to whole months.
 			return pgInterval{}, &intervalError{"a fraction of a " + u.name + " that is no whole number of months", false}
-		case u.field == 'M':
-			months.Add(months, v)
-		case u.field == 'D':
-			days.Add(days, v)
-		default:
-			us.Add(us, v)
 		}
+		// Each unit's fraction is carried down as Postgres reads the unit,
+		// a fraction of a month to days at 30 a month and a fraction of a
+		// day to time at 24 hours, so '1 year -0.5 months' is 12 months and
+		// -15 days rather than 11 months and 15 days.
+		if u.field == 'M' {
+			whole, frac := splitRat(v)
+			months.Add(months, new(big.Rat).SetInt(whole))
+			v = frac.Mul(frac, big.NewRat(daysPerMonth, 1))
+		}
+		if u.field != 'U' {
+			whole, frac := splitRat(v)
+			days.Add(days, new(big.Rat).SetInt(whole))
+			v = frac.Mul(frac, new(big.Rat).SetInt64(usecsPerDay))
+		}
+		us.Add(us, v)
 	}
-	// A fraction of a month is days at 30 a month, and a fraction of a day
-	// time at 24 hours, as Postgres carries them.
-	m, mfrac := splitRat(months)
-	days.Add(days, mfrac.Mul(mfrac, big.NewRat(daysPerMonth, 1)))
-	d, dfrac := splitRat(days)
-	us.Add(us, dfrac.Mul(dfrac, new(big.Rat).SetInt64(usecsPerDay)))
 	if !us.IsInt() {
 		return pgInterval{}, &intervalError{"an interval with a fraction of a microsecond", false}
 	}
+	m, d := months.Num(), days.Num()
 	if !us.Num().IsInt64() || !m.IsInt64() || !d.IsInt64() {
 		return pgInterval{}, &intervalError{"an interval beyond the range detest reads", false}
 	}

@@ -56,6 +56,10 @@ func TestParseInterval(t *testing.T) {
 		{"1.5 years", iv(18, 0, 0)},
 		{"1 week 2 days", iv(0, 9, 0)},
 		{"-1 year 2 mons", iv(-10, 0, 0)},
+		// Each unit's fraction is carried down before the next is added.
+		{"1 year -0.5 months", iv(12, -15, 0)},
+		{"1 month -0.5 days", iv(1, 0, -12*time.Hour)},
+		{"1.5 months -0.5 days", iv(1, 15, -12*time.Hour)},
 	} {
 		got, err := parseInterval(tt.in)
 		if err != nil || got != tt.want {
