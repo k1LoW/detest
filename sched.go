@@ -274,11 +274,11 @@ func (s *Sim) Current() *Proc {
 		// A seed, before any process ran. It may wake a goroutine retired
 		// from an earlier run, such as by closing that run's channel, which
 		// must be turned away rather than run as part of the seed.
+		// A process detest started that reap gave up on is retired too, and
+		// the scheduler's own goroutine never is.
 		if s.staleN.Load() > 0 {
-			if onProc, _ := onProcGoroutine(); !onProc {
-				if p := s.retired(goroutineID()); p != nil {
-					return p
-				}
+			if p := s.retired(goroutineID()); p != nil {
+				return p
 			}
 		}
 		return nil
