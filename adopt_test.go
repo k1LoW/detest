@@ -1063,3 +1063,32 @@ func TestDeepAdoptedGoroutineAbortedInTx(t *testing.T) {
 		s.ExpectViolation("flag set")
 	})
 }
+
+// A goroutine releasing a read lock its parent took releases the parent's,
+// not that of another process holding the same lock. Were it the other
+// process's, that process's crash would free nothing, and a writer would wait
+// for good on the read lock the parent's pod still counted.
+func TestRUnlockByGoroutineReleasesItsFamilysLock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		rw := s.RWMutex("rw")
+		s.Manual("other", 1, func(p *Proc) error {
+			rw.RLock()
+			p.Step("hold the read lock")
+			rw.RUnlock()
+			return nil
+		})
+		s.Manual("pod", 1, func(p *Proc) error {
+			rw.RLock()
+			var wg sync.WaitGroup
+			wg.Go(func() { rw.RUnlock() })
+			wg.Wait()
+			return nil
+		})
+		s.Manual("writer", 1, func(p *Proc) error {
+			rw.Lock()
+			defer rw.Unlock()
+			p.Step("write")
+			return nil
+		})
+	}, MaxCrashes(1), MaxPreemptions(2))
+}

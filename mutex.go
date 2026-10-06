@@ -188,8 +188,23 @@ func (rw *RWMutex) RUnlock() {
 	if r := rw.s.run; r != nil && r.over() {
 		return // as Mutex.Unlock, the next run resets the read locks
 	}
+	// A read lock taken by another goroutine of the caller's pod, such as
+	// its parent's, is released before anyone else's, since an adopted
+	// goroutine unlocking for its parent is the common case and releasing
+	// another pod's would let its crash free a lock still in use.
+	var family *Proc
+	if p != nil && rw.readers[p] == 0 {
+		for _, q := range rw.s.run.procs {
+			if rw.readers[q] > 0 && q.root() == p.root() {
+				family = q
+				break
+			}
+		}
+	}
 	switch {
 	case p != nil && rw.readers[p] > 0:
+	case family != nil:
+		p = family
 	case rw.outsideReaders > 0:
 		rw.outsideReaders--
 		p = nil
@@ -246,8 +261,11 @@ func (rw *RWMutex) holders(waiter *Proc) []*Proc {
 }
 
 func (rw *RWMutex) crash(p *Proc) bool {
+	// A writer that dies waiting no longer keeps new readers out, so the
+	// readers waiting behind it must retry as for a release.
+	held := rw.pendingWriters[p]
 	delete(rw.pendingWriters, p)
-	held := rw.readers[p] > 0
+	held = held || rw.readers[p] > 0
 	delete(rw.readers, p)
 	if rw.writing && rw.writer == p {
 		rw.writing, rw.writer = false, nil
