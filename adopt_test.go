@@ -384,3 +384,22 @@ func TestCrashTakesGoroutineOfFinishedTick(t *testing.T) {
 		t.Error("no run crashed the pod between its goroutine's two inserts")
 	}
 }
+
+// A process that sleeps for minutes, as one waiting out a lease or a backoff
+// does, is waited for rather than reported as blocked for good.
+func TestProcessSleepsForMinutes(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			time.Sleep(6 * time.Minute)
+			_, err := db.Exec(`INSERT INTO "marks" ("id") VALUES ('woke')`)
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "woke"); !ok {
+				return errors.New("the pod never woke")
+			}
+			return nil
+		})
+	})
+}

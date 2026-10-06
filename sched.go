@@ -413,10 +413,12 @@ func (r *run) execute() (v *violation) {
 			if r.advanceClock() {
 				continue
 			}
-			if r.waitOutside() {
+			// A goroutine that returned is told apart before waiting, which
+			// would otherwise last the whole outsideWaitLimit for it.
+			if r.reapAdopted() {
 				continue
 			}
-			if r.reapAdopted() {
+			if r.waitOutside() {
 				continue
 			}
 			break
@@ -937,8 +939,10 @@ const reapLimit = time.Hour
 
 // outsideWaitLimit bounds how long the scheduler waits for a process parked
 // outside detest when nothing else can run. The bubble's clock is fake, so it
-// only fires when no earlier timer exists.
-const outsideWaitLimit = 10 * time.Second
+// only fires when no earlier timer exists, and costs no real time. It outlasts
+// the sleeps of the code under test, such as a lease or a backoff of minutes,
+// which a shorter limit would report as a process blocked for good.
+const outsideWaitLimit = 24 * time.Hour
 
 func (r *run) handleEvent(p *Proc, ev procEvent) {
 	switch ev.kind {

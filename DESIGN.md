@@ -64,7 +64,7 @@ A run is fully determined by its sequence of picks. That sequence is what a viol
 
 ### testing/synctest
 
-Every run happens inside a `testing/synctest` bubble. The bubble gives the code under test a fake clock, so `time.Sleep` and timers cost no real time and are deterministic, and it lets the scheduler know when the resumed process has parked, as `synctest.Wait` returns once every goroutine in the bubble is durably blocked. A process blocked on something detest does not model (a channel, a timer) is recognised that way and parked as blocked outside, and the scheduler moves on.
+Every run happens inside a `testing/synctest` bubble. The bubble gives the code under test a fake clock, so `time.Sleep` and timers cost no real time and are deterministic, and it lets the scheduler know when the resumed process has parked, as `synctest.Wait` returns once every goroutine in the bubble is durably blocked. A process blocked on something detest does not model (a channel, a timer) is recognised that way and parked as blocked outside, and the scheduler moves on. When nothing else can run, the scheduler waits for such a process on the fake clock for up to a day, so a sleep of minutes, such as waiting out a lease or a backoff, costs no real time, and only a process that nothing will ever wake is reported as blocked.
 
 A goroutine blocked on a `sync.Mutex` is not durably blocked in synctest's sense, so a real mutex held across a yield point would hang the scheduler. A watchdog outside the bubble, on real time, reports that with the stacks of the blocked goroutines. The fix is to inject `detest.Mutex` or `detest.RWMutex`, which the scheduler sees.
 
