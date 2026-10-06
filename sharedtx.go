@@ -18,6 +18,13 @@ import (
 // outcome could depend on its order with another goroutine's stops the
 // exploration, as nondeterminism does.
 //
+// Goroutines of one step whose order the code under test fixes itself, such
+// as one signaling the next on a channel, or two WaitGroups one after the
+// other, are compared all the same and may stop the exploration although
+// their order holds in every run. The driver does not see that order, and
+// telling them from goroutines that race would need it; stopping is the
+// answer AGENTS.md gives where detest cannot tell.
+//
 // A statement of the process itself is not compared. Before it enters the
 // engine, the process lets every goroutine running alongside it get to where
 // it blocks (see Proc.drain), so the goroutines' statements in flight come
@@ -110,7 +117,7 @@ func (r *run) recordShared(a *sharedAccess) {
 			continue
 		}
 		if r.pending == nil {
-			r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: goroutines sharing a transaction ran statements in one step whose outcome depends on their order, which database/sql and the Go runtime decide rather than the schedule, so a replay would not reproduce it: %q and %q. Let one goroutine run statements that touch the same rows, or have each goroutine touch rows of its own by primary key", b.query, a.query)}
+			r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: goroutines sharing a transaction ran statements in one step whose outcome depends on their order, which database/sql and the Go runtime decide rather than the schedule, so a replay would not reproduce it: %q and %q. Let one goroutine run statements that touch the same rows, or have each goroutine touch rows of its own by primary key. Goroutines the code orders itself, such as by a channel or by one WaitGroup after another, stop here too when they run in one step, as detest cannot see that order", b.query, a.query)}
 		}
 		return
 	}
