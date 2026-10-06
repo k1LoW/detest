@@ -115,6 +115,34 @@ func paramBool(c *sqlir.Cast, v any) any {
 	return v
 }
 
+// paramDate is a time bound to a parameter cast to date or timestamp as the
+// value the driver sends for it (wallClock).
+func paramDate(c *sqlir.Cast, v any) any {
+	if _, ok := c.X.(*sqlir.Param); !ok {
+		return v
+	}
+	return wallClock(c.Type, v)
+}
+
+// wallClock is a time bound for a date or a timestamp as the driver sends it
+// once Postgres has typed the parameter: pgx takes the time's own year,
+// month, day and clock, and lib/pq sends its text, whose zone a date's and a
+// timestamp's input drop. A timestamptz is the instant, which detest keeps
+// as it is, and so does a date or a timestamp's own time in UTC.
+func wallClock(typ string, v any) any {
+	t, ok := derefValue(v).(time.Time)
+	if !ok {
+		return v
+	}
+	switch typ {
+	case "date":
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	case "timestamp":
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+	}
+	return v
+}
+
 // paramTextCast refuses a cast to text of a parameter holding a value other
 // than text or an integer, such as one ANY (ARRAY['x', $1]) makes: the text
 // a driver sends for a float, a boolean or a time is not modeled.
@@ -309,11 +337,40 @@ func castValue(v any, typ string) (any, error) {
 		}
 		return uuidValue(c), nil
 	case "interval":
-		if s, ok := v.(string); ok {
-			if d, err := time.ParseDuration(strings.ReplaceAll(strings.ReplaceAll(s, " seconds", "s"), " second", "s")); err == nil {
+		switch v := v.(type) {
+		case time.Duration:
+			return v, nil
+		case string:
+			d, ierr := parseInterval(v)
+			if ierr == nil {
 				return d, nil
 			}
+			if ierr.malformed {
+				return nil, kindError{sqlir.InvalidDatetimeFormat, fmt.Sprintf("invalid input syntax for type interval: %q", v)}
+			}
+			return nil, errUnknownExpr{ierr.what}
 		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to interval", v)}
+	case "timestamptz", "timestamp":
+		// A time is kept in UTC, the session's TimeZone: an instant as a
+		// timestamptz, and the clock a timestamptz shows there as a
+		// timestamp. Text is left as it is, as before.
+		if t, ok := v.(time.Time); ok {
+			return t.UTC(), nil
+		}
+	case "date":
+		switch v := v.(type) {
+		case time.Time:
+			return utcDate(v), nil
+		case string:
+			tm, _, ok := pgParseTime(v)
+			if !ok {
+				return nil, errUnknownExpr{fmt.Sprintf("the date %q, in a format detest does not parse", v)}
+			}
+			// The date part as written: a date drops the time and any zone.
+			return time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, time.UTC), nil
+		}
+		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to date", v)}
 	}
 	return v, nil
 }

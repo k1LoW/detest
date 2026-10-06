@@ -32,8 +32,8 @@ func TestREADMEListsKnownFuncs(t *testing.T) {
 		}
 	}
 	for name := range knownFuncs {
-		if name == "current_timestamp" {
-			continue // the SQL value function, which the README lists in capitals
+		if name == "current_timestamp" || name == "current_date" {
+			continue // the SQL value functions, which the README lists in capitals
 		}
 		if !listed[name] {
 			t.Errorf("README's function list lacks %q", name)

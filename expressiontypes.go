@@ -1,6 +1,10 @@
 package detest
 
-import "github.com/k1LoW/detest/internal/sqlir"
+import (
+	"strings"
+
+	"github.com/k1LoW/detest/internal/sqlir"
+)
 
 // expressionType uses only types the statement or its declared columns tell
 // us. It never evaluates an argument while resolving a function signature.
@@ -37,6 +41,10 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "text"
 		case "+", "-", "*", "/", "%":
 			l, r := expressionType(e.L, column), expressionType(e.R, column)
+			// A date moved by an interval is a timestamp.
+			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
+				return "timestamp"
+			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
 					return typ
@@ -73,11 +81,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 				}
 			}
 		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
-			for _, arg := range e.Args {
-				if typ := expressionType(arg, column); typ != "" {
-					return typ
-				}
-			}
+			return commonType(e.Args, column)
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -92,17 +96,26 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "float8"
 		case "now", "clock_timestamp", "transaction_timestamp", "statement_timestamp", "current_timestamp":
 			return "timestamptz"
+		case "current_date":
+			return "date"
+		case "extract":
+			return "numeric"
+		case "date_part":
+			return "float8"
+		case "date_trunc":
+			// A timestamp's stays a timestamp, and a date's becomes a
+			// timestamptz, as any other's.
+			if len(e.Args) == 2 && expressionType(e.Args[1], column) == "timestamp" {
+				return "timestamp"
+			}
+			return "timestamptz"
 		case "gen_random_uuid", "uuid_generate_v4":
 			return "uuid"
 		}
 	case *sqlir.WindowFunc:
 		return expressionType(e.Func, column)
 	case *sqlir.CaseExpr:
-		for _, branch := range caseBranches(e) {
-			if typ := expressionType(branch, column); typ != "" {
-				return typ
-			}
-		}
+		return commonType(caseBranches(e), column)
 	case *sqlir.SubQuery:
 		if e.Select != nil && len(e.Select.Targets) == 1 {
 			return expressionType(e.Select.Targets[0].Expr, column)
@@ -111,6 +124,31 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 		return "bool"
 	}
 	return ""
+}
+
+// commonType is the type Postgres resolves exprs to together, as the
+// arguments of COALESCE or the branches of CASE: the first one known, except
+// that dates and timestamps meet at the widest of them, a timestamptz over a
+// timestamp over a date.
+func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
+	best := ""
+	for _, e := range exprs {
+		typ := expressionType(e, column)
+		if typ == "" {
+			continue
+		}
+		if first == "" {
+			first = typ
+		}
+		if rank[typ] > rank[best] {
+			best = typ
+		}
+	}
+	if rank[first] > 0 && best != "" {
+		return best
+	}
+	return first
 }
 
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
@@ -140,6 +178,58 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " key argument"
 			}
 		}
+	case "date_trunc", "extract", "date_part":
+		if len(f.Args) != 2 {
+			break
+		}
+		switch typ := expressionType(f.Args[0], column); typ {
+		case "", "unresolved column type", "text", "varchar":
+		default:
+			return f.Name + " with a " + typ + " unit"
+		}
+		// unit is "" when it is given at run time, and unknownUnit for a
+		// constant Postgres does not take, which fails with 22023 whatever
+		// the source, so it is left to the run.
+		const unknownUnit = "?"
+		unit := ""
+		if k, ok := f.Args[0].(*sqlir.Const); ok {
+			if s, ok := k.Value.(string); ok {
+				unit = unknownUnit
+				u, known := timeUnits[strings.ToLower(s)]
+				if f.Name != "date_trunc" {
+					u, known = extractUnit(s)
+				}
+				if known {
+					unit = u
+				}
+			}
+		}
+		// Postgres picks the overload by the source's type, and one it does
+		// not know, a parameter or a string literal, matches several of them
+		// (42725), whatever value is bound.
+		if untypedExpr(f.Args[1]) {
+			return f.Name + " of a parameter or a string literal of no type"
+		}
+		switch typ := expressionType(f.Args[1], column); typ {
+		case "", "unresolved column type", "timestamp", "timestamptz":
+		case "date":
+			// extract from a date fails for a unit of the time of day, which
+			// the value, a time at midnight, does not tell.
+			if f.Name == "extract" {
+				switch unit {
+				case "", "microseconds", "milliseconds", "second", "minute", "hour", "timezone", "timezone_hour", "timezone_minute":
+					return "extract of a time-of-day unit, or a unit given at run time, from a date"
+				}
+			}
+		case "interval":
+			// An interval keeps its days apart from its time, which the
+			// duration detest holds does not, so only its length is known.
+			if unit != unknownUnit && (f.Name == "date_trunc" || unit != "epoch") {
+				return f.Name + " of an interval other than extract(epoch FROM ...)"
+			}
+		default:
+			return f.Name + " of a " + typ
+		}
 	case "abs", "floor", "ceil", "ceiling", "power", "pow":
 		// Postgres has no signature of these for a non-numeric argument
 		// and rejects the call before evaluating any of them, where
@@ -152,6 +242,21 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	}
+	return ""
+}
+
+// dateDifferenceMismatch refuses date - date, which Postgres gives as an
+// integer of days. A date is a time at midnight to detest, so the difference
+// would come out an interval.
+func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
+	if b.Op != "-" {
+		return ""
+	}
+	l, r := expressionType(b.L, column), expressionType(b.R, column)
+	// A parameter or a string literal beside a date is read as a date too.
+	if l == "date" && (r == "date" || untypedExpr(b.R)) || r == "date" && untypedExpr(b.L) {
+		return "date - date"
 	}
 	return ""
 }

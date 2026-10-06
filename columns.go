@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -61,6 +62,8 @@ type columnChecker struct {
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
 	untyped []func() error
+	// timeConflict names a parameter given two date and time types.
+	timeConflict string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -87,6 +90,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if what := c.params.conflict(x.tx.checking); what != "" {
 		return x.unsupported(what)
+	}
+	if c.timeConflict != "" {
+		return x.unsupported(c.timeConflict)
 	}
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
@@ -935,6 +941,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if what := dateDifferenceMismatch(e, sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				switch e.Op {
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
@@ -950,6 +960,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.untypedOperands(sc, e.X, item)
 				}
 			case *sqlir.CaseExpr:
+				// The branches take the type of the typed ones.
+				c.timeParams(expressionType(e, sc.columnType), caseBranches(e)...)
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
@@ -966,6 +978,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if e.Name == "nullif" && len(e.Args) == 2 {
 					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
+				switch e.Name {
+				case "coalesce", "greatest", "least", "nullif":
+					// The arguments take the type of the typed ones.
+					c.timeParams(expressionType(e, sc.columnType), e.Args...)
+				}
+			case *sqlir.Cast:
+				c.castInput(e)
+				c.timeParams(e.Type, e.X)
 			case *sqlir.ColumnRef:
 				err = c.resolve(e, sc)
 				return
@@ -1005,6 +1025,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	typ := expressionType(b, sc.columnType)
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, typ)
+		c.timeParams(typ, a)
 	}
 	sample := typeSample(typ)
 	if sample == nil {
@@ -1024,6 +1045,62 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		_, err := c.x.untyped(a, v, sample)
 		return err
 	})
+}
+
+// castInput reads a string literal or a parameter cast to interval or date
+// before the statement runs, as Postgres converts a literal when it plans
+// the statement and a parameter when it binds it, so that 'bad'::interval
+// fails over an empty table too. Only the server's errors are raised here;
+// a form detest does not read is left to the run, which refuses it if a row
+// reaches it.
+func (c *columnChecker) castInput(e *sqlir.Cast) {
+	if e.Type != "interval" && e.Type != "date" || !untypedExpr(e.X) {
+		return
+	}
+	c.untyped = append(c.untyped, func() error {
+		var v any
+		switch src := e.X.(type) {
+		case *sqlir.Const:
+			v = src.Value
+		case *sqlir.Param:
+			if src.Index < 0 || src.Index >= len(c.x.args) {
+				return nil
+			}
+			v = paramText(src, c.x.args[src.Index])
+		}
+		if _, err := c.x.cast(paramDate(e, v), e.Type); errors.As(err, new(*sqlir.DBError)) {
+			return err
+		}
+		return nil
+	})
+}
+
+// timeParams records the date or timestamp type, typ, that Postgres gives
+// the parameters among exprs, for a parameter to be read as the driver sends
+// a time for it (wallClock). Any other type leaves them as they are.
+//
+// Postgres types a parameter where it first meets it in the statement. A
+// parameter given two date and time types, by casts or by the operands it is
+// compared with, is refused instead of following that order; timestamptz,
+// which keeps the time as bound, is recorded for that alone.
+func (c *columnChecker) timeParams(typ string, exprs ...sqlir.Expr) {
+	if typ != "date" && typ != "timestamp" && typ != "timestamptz" {
+		return
+	}
+	for _, e := range exprs {
+		p, ok := e.(*sqlir.Param)
+		if !ok {
+			continue
+		}
+		if c.x.paramTimeTypes == nil {
+			c.x.paramTimeTypes = map[int]string{}
+		}
+		if first, ok := c.x.paramTimeTypes[p.Index]; ok && first != typ {
+			c.timeConflict = fmt.Sprintf("parameter $%d typed as both %s and %s", p.Index+1, first, typ)
+		} else if !ok {
+			c.x.paramTimeTypes[p.Index] = typ
+		}
+	}
 }
 
 // typeSample is a value of type typ, for untyped to read text as typ, or nil

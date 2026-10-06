@@ -83,6 +83,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "22003", 1264 // ER_WARN_DATA_OUT_OF_RANGE, as a write out of a column's range reports
 	case sqlir.InvalidTextRepresentation:
 		return "HY000", 1366 // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+	case sqlir.InvalidDatetimeFormat:
+		return "22007", 1292 // ER_TRUNCATED_WRONG_VALUE
 	case sqlir.SyntaxError:
 		return "42000", 1064 // ER_PARSE_ERROR
 	case sqlir.DuplicateTable:
