@@ -79,6 +79,9 @@ func (iv pgInterval) add(o pgInterval) pgInterval {
 // the day of the month unless the month is shorter, then the days, then the
 // time. A day is 24 hours, as in the session's TimeZone, UTC.
 func (iv pgInterval) addToTime(t time.Time) time.Time {
+	// A timestamptz parameter keeps the zone the application gave it, and
+	// Postgres reads its calendar in the session's.
+	t = t.UTC()
 	if iv.months != 0 {
 		y, m, d := t.Date()
 		total := int64(y)*12 + int64(m-1) + iv.months

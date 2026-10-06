@@ -400,6 +400,10 @@ func TestIntervals(t *testing.T) {
 		`SELECT least(interval '2 months', '40 days')`,
 		`SELECT greatest('40 days', interval '2 months')`,
 		`SELECT least('40 days', every) FROM plan`,
+		`SELECT COALESCE(interval '1 month', 'bogus')`,
+		`SELECT min(COALESCE(every, '40 days')) FROM plan`,
+		`SELECT CASE WHEN id = 1 THEN every ELSE '1 day' END FROM plan`,
+		`SELECT nullif(every, '1 month') FROM plan`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -425,5 +429,17 @@ func TestIntervals(t *testing.T) {
 	}
 	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every = $1 ORDER BY id`, "720 hours"); !slices.Equal(got, []int64{1, 2, 3}) {
 		t.Errorf("every = $1 with interval text: got %v", got)
+	}
+	if err := CheckSQL(postgres.New(), `SELECT COALESCE(interval '1 month', $1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CheckSQL of COALESCE(interval, $1): got %v, want ErrUnsupportedSQL", err)
+	}
+
+	// A timestamptz parameter in another zone moves by a month in UTC, the
+	// session's TimeZone: 2024-01-31 00:30+09 is January 30 there.
+	mustExec(t, db, `CREATE TABLE renewal (id int PRIMARY KEY, at timestamptz NOT NULL)`)
+	mustExec(t, db, `INSERT INTO renewal VALUES (1, '2024-02-29 15:30:00+00'), (2, '2024-02-28 15:30:00+00')`)
+	jst := time.Date(2024, 1, 31, 0, 30, 0, 0, time.FixedZone("JST", 9*3600))
+	if got := queryIDs(t, db, `SELECT id FROM renewal WHERE at = COALESCE($1, now()) + interval '1 month'`, jst); !slices.Equal(got, []int64{1}) {
+		t.Errorf("a JST parameter plus a month: got %v, want [1]", got)
 	}
 }
