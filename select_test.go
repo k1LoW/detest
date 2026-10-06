@@ -724,7 +724,7 @@ func TestTextComparedWithNumber(t *testing.T) {
 		`SELECT count(*) FROM t WHERE name::text < 2`,
 		`SELECT count(*) FROM t WHERE 1 IN (SELECT name FROM t)`,
 		`SELECT count(*) FROM t WHERE id = true`,
-		`SELECT count(*) FROM t WHERE now() > '2024-01-01'`,
+		`SELECT count(*) FROM t WHERE localtimestamp > '2024-01-01'`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', '2'])`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY['1', NULL::text])`,
 		`SELECT count(*) FROM t WHERE id = ANY (ARRAY[NULL])`,
@@ -755,7 +755,7 @@ func TestBooleanAndTimestampColumnsStoreTheirValues(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, at timestamptz, ts timestamp, active bool, name text)`)
 	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	mustExec(t, db, `INSERT INTO e VALUES (1, '2024-01-01 09:00:00+09', '2024-01-01 00:00:00+09', 'true', 't')`)
-	mustExec(t, db, `INSERT INTO e VALUES (2, $1, $1, true, 'true')`, at)
+	mustExec(t, db, `INSERT INTO e VALUES (2, $1, $2, true, 'true')`, at, at)
 	mustExec(t, db, `INSERT INTO e VALUES (3, $1, $2, $3, 'f')`, "2023-12-31T00:00:00Z", []byte("2023-12-31"), []byte("off"))
 	for _, tc := range []struct {
 		query string
@@ -792,7 +792,6 @@ func TestBooleanAndTimestampColumnsStoreTheirValues(t *testing.T) {
 		args  []any
 	}{
 		// Postgres reads it in the session's TimeZone, which is not modeled.
-		{`INSERT INTO e (id, at) VALUES (4, '2024-01-01 00:00:00')`, nil},
 		{`INSERT INTO e (id, at) VALUES (4, 'today')`, nil},
 		{`INSERT INTO e (id, ts) VALUES (4, 'Jan 1 2024')`, nil},
 		{`INSERT INTO e (id, ts) VALUES (4, $1)`, []any{int64(1)}},

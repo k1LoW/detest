@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -137,6 +138,17 @@ func (x *sqlExec) readArray(c *sqlir.ArrayCmp) (*arrayElems, error) {
 		return out, nil
 	case arrayParam:
 		for _, el := range v {
+			if t, ok := el.(time.Time); ok && !x.tx.db.kind.InnoDB() {
+				// As a time bound to a parameter is: the time's own clock
+				// for an array Postgres types as one of dates or
+				// timestamps, and the instant otherwise.
+				switch typ := x.exprTypes[c]; typ {
+				case "date", "timestamp":
+					el = wallClock(typ, t)
+				default:
+					el = newInstant(t)
+				}
+			}
 			if c.ElemType == "" {
 				out.exprs = append(out.exprs, &sqlir.Param{})
 				out.vals = append(out.vals, el)

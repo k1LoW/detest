@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	pg "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
@@ -24,6 +25,8 @@ type config struct {
 	isolation  sqlir.IsolationLevel
 	searchPath []string
 	convert    func(*sqlir.DBError) error
+	timeZone   *time.Location
+	zoneErr    error
 }
 
 // Isolation sets the level transactions run at when they do not ask for one,
@@ -37,6 +40,21 @@ func Isolation(level sqlir.IsolationLevel) Option {
 // exists in none of them refers to the first.
 func SearchPath(schemas ...string) Option {
 	return func(c *config) { c.searchPath = schemas }
+}
+
+// TimeZone sets the server's TimeZone, which a session starts in and SET
+// TIME ZONE LOCAL, DEFAULT and RESET return to (default "UTC"), as
+// postgresql.conf sets it. name is an IANA time zone name, such as
+// "Asia/Tokyo", which time.LoadLocation reads; declaring a database on a
+// server whose zone does not load fails.
+//
+// The zone decides how Postgres converts between a timestamp and a
+// timestamptz, and the date, the fields, date_trunc and the days and months
+// added to a timestamptz.
+func TimeZone(name string) Option {
+	return func(c *config) {
+		c.timeZone, c.zoneErr = loadZone(name)
+	}
 }
 
 // Errors sets how the database errors detest raises reach the code under
@@ -55,13 +73,15 @@ func New(opts ...Option) sqlir.Server {
 		o(c)
 	}
 	return sqlir.NewServer(sqlir.ServerSpec{
-		Name:       "postgres",
-		Parser:     parser{},
-		Isolation:  c.isolation,
-		Supported:  []sqlir.IsolationLevel{sqlir.ReadCommitted},
-		SearchPath: c.searchPath,
-		Codes:      codes,
-		Convert:    c.convert,
+		Name:        "postgres",
+		Parser:      parser{},
+		Isolation:   c.isolation,
+		Supported:   []sqlir.IsolationLevel{sqlir.ReadCommitted},
+		SearchPath:  c.searchPath,
+		Codes:       codes,
+		Convert:     c.convert,
+		TimeZone:    c.timeZone,
+		TimeZoneErr: c.zoneErr,
 	})
 }
 
@@ -192,34 +212,6 @@ func (c *pgConv) unsupported(what string) error { return sqlir.Unsupported(what,
 // Committed (Read Uncommitted is Read Committed in Postgres) and READ WRITE.
 // A read-only default would fail every write with 25006, which detest does
 // not model. DEFERRABLE changes nothing outside Serializable and is ignored.
-// utcZones are the names of UTC among Postgres's time zones.
-var utcZones = map[string]bool{
-	"utc": true, "etc/utc": true, "uct": true, "etc/uct": true, "gmt": true, "etc/gmt": true,
-	"universal": true, "etc/universal": true, "zulu": true, "etc/zulu": true,
-}
-
-// timeZoneSet refuses SET TIME ZONE to a zone other than UTC. detest computes
-// the fields of a timestamptz, date_trunc and CURRENT_DATE in UTC, the
-// server's default TimeZone, and in another zone they give other days and
-// hours, so the setting cannot be ignored as the others are. The default
-// (LOCAL, DEFAULT, RESET) and an offset of 0 are UTC.
-func (c *pgConv) timeZoneSet(v *pg.VariableSetStmt) error {
-	if v.Name != "timezone" || v.Kind != pg.VariableSetKind_VAR_SET_VALUE {
-		return nil
-	}
-	if len(v.Args) == 1 {
-		if k := v.Args[0].GetAConst(); k != nil {
-			switch {
-			case k.GetSval() != nil && utcZones[strings.ToLower(k.GetSval().Sval)]:
-				return nil
-			case k.GetIval() != nil && k.GetIval().Ival == 0:
-				return nil
-			}
-		}
-	}
-	return c.unsupported("SET TIME ZONE to a zone other than UTC")
-}
-
 func (c *pgConv) transactionSet(v *pg.VariableSetStmt) error {
 	var level, readOnly string
 	switch v.Kind {
@@ -315,8 +307,10 @@ func (c *pgConv) stmt(n *pg.Node) (sqlir.Statement, error) {
 		if err := c.transactionSet(v); err != nil {
 			return nil, err
 		}
-		if err := c.timeZoneSet(v); err != nil {
+		if zone, ok, err := c.timeZoneSet(v); err != nil {
 			return nil, err
+		} else if ok {
+			return &sqlir.SetStmt{Name: "timezone", Local: v.IsLocal, Zone: zone}, nil
 		}
 		if v.Kind == pg.VariableSetKind_VAR_RESET_ALL {
 			// Resets every setting, among them lock_timeout, the one
@@ -1984,15 +1978,23 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		return &sqlir.FuncCall{Name: name, Args: args}, nil
 	case *pg.Node_SqlvalueFunction:
 		switch e.SqlvalueFunction.Op {
-		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP:
+		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP:
 			return &sqlir.FuncCall{Name: "now"}, nil
+		case pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP:
+			// LOCALTIMESTAMP is a timestamp, now()'s clock in the session's
+			// TimeZone. It cannot be written as a call, so the name is free.
+			return &sqlir.FuncCall{Name: "localtimestamp"}, nil
 		case pg.SQLValueFunctionOp_SVFOP_CURRENT_DATE:
 			// CURRENT_DATE cannot be written as a call, so the name is free.
 			return &sqlir.FuncCall{Name: "current_date"}, nil
 		case pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N, pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N:
 			// current_timestamp with an argument cannot be written as a call,
 			// so it is free to carry the precision to round to.
-			return &sqlir.FuncCall{Name: "current_timestamp", Args: []sqlir.Expr{&sqlir.Const{Value: int64(e.SqlvalueFunction.Typmod)}}}, nil
+			name := "current_timestamp"
+			if e.SqlvalueFunction.Op == pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N {
+				name = "localtimestamp"
+			}
+			return &sqlir.FuncCall{Name: name, Args: []sqlir.Expr{&sqlir.Const{Value: int64(e.SqlvalueFunction.Typmod)}}}, nil
 		}
 		return nil, c.unsupported("SQL value function " + e.SqlvalueFunction.Op.String())
 	case *pg.Node_CaseExpr:

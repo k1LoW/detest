@@ -75,12 +75,33 @@ func (iv pgInterval) add(o pgInterval) pgInterval {
 	return pgInterval{iv.months + o.months, iv.days + o.days, iv.micros + o.micros}
 }
 
-// addToTime is t + iv as Postgres computes it: the months first, keeping
-// the day of the month unless the month is shorter, then the days, then the
-// time. A day is 24 hours, as in the session's TimeZone, UTC.
+// addToTime is t + iv for a timestamp's or a date's clock t: the months
+// first, keeping the day of the month unless the month is shorter, then the
+// days, then the time. addToInstant moves a timestamptz.
 func (iv pgInterval) addToTime(t time.Time) time.Time {
-	// A timestamptz parameter keeps the zone the application gave it, and
-	// Postgres reads its calendar in the session's.
+	return iv.addCalendar(t).Add(time.Duration(iv.micros) * time.Microsecond)
+}
+
+// addToInstant is t + iv for a timestamptz: the months and days added to
+// the clock t shows in loc, which keeps the clock across a daylight saving
+// change, and the time to the instant that clock is, as Postgres adds them.
+func (iv pgInterval) addToInstant(t instant, loc *time.Location) instant {
+	// The months and then the days, each added to the clock the instant
+	// before shows and read back as an instant, as timestamptz_pl_interval
+	// does: a month that lands on a clock time a zone skips is read on
+	// before the days are added. Without either, the clock is not read at
+	// all, so an instant whose clock a zone shows twice stays the one it is.
+	if iv.months != 0 {
+		t = instantAt(pgInterval{months: iv.months}.addCalendar(wallIn(t.Time, loc)), loc)
+	}
+	if iv.days != 0 {
+		t = instantAt(pgInterval{days: iv.days}.addCalendar(wallIn(t.Time, loc)), loc)
+	}
+	return newInstant(t.Add(time.Duration(iv.micros) * time.Microsecond))
+}
+
+// addCalendar is t moved by iv's months and days, on the clock t holds.
+func (iv pgInterval) addCalendar(t time.Time) time.Time {
 	t = t.UTC()
 	if iv.months != 0 {
 		y, m, d := t.Date()
@@ -92,7 +113,7 @@ func (iv pgInterval) addToTime(t time.Time) time.Time {
 		hh, mm, ss := t.Clock()
 		t = time.Date(ny, nm, d, hh, mm, ss, t.Nanosecond(), t.Location())
 	}
-	return t.AddDate(0, 0, int(iv.days)).Add(time.Duration(iv.micros) * time.Microsecond)
+	return t.AddDate(0, 0, int(iv.days))
 }
 
 // timeDifference is a - b as Postgres gives it: the difference in time,

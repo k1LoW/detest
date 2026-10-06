@@ -12,10 +12,8 @@ import (
 
 // This file reads Postgres's interval text and computes the date and time
 // functions detest runs: CURRENT_DATE, a cast to date, date_trunc, extract
-// and date_part. Postgres computes the ones that read a timestamptz's fields
-// in the session's TimeZone, which detest takes as UTC, the server's default,
-// and SET TIME ZONE to another zone is refused (postgres.go). A timestamp and
-// a timestamptz are both a time.Time in UTC, so they compute the same.
+// and date_part. They compute on a clock, a timestamp's or a date's, and a
+// timestamptz's is the clock it shows in the session's TimeZone (sqltz.go).
 
 // intervalUnit is a unit of interval text: the field of the interval it
 // counts in, months, days or microseconds, and how many of them it is.
@@ -280,14 +278,14 @@ func extractUnit(unit string) (string, bool) {
 var extractOnly = map[string]bool{"epoch": true, "dow": true, "isodow": true, "doy": true, "isoyear": true, "julian": true, "timezone": true, "timezone_hour": true, "timezone_minute": true}
 
 // errUnit is Postgres's error for a unit it does not take, which it raises
-// whatever the rows. detest cannot tell a timestamp from a timestamptz, so
-// the message names the latter.
+// whatever the rows. The unit is checked before the source is evaluated,
+// so the message names a timestamptz whatever the source is.
 func (x *sqlExec) errUnit(unit string) error {
 	return x.tx.db.kind.Error(sqlir.InvalidParameterValue, fmt.Sprintf("unit %q not recognized for type timestamp with time zone", unit), "", "", "")
 }
 
-// dateTrunc is date_trunc(unit, t) in UTC, as Postgres computes it after
-// reading t to microseconds. ok is false for a unit date_trunc does not take.
+// dateTrunc is date_trunc(unit, t) of the clock t, as Postgres computes it
+// after reading t to microseconds. ok is false for a unit date_trunc does not take.
 func dateTrunc(unit string, t time.Time) (time.Time, bool) {
 	t = t.UTC().Round(time.Microsecond)
 	u, ok := timeUnits[strings.ToLower(unit)]
@@ -404,8 +402,8 @@ func micros(us int64) string {
 	return s
 }
 
-// utcDate is the date of t in the session's TimeZone, UTC, at midnight, as
-// a date compares with a timestamp.
+// utcDate is the date of the clock t at midnight, as a date compares with a
+// timestamp.
 func utcDate(t time.Time) time.Time {
 	t = t.UTC()
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
