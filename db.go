@@ -2008,6 +2008,12 @@ func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, nil) }()
+	// It does not yield, so the caller is resolved here, which adopts a
+	// goroutine calling for the first time and takes back one that woke
+	// outside detest before the transaction changes.
+	if tx.p != nil && !tx.atomic {
+		goneStale(tx.db.s.Current())
+	}
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 

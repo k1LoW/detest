@@ -738,3 +738,34 @@ func TestExternalCallAfterSleepDeterministic(t *testing.T) {
 		}
 	}, Workers(4))
 }
+
+// A goroutine whose first call into detest is an enqueue on a transaction
+// handed to it is taken in as a process before the enqueue.
+func TestHandWrittenTxEnqueueByGoroutine(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		q := s.Queue("outbox")
+		s.Manual("pod", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					tx.Enqueue(q, Msg{"id": "m"})
+				})
+				wg.Wait()
+				return nil
+			})
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(st.Queue(q)) != 1 {
+				return fmt.Errorf("%d messages", len(st.Queue(q)))
+			}
+			return errors.New("done")
+		})
+	}, nil, nil, 0)
+	if !res.Violated || !strings.Contains(fmt.Sprint(res.Err), "done") {
+		t.Fatalf("expected the message published, got %v", res.Err)
+	}
+	if !strings.Contains(res.Trace, "starts goroutine pod#1.1") {
+		t.Errorf("the goroutine was not taken in:\n%s", res.Trace)
+	}
+}
