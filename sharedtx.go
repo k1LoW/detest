@@ -118,6 +118,18 @@ func (r *run) recordShared(a *sharedAccess) {
 	r.sharedLog = append(r.sharedLog, *a)
 }
 
+// stopEnding stops the exploration when a goroutine sharing a transaction
+// with its process ends it. database/sql marks the transaction done before
+// the driver hears of it, so a sibling whose statement comes later gets
+// sql.ErrTxDone without reaching detest, and which siblings ran in the
+// transaction is the runtime's choice, which no log of statements can tell.
+// It is called with the engine mutex held.
+func (r *run) stopEnding(what string) {
+	if r.pending == nil {
+		r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: a goroutine sharing a transaction with its process ran %s on it, and which of its siblings' statements ran before is decided by database/sql and the Go runtime rather than the schedule, so a replay would not reproduce it. Let the process that began the transaction end it, after its goroutines finished", what)}
+	}
+}
+
 // pointTable returns the table a statement touches only the rows of, by its
 // primary key, so that which rows it touches cannot depend on another
 // statement: an INSERT of given keys, or an UPDATE, a DELETE or a locking

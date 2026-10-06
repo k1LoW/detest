@@ -196,10 +196,8 @@ func (t *sqlTx) Commit() (err error) {
 		// next statement to run in.
 		t.c.tx = nil
 		tx.p.r.postCancel(txCancel{tx: tx, why: "rolls back, as its commit by a goroutine sharing it was refused"})
-		// The siblings' statements after it no longer run in the
-		// transaction, so it does not commute with them.
 		exit := t.c.db.s.enter(nil)
-		tx.p.r.recordShared(&sharedAccess{gid: goroutineID(), db: t.c.db, query: "COMMIT", write: true})
+		tx.p.r.stopEnding("COMMIT")
 		exit()
 		err := unsupported("a transaction committed by another goroutine than the one that began it", "COMMIT")
 		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
@@ -283,10 +281,8 @@ func (t *sqlTx) Rollback() (err error) {
 		why := "rolls back, as its context ended"
 		if t.ctx.Err() == nil {
 			why = "rolls back, by a goroutine sharing it"
-			// As a refused commit, it ends the transaction for the siblings'
-			// statements after it.
 			exit := t.c.db.s.enter(nil)
-			tx.p.r.recordShared(&sharedAccess{gid: goroutineID(), db: t.c.db, query: "ROLLBACK", write: true})
+			tx.p.r.stopEnding("ROLLBACK")
 			exit()
 		}
 		tx.p.r.postCancel(txCancel{tx: tx, why: why})

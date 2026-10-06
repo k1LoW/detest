@@ -568,41 +568,26 @@ func TestAdoptedGoroutineWokenBySeedNotRun(t *testing.T) {
 	})
 }
 
-// A goroutine that commits a transaction its parent began is refused, since
-// where the commit lands among the other processes could not be explored,
-// and the transaction does not stay on the pooled connection.
-func TestGoroutineCommitOnParentTxRefused(t *testing.T) {
-	var mu sync.Mutex
-	var got error
-	Explore(t, func(t *testing.T, s *Sim) {
-		db, store := s.DB("app", postgres.New())
+// A goroutine that commits a transaction its parent began stops the
+// exploration: database/sql ends the transaction before the driver hears of
+// it, so which of its siblings' statements ran in it is the runtime's.
+func TestGoroutineCommitOnParentTxStops(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
 		s.Manual("pod", 1, func(p *Proc) error {
 			tx, err := db.BeginTx(p.Context(), nil)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = tx.Rollback() }()
-			var gerr error
 			var wg sync.WaitGroup
-			wg.Go(func() { gerr = tx.Commit() })
+			wg.Go(func() { _ = tx.Commit() })
 			wg.Wait()
-			mu.Lock()
-			got = gerr
-			mu.Unlock()
-			// A refused commit leaves no transaction on the pooled
-			// connection for this statement to run in.
-			_, err = db.Exec(`INSERT INTO "marks" ("id") VALUES ('after')`)
-			return err
-		})
-		s.AtQuiescence(func(st *State) error {
-			if _, ok := st.Row(store, "marks", "after"); !ok {
-				return errors.New("a statement after the refused commit was not committed")
-			}
 			return nil
 		})
-	})
-	if _, ok := errors.AsType[*ErrUnsupportedSQL](got); !ok {
-		t.Errorf("the goroutine got %v, want an unsupported error", got)
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "ran COMMIT on it") {
+		t.Fatalf("want the exploration stopped for a goroutine's commit, got:\n%s", res.report())
 	}
 }
 
