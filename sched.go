@@ -415,10 +415,9 @@ func (r *run) execute() (v *violation) {
 		// have gone on, so the switch spends none of the budget.
 		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && cur != gaveWay && (o.kind != optResume || o.p != cur))
 		r.countSpin(o)
+		var spun *violation
 		if gaveWay != nil {
-			if v := r.handoff(gaveWay, before); v != nil {
-				return v
-			}
+			spun = r.handoff(gaveWay, before)
 		}
 		if r.pending != nil {
 			return r.pending
@@ -428,6 +427,10 @@ func (r *run) execute() (v *violation) {
 		}
 		if r.cut {
 			return nil // only the checks at quiescence are skipped
+		}
+		// Reported after what the step itself broke, which says more.
+		if spun != nil {
+			return spun
 		}
 	}
 	for _, p := range r.procs {

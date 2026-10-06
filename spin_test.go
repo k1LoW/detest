@@ -214,6 +214,36 @@ func TestOutsideStepEndsASpin(t *testing.T) {
 	}
 }
 
+// What the step given way to broke is reported before the handoff bound it
+// also reached, as it says more.
+func TestStepBrokenOnAHandoffIsReportedFirst(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		ySteps := 0
+		s.Seed(func() { ySteps = 0 })
+		s.Manual("x", 1, func(p *Proc) error {
+			for {
+				p.Step("x waits")
+			}
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			for {
+				p.Step("y waits")
+				ySteps++
+			}
+		})
+		s.Always(func(st *State) error {
+			if ySteps > 0 {
+				return fmt.Errorf("y stepped")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if !res.Violated || res.Kind != "always invariant" {
+		t.Fatalf("want the always invariant reported, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {
