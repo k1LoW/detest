@@ -95,16 +95,21 @@ func transcript(c Case, res []stepResult) string {
 	return sb.String()
 }
 
-// session is one connection with the transaction it has open.
+// session is one connection with the transaction it has open, and the
+// function that ends the context the transaction began with.
 type session struct {
-	conn *sql.Conn
-	tx   *sql.Tx
+	conn     *sql.Conn
+	tx       *sql.Tx
+	cancelTx context.CancelFunc
 }
 
 func (s *session) run(ctx context.Context, st Step, outcome func(error) (string, bool)) string {
 	text, err := s.exec(ctx, st)
 	if err == nil {
 		return text
+	}
+	if errors.Is(err, sql.ErrTxDone) {
+		return "TX DONE"
 	}
 	if o, ok := outcome(err); ok {
 		if st.kind() == kindCommit && o == "ERROR 25P02" {
@@ -124,11 +129,13 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		tx, err := s.conn.BeginTx(ctx, opts)
+		tctx, cancel := context.WithCancel(ctx)
+		tx, err := s.conn.BeginTx(tctx, opts)
 		if err != nil {
+			cancel()
 			return "", err
 		}
-		s.tx = tx
+		s.tx, s.cancelTx = tx, cancel
 		return "OK", nil
 	case kindCommit, kindRollback:
 		if s.tx == nil {
@@ -136,6 +143,9 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 		}
 		tx := s.tx
 		s.tx = nil
+		if s.cancelTx != nil {
+			defer s.cancelTx()
+		}
 		if st.kind() == kindCommit {
 			return "OK", tx.Commit()
 		}
@@ -257,9 +267,10 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 			}
 		}
 		var (
-			res  []stepResult
-			done []bool
-			cmds []chan int
+			res      []stepResult
+			done     []bool
+			cmds     []chan int
+			sessions []*session
 		)
 		s.Seed(func() {
 			for _, q := range c.Seed {
@@ -273,6 +284,7 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 			for i := range cmds {
 				cmds[i] = make(chan int, 1)
 			}
+			sessions = make([]*session, c.Conns)
 		})
 		for i := range c.Conns {
 			s.Manual(fmt.Sprintf("conn%d", i), 1, func(p *detest.Proc) error {
@@ -282,6 +294,7 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 				}
 				defer conn.Close()
 				se := &session{conn: conn}
+				sessions[i] = se
 				for {
 					// A run that ends early cancels the context, and the process
 					// has to return for the run to unwind.
@@ -307,6 +320,12 @@ func runDetest(t *testing.T, b Backend, c Case) []string {
 				last[i] = -1
 			}
 			for k, st := range c.Steps {
+				if st.CancelTx {
+					sessions[st.Conn].cancelTx()
+					res[k].text, done[k] = "OK", true
+					p.WaitUntil(p.Now() + 1)
+					continue
+				}
 				if j := last[st.Conn]; j >= 0 && !done[j] {
 					return fmt.Errorf("step %d: conn%d still waits in step %d", k, st.Conn, j)
 				}
@@ -343,6 +362,7 @@ func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) stri
 	results := make(chan stepDone, len(c.Steps))
 	cmds := make([]chan int, c.Conns)
 	ids := make([]int64, c.Conns)
+	sessions := make([]*session, c.Conns)
 	var wg sync.WaitGroup
 	defer func() {
 		for _, ch := range cmds {
@@ -368,9 +388,10 @@ func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) stri
 			t.Fatal(err)
 		}
 		cmds[i] = make(chan int, 1)
+		se := &session{conn: conn}
+		sessions[i] = se
 		wg.Go(func() {
 			defer conn.Close()
-			se := &session{conn: conn}
 			for k := range cmds[i] {
 				results <- stepDone{k, se.run(ctx, c.Steps[k], b.Outcome)}
 			}
@@ -387,6 +408,15 @@ func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) stri
 		last[i] = -1
 	}
 	for k, st := range c.Steps {
+		if st.CancelTx {
+			time.Sleep(pauses[k])
+			sessions[st.Conn].cancelTx()
+			res[k].text = "OK"
+			if err := settle(ctx, b, db, ids, pending, results, res); err != nil {
+				t.Fatalf("step %d: %v", k, err)
+			}
+			continue
+		}
 		if j := last[st.Conn]; j >= 0 {
 			if _, ok := pending[j]; ok {
 				t.Fatalf("step %d: conn%d still waits in step %d", k, st.Conn, j)
