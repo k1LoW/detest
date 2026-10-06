@@ -435,7 +435,16 @@ func (r *run) execute() (v *violation) {
 		}
 		// Reported after what the step itself broke, which says more.
 		if spun != nil {
-			return spun
+			// A process outside detest the step woke may have reported back
+			// already, which ends the turns as a step of its own does. It is
+			// settled here, as the next step would before anything else.
+			r.settleOutside()
+			if r.pending != nil {
+				return r.pending
+			}
+			if r.handoffs > r.s.maxSpins {
+				return spun
+			}
 		}
 	}
 	for _, p := range r.procs {

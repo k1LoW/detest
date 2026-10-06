@@ -219,6 +219,41 @@ func TestOutsideStepEndsASpin(t *testing.T) {
 	}
 }
 
+// A process outside detest that the step given way to wakes reports back
+// before the handoff bound is checked, so with MaxSpins(1) the flag it sets
+// ends the turns instead of the run being reported.
+func TestOutsideStepOnAHandoffEndsTheTurns(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		var ch chan struct{}
+		var flag, started atomic.Bool
+		s.Seed(func() { ch = make(chan struct{}); flag.Store(false); started.Store(false) })
+		s.Manual("setter", 1, func(p *Proc) error {
+			started.Store(true)
+			<-ch
+			flag.Store(true)
+			return nil
+		}, When(func() bool { return ch != nil }))
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag.Load() {
+				p.Step("wait")
+			}
+			return nil
+		}, When(started.Load))
+		s.Manual("waker", 1, func(p *Proc) error {
+			p.Step("wake")
+			close(ch)
+			for !flag.Load() {
+				p.Step("waker waits")
+			}
+			return nil
+		}, When(started.Load))
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // What the step given way to broke is reported before the handoff bound it
 // also reached, as it says more.
 func TestStepBrokenOnAHandoffIsReportedFirst(t *testing.T) {
