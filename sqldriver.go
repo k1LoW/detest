@@ -392,6 +392,13 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	if c.bad {
 		return nil, 0, driver.ErrBadConn
 	}
+	// A statement whose context ended before it reached the driver, such as
+	// one waiting for database/sql's lock of the connection meanwhile, is not
+	// sent, as pgx and go-sql-driver check the context first. The connection
+	// and its transaction stay as they were.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		args[i] = nv.Value
