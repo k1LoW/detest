@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing/synctest"
 	"time"
 )
 
@@ -62,6 +61,12 @@ type procEvent struct {
 }
 
 type abortSentinel struct{}
+
+// Values of Proc.away.
+const (
+	awayOutside = iota + 1
+	awayCrashed
+)
 
 type triggerKind int
 
@@ -196,6 +201,15 @@ type run struct {
 	outside atomic.Int32
 	gidMu   sync.Mutex
 	byGid   map[string]*Proc // process by goroutine id, for attributing statements
+	// adopting holds the goroutines that called into detest for the first
+	// time and wait to be taken in as processes (see adopt), guarded by gidMu.
+	adopting []*Proc
+	// adoptCh wakes waitOutside when a goroutine is adopted.
+	adoptCh chan struct{}
+	// began is set once the scheduler first resumes a process. Goroutines
+	// woken outside detest read it, unlike current, which the scheduler
+	// changes while they run.
+	began atomic.Bool
 }
 
 type step struct {
@@ -222,6 +236,41 @@ type Proc struct {
 	exited   chan struct{} // closed when the process's goroutine returns
 	err      error
 	gid      string // goroutine id, for inspecting its state in runtime.Stack
+	// adopted marks a process for a goroutine the code under test started
+	// itself (see adopt). Its parent is the process that started it, and its
+	// family the process detest started that it descends from, with which it
+	// crashes.
+	adopted bool
+	parent  *Proc
+	creator string // the id of the goroutine that started an adopted one
+	// first describes the call an adopted goroutine was adopted at, which
+	// orders the goroutines of a parent taken in at the same step.
+	first  string
+	family *Proc
+	kids   int // goroutines adopted from this process, for naming them
+	// returned marks an adopted goroutine seen to have returned. Done alone
+	// does not tell, since one that crashed with its family is done while its
+	// goroutine still runs.
+	returned bool
+	// killed marks a process detest started that crashed, so that a
+	// goroutine of its pod calling into detest only afterwards is dead too.
+	killed bool
+	// victimOf is the transaction this process waits for a lock on behalf
+	// of, once the transaction that closed a cycle of lock waits picked it as
+	// the deadlock victim. It is per process, since several goroutines may
+	// wait on behalf of one transaction, and each must see the abort.
+	victimOf *Tx
+	// conns are the connections of hand-written transactions the process
+	// runs an operation on, which its crash gives back (see enterOp).
+	conns []*txConn
+	// lingering marks a process detest started whose goroutine was still
+	// running when its run ended and reap gave up on it. It is turned away
+	// in later runs as a retired adopted goroutine is.
+	lingering bool
+	// away is awayOutside while the process is blocked outside detest, and
+	// awayCrashed once it crashed with its family there. Its goroutine reads
+	// it when it wakes, alongside the scheduler, hence atomic.
+	away atomic.Uint32
 	// started is the run's version when the process started, and bumps
 	// counts the version changes the process made itself. An idle loop tick
 	// saw no change another process made after it started, even one
@@ -244,29 +293,49 @@ func (p *Proc) Name() string { return p.name }
 
 // Current returns the process whose goroutine is calling. Production code
 // called from a process does not carry the *Proc, so fakes injected at its
-// boundaries (clients, drivers) use this instead. A goroutine the process
-// itself spawned is not registered and falls back to the process the
-// scheduler resumed last.
-func (s *Sim) Current() *Proc {
-	if s.run == nil {
+// boundaries (clients, drivers) use this instead. A goroutine the code under
+// test started itself is adopted as a process of its own the first time it
+// calls (see adopt).
+func (s *Sim) Current() *Proc { return s.currentAs(nil) }
+
+// currentAs is Current for an entry point that can describe the call it is
+// about to make, such as a statement with its arguments. A goroutine adopted
+// at the call is ordered among its siblings by the description, which is
+// built only then.
+func (s *Sim) currentAs(first func() string) *Proc {
+	r := s.live.Load()
+	if r == nil {
 		return nil
 	}
-	r := s.run
-	// While no process is blocked outside detest, every process but the
-	// resumed one is parked inside detest and cannot be calling, so the lookup
-	// below would return r.current anyway. It is skipped because goroutineID
+	if !r.began.Load() {
+		// A seed, before any process ran. It may wake a goroutine of an
+		// earlier run, such as by closing that run's channel, which must be
+		// turned away rather than run as part of the seed: a retired one, or
+		// one that never called into detest before. No process ran yet, so a
+		// caller other than the scheduler's own goroutine is one of those.
+		if s.onSchedGoroutine() {
+			return nil
+		}
+		gid := goroutineID()
+		if p := s.retired(gid); p != nil {
+			return p
+		}
+		return s.retireUnknown(gid)
+	}
+	onProc, _ := onProcGoroutine()
+	// While no process is blocked outside detest, every process detest started
+	// but the resumed one is parked inside detest and cannot be calling, so the
+	// lookup would return r.current anyway. It is skipped because goroutineID
 	// takes a runtime-wide lock, which parallel workers contend on.
-	if r.outside.Load() == 0 {
+	if onProc && r.outside.Load() == 0 && s.lingerN.Load() == 0 {
 		return r.current
 	}
-	gid := goroutineID()
-	r.gidMu.Lock()
-	p, ok := r.byGid[gid]
-	r.gidMu.Unlock()
-	if ok {
-		return p
+	p := s.lookup(r, onProc, first)
+	if p == nil {
+		return nil
 	}
-	return r.current
+	p.comeBack()
+	return p
 }
 
 func (r *run) choose(label string, n int) int {
@@ -358,8 +427,9 @@ func (r *run) execute() (v *violation) {
 		// Let the processes left parked unwind, and database/sql roll back the
 		// transactions they left open, before the next run resets the simulated resources.
 		r.cancel()
-		synctest.Wait()
+		r.s.settled()
 		r.reap()
+		r.retire()
 		if rec := recover(); rec != nil {
 			if _, ok := rec.(abortSentinel); !ok {
 				panic(rec)
@@ -370,7 +440,7 @@ func (r *run) execute() (v *violation) {
 		if r.s.progress != nil {
 			r.s.progress.steps.Add(1)
 		}
-		r.settleOutside()
+		r.settle()
 		if r.pending != nil {
 			return r.pending
 		}
@@ -388,7 +458,17 @@ func (r *run) execute() (v *violation) {
 			if r.advanceClock() {
 				continue
 			}
+			// A goroutine that returned is told apart before waiting, which
+			// would otherwise last the whole outsideWaitLimit for it.
+			if r.reapAdopted() {
+				continue
+			}
 			if r.waitOutside() {
+				continue
+			}
+			// One that slept after its last call may have returned while the
+			// wait lasted, sending nothing.
+			if r.reapAdopted() {
 				continue
 			}
 			if r.turnsSpent() {
@@ -626,8 +706,17 @@ func (r *run) enabled() []option {
 		opts = append(opts, option{kind: optResume, p: p})
 	}
 	if r.crashes < r.s.maxCrashes {
+		// A goroutine dies only with its pod, so a crash takes a family, the
+		// process detest started with the goroutines adopted from it. It may
+		// strike while any of them stands at a step, such as a pod waiting
+		// in errgroup.Wait while its goroutines poll.
 		for _, p := range r.procs {
-			if p.state == stateReady || p.state == stateBlockedLock {
+			if p.adopted {
+				continue
+			}
+			// A root that is done still dies with the goroutines it left
+			// running, such as a worker tick that handed its job to one.
+			if p.state == stateReady || p.state == stateBlockedLock || r.familyAtStep(p) {
 				opts = append(opts, option{kind: optCrash, p: p})
 			}
 		}
@@ -715,6 +804,10 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 // Step records a step with no effect on a simulated resource, such as a decision made
 // by an external environment. It is a yield point.
 func (p *Proc) Step(format string, args ...any) {
+	defer p.r.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return canonical(format, args) })
+	goneStale(p)
 	p.yieldf(format, args...)
 }
 
@@ -744,6 +837,7 @@ var debugSched = os.Getenv("DETEST_DEBUG") != ""
 
 func (r *run) resume(p *Proc) {
 	r.current = p
+	r.began.Store(true)
 	if debugSched {
 		fmt.Fprintf(os.Stderr, "[detest] resume %s (state %d, gid %s)\n", p.name, p.state, p.gid)
 	}
@@ -753,9 +847,7 @@ func (r *run) resume(p *Proc) {
 		fmt.Fprintf(os.Stderr, "[detest] %s -> event ok=%v kind=%d\n", p.name, ok, ev.kind)
 	}
 	if !ok {
-		p.state = stateBlockedOutside
-		r.outside.Add(1)
-		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+		r.parkOutside(p)
 		return
 	}
 	// Only the events of the resumed process enter the fingerprint: when
@@ -775,12 +867,28 @@ func (r *run) resume(p *Proc) {
 // which is not a durable block. Such a hang is left to the stall watchdog;
 // inspecting goroutine stacks here instead stops the world on every step.
 func (r *run) awaitEvent(p *Proc) (procEvent, bool) {
-	synctest.Wait()
+	r.s.settled()
 	select {
 	case ev := <-p.ev:
 		return ev, true
 	default:
 		return procEvent{}, false
+	}
+}
+
+// settle takes in the goroutines adopted since the last step and the
+// processes back from outside detest, until none is left. Each one it runs
+// may start or wake another.
+func (r *run) settle() {
+	for {
+		took := r.takeAdopted()
+		r.settleOutside()
+		r.gidMu.Lock()
+		more := len(r.adopting) > 0
+		r.gidMu.Unlock()
+		if !took && !more {
+			return
+		}
 	}
 }
 
@@ -798,7 +906,7 @@ func (r *run) settleOutside() {
 	if len(outside) == 0 {
 		return
 	}
-	synctest.Wait()
+	r.s.settled()
 	for _, p := range outside {
 		select {
 		case ev := <-p.ev:
@@ -810,7 +918,7 @@ func (r *run) settleOutside() {
 
 // takeOutside handles the event of a process that was blocked outside detest.
 func (r *run) takeOutside(p *Proc, ev procEvent) {
-	r.outside.Add(-1)
+	r.leaveOutside(p)
 	// A process outside detest took a step, which may have made true what a
 	// spinning process waits for, so the spin and the turns end as when
 	// another is resumed.
@@ -820,8 +928,13 @@ func (r *run) takeOutside(p *Proc, ev procEvent) {
 		r.handleEvent(p, ev)
 		return
 	}
-	// The process runs on to its next event as part of the current step, as
-	// it would have alongside the process that woke it, but alone.
+	r.runSync(p)
+}
+
+// runSync runs a process that asked to be run now (evSync) on to its next
+// event as part of the current step, as it would have run alongside the
+// process that woke or started it, but alone.
+func (r *run) runSync(p *Proc) {
 	prev := r.current
 	p.state = stateReady
 	r.current = p
@@ -829,12 +942,31 @@ func (r *run) takeOutside(p *Proc, ev procEvent) {
 	ev, ok := r.awaitEvent(p)
 	r.current = prev
 	if !ok {
-		p.state = stateBlockedOutside
-		r.outside.Add(1)
-		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+		r.parkOutside(p)
 		return
 	}
 	r.handleEvent(p, ev)
+}
+
+// parkOutside records that p blocked on a primitive detest does not model.
+// An adopted goroutine that returned looks the same, until reapAdopted.
+func (r *run) parkOutside(p *Proc) {
+	p.state = stateBlockedOutside
+	p.away.Store(awayOutside)
+	if !p.adopted {
+		// outside counts the goroutines detest started that may run alongside
+		// the resumed one. An adopted goroutine is looked up by its id anyway,
+		// and one that returned would keep the count up for the rest of the run.
+		r.outside.Add(1)
+	}
+	r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+}
+
+func (r *run) leaveOutside(p *Proc) {
+	p.away.Store(0)
+	if !p.adopted {
+		r.outside.Add(-1)
+	}
 }
 
 // waitOutside blocks until a process parked outside detest reports back, when
@@ -850,43 +982,71 @@ func (r *run) waitOutside() bool {
 	if len(waiting) == 0 {
 		return false
 	}
-	cases := make([]reflect.SelectCase, 0, len(waiting)+1)
+	cases := make([]reflect.SelectCase, 0, len(waiting)+2)
 	for _, p := range waiting {
 		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.ev)})
 	}
 	timeout := time.NewTimer(outsideWaitLimit)
 	defer timeout.Stop()
 	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timeout.C)})
+	// A goroutine one of them started may call into detest first.
+	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.adoptCh)})
 	chosen, v, _ := reflect.Select(cases)
-	if chosen == len(waiting) {
+	switch chosen {
+	case len(waiting):
 		return false // nothing reported back in time: left to the quiescence check
+	case len(waiting) + 1:
+		r.s.settled() // the goroutines woken with it reach detest too
+		return true   // taken in by settle
 	}
+	// The process ran alongside nothing detest schedules, but goroutines it
+	// started may still be on their way to detest. Taking them in only once
+	// they all got there keeps which ones are taken in this step independent
+	// of the runtime's timing.
+	r.s.settled()
 	ev, _ := reflect.TypeAssert[procEvent](v) // p.ev carries only procEvent
 	r.takeOutside(waiting[chosen], ev)
 	return true
 }
 
-// crash kills p where it stands, at a yield point or waiting for a lock. Its
-// goroutine is not resumed again: it stays parked until the run ends and then
-// unwinds with the others, its deferred calls finding the run over.
+// crash kills p where it stands, at a yield point or waiting for a lock, with
+// the goroutines adopted from it, as a pod dies with all its goroutines. A
+// goroutine killed so is not resumed again. It stays parked until the run
+// ends and then unwinds with the others, its deferred calls finding the run
+// over. One blocked outside detest wakes to the same (see Current).
 func (r *run) crash(p *Proc) {
 	r.crashes++
 	r.note(p, "crashes: its transactions roll back, the mutexes it held are freed")
-	p.state = stateDone
-	p.waitRow, p.waitLock = nil, nil
-	if p.tx != nil && !p.tx.closed {
-		p.tx.rollback()
-	}
-	for _, tx := range p.txs {
-		if !tx.closed {
-			tx.rollback()
-		}
-	}
-	p.txs = nil
+	wasDone := p.state == stateDone
+	p.killed = true
 	freed := false
-	for _, l := range r.s.locks {
-		if l.crash(p) {
+	for _, m := range r.procs {
+		if m != p && (!m.adopted || m.family != p) {
+			continue
+		}
+		if m.state == stateBlockedOutside {
+			// It stays counted outside, so that Current looks its goroutine
+			// up when it wakes and finds it crashed, rather than take it on
+			// the fast path for the process being run.
+			m.away.Store(awayCrashed)
+		}
+		if m.state != stateDone {
+			r.finish(m)
+			m.waitRow, m.waitLock = nil, nil
+		}
+		// The connection of a hand-written transaction it ran an operation
+		// on is free again, for a process of another pod sharing it.
+		for _, c := range m.conns {
+			c.by, c.depth = nil, 0
 			freed = true
+		}
+		m.conns = nil
+		// A goroutine that returned may still hold a mutex, which Go lets
+		// another goroutine of the pod unlock later, so it is freed too.
+		for _, l := range r.s.locks {
+			if l.crash(m) {
+				freed = true
+			}
 		}
 	}
 	if freed {
@@ -896,10 +1056,21 @@ func (r *run) crash(p *Proc) {
 			}
 		}
 	}
-	if p.msg != nil {
-		r.redeliver(p)
+	if p.msg != nil && !wasDone {
+		r.redeliver(p) // a root that was done had settled its message already
 	}
 	r.bump(nil)
+}
+
+// familyAtStep reports whether a goroutine adopted from p stands at a step,
+// where a crash of its pod may strike.
+func (r *run) familyAtStep(p *Proc) bool {
+	for _, m := range r.procs {
+		if m.adopted && m.family == p && (m.state == stateReady || m.state == stateBlockedLock) {
+			return true
+		}
+	}
+	return false
 }
 
 // bump records a change of committed state. p is the process that made it,
@@ -937,6 +1108,9 @@ func (r *run) reap() {
 	limit := time.NewTimer(reapLimit)
 	defer limit.Stop()
 	for _, p := range r.procs {
+		if p.adopted {
+			continue // detest did not start it and cannot tell when it returns
+		}
 		select {
 		case <-p.exited:
 		case <-limit.C:
@@ -951,8 +1125,16 @@ const reapLimit = time.Hour
 
 // outsideWaitLimit bounds how long the scheduler waits for a process parked
 // outside detest when nothing else can run. The bubble's clock is fake, so it
-// only fires when no earlier timer exists.
-const outsideWaitLimit = 10 * time.Second
+// only fires when no earlier timer exists, and costs no real time. It outlasts
+// the sleeps of the code under test, such as a lease or a backoff of minutes,
+// which a shorter limit would report as a process blocked for good. A sleep of
+// a day or more is still reported so. Telling a timer wait from a wait nothing
+// will end is not done, since a select over a context and a ticker looks the
+// same as one over channels alone in a goroutine dump, and waiting without a
+// limit turns a real deadlock into synctest's panic, which loses the schedule.
+// The extra nanosecond keeps the limit from firing together with a sleep of
+// exactly a day, which would leave the outcome to the runtime.
+const outsideWaitLimit = 24*time.Hour + time.Nanosecond
 
 func (r *run) handleEvent(p *Proc, ev procEvent) {
 	switch ev.kind {
@@ -1100,6 +1282,10 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // WaitUntil blocks until the simulated clock reaches t. The clock advances only when
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
+	defer p.r.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return canonical("wait until", t) })
+	goneStale(p)
 	if p.r.clock >= t {
 		return
 	}
@@ -1112,12 +1298,20 @@ func (p *Proc) WaitUntil(t int64) {
 
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
+	defer p.r.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return "choose " + label })
+	goneStale(p)
 	return p.r.choose(label, n)
 }
 
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
+	defer p.r.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return "spawn " + name })
+	goneStale(p) // its run is over and must not grow
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
@@ -1159,6 +1353,11 @@ func (p *Proc) main() {
 // ran while it waited, an order it did not run in.
 func (p *Proc) yieldf(format string, args ...any) {
 	if p.r.over() {
+		if p.adopted {
+			// It may run alongside a later run, so the call stops here, and
+			// the entry point that absorbs the panic returns errRunOver.
+			panic(abortSentinel{})
+		}
 		return // cleanup after the run runs through without scheduling
 	}
 	var st step
@@ -1416,9 +1615,15 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
+	if s.schedGid == "" {
+		// Every run of a Sim is scheduled on the goroutine of its bubble.
+		s.schedGid = goroutineID()
+		s.schedEntry, _ = bottomEntry()
+	}
 	s.run = r
+	s.live.Store(r)
 	for _, db := range s.dbs {
 		db.reset()
 	}

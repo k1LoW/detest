@@ -31,7 +31,7 @@ A process is blocked on something detest does not see. The stacks printed show w
 
 ## `process X is blocked on a channel or WaitGroup that nothing left running can release`
 
-The code waits for a goroutine it started, or for something that only happens outside the simulation. Drive a synchronous entry point, model the goroutine as a process (`p.Spawn`), or replace the background machinery with `Loop`/`OnMessage`.
+The code waits for something that only happens outside the simulation, or for a goroutine it started that never calls into detest and never returns. Replace the background machinery with `Loop`/`OnMessage`, or drive a synchronous entry point.
 
 ## `the simulation is nondeterministic`
 
@@ -40,7 +40,7 @@ Replaying the same choices produced different operations. Look for:
 - map iteration deciding the order or set of statements. In the harness's own code, iterate sorted keys. In production code, do not sort it for the test: the order varies in production too and may be the bug itself, such as rows locked in map order deadlocking, so a sorted test path would hide it. Report it to the user as a finding, propose sorting in the production code, or stop as for a fidelity blocker;
 - `math/rand` or random IDs deciding control flow (not just values);
 - caches, `sync.Once`, package-level variables surviving from one run to the next. The declaration function runs once per worker, so building them there is not enough. Clear or rebuild them in a `Seed`, rebuilding the service there when its cache cannot be cleared;
-- goroutines the code starts and does not wait for;
+- goroutines the code starts that sleep before their first call into detest and outlive the run that started them;
 - Go state shared across workers (with `Workers(n)`, the declaration function runs once per worker; avoid package-level state).
 
 ## `waits for ... held by its own open transaction`

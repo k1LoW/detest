@@ -1,8 +1,10 @@
 package detest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 )
@@ -65,7 +67,13 @@ func (s *Sim) External(name string, opts ...ExternalOption) *External {
 // db (the remote service's own database); the explorer picks the outcome. The
 // effect's returned error is an application error (NotFound, FailedPrecondition)
 // and rolls the effect back; ErrUnavailable is a transport failure.
-func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) error {
+func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) (err error) {
+	defer e.s.leave()
+	defer func() { absorbAbort(recover(), p, &err) }()
+	p = p.resolve(func() string { return e.name + " " + desc })
+	if p.stale() {
+		return errRunOver
+	}
 	n := len(e.outcomes)
 	if p.r.failures >= p.r.s.maxFailures {
 		n = 1
@@ -85,7 +93,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 	}
 	tx := db.newTx(p)
 	tx.atomic = true
-	err := effect(tx)
+	err = effect(tx)
 	if err != nil {
 		tx.rollback()
 		p.r.note(p, "%s(%s): %s, effect rejected: %v", e.name, desc, out, err)
@@ -105,7 +113,13 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 // ErrUnavailable without running it; FailAfter runs it (its effects, including
 // SQL issued through detest's driver, happen and yield as usual) and then
 // returns ErrUnavailable, modeling a response lost after the callee committed.
-func (e *External) Do(p *Proc, desc string, call func() error) error {
+func (e *External) Do(p *Proc, desc string, call func() error) (err error) {
+	defer e.s.leave()
+	defer func() { absorbAbort(recover(), p, &err) }()
+	p = p.resolve(func() string { return e.name + " " + desc })
+	if p.stale() {
+		return errRunOver
+	}
 	n := len(e.outcomes)
 	if p.r.failures >= p.r.s.maxFailures {
 		n = 1
@@ -123,7 +137,7 @@ func (e *External) Do(p *Proc, desc string, call func() error) error {
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
 	}
-	err := call()
+	err = call()
 	switch {
 	case err != nil:
 		p.r.note(p, "%s(%s): %s, callee returned: %v", e.name, desc, out, err)
@@ -152,13 +166,16 @@ type transport struct {
 	h http.Handler
 }
 
-func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	p := t.e.s.Current()
+func (t *transport) RoundTrip(req *http.Request) (_ *http.Response, err error) {
+	p := t.e.s.currentAs(func() string { return requestKey(req) })
 	if p == nil {
 		return t.serve(req), nil // outside any process, such as in a seed
 	}
+	if p.stale() {
+		return nil, errRunOver
+	}
 	var resp *http.Response
-	err := t.e.Do(p, req.Method+" "+req.URL.Path, func() error {
+	err = t.e.Do(p, req.Method+" "+req.URL.Path, func() error {
 		resp = t.serve(req)
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("%s", resp.Status)
@@ -169,6 +186,12 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
+		return nil, err
+	}
+	if resp == nil {
+		// The call ended without a response, such as errRunOver when the
+		// run ended while it waited, which an http.RoundTripper must return
+		// rather than a nil response with no error.
 		return nil, err
 	}
 	return resp, nil
@@ -189,4 +212,39 @@ func (t *transport) serve(req *http.Request) *http.Response {
 	resp := rec.Result()
 	resp.Request = req
 	return resp
+}
+
+// requestKey describes a request for ordering goroutines adopted at it, by
+// its method, URL and body, which tells apart the requests goroutines of a
+// fan-out send for different items. The body is read only from the copy
+// GetBody gives, as connect and http.NewRequest set it for a buffered body,
+// since reading the body itself could block on a stream while the scheduler
+// does not yet see the goroutine. connect's GetBody rewinds and returns the
+// body the request itself reads, so the request is handed a fresh copy
+// afterwards, which leaves it as it was either way.
+func requestKey(req *http.Request) string {
+	// The headers are left out, as some carry a value fresh to each request,
+	// such as a trace id, which would order the goroutines differently in
+	// every run.
+	key := req.Method + " " + req.Host + " " + req.URL.String()
+	if req.GetBody == nil {
+		return key
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return key
+	}
+	b, err := io.ReadAll(body)
+	_ = body.Close()
+	if fresh, ferr := req.GetBody(); ferr == nil {
+		req.Body = fresh
+	} else if err == nil {
+		// GetBody cannot give it again, such as one whose Close ended it, so
+		// the request is handed what was read.
+		req.Body = io.NopCloser(bytes.NewReader(b))
+	}
+	if err != nil {
+		return key
+	}
+	return key + " " + string(b)
 }

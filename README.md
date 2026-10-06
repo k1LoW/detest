@@ -134,6 +134,8 @@ The simulations replace what the application talks to at the client boundary, th
 - A store detest has no simulation of, such as SQLite, MongoDB, DynamoDB, Spanner, or Redis holding locks or counters
 - Go memory shared between goroutines without one of the mutexes above, which `go test -race` checks
 
+Goroutines the code under test starts itself, such as an `errgroup`'s or the one a worker hands a claimed job to, are scheduled too. Each becomes a process of its own the first time it calls into one of these boundaries, named after the process that started it (`worker#1.1`), and a crash takes it down with that process.
+
 ### Database
 
 `s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.
@@ -246,6 +248,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Statements*
 
 - `BEGIN`, `COMMIT` and `ROLLBACK` sent as SQL (use `database/sql`'s transactions), `PREPARE`, `DEALLOCATE`, `DISCARD`, `LISTEN`, `NOTIFY`, `EXPLAIN`, `VACUUM`, `ANALYZE`, `SHOW`
+- A statement or a commit on a `*sql.Tx` from another process than the one that began it, such as an `errgroup` running statements on its parent's transaction, or two processes sharing one
 - `SET` of the settings listed under **Isolation**, and `SET search_path` to a path other than the one `postgres.SearchPath` declares, since detest resolves every name on the declared path. `SET search_path` to the declared path, as a migration writes it, and to an empty path, as `pg_dump` output does, runs, and so does the `set_config('search_path', ...)` a dump writes, under the same rule; any other call of `set_config` is a function detest does not run. `SET LOCAL lock_timeout` is acted on, and `RESET ALL` clears it, and `SET` of any other setting, such as `statement_timeout`, `application_name` or a custom setting, is accepted and ignored. `SET TIME ZONE` is described with the dates above. `current_setting` reading one back is refused
 
 `detest.CheckSQL` tells whether detest can run a statement, for the cases the statement decides on its own, and refuses a function or an operator it does not know, or a call with other arguments than the function takes, wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`, where a run reaches only the expressions it evaluates. A case that depends on the schema or on the values, such as a generated column detest cannot compute or a comparison decided by the column's type, passes `CheckSQL` and fails when the statement runs, and so does an expression in a `CHECK` or a generated column, which the write that evaluates it refuses. A default detest cannot evaluate passes both, and a write that leaves the column out stores the `Unknown` marker unless the table's own schema reads the column. The statements refused in a run are listed after the exploration's report, as an application that drops the error hides them.

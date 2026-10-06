@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -317,14 +318,20 @@ func encodeKey(vals []any) string {
 }
 
 // Tx runs fn in a transaction: commit on nil, rollback on error.
-func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
+func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
+	defer db.s.leave()
+	defer func() { absorbAbort(recover(), p, &err) }()
+	p = p.resolve(func() string { return db.name + " tx" })
+	if p.stale() {
+		return errRunOver
+	}
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
 	tx := db.newTx(p)
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
-	err := fn(tx)
+	err = fn(tx)
 	if tx.closed {
 		p.tx = nil
 		return err
@@ -351,6 +358,10 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
 
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
+	defer db.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return db.name + " get " + table + " " + key })
+	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
 	r, ok := db.committed[table][key]
@@ -376,6 +387,10 @@ func sequenceName(s string) string {
 
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
+	defer db.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return db.name + " select " + table })
+	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
 	return publicRows(db.selectCommitted(table, publicPred(pred)))
@@ -389,11 +404,24 @@ func (db *DB) Peek(table string) []Row { return publicRows(db.selectCommitted(ta
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
+	if caller = tx.caller(func() string { return "select " + table }); caller.stale() {
+		runtime.Goexit()
+	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil
 	}
 	tx.yieldf("%s: select %s where ...", tx.db.name, table)
+	// Another goroutine using the transaction may have had it aborted
+	// while this one stood at its yield point.
+	if tx.check() != nil {
+		return nil
+	}
 	seen := map[string]bool{}
 	var keys []string
 	for k := range tx.db.committed[table] {
@@ -1703,6 +1731,10 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 type Tx struct {
 	db *DB
 	p  *Proc
+	// conn serializes the operations of a hand-written transaction several
+	// goroutines of its process use, as a connection runs one statement at
+	// a time (see enterOp).
+	conn txConn
 	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
 	// transaction holds. Letting a lock go or weakening it then changes what
 	// such a read finds, so an idle loop may tick again even if no row
@@ -1714,17 +1746,14 @@ type Tx struct {
 	moved      map[lockKey]string // the keys this transaction changed, as DB.moved
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
-	start   time.Time
-	locks   []lockKey
-	aborted bool
-	// deadlockVictim is set by the transaction that closed a cycle of lock
-	// waits when the explorer picked this waiting one to break it.
-	deadlockVictim bool
-	closed         bool
-	deferred       []func()
-	atomic         bool
-	block          bool // begun with BeginTx, so SAVEPOINT may be used
-	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
+	start    time.Time
+	locks    []lockKey
+	aborted  bool
+	closed   bool
+	deferred []func()
+	atomic   bool
+	block    bool // begun with BeginTx, so SAVEPOINT may be used
+	checking bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
 	// undo counts the undo records of the transaction's row changes, and
 	// lockStructs the lock structs its statements and waits took, which
 	// InnoDB weighs a deadlock victim by.
@@ -1828,17 +1857,36 @@ type savepoint struct {
 
 // Get reads one row.
 func (tx *Tx) Get(table, key string) (Row, bool) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
+	if caller = tx.caller(func() string { return "get " + table + " " + key }); caller.stale() {
+		runtime.Goexit()
+	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil, false
 	}
 	tx.yieldf("%s: select %s id=%s", tx.db.name, table, key)
+	if tx.check() != nil {
+		return nil, false // aborted while it stood at its yield point, as Select
+	}
 	r, ok := tx.view(table, key)
 	return publicRow(r), ok
 }
 
 // GetForUpdate reads one row and takes its lock (SELECT ... FOR UPDATE).
-func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
+func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return "get for update " + table + " " + key }); caller.stale() {
+		return nil, false, errRunOver
+	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return nil, false, err
@@ -1852,20 +1900,44 @@ func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
 }
 
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
-func (tx *Tx) Insert(table string, row Row) error {
+func (tx *Tx) Insert(table string, row Row) (err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return canonical("insert", table, row) }); caller.stale() {
+		return errRunOver
+	}
+	defer tx.enterOp(caller)()
 	row = tx.db.typedRow(table, row)
 	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
 
 // Update sets columns of one row. Returns false when the row does not exist.
-func (tx *Tx) Update(table, key string, fields Row) (bool, error) {
+func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return canonical("update", table, key, fields) }); caller.stale() {
+		return false, errRunOver
+	}
+	defer tx.enterOp(caller)()
 	n, err := tx.UpdateWhere(table, func(r Row) bool { return r.Key() == key }, fields, fmt.Sprintf("id=%s", key))
 	return n == 1, err
 }
 
 // CAS updates one row only if column field equals from (UPDATE ... WHERE id=?
 // AND field=?). Returns whether a row was updated.
-func (tx *Tx) CAS(table, key, field string, from, to any) (bool, error) {
+func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return canonical("cas", table, key, field, from, to) }); caller.stale() {
+		return false, errRunOver
+	}
+	defer tx.enterOp(caller)()
 	from, _ = tx.db.typedValue(table, field, from)
 	to, _ = tx.db.typedValue(table, field, to)
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
@@ -1981,14 +2053,30 @@ func (db *DB) duplicateKey(table, constraint string) error {
 // UpdateWhere updates every row matching pred and returns the count. Each
 // matching row is locked, then pred is re-evaluated on the version visible after
 // the lock is granted.
-func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (int, error) {
+func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (_ int, err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return canonical("update", table, desc, fields) }); caller.stale() {
+		return 0, errRunOver
+	}
+	defer tx.enterOp(caller)()
 	return tx.updateWhere(table, publicPred(pred), tx.db.typedRow(table, fields), desc)
 }
 
 // Delete removes one row. Returns whether it existed.
-func (tx *Tx) Delete(table, key string) (bool, error) {
+func (tx *Tx) Delete(table, key string) (_ bool, err error) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return "delete " + table + " " + key }); caller.stale() {
+		return false, errRunOver
+	}
+	defer tx.enterOp(caller)()
 	var found bool
-	err := tx.asStatement(func() error {
+	err = tx.asStatement(func() error {
 		var err error
 		found, err = tx.delete(table, key)
 		return err
@@ -1998,6 +2086,16 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
+	defer tx.db.s.leave()
+	// Another goroutine than its owner's may run it (see run).
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
+	// It does not yield, so resolving the caller here is what adopts a
+	// goroutine calling for the first time.
+	if caller = tx.caller(func() string { return canonical("enqueue", q.name, msg) }); caller.stale() {
+		runtime.Goexit()
+	}
+	defer tx.enterOp(caller)()
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
@@ -2010,7 +2108,10 @@ func (tx *Tx) asStatement(f func() error) error {
 	}
 	m := tx.markStatement()
 	err := f()
-	if err != nil {
+	// A statement refused because another goroutine using the transaction
+	// had it rolled back, such as by a deadlock, changed nothing, and
+	// rolling it back to its mark would bring back what that rollback undid.
+	if err != nil && !errors.Is(err, sqlir.ErrInFailedTx) {
 		tx.failStatement(m, errors.Is(err, sqlir.ErrDeadlock))
 	}
 	return err
@@ -2239,7 +2340,124 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return
 	}
-	tx.p.yieldf(format, args...)
+	tx.procAs(func() string { return canonical(format, args) }).yieldf(format, args...)
+}
+
+// caller resolves the caller of an operation of the transaction before the
+// operation reads or changes anything, which adopts a goroutine calling for
+// the first time and takes back one that woke outside detest. A goroutine of
+// an ended run it returns is stale, to be turned away. An insert evaluates
+// defaults such as nextval before it yields, which would otherwise take a
+// later run's sequence values. The operation's recovery from the end of the
+// run is handed the process too, which a stack too deep to classify leaves
+// unknown otherwise.
+func (tx *Tx) caller(first func() string) *Proc {
+	if tx.p == nil || tx.atomic {
+		return nil
+	}
+	return tx.db.s.currentAs(first)
+}
+
+// txConn is the connection of a hand-written transaction, which one
+// operation uses at a time. A process waiting for it is blocked as for a
+// mutex, so it takes part in the cycles of waits detest reports.
+type txConn struct {
+	by    *Proc // the process running an operation, nil while none does
+	depth int   // operations of by in progress, which may call each other
+}
+
+func (c *txConn) holders(*Proc) []*Proc {
+	if c.by == nil {
+		return nil
+	}
+	return []*Proc{c.by}
+}
+
+func (c *txConn) reset() {}
+
+func (c *txConn) crash(p *Proc) bool {
+	if c.by != p {
+		return false
+	}
+	c.by, c.depth = nil, 0
+	return true
+}
+
+// enterOp waits until no other process runs an operation of the
+// transaction and takes it for p, returning what gives it back. A real
+// connection runs one statement at a time, while the goroutines a process
+// hands its transaction to would otherwise interleave at their yield points,
+// such as a failed statement on MySQL rolling back to its mark and taking a
+// sibling's write that came after the mark with it.
+func (tx *Tx) enterOp(p *Proc) func() {
+	if p == nil || tx.p == nil || tx.atomic {
+		return func() {}
+	}
+	c := &tx.conn
+	if p != tx.p && c.by != p {
+		// Goroutines the process handed the transaction to reach here in an
+		// order of detest's own, so that whichever comes first would always
+		// run first. Yielding before taking it lets the explorer try each
+		// order a connection could have run their statements in. The
+		// process that began the transaction takes it without a yield, as
+		// one using its transaction alone always did.
+		p.yieldf("%s: use the transaction of %s", tx.db.name, tx.p.name)
+	}
+	for c.by != nil && c.by != p {
+		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
+	}
+	if c.by != p {
+		p.conns = append(p.conns, c)
+	}
+	c.by = p
+	c.depth++
+	return func() {
+		if c.by != p {
+			return
+		}
+		if c.depth--; c.depth > 0 {
+			return
+		}
+		c.by = nil
+		p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
+		if tx.p.r.over() {
+			return
+		}
+		for _, w := range tx.p.r.procs {
+			if w.state == stateBlockedLock && w.waitLock == c {
+				w.state, w.waitLock = stateReady, nil // each re-checks when resumed
+			}
+		}
+	}
+}
+
+// proc returns the process running the calling operation of the
+// transaction. It is p unless p handed the transaction to another goroutine,
+// such as one it started that a fake's hand-written transaction runs on,
+// which yields and waits for locks itself while p keeps owning the
+// transaction and its locks. It is resolved from the caller each time rather
+// than kept on the transaction, which two goroutines may use at once.
+func (tx *Tx) proc() *Proc { return tx.procAs(nil) }
+
+// procAs is proc for an operation that can describe itself (see currentAs).
+func (tx *Tx) procAs(first func() string) *Proc {
+	if c := tx.db.s.currentAs(first); c != nil && c != tx.p && c.r == tx.p.r {
+		return c
+	}
+	return tx.p
+}
+
+// waiters returns the processes waiting for a row lock on the transaction's
+// behalf, which a deadlock victim's abort wakes. There are several when
+// goroutines its process started use it at once.
+func (tx *Tx) waiters() []*Proc {
+	var out []*Proc
+	for _, w := range tx.p.r.procs {
+		if w.state == stateBlockedLock && w.waitRow != nil && w.waitRow.tx == tx {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func (tx *Tx) view(table, key string) (Row, bool) {
@@ -2354,6 +2572,11 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 		return 0, err
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
+	// Aborted by another goroutine while it stood at its yield point. An
+	// update matching no row takes no lock that would tell.
+	if err := tx.check(); err != nil {
+		return 0, err
+	}
 	n := 0
 	cols := make([]string, 0, len(fields))
 	for c := range fields {

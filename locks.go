@@ -103,6 +103,14 @@ func (tx *Tx) lockImplicit(lk lockKey, wait lockStruct) error {
 // lockWith takes a lock that InnoDB keeps in the struct grant once granted,
 // none for an implicit lock, and in the struct wait while it waits.
 func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error {
+	// Another goroutine using the transaction may have had it aborted, such
+	// as by a deadlock, while this operation stood at its yield point after
+	// its own check. Postgres refuses any statement of an aborted
+	// transaction, so the operation fails here rather than take the lock,
+	// explicit or the implicit one a write takes.
+	if err := tx.check(); err != nil {
+		return err
+	}
 	tx.started = true
 	table, _ := entryIndex(lk)
 	tx.noteTableLock(table, mode)
@@ -156,18 +164,23 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
-		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
+		if tx.lockTimeout && tx.proc().Choose("lock timeout on "+lk.table, 2) == 1 {
 			cancelWait()
 			tx.aborted = true
-			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
+			tx.p.r.note(tx.proc(), "lock timeout waiting for %s/%s", lk.table, lk.key)
 			markPassedOver(conflict) // gave up on the lock, as NOWAIT does
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		if err := tx.breakCycle(conflict, what); err != nil {
 			return err
 		}
-		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
+		tx.proc().blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
 		if err := tx.victim(); err != nil {
+			return err
+		}
+		// Another goroutine using the transaction may have had it
+		// aborted while this one waited.
+		if err := tx.check(); err != nil {
 			return err
 		}
 	}
@@ -180,11 +193,15 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 // same database. Postgres does not detect it (the holder is idle in
 // transaction), so the statement hangs until a timeout.
 func (tx *Tx) selfWait(conflict []*Tx, what, kind string) error {
+	// The process waiting is the one running the operation, which may be a
+	// goroutine its process handed the transaction to, and it waits for
+	// itself only when it is the one that would end the other transaction.
+	w := tx.proc()
 	for _, o := range conflict {
-		if o.p == tx.p {
+		if o.p == w {
 			tx.aborted = true
-			tx.p.r.note(tx.p, "waits for %s held by its own open transaction", what)
-			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", tx.p.name, kind)}
+			tx.p.r.note(w, "waits for %s held by its own open transaction", what)
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", w.name, kind)}
 			return ErrSelfWait
 		}
 	}
@@ -205,26 +222,40 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		if tx.db.kind.InnoDB() {
 			v = innodbVictim(members)
 		} else {
-			v = members[tx.p.Choose("deadlock victim", len(members))]
+			v = members[tx.proc().Choose("deadlock victim", len(members))]
 		}
 		// The victim gives up on the locks it waited for, as NOWAIT does,
 		// so their holders' release may let an idle loop it ran in retry.
 		if v == tx {
 			markPassedOver(conflict)
 			tx.aborted = true
-			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+			// Goroutines already waiting on its behalf see the abort too,
+			// or their process, waiting for them, could not roll it back.
+			for _, w := range tx.waiters() {
+				markPassedOver(w.waitRow.blockers())
+				w.victimOf = tx
+				w.state = stateReady
+				w.waitRow = nil
+			}
+			tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
-		markPassedOver(v.p.waitRow.blockers())
-		v.deadlockVictim = true
-		v.p.state = stateReady
-		v.p.waitRow = nil
+		// The victim is aborted now, so that another goroutine using it,
+		// which may take a lock before its waiter resumes, fails as in an
+		// aborted transaction rather than wait on its behalf.
+		v.aborted = true
+		for _, w := range v.waiters() {
+			markPassedOver(w.waitRow.blockers())
+			w.victimOf = v
+			w.state = stateReady
+			w.waitRow = nil
+		}
 	}
 	// A cycle left after another victim was picked is one the database
 	// detects too, once that victim's abort wakes this wait.
 	for _, o := range conflict {
-		if cycle == nil && tx.p.r.waitsFor(o.p, tx.p) {
-			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, what, o.p.name)}
+		if cycle == nil && tx.p.r.waitsFor(o.p, tx.proc()) {
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.proc().name, what, o.p.name)}
 			break
 		}
 	}
@@ -441,12 +472,13 @@ func entryIndex(lk lockKey) (table, index string) {
 // victim ends a wait that another transaction's deadlock check broke by
 // picking tx as the victim.
 func (tx *Tx) victim() error {
-	if !tx.deadlockVictim {
+	p := tx.proc()
+	if p.victimOf != tx {
 		return nil
 	}
-	tx.deadlockVictim = false
+	p.victimOf = nil
 	tx.aborted = true
-	tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+	tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 	return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 }
 
@@ -459,10 +491,16 @@ func (tx *Tx) rowWaitCycle(conflict []*Tx) []*Tx {
 	waitsFor := func(w *Tx) []*Tx {
 		// The process's wait may be another transaction's of the same process:
 		// one it keeps open while a second connection waits.
-		if w.p == nil || w.p.state != stateBlockedLock || w.p.waitRow == nil || w.p.waitRow.tx != w {
+		// The waiting processes may also be goroutines w's process handed it
+		// to, several at once.
+		if w.p == nil {
 			return nil
 		}
-		return w.p.waitRow.blockers()
+		var out []*Tx
+		for _, p := range w.waiters() {
+			out = append(out, p.waitRow.blockers()...)
+		}
+		return out
 	}
 	// The transactions tx would wait for, directly or through their waits,
 	// and for each one the transactions waiting for it among them.

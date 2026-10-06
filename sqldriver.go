@@ -97,6 +97,7 @@ func (c *sqlConn) Ping(context.Context) error {
 }
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.Tx, err error) {
+	defer c.db.s.leave()
 	defer func() {
 		// A begin cut short by the end of the run returns no Tx, so
 		// database/sql never rolls it back: the connection must not keep it.
@@ -107,6 +108,13 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 			c.tx, err = nil, errRunOver
 		}
 	}()
+	// The caller is resolved before anything else, as a goroutine of an
+	// ended run must not read the connection's state, nor s.run, which the
+	// scheduler may be setting for the next run.
+	p := c.db.s.currentAs(func() string { return canonical(c.db.name, "begin", opts.Isolation, opts.ReadOnly) })
+	if p.stale() {
+		return nil, errRunOver
+	}
 	c.dropStaleTx()
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
@@ -117,7 +125,6 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	if err != nil {
 		return nil, err
 	}
-	p := c.current()
 	tx := c.db.newTx(p)
 	// The session's settings hold for a transaction it begins, inside a
 	// process or not.
@@ -137,6 +144,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 // ExecContext and QueryContext return database errors as the server's Errors
 // option converts them, the type the production code's driver returns.
 func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
+	defer c.db.s.leave()
 	defer recoverRunOver(&err)
 	rows, affected, err := c.run(query, args)
 	if err != nil {
@@ -151,11 +159,35 @@ func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.N
 type sqlTx struct{ c *sqlConn }
 
 func (t *sqlTx) Commit() (err error) {
+	defer t.c.db.s.leave()
 	defer recoverRunOver(&err)
+	// The caller is resolved first, so that a goroutine of an ended run is
+	// turned away before it reads the connection.
+	caller := t.c.current()
+	if caller.stale() {
+		return errRunOver
+	}
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
 		return nil
+	}
+	if tx.p != nil && tx.p.r.over() {
+		// The run's databases are reset, or are a later run's, and a commit
+		// after the end of its run never counts.
+		return errRunOver
+	}
+	if borrowedTx(tx, caller) {
+		// database/sql rolls nothing back after a failed commit and puts the
+		// connection back in the pool, so the transaction ends here, rather
+		// than stay on the connection for the next statement to run in.
+		tx.rollback()
+		tx.p.forgetTx(tx)
+		err := unsupported("a transaction used by another goroutine than the one that began it", "COMMIT")
+		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
+			t.c.db.s.refuse(u)
+		}
+		return err
 	}
 	if tx.p != nil {
 		// The process keeps the transaction until the commit is done, so a
@@ -186,11 +218,20 @@ func (t *sqlTx) Commit() (err error) {
 }
 
 func (t *sqlTx) Rollback() (err error) {
+	defer t.c.db.s.leave()
 	defer recoverRunOver(&err)
+	// database/sql rolls back from a goroutine of its own when the context
+	// ends, which Current would adopt, so a stale caller is only looked up.
+	if t.c.db.s.staleCaller() {
+		return errRunOver
+	}
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
 		return nil
+	}
+	if tx.p.stale() {
+		return errRunOver // as Commit
 	}
 	if tx.p != nil {
 		defer tx.p.forgetTxUnlessOver(tx)
@@ -219,6 +260,7 @@ func (p *Proc) forgetTx(tx *Tx) {
 }
 
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
+	defer c.db.s.leave()
 	defer recoverRunOver(&err)
 	rows, _, err := c.run(query, args)
 	if err != nil {
@@ -249,6 +291,19 @@ func recoverRunOver(err *error) {
 }
 
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
+
+// borrowed reports whether p runs on a transaction another process began,
+// whether one of them is a goroutine the code under test started or both
+// are processes the test declared sharing a *sql.Tx. Its statements would
+// yield as the process that began it, whose own goroutine may be waiting
+// for p meanwhile, so detest refuses it rather than schedule it under the
+// wrong process. Rollback is not checked, since database/sql rolls
+// a transaction back from a goroutine of its own when its context ends.
+func (c *sqlConn) borrowed(p *Proc) bool { return borrowedTx(c.tx, p) }
+
+func borrowedTx(tx *Tx, p *Proc) bool {
+	return p != nil && tx != nil && tx.p != nil && p != tx.p && !tx.p.r.over()
+}
 
 // statementTx returns the transaction a statement runs in: the open one, or an
 // autocommit transaction committed right after the statement.
@@ -294,7 +349,13 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
-	if p := c.current(); p != nil {
+	if p := c.db.s.currentAs(func() string { return canonical(c.db.name, query, args) }); p != nil {
+		if p.stale() {
+			return nil, 0, errRunOver
+		}
+		if c.borrowed(p) {
+			return nil, 0, unsupported("a transaction used by another goroutine than the one that began it", query)
+		}
 		p.syncOutside()
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)

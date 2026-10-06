@@ -188,16 +188,21 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 		if cancelWait == nil {
 			cancelWait = tx.noteWait(structKey(table, "", lockUpdate, "insert intention"))
 		}
-		if tx.lockTimeout && tx.p.Choose("lock timeout on "+table, 2) == 1 {
+		if tx.lockTimeout && tx.proc().Choose("lock timeout on "+table, 2) == 1 {
 			cancelWait()
-			tx.p.r.note(tx.p, "lock timeout waiting for a gap in %s", table)
+			tx.p.r.note(tx.proc(), "lock timeout waiting for a gap in %s", table)
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "lock wait timeout exceeded", relname(table), "", "")
 		}
 		if err := tx.breakCycle(holders, what); err != nil {
 			return err
 		}
-		tx.p.blockOnRow(rowWait{key: lk, mode: lockUpdate, tx: tx, insert: row, old: old}, holders[0])
+		tx.proc().blockOnRow(rowWait{key: lk, mode: lockUpdate, tx: tx, insert: row, old: old}, holders[0])
 		if err := tx.victim(); err != nil {
+			return err
+		}
+		// Another goroutine using the transaction may have had it
+		// aborted while this one waited.
+		if err := tx.check(); err != nil {
 			return err
 		}
 	}
