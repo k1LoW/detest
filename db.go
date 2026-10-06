@@ -2267,15 +2267,17 @@ func (tx *Tx) procAs(first func() string) *Proc {
 	return tx.p
 }
 
-// waiter returns the process waiting for a lock on the transaction's
-// behalf, which a deadlock victim's abort wakes.
-func (tx *Tx) waiter() *Proc {
+// waiters returns the processes waiting for a row lock on the transaction's
+// behalf, which a deadlock victim's abort wakes. There are several when
+// goroutines its process started use it at once.
+func (tx *Tx) waiters() []*Proc {
+	var out []*Proc
 	for _, w := range tx.p.r.procs {
 		if w.state == stateBlockedLock && w.waitRow != nil && w.waitRow.tx == tx {
-			return w
+			out = append(out, w)
 		}
 	}
-	return tx.p
+	return out
 }
 
 func (tx *Tx) view(table, key string) (Row, bool) {

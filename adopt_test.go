@@ -873,3 +873,61 @@ func TestHandWrittenTxGoroutinesDeadlock(t *testing.T) {
 		t.Error("no run detected the deadlock between the goroutines")
 	}
 }
+
+// Two goroutines may wait on behalf of one hand-written transaction at
+// once, and a deadlock through either one's wait is detected. The goroutine
+// waiting for "c" sorts first and is on no cycle, while the one waiting for
+// "d" closes the cycle with y.
+func TestHandWrittenTxDeadlockThroughSecondWaiter(t *testing.T) {
+	var mu sync.Mutex
+	deadlocks := 0
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() {
+			for _, id := range []string{"a", "c", "d"} {
+				store.SeedRow("counters", Row{"id": id, "n": int64(0)})
+			}
+		})
+		count := func(err error) error {
+			if errors.Is(err, ErrDeadlock) {
+				mu.Lock()
+				deadlocks++
+				mu.Unlock()
+				return nil
+			}
+			return err
+		}
+		s.Manual("x", 1, func(p *Proc) error {
+			return count(store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+					return err
+				}
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i, id := range []string{"c", "d"} {
+					wg.Go(func() { _, _, errs[i] = tx.GetForUpdate("counters", id) })
+				}
+				wg.Wait()
+				return errors.Join(errs...)
+			}))
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			return count(store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "d"); err != nil {
+					return err
+				}
+				_, _, err := tx.GetForUpdate("counters", "a")
+				return err
+			}))
+		})
+		s.Manual("z", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				_, _, err := tx.GetForUpdate("counters", "c")
+				return err
+			})
+		})
+	}, MaxPreemptions(2))
+	if deadlocks == 0 {
+		t.Error("no run detected the deadlock")
+	}
+}
