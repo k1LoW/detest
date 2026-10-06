@@ -334,7 +334,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			if what := textArgumentMismatch(v, nil); what != "" {
 				return c.refuse(what)
 			}
-			if what := intervalBranchMismatch(branchArgs(v), nil); what != "" {
+			if what := intervalBranchMismatch(branchArgs(v), nil, nil); what != "" {
 				return c.refuse(what)
 			}
 		}
@@ -344,7 +344,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			return unsupported(what, c.query)
 		}
 		if !c.innodb {
-			if what := intervalBranchMismatch(branchArgs(v.Func), nil); what != "" {
+			if what := intervalBranchMismatch(branchArgs(v.Func), nil, nil); what != "" {
 				return c.refuse(what)
 			}
 		}
@@ -398,7 +398,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		return c.expr(v.X)
 	case *sqlir.CaseExpr:
 		if !c.innodb {
-			if what := intervalBranchMismatch(caseBranches(v), nil); what != "" {
+			if what := intervalBranchMismatch(caseBranches(v), nil, nil); what != "" {
 				return c.refuse(what)
 			}
 		}

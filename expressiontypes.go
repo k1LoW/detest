@@ -286,13 +286,20 @@ func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) s
 // no interval. A column whose type the check cannot resolve, of a * or a
 // set operation, may be an interval, so it is refused beside an interval or
 // a value of another type too.
-func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+//
+// subquery, when given, types a scalar subquery in its own scope, which
+// expressionType reads in the scope around it.
+func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	interval, other, unresolved := false, false, false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
 		}
-		switch typ := expressionType(e, column); {
+		typ := expressionType(e, column)
+		if q, ok := e.(*sqlir.SubQuery); ok && subquery != nil {
+			typ = subquery(q)
+		}
+		switch {
 		case untypedBranch(e):
 			other = true
 		case typ == "interval":
@@ -310,8 +317,8 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 }
 
 // untypedBranch reports a string literal or a parameter, or a CASE or
-// COALESCE of nothing else, which Postgres resolves to text, as in
-// COALESCE('bogus', '').
+// COALESCE of nothing else or of NULL only, which Postgres resolves to
+// text, as in COALESCE('bogus', '') and COALESCE(NULL, NULL).
 func untypedBranch(e sqlir.Expr) bool {
 	var branches []sqlir.Expr
 	switch e := e.(type) {
@@ -325,7 +332,6 @@ func untypedBranch(e sqlir.Expr) bool {
 	default:
 		return untypedExpr(e)
 	}
-	untyped := false
 	for _, b := range branches {
 		if k, ok := b.(*sqlir.Const); ok && k.Value == nil {
 			continue
@@ -333,9 +339,8 @@ func untypedBranch(e sqlir.Expr) bool {
 		if !untypedBranch(b) {
 			return false
 		}
-		untyped = true
 	}
-	return untyped
+	return len(branches) > 0
 }
 
 // branchArgs are the arguments of f that Postgres resolves to one type, for

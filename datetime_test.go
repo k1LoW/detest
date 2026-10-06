@@ -301,6 +301,8 @@ func TestIntervals(t *testing.T) {
 		{`SELECT COALESCE(v.every, interval '0') FROM (SELECT every FROM plan WHERE id = 2) v`, "30 days"},
 		{`WITH v AS (SELECT every FROM plan) SELECT max(COALESCE(every, NULL)) FROM v`, "1 year"},
 		{`SELECT CASE WHEN id = 4 THEN every ELSE interval '0' END FROM plan_view WHERE id = 4`, "1 year"},
+		{`SELECT COALESCE((SELECT every FROM plan WHERE id = 2), interval '0', NULL)`, "30 days"},
+		{`SELECT COALESCE(s.a, NULL) FROM (SELECT interval '1 month' AS v, 'ok'::text AS v) s(a, b)`, "1 mon"},
 		// LAG and LEAD evaluate their value once a row and the default only
 		// when it is returned.
 		{`SELECT max(n)::text FROM (SELECT id, lead(nextval('seq'), 0, '0') OVER (ORDER BY id) AS n FROM plan) w`, "4"},
@@ -450,6 +452,17 @@ func TestIntervals(t *testing.T) {
 		`SELECT lag(v.every, 1, '1 day') OVER (ORDER BY v.id) FROM (SELECT id, every FROM plan) v`,
 		`WITH v AS (SELECT every FROM plan) SELECT COALESCE(every, '1 day') FROM v`,
 		`SELECT COALESCE(every, '1 day') FROM plan_view`,
+		// Output types go by position, so a name two columns have does
+		// not take the other's type.
+		`SELECT COALESCE(s.a, 'bogus') FROM (SELECT interval '1 month' AS v, 'ok'::text AS v) s(a, b)`,
+		// A scalar subquery's column is read in its own scope, and a
+		// string literal there is text.
+		`SELECT COALESCE((SELECT every FROM plan WHERE id = 1), 'bogus')`,
+		`SELECT COALESCE(interval '1 month', (SELECT 'bogus'))`,
+		`SELECT CASE WHEN false THEN (SELECT every FROM plan WHERE id = 1) ELSE 'bogus' END`,
+		// A CASE or COALESCE of NULL only is text.
+		`SELECT COALESCE(interval '1 month', COALESCE(NULL, NULL))`,
+		`SELECT COALESCE(interval '1 month', CASE WHEN true THEN NULL END)`,
 		// A column of a * or a set operation is of a type the check does
 		// not resolve, which may be an interval.
 		`SELECT COALESCE(s.every, '1 day') FROM (SELECT * FROM plan) s`,

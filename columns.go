@@ -61,9 +61,10 @@ type columnChecker struct {
 	// cteTypes are the types of the CTEs' columns, by CTE and column, as
 	// ctes holds their names.
 	cteTypes []map[string]map[string]string
-	// outTypes are the types of a query's output columns by name, those
-	// expressionType knows, for a FROM item, a CTE or a view made of it.
-	outTypes map[*sqlir.SelectStmt]map[string]string
+	// outTypes are the types of a query's output columns by position, ""
+	// where expressionType does not know one, for a FROM item, a CTE, a
+	// view or a scalar subquery made of it.
+	outTypes map[*sqlir.SelectStmt][]string
 	params paramUses
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
@@ -358,7 +359,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	case t.Func != nil:
 		sc.types[alias] = map[string]string{}
 	case t.Sub != nil:
-		sc.types[alias] = renamedTypes(t.Sub, c.outTypes[t.Sub], t.Columns)
+		sc.types[alias] = namedTypes(t.Sub, c.outTypes[t.Sub], t.Columns)
 	default:
 		db := c.x.tx.db
 		if types, ok := c.cteTypesOf(t.Name); ok {
@@ -598,7 +599,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 			return nil, err
 		}
 		m[cte.Name] = s
-		tm[cte.Name] = renamedTypes(cte.Select, c.outTypes[cte.Select], nil)
+		tm[cte.Name] = namedTypes(cte.Select, c.outTypes[cte.Select], nil)
 	}
 	return pop, nil
 }
@@ -733,43 +734,68 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 }
 
 // noteOutputTypes records the types of a query's select list items that
-// expressionType knows, by their names. A set operation's and a *'s are not
+// expressionType knows, by position. A set operation's and a *'s are not
 // recorded, so their columns stay of unresolved type.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
-	types := map[string]string{}
+	var types []string
 	for _, t := range sel.Targets {
 		if t.Star {
 			return
 		}
-		if typ := expressionType(t.Expr, sc.columnType); typ != "" && typ != "unresolved column type" {
-			types[targetName(t)] = typ
+		typ := expressionType(t.Expr, sc.columnType)
+		if typ == "unresolved column type" {
+			typ = ""
 		}
+		types = append(types, typ)
 	}
 	if c.outTypes == nil {
-		c.outTypes = map[*sqlir.SelectStmt]map[string]string{}
+		c.outTypes = map[*sqlir.SelectStmt][]string{}
 	}
 	c.outTypes[sel] = types
 }
 
-// renamedTypes are the output types of sel under the names an AS alias(a, b)
-// or a view's column list gives its first columns.
-func renamedTypes(sel *sqlir.SelectStmt, types map[string]string, names []string) map[string]string {
+// namedTypes are the output types of sel by the names its columns have,
+// under those an AS alias(a, b) or a view's column list gives the first
+// ones. A name two columns have is left unresolved, as its type is either.
+func namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
+	out := map[string]string{}
 	// Without any, as of a * or a set operation, the item's columns are of
 	// unresolved type rather than unknown.
-	if types == nil {
-		return map[string]string{}
-	}
-	if len(names) == 0 {
-		return types
-	}
 	cols := outputNames(sel)
-	out := map[string]string{}
-	for i, n := range renamedCols(cols, names) {
-		if typ, ok := types[cols[i]]; ok {
-			out[n] = typ
+	if types == nil || len(cols) != len(types) {
+		return out
+	}
+	cols = renamedCols(cols, names)
+	seen := map[string]int{}
+	for _, n := range cols {
+		seen[n]++
+	}
+	for i, n := range cols {
+		if seen[n] == 1 && types[i] != "" {
+			out[n] = types[i]
 		}
 	}
 	return out
+}
+
+// subqueryType is the type of a scalar subquery's one column, read in its
+// own scope inside sc: text for a string literal or a parameter, as
+// Postgres resolves one, and "" where expressionType does not know it.
+func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
+	if q.Select == nil || len(q.Select.Targets) != 1 {
+		return ""
+	}
+	if untypedBranch(q.Select.Targets[0].Expr) {
+		return "text"
+	}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes}
+	if _, err := vc.query(q.Select, sc); err != nil {
+		return ""
+	}
+	if types := vc.outTypes[q.Select]; len(types) == 1 {
+		return types[0]
+	}
+	return ""
 }
 
 // viewTypes are the output types of a view's query, checked apart from the
@@ -779,7 +805,7 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) map[string]string {
 	if _, err := vc.query(v.View, nil); err != nil {
 		return map[string]string{}
 	}
-	return renamedTypes(v.View, vc.outTypes[v.View], v.ViewColumns)
+	return namedTypes(v.View, vc.outTypes[v.View], v.ViewColumns)
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that
@@ -1041,7 +1067,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.untypedOperands(sc, e.X, item)
 				}
 			case *sqlir.CaseExpr:
-				if what := intervalBranchMismatch(caseBranches(e), sc.columnType); what != "" {
+				if what := intervalBranchMismatch(caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
@@ -1063,7 +1089,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if e.Name == "nullif" && len(e.Args) == 2 {
 					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
-				if what := intervalBranchMismatch(branchArgs(e), sc.columnType); what != "" {
+				if what := intervalBranchMismatch(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
