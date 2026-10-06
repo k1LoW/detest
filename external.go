@@ -185,6 +185,12 @@ func (t *transport) RoundTrip(req *http.Request) (_ *http.Response, err error) {
 		}
 		return nil, err
 	}
+	if resp == nil {
+		// The call ended without a response, such as errRunOver when the
+		// run ended while it waited, which an http.RoundTripper must return
+		// rather than a nil response with no error.
+		return nil, err
+	}
 	return resp, nil
 }
 
