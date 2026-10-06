@@ -736,6 +736,9 @@ const (
 	AmbiguousColumn
 	// DuplicateColumn is a column an INSERT's column list names twice.
 	DuplicateColumn
+	// InvalidDatetimeFormat is text that does not read as a date, a time or
+	// an interval.
+	InvalidDatetimeFormat
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -750,6 +753,7 @@ var (
 	ErrDivisionByZero            = errors.New("detest: division by zero")
 	ErrNumericValueOutOfRange    = errors.New("detest: numeric value out of range")
 	ErrInvalidTextRepresentation = errors.New("detest: invalid input syntax")
+	ErrInvalidDatetimeFormat     = errors.New("detest: invalid datetime format")
 	ErrSyntaxError               = errors.New("detest: syntax error")
 	ErrUndefinedParameter        = errors.New("detest: undefined parameter")
 	ErrInvalidColumnReference    = errors.New("detest: invalid column reference")
@@ -775,7 +779,7 @@ var (
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
 		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
-		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn}
+		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn, InvalidDatetimeFormat: ErrInvalidDatetimeFormat}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers

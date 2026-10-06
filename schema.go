@@ -851,7 +851,7 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			continue
 		}
 		switch t {
-		case "bool", "timestamp", "timestamptz":
+		case "bool", "timestamp", "timestamptz", "date":
 			if x.tx.db.kind.InnoDB() || v == sqlir.Unknown {
 				continue
 			}
@@ -1026,7 +1026,7 @@ func (x *sqlExec) mysqlStoredText(t string, v any, fsp int) (any, error) {
 	return v, nil
 }
 
-// pgStoredValue is v as a Postgres boolean, timestamp or timestamptz column
+// pgStoredValue is v as a Postgres boolean, timestamp, timestamptz or date column
 // stores it. Text is read as the column's input, so 'true' and the time a
 // string spells compare like the values a driver binds.
 func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, error) {
@@ -1049,6 +1049,22 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 		// does not tell the two apart.
 		return nil, x.unsupported(fmt.Sprintf("a %T written to the boolean column %q", v, col))
 	}
+	if t == "date" {
+		// The date as written or as the driver's time.Time holds it: pgx
+		// takes the time's own year, month and day, and lib/pq sends its
+		// text, whose zone the date input drops.
+		switch v := v.(type) {
+		case time.Time:
+			return time.Date(v.Year(), v.Month(), v.Day(), 0, 0, 0, 0, time.UTC), nil
+		case string:
+			tm, _, ok := pgParseTime(v)
+			if !ok {
+				return nil, x.unsupported(fmt.Sprintf("the date value %q, in a format detest does not parse", v))
+			}
+			return time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, time.UTC), nil
+		}
+		return nil, x.unsupported(fmt.Sprintf("a %T written to the date column %q", v, col))
+	}
 	tm, err := x.pgStoredTime(t, col, v)
 	if err != nil {
 		return nil, err
@@ -1065,7 +1081,12 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 func (x *sqlExec) pgStoredTime(t, col string, v any) (time.Time, error) {
 	switch v := v.(type) {
 	case time.Time:
-		return v, nil
+		// A timestamp keeps the time's own clock, as the driver sends it,
+		// and a timestamptz the instant, kept in UTC.
+		if w, ok := wallClock(t, v).(time.Time); ok && t == "timestamp" {
+			return w, nil
+		}
+		return v.UTC(), nil
 	case string:
 		tm, hasZone, ok := pgParseTime(v)
 		if !ok {

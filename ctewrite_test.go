@@ -155,8 +155,8 @@ func TestCTEWritesUnsupported(t *testing.T) {
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) UPDATE jobs SET status = 'x' FROM c WHERE jobs.id = c.id RETURNING *`},
 		{postgres.New(), `WITH c AS (SELECT 1 AS id) DELETE FROM jobs USING c WHERE jobs.id = c.id RETURNING *`},
 		// An unread CTE is checked too, as Postgres analyzes it.
-		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) UPDATE jobs SET status = 'x'`},
-		{postgres.New(), `WITH c AS (SELECT date_trunc('day', now()) AS d) DELETE FROM jobs`},
+		{postgres.New(), `WITH c AS (SELECT to_char(now(), 'YYYY') AS d) UPDATE jobs SET status = 'x'`},
+		{postgres.New(), `WITH c AS (SELECT to_char(now(), 'YYYY') AS d) DELETE FROM jobs`},
 		// A CTE with effects runs in Postgres only as far as SET, RETURNING,
 		// a subquery or another CTE asks for its rows.
 		{postgres.New(), `WITH q AS (SELECT id FROM jobs FOR UPDATE SKIP LOCKED) DELETE FROM jobs WHERE id IN (SELECT id FROM q)`},
