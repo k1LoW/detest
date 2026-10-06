@@ -146,25 +146,6 @@ func wallClock(typ string, v any) any {
 // paramTextCast refuses a cast to text of a parameter holding a value other
 // than text or an integer, such as one ANY (ARRAY['x', $1]) makes: the text
 // a driver sends for a float, a boolean or a time is not modeled.
-// castLength is v cut to the length of a varchar(n) or char(n) cast, as an
-// explicit cast cuts longer text. A char(n) pads shorter text with spaces
-// it then compares without, which detest's plain strings do not follow, so
-// shorter text is refused there.
-func (x *sqlExec) castLength(c *sqlir.Cast, v any) (any, error) {
-	s, ok := derefValue(v).(string)
-	if !ok {
-		return v, nil
-	}
-	r := []rune(s)
-	if len(r) > c.Len {
-		r = r[:c.Len]
-	}
-	if c.Type == "bpchar" && len(r) < c.Len {
-		return nil, x.unsupported(fmt.Sprintf("a cast to char(%d) of shorter text", c.Len))
-	}
-	return string(r), nil
-}
-
 func (x *sqlExec) paramTextCast(c *sqlir.Cast, v any) error {
 	if _, ok := c.X.(*sqlir.Param); !ok || !textCast(c) || derefValue(v) == nil || isText(v) {
 		return nil
@@ -183,6 +164,21 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 		return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
 	}
 	return out, err
+}
+
+// castTo is x.cast of v for c, cut to the length of a varchar(n) cast, as
+// an explicit cast cuts longer text.
+func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
+	out, err := x.cast(v, c.Type)
+	if err != nil || c.Len == 0 {
+		return out, err
+	}
+	if s, ok := derefValue(out).(string); ok {
+		if r := []rune(s); len(r) > c.Len {
+			return string(r[:c.Len]), nil
+		}
+	}
+	return out, nil
 }
 
 // castInteger casts v to an integer before the target type's width is

@@ -1800,9 +1800,19 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			}
 		}
 		cast := &sqlir.Cast{X: x, Type: typ}
-		if typ == "varchar" || typ == "bpchar" {
-			// char alone is char(1), which the parser spells out.
-			if mods := typmods(e.TypeCast.TypeName); len(mods) == 1 {
+		if len(e.TypeCast.TypeName.GetTypmods()) > 0 {
+			switch typ {
+			case "bpchar":
+				// char(n), and char alone, which is char(1), pads text with
+				// spaces it then compares without, which detest's strings
+				// do not follow. A bare ::bpchar, as dumps write defaults,
+				// has no length and stays text.
+				return nil, c.unsupported("a cast to char(n)")
+			case "varchar":
+				mods := typmods(e.TypeCast.TypeName)
+				if len(mods) != 1 || mods[0] < 1 {
+					return nil, c.unsupported("a cast to varchar with a length other than a positive integer")
+				}
 				cast.Len = mods[0]
 			}
 		}

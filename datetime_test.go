@@ -340,9 +340,10 @@ func TestIntervals(t *testing.T) {
 		// An explicit cast to varchar(n) or char(n) cuts longer text.
 		{`SELECT CAST(interval '1 month' AS varchar(1))`, "1"},
 		{`SELECT 'abc'::varchar(2)`, "ab"},
-		{`SELECT 'abc'::char`, "a"},
-		{`SELECT 'abc'::char(3)`, "abc"},
 		{`SELECT 'abc'::varchar`, "abc"},
+		{`SELECT 'abc'::bpchar`, "abc"},
+		{`SELECT max(every)::varchar(1) FROM plan`, "1"},
+		{`SELECT count(*)::text FROM plan HAVING max(every)::varchar(1) = '1'`, "4"},
 		// date_trunc of an interval is an interval, so a date moved by it
 		// is a timestamp, whose hour extract reads.
 		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
@@ -427,8 +428,13 @@ func TestIntervals(t *testing.T) {
 		// rows where it holds an interval refuse the call.
 		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT interval '1 month' AS every) v`,
 		`SELECT greatest(v.every, '40 days') FROM (SELECT every FROM plan) v`,
-		// char(n) pads shorter text with spaces, which detest does not.
+		`SELECT CASE WHEN false THEN v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		// char(n) pads text with spaces it compares without, which
+		// detest's strings do not.
 		`SELECT 'ab'::char(3)`,
+		`SELECT 'abc'::char`,
+		`SELECT 'ab '::char(3) = 'ab'::char(2)`,
+		`SELECT 'a'::varchar(0)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

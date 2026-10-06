@@ -111,11 +111,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		out, err := x.cast(x.halfToInteger(v, paramDate(v, paramBool(v, val))), v.Type)
-		if err != nil || v.Len == 0 {
-			return out, err
-		}
-		return x.castLength(v, out)
+		return x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, val))))
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -1037,12 +1033,14 @@ func (x *sqlExec) branchValue(exprs []sqlir.Expr, vals []any, v any) (any, error
 		return commonNumber(exprs, v), nil
 	}
 	isInterval := func(a any) bool { _, ok := derefValue(a).(pgInterval); return ok }
-	if slices.ContainsFunc(vals, isInterval) && slices.ContainsFunc(vals, func(a any) bool { return !isInterval(a) && derefValue(a) != nil }) {
+	other := func(a any) bool { return !isInterval(a) && derefValue(a) != nil }
+	if slices.ContainsFunc(vals, isInterval) && (slices.ContainsFunc(vals, other) || slices.ContainsFunc(exprs, untypedBranch)) {
 		// Postgres reads '40 days' beside an interval as an interval, which
 		// detest does not. The column check refuses the branches whose
 		// types it knows; this catches a derived column, whose type it
-		// does not, in the rows where it holds one.
-		return nil, x.unsupported("an interval and a value of another type among the arguments of COALESCE, GREATEST, LEAST or NULLIF")
+		// does not, in the rows where it holds one. A CASE branch no row
+		// takes is not evaluated, so its form tells it is untyped.
+		return nil, x.unsupported("an interval and a value of another type among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
 	}
 	// A column's type shows only in its value, so a float there makes the
 	// integer of another branch a float, as 1 ELSE amount is a numeric; a
