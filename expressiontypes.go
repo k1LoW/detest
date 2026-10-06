@@ -9,6 +9,13 @@ import (
 // expressionType uses only types the statement or its declared columns tell
 // us. It never evaluates an argument while resolving a function signature.
 func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+	return expressionTypeIn(e, column, nil)
+}
+
+// expressionTypeIn is expressionType with subquery, when given, typing a
+// scalar subquery in its own scope, which expressionType reads in the scope
+// around it.
+func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	switch e := e.(type) {
 	case *sqlir.Cast:
 		return e.Type
@@ -33,14 +40,14 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "bool"
 		}
 		if e.Op == "-" {
-			return expressionType(e.X, column)
+			return expressionTypeIn(e.X, column, subquery)
 		}
 	case *sqlir.BinaryExpr:
 		switch e.Op {
 		case "||":
 			return "text"
 		case "+", "-", "*", "/", "%":
-			l, r := expressionType(e.L, column), expressionType(e.R, column)
+			l, r := expressionTypeIn(e.L, column, subquery), expressionTypeIn(e.R, column, subquery)
 			// A date moved by an interval is a timestamp.
 			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
 				return "timestamp"
@@ -80,7 +87,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "int4"
 		case "sum":
 			if len(e.Args) > 0 {
-				switch typ := expressionType(e.Args[0], column); typ {
+				switch typ := expressionTypeIn(e.Args[0], column, subquery); typ {
 				case "int", "int2", "int4", "integer", "smallint":
 					return "int8"
 				case "int8", "bigint":
@@ -90,7 +97,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 				}
 			}
 		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
-			return commonType(e.Args, column)
+			return commonType(e.Args, column, subquery)
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -99,7 +106,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "int8"
 		case "lag", "lead", "first_value", "last_value":
 			if len(e.Args) > 0 {
-				return expressionType(e.Args[0], column)
+				return expressionTypeIn(e.Args[0], column, subquery)
 			}
 		case "random":
 			return "float8"
@@ -115,7 +122,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			// A timestamp's stays a timestamp and an interval's an
 			// interval, and a date's becomes a timestamptz, as any other's.
 			if len(e.Args) == 2 {
-				if typ := expressionType(e.Args[1], column); typ == "timestamp" || typ == "interval" {
+				if typ := expressionTypeIn(e.Args[1], column, subquery); typ == "timestamp" || typ == "interval" {
 					return typ
 				}
 			}
@@ -124,12 +131,15 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "uuid"
 		}
 	case *sqlir.WindowFunc:
-		return expressionType(e.Func, column)
+		return expressionTypeIn(e.Func, column, subquery)
 	case *sqlir.CaseExpr:
-		return commonType(caseBranches(e), column)
+		return commonType(caseBranches(e), column, subquery)
 	case *sqlir.SubQuery:
+		if subquery != nil {
+			return subquery(e)
+		}
 		if e.Select != nil && len(e.Select.Targets) == 1 {
-			return expressionType(e.Select.Targets[0].Expr, column)
+			return expressionTypeIn(e.Select.Targets[0].Expr, column, subquery)
 		}
 	case *sqlir.Exists, *sqlir.InExpr, *sqlir.ArrayCmp, *sqlir.IsNull:
 		return "bool"
@@ -141,11 +151,11 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 // arguments of COALESCE or the branches of CASE: the first one known, except
 // that dates and timestamps meet at the widest of them, a timestamptz over a
 // timestamp over a date.
-func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
 	best := ""
 	for _, e := range exprs {
-		typ := expressionType(e, column)
+		typ := expressionTypeIn(e, column, subquery)
 		if typ == "" {
 			continue
 		}
@@ -295,10 +305,7 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
 		}
-		typ := expressionType(e, column)
-		if q, ok := e.(*sqlir.SubQuery); ok && subquery != nil {
-			typ = subquery(q)
-		}
+		typ := expressionTypeIn(e, column, subquery)
 		switch {
 		case untypedBranch(e):
 			other = true

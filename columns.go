@@ -782,7 +782,14 @@ func namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[strin
 // own scope inside sc: text for a string literal or a parameter, as
 // Postgres resolves one, and "" where expressionType does not know it.
 func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
-	if q.Select == nil || len(q.Select.Targets) != 1 {
+	if q.Select == nil {
+		return ""
+	}
+	if q.Select.SetOp != "" {
+		// A set operation's column may be an interval.
+		return "unresolved column type"
+	}
+	if len(q.Select.Targets) != 1 {
 		return ""
 	}
 	if untypedBranch(q.Select.Targets[0].Expr) {
@@ -792,7 +799,12 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
-	if types := vc.outTypes[q.Select]; len(types) == 1 {
+	types, ok := vc.outTypes[q.Select]
+	if !ok {
+		// A set operation's or a *'s column may be an interval.
+		return "unresolved column type"
+	}
+	if len(types) == 1 {
 		return types[0]
 	}
 	return ""

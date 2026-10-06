@@ -295,6 +295,7 @@ func TestIntervals(t *testing.T) {
 	mustExec(t, db, `INSERT INTO plan VALUES (1, '1 month'), (2, '30 days'), (3, $1), (4, '1 year')`, "720:00:00")
 	mustExec(t, db, `CREATE VIEW plan_view AS SELECT id, every FROM plan`)
 	mustExec(t, db, `CREATE SEQUENCE seq`)
+	mustExec(t, db, `CREATE TABLE periods (every interval)`)
 
 	for _, tt := range []struct{ q, want string }{
 		// A derived interval column beside an interval or NULL runs.
@@ -460,6 +461,12 @@ func TestIntervals(t *testing.T) {
 		`SELECT COALESCE((SELECT every FROM plan WHERE id = 1), 'bogus')`,
 		`SELECT COALESCE(interval '1 month', (SELECT 'bogus'))`,
 		`SELECT CASE WHEN false THEN (SELECT every FROM plan WHERE id = 1) ELSE 'bogus' END`,
+		// ... through the expressions around it too.
+		`SELECT COALESCE(COALESCE((SELECT every FROM plan LIMIT 1), NULL), 'bogus')`,
+		`SELECT COALESCE(-(SELECT every FROM plan LIMIT 1), 'bogus'::text)`,
+		// A scalar set operation's or *'s column may be an interval.
+		`SELECT COALESCE((SELECT interval '1 month' UNION SELECT interval '1 month'), 'bogus')`,
+		`SELECT COALESCE((SELECT * FROM periods), 'bogus'::text)`,
 		// A CASE or COALESCE of NULL only is text.
 		`SELECT COALESCE(interval '1 month', COALESCE(NULL, NULL))`,
 		`SELECT COALESCE(interval '1 month', CASE WHEN true THEN NULL END)`,
