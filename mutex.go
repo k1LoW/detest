@@ -57,7 +57,7 @@ func (mu *Mutex) Lock() {
 func (mu *Mutex) Unlock() {
 	// A goroutine of an ended run ends here, as at any entry point with
 	// no error to return, its deferred calls running.
-	goneStale(mu.s.Current())
+	goneStale(mu.s.currentAs(func() string { return "unlock " + mu.name }))
 	if r := mu.s.run; r != nil && r.over() {
 		// An adopted goroutine whose Lock the end of the run cut short unlocks
 		// a mutex it never got. The next run resets the mutex anyway.
@@ -138,7 +138,7 @@ func (rw *RWMutex) Lock() {
 
 // Unlock releases the write lock.
 func (rw *RWMutex) Unlock() {
-	goneStale(rw.s.Current())
+	goneStale(rw.s.currentAs(func() string { return "unlock " + rw.name }))
 	if r := rw.s.run; r != nil && r.over() {
 		rw.writing, rw.writer = false, nil // as Mutex.Unlock
 		return
@@ -179,7 +179,7 @@ func (rw *RWMutex) RLock() {
 func (rw *RWMutex) RUnlock() {
 	// Resolved first, as a goroutine of an ended run must not read s.run,
 	// which the scheduler may be setting for the next run.
-	p := rw.s.Current()
+	p := rw.s.currentAs(func() string { return "runlock " + rw.name })
 	goneStale(p)
 	if r := rw.s.run; r != nil && r.over() {
 		return // as Mutex.Unlock, the next run resets the read locks

@@ -1273,7 +1273,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	p = p.resolve(nil)
+	p = p.resolve(func() string { return fmt.Sprint("wait until ", t) })
 	goneStale(p)
 	if p.r.clock >= t {
 		return

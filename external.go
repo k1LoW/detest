@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -232,6 +233,10 @@ func requestKey(req *http.Request) string {
 	_ = body.Close()
 	if fresh, ferr := req.GetBody(); ferr == nil {
 		req.Body = fresh
+	} else if err == nil {
+		// GetBody cannot give it again, such as one whose Close ended it, so
+		// the request is handed what was read.
+		req.Body = io.NopCloser(bytes.NewReader(b))
 	}
 	if err != nil {
 		return key
