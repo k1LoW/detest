@@ -1,7 +1,6 @@
 package detest
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -208,15 +207,21 @@ func (t *transport) serve(req *http.Request) *http.Response {
 
 // requestKey describes a request for ordering goroutines adopted at it, by
 // its method, URL and body, which tells apart the requests goroutines of a
-// fan-out send for different items. The body is read and put back.
+// fan-out send for different items. The body is read only from the copy
+// GetBody gives, as connect and http.NewRequest set it for a buffered body,
+// since reading the body itself could block on a stream while the scheduler
+// does not yet see the goroutine.
 func requestKey(req *http.Request) string {
 	key := req.Method + " " + req.URL.String()
-	if req.Body == nil || req.Body == http.NoBody {
+	if req.GetBody == nil {
 		return key
 	}
-	b, err := io.ReadAll(req.Body)
-	_ = req.Body.Close()
-	req.Body = io.NopCloser(bytes.NewReader(b))
+	body, err := req.GetBody()
+	if err != nil {
+		return key
+	}
+	defer func() { _ = body.Close() }()
+	b, err := io.ReadAll(body)
 	if err != nil {
 		return key
 	}
