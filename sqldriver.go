@@ -94,6 +94,9 @@ type sqlConn struct {
 func (c *sqlConn) IsValid() bool { return !c.bad }
 
 func (c *sqlConn) Prepare(query string) (driver.Stmt, error) {
+	if c.bad {
+		return nil, driver.ErrBadConn
+	}
 	return &sqlStmt{c: c, query: query}, nil
 }
 func (c *sqlConn) Close() error { return nil }
@@ -101,6 +104,9 @@ func (c *sqlConn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 func (c *sqlConn) Ping(context.Context) error {
+	if c.bad {
+		return driver.ErrBadConn
+	}
 	return nil
 }
 
