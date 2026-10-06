@@ -223,7 +223,10 @@ func (t *transport) serve(req *http.Request) *http.Response {
 // body the request itself reads, so the request is handed a fresh copy
 // afterwards, which leaves it as it was either way.
 func requestKey(req *http.Request) string {
-	key := req.Method + " " + req.URL.String()
+	// The headers are left out, as some carry a value fresh to each request,
+	// such as a trace id, which would order the goroutines differently in
+	// every run.
+	key := req.Method + " " + req.Host + " " + req.URL.String()
 	if req.GetBody == nil {
 		return key
 	}
