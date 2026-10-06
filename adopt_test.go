@@ -573,7 +573,7 @@ func TestAdoptedGoroutineOnParentTxRefused(t *testing.T) {
 			var mu sync.Mutex
 			var got error
 			Explore(t, func(t *testing.T, s *Sim) {
-				db, _ := s.DB("app", postgres.New())
+				db, store := s.DB("app", postgres.New())
 				s.Manual("pod", 1, func(p *Proc) error {
 					tx, err := db.BeginTx(p.Context(), nil)
 					if err != nil {
@@ -593,6 +593,15 @@ func TestAdoptedGoroutineOnParentTxRefused(t *testing.T) {
 					mu.Lock()
 					got = gerr
 					mu.Unlock()
+					// A refused commit leaves no transaction on the pooled
+					// connection for this statement to run in.
+					_, err = db.Exec(`INSERT INTO "marks" ("id") VALUES ('after')`)
+					return err
+				})
+				s.AtQuiescence(func(st *State) error {
+					if _, ok := st.Row(store, "marks", "after"); !ok {
+						return errors.New("a statement after the refused commit was not committed")
+					}
 					return nil
 				})
 			})

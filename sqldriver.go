@@ -170,7 +170,11 @@ func (t *sqlTx) Commit() (err error) {
 		return errRunOver
 	}
 	if borrowedTx(tx, caller) {
-		t.c.tx = tx // still open, for database/sql to roll back
+		// database/sql rolls nothing back after a failed commit and puts the
+		// connection back in the pool, so the transaction ends here, rather
+		// than stay on the connection for the next statement to run in.
+		tx.rollback()
+		tx.p.forgetTx(tx)
 		err := unsupported("a transaction used by another goroutine than the one that began it", "COMMIT")
 		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
 			t.c.db.s.refuse(u)
@@ -329,7 +333,7 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
-	if p := c.db.s.currentAs(func() string { return fmt.Sprint(query, args) }); p != nil {
+	if p := c.db.s.currentAs(func() string { return fmt.Sprint(c.db.name, " ", query, args) }); p != nil {
 		if p.stale() {
 			return nil, 0, errRunOver
 		}
