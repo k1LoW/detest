@@ -93,6 +93,10 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 			total.Add(total, d)
 			continue
 		}
+		if (f == "+" || f == "-") && i+1 < len(fields) && startsNumber(fields[i+1]) {
+			fields[i+1] = f + fields[i+1] // '+ 1 day' is '+1 day'
+			continue
+		}
 		num, unit := splitNumber(f)
 		if num == "" {
 			// ISO 8601 (P1D) and infinity are interval text Postgres reads;
@@ -102,9 +106,14 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 			}
 			return 0, &intervalError{fmt.Sprintf("interval text %q", s), true}
 		}
+		if strings.TrimLeft(num, "+-") == "." {
+			num = "0" // Postgres reads a point alone as zero
+		}
 		n, ok := new(big.Rat).SetString(num)
-		if !ok || strings.ContainsAny(num, "eE/") {
-			return 0, &intervalError{fmt.Sprintf("the number %q in interval text", num), false}
+		if !ok {
+			// num holds a sign, digits and points only, so it is malformed,
+			// such as 1.2.3.
+			return 0, &intervalError{fmt.Sprintf("the number %q in interval text", num), true}
 		}
 		if unit == "" && i+1 < len(fields) && !startsNumber(fields[i+1]) {
 			i++
@@ -118,10 +127,8 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 		}
 		us, ok := intervalUnits[unit]
 		if !ok {
-			// A number in exponent form, which detest does not read, is left
-			// unread rather than called malformed.
-			exponent := len(unit) > 1 && unit[0] == 'e' && (startsNumber(unit[1:]) || unit[1] == '+' || unit[1] == '-')
-			return 0, &intervalError{fmt.Sprintf("the interval unit %q", unit), !exponent}
+			// A number in exponent form, such as 1e3, is malformed too.
+			return 0, &intervalError{fmt.Sprintf("the interval unit %q", unit), true}
 		}
 		if err := add(n, us); err != nil {
 			return 0, err

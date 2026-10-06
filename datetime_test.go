@@ -36,18 +36,22 @@ func TestParseInterval(t *testing.T) {
 		{"1.5 hours", 90 * time.Minute},
 		{"0.000001 seconds", time.Microsecond},
 		{"1 D", 24 * time.Hour},
+		{"+ 1 day", 24 * time.Hour},
+		{"- 2 hours", -2 * time.Hour},
+		{". seconds", 0},
+		{"1. seconds", time.Second},
 	} {
 		got, err := parseInterval(tt.in)
 		if err != nil || got != tt.want {
 			t.Errorf("%q: got %v, %v; want %v", tt.in, got, err, tt.want)
 		}
 	}
-	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "1 dayz", "--1:00", "day"} {
+	for _, in := range []string{"1 day 1 day", "1 2", "", "nonsense", "1 dayz", "--1:00", "day", "1.2.3 seconds", "1.2.3", "1e3 seconds", "1.5e2 min", "- seconds"} {
 		if _, err := parseInterval(in); err == nil || !err.malformed {
 			t.Errorf("%q: got %v, want malformed", in, err)
 		}
 	}
-	for _, in := range []string{"1 month", "2 years", "1 decade", "1 quarter", "P1D", "infinity", "1.0000005 seconds", "1e3 seconds", "1 hour 2:00"} {
+	for _, in := range []string{"1 month", "2 years", "1 decade", "1 quarter", "P1D", "infinity", "1.0000005 seconds", "1 hour 2:00"} {
 		if _, err := parseInterval(in); err == nil || err.malformed {
 			t.Errorf("%q: got %v, want unread", in, err)
 		}

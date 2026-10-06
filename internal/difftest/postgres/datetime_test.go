@@ -40,6 +40,9 @@ var datetimeCases = []difftest.Case{
 			difftest.Q(0, `SELECT interval 'nonsense'`),
 			difftest.Q(0, `SELECT interval '1 dayz'`),
 			difftest.Q(0, `SELECT interval '--1:00'`),
+			difftest.Q(0, `SELECT interval '1.2.3 seconds'`),
+			difftest.Q(0, `SELECT interval '1e3 seconds'`),
+			difftest.Q(0, `SELECT interval '+ 1 day' = interval '1 day', interval '- 2 hours' = interval '-2 hours', interval '. seconds' = interval '0', interval '1. seconds' = interval '1 second'`),
 		},
 	},
 	{
