@@ -414,7 +414,7 @@ func (r *run) execute() (v *violation) {
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
 		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && cur != gaveWay && (o.kind != optResume || o.p != cur))
-		r.countSpin(o)
+		r.countSpin(o, before)
 		var spun *violation
 		if gaveWay != nil {
 			spun = r.handoff(gaveWay, before)
@@ -461,12 +461,16 @@ func onlyFaults(opts []option) bool {
 
 // countSpin counts the steps one process takes in a row without changing
 // committed state, for MaxSpins.
-func (r *run) countSpin(o option) {
+func (r *run) countSpin(o option, before int) {
 	switch {
 	case o.kind != optResume || o.p.state != stateReady:
 		// A process that blocked or ended waits rather than spins, and what
 		// it waited for ends the streak.
 		r.spinProc = nil
+	case r.version != before:
+		// The step changed committed state, which is no spin: the streak
+		// starts after it.
+		r.spinProc, r.spinCount, r.spinVersion = o.p, 0, r.version
 	case o.p == r.spinProc && r.version == r.spinVersion:
 		r.spinCount++
 	default:

@@ -244,6 +244,23 @@ func TestStepBrokenOnAHandoffIsReportedFirst(t *testing.T) {
 	}
 }
 
+// A step that changes committed state is no spin, so with MaxSpins(1) a
+// process that enqueues and then yields once more is no spinner.
+func TestChangingStepIsNoSpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		q := s.Queue("jobs")
+		s.Manual("producer", 1, func(p *Proc) error {
+			q.Enqueue(p, Msg{"id": "a"})
+			p.Step("after enqueue")
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {
