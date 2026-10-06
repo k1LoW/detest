@@ -820,8 +820,18 @@ func TestHandWrittenTxRunByTwoGoroutinesAtOnce(t *testing.T) {
 			store.SeedRow("counters", Row{"id": "a", "n": int64(0)})
 			store.SeedRow("counters", Row{"id": "b", "n": int64(0)})
 		})
+		// No cycle of waits is possible here, so every operation succeeds,
+		// and an error from any is one the test must not let pass.
+		var failed []error
+		s.Seed(func() { failed = nil })
+		record := func(err error) error {
+			if err != nil {
+				failed = append(failed, err)
+			}
+			return nil
+		}
 		s.Manual("x", 1, func(p *Proc) error {
-			return store.Tx(p, func(tx *Tx) error {
+			return record(store.Tx(p, func(tx *Tx) error {
 				var wg sync.WaitGroup
 				errs := make([]error, 2)
 				for i, id := range []string{"a", "b"} {
@@ -829,13 +839,19 @@ func TestHandWrittenTxRunByTwoGoroutinesAtOnce(t *testing.T) {
 				}
 				wg.Wait()
 				return errors.Join(errs...)
-			})
+			}))
 		})
 		s.Manual("y", 1, func(p *Proc) error {
-			return store.Tx(p, func(tx *Tx) error {
+			return record(store.Tx(p, func(tx *Tx) error {
 				_, _, err := tx.GetForUpdate("counters", "b")
 				return err
-			})
+			}))
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(failed) > 0 {
+				return fmt.Errorf("an operation failed: %w", failed[0])
+			}
+			return nil
 		})
 	})
 }
