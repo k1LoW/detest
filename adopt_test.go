@@ -12,6 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/k1LoW/detest/mysql"
 	"github.com/k1LoW/detest/postgres"
 )
 
@@ -1425,4 +1426,65 @@ func TestHandWrittenTxWriteAfterSiblingAbort(t *testing.T) {
 			}, MaxPreemptions(2))
 		})
 	}
+}
+
+// On MySQL, a deadlock rolls the victim's transaction back. A statement of a
+// goroutine sharing that transaction, refused because of it, does not bring
+// back the writes the rollback undid, so a commit after it commits none.
+func TestMySQLSharedTxDeadlockStaysRolledBack(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", mysql.New())
+		s.Seed(func() {
+			for _, id := range []string{"a", "b"} {
+				store.SeedRow("counters", Row{"id": id, "n": int64(0)})
+			}
+		})
+		var victim bool
+		s.Seed(func() { victim = false })
+		s.Manual("x", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+					return err
+				}
+				if err := tx.Insert("marks", Row{"id": "p"}); err != nil {
+					return err
+				}
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					_, _, err := tx.GetForUpdate("counters", "b")
+					if errors.Is(err, ErrDeadlock) {
+						victim = true
+					}
+				})
+				wg.Go(func() { _ = tx.Insert("marks", Row{"id": "q"}) })
+				wg.Wait()
+				return nil // commits whatever is left, errors or not
+			})
+			return nil
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				// More writes than x, so that InnoDB picks x as the victim.
+				for _, id := range []string{"y1", "y2", "y3"} {
+					if err := tx.Insert("marks", Row{"id": id}); err != nil {
+						return err
+					}
+				}
+				for _, id := range []string{"b", "a"} {
+					if _, _, err := tx.GetForUpdate("counters", id); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "p"); ok && victim {
+				return errors.New("a write of a transaction rolled back by a deadlock was committed")
+			}
+			return nil
+		})
+		s.Sometimes("x was the deadlock victim", func(st *State) bool { return victim })
+	}, MaxPreemptions(2))
 }

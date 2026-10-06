@@ -2083,7 +2083,10 @@ func (tx *Tx) asStatement(f func() error) error {
 	}
 	m := tx.markStatement()
 	err := f()
-	if err != nil {
+	// A statement refused because another goroutine using the transaction
+	// had it rolled back, such as by a deadlock, changed nothing, and
+	// rolling it back to its mark would bring back what that rollback undid.
+	if err != nil && !errors.Is(err, sqlir.ErrInFailedTx) {
 		tx.failStatement(m, errors.Is(err, sqlir.ErrDeadlock))
 	}
 	return err
