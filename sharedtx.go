@@ -138,14 +138,13 @@ func pointTable(db *DB, stmt sqlir.Statement) (table string, ok bool) {
 			if given[c] {
 				continue
 			}
-			// A sequence hands out its values in the order of the inserts.
+			// A sequence, or a function such as gen_random_uuid, hands out
+			// its values in the order of the inserts.
 			if def.autoInc[c] {
 				return "", false
 			}
-			if d, ok := def.defaults[c]; ok {
-				if _, seq := nextvalOf(d); seq {
-					return "", false
-				}
+			if d, ok := def.defaults[c]; ok && hasEffects(d) {
+				return "", false
 			}
 		}
 		for _, row := range s.Rows {

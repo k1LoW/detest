@@ -377,3 +377,49 @@ func TestOutboxGoroutinesDeleteSharedSQLTxRows(t *testing.T) {
 		})
 	})
 }
+
+// Goroutines sharing a transaction whose statements take values from a
+// sequence or a generator in one step get them in the order database/sql
+// hands them the connection, so the exploration stops, even when each
+// inserts a row of its own.
+func TestGoroutinesSharingSQLTxGeneratedValuesStop(t *testing.T) {
+	for name, stmt := range map[string]string{
+		"default": `INSERT INTO marks (id) VALUES ($1)`,
+		"select":  `SELECT nextval('s') + $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				for _, ddl := range []string{
+					`CREATE SEQUENCE s`,
+					`CREATE TABLE marks (id bigint PRIMARY KEY, n bigint NOT NULL DEFAULT nextval('s') + 1)`,
+				} {
+					if _, err := db.Exec(ddl); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s.Manual("pod", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					var wg sync.WaitGroup
+					for _, id := range []int64{1, 2} {
+						wg.Go(func() {
+							rows, err := tx.Query(stmt, id)
+							if err == nil {
+								_ = rows.Close()
+							}
+						})
+					}
+					wg.Wait()
+					return tx.Commit()
+				})
+			}, nil, nil, 0)
+			if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "depends on their order") {
+				t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
+			}
+		})
+	}
+}

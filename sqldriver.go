@@ -437,9 +437,10 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	a := &sharedAccess{gid: goroutineID(), db: c.db, query: query, write: true}
 	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
 		if sel, ok := stmt.stmt.(*sqlir.SelectStmt); ok && err == nil {
-			// A read alone commutes with other reads. A locking one does not,
-			// and a failed statement may have aborted the transaction.
-			a.write = sel.Lock != nil
+			// A read alone commutes with other reads. One that locks or calls
+			// a function such as nextval does not, and a failed statement may
+			// have aborted the transaction.
+			a.write = queryHasEffects(sel)
 		}
 		if _, ok := pointTable(c.db, stmt.stmt); ok && err == nil {
 			if keys := tx.sinceShared(mark); len(keys) > 0 {
