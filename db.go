@@ -405,7 +405,10 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 // that need to observe another database's state (for example a fake runtime that
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
-func (db *DB) Peek(table string) []Row { return publicRows(db.selectCommitted(table, nil)) }
+func (db *DB) Peek(table string) []Row {
+	defer db.s.enterAny()()
+	return publicRows(db.selectCommitted(table, nil))
+}
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
