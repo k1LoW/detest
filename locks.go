@@ -224,6 +224,14 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		if v == tx {
 			markPassedOver(conflict)
 			tx.aborted = true
+			// Goroutines already waiting on its behalf see the abort too,
+			// or their process, waiting for them, could not roll it back.
+			for _, w := range tx.waiters() {
+				markPassedOver(w.waitRow.blockers())
+				w.victimOf = tx
+				w.state = stateReady
+				w.waitRow = nil
+			}
 			tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
