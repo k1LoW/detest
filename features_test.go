@@ -168,6 +168,36 @@ func TestIdleLoopRetriesARowSkipLockedPassedOver(t *testing.T) {
 	})
 }
 
+// '30 days' changed to '1 mon' is a change that wakes an idle loop, though
+// the two compare equal: added to a time, they land on other days.
+func TestIdleLoopIsWokenByAnIntervalOfOtherFields(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL, done bool NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO plan VALUES (1, '30 days', false)`) })
+		s.Manual("admin", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE plan SET every = '1 month' WHERE id = 1`)
+			return err
+		})
+		s.Loop("renewer", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE plan SET done = true WHERE NOT done AND timestamp '2024-01-31' + every = timestamp '2024-02-29'`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "plan", "1"); !row.Bool("done") {
+				return fmt.Errorf("plan 1 not renewed")
+			}
+			return nil
+		})
+	})
+}
+
 // Idle loops that lock rows the other passes over with SKIP LOCKED end, cut
 // at MaxIdleTicks rather than waking each other forever.
 func TestIdleLoopsWakingEachOtherAreCut(t *testing.T) {

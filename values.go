@@ -44,6 +44,13 @@ func equalValues(a, b any) bool {
 // an insert did not give.
 func sameRow(a, b Row) bool {
 	for k, v := range a {
+		// '1 mon' and '30 days' are equal but move a time to other days,
+		// so a row changed from one to the other is a change.
+		if x, ok := derefValue(v).(pgInterval); ok {
+			if y, ok := derefValue(b[k]).(pgInterval); ok && x != y {
+				return false
+			}
+		}
 		if !sameValue(v, b[k]) {
 			return false
 		}
