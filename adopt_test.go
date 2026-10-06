@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/k1LoW/detest/postgres"
@@ -526,4 +527,40 @@ func TestCrashFreesMutexOfReturnedGoroutine(t *testing.T) {
 			return ok
 		}))
 	}, MaxCrashes(1))
+}
+
+// A seed that resets the previous run's channel wakes a goroutine of that
+// run before any process of the new one ran. Its statement is turned away,
+// not run as part of the seed.
+func TestAdoptedGoroutineWokenBySeedNotRun(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		var ch chan struct{}
+		s.Seed(func() {
+			if ch != nil {
+				close(ch)
+				synctest.Wait() // the woken goroutine gets as far as it can
+			}
+			ch = make(chan struct{})
+		})
+		s.Manual("pod", 1, func(p *Proc) error {
+			wake := ch
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('g')`)
+				<-wake
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "late"); ok {
+				return errors.New("late mark")
+			}
+			if _, ok := st.Row(store, "marks", "g"); ok {
+				return errors.New("g mark")
+			}
+			return nil
+		})
+		s.ExpectViolation("g mark")
+	})
 }

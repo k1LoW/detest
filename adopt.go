@@ -134,6 +134,7 @@ func (r *run) adopt(gid string) *Proc {
 			r.s.stale = map[string]*Proc{}
 		}
 		r.s.stale[gid] = np
+		r.s.staleN.Store(int32(len(r.s.stale))) //nolint:gosec // far below 2^31
 		r.s.staleMu.Unlock()
 		return np
 	}
@@ -349,6 +350,7 @@ func (r *run) retire() {
 			}
 		}
 	}
+	s.staleN.Store(int32(len(s.stale))) //nolint:gosec // far below 2^31
 }
 
 // staleLimit bounds the retired goroutines kept before the ones that returned
@@ -374,6 +376,7 @@ func (s *Sim) drainAdopted() {
 			}
 		}
 		n = len(s.stale)
+		s.staleN.Store(int32(n)) //nolint:gosec // far below 2^31
 		s.staleMu.Unlock()
 		if n == 0 {
 			return

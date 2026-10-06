@@ -207,6 +207,9 @@ type Sim struct {
 	// their processes (see run.retire).
 	staleMu sync.Mutex
 	stale   map[string]*Proc
+	// staleN is len(stale), read without staleMu by Current while a seed
+	// runs, which looks a goroutine up only when some is retired.
+	staleN atomic.Int32
 	// schedGid is the goroutine that runs the seeds and the scheduler, whose
 	// calls into detest belong to no process.
 	schedGid string

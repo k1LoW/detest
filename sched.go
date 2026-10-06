@@ -267,7 +267,17 @@ func (s *Sim) Current() *Proc {
 		return nil
 	}
 	if !r.began.Load() {
-		return nil // a seed, before any process ran
+		// A seed, before any process ran. It may wake a goroutine retired
+		// from an earlier run, such as by closing that run's channel, which
+		// must be turned away rather than run as part of the seed.
+		if s.staleN.Load() > 0 {
+			if onProc, _ := onProcGoroutine(); !onProc {
+				if p := s.retired(goroutineID()); p != nil {
+					return p
+				}
+			}
+		}
+		return nil
 	}
 	onProc, _ := onProcGoroutine()
 	// While no process is blocked outside detest, every process detest started
