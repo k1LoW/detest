@@ -112,10 +112,12 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 		case "date_part":
 			return "float8"
 		case "date_trunc":
-			// A timestamp's stays a timestamp, and a date's becomes a
-			// timestamptz, as any other's.
-			if len(e.Args) == 2 && expressionType(e.Args[1], column) == "timestamp" {
-				return "timestamp"
+			// A timestamp's stays a timestamp and an interval's an
+			// interval, and a date's becomes a timestamptz, as any other's.
+			if len(e.Args) == 2 {
+				if typ := expressionType(e.Args[1], column); typ == "timestamp" || typ == "interval" {
+					return typ
+				}
 			}
 			return "timestamptz"
 		case "gen_random_uuid", "uuid_generate_v4":

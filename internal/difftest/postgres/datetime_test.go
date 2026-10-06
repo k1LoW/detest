@@ -137,6 +137,7 @@ var datetimeCases = []difftest.Case{
 			difftest.Q(0, `SELECT extract(day FROM interval '27 hours')::int, extract(hour FROM interval '27 hours')::int, extract(week FROM interval '15 days')::int, extract(month FROM interval '14 months')::int, extract(year FROM interval '14 months')::int, extract(quarter FROM interval '7 months')::int`),
 			difftest.Q(0, `SELECT extract(epoch FROM interval '1 month 1 day')::bigint, extract(epoch FROM interval '1 year')::bigint, extract(epoch FROM interval '-1 year 2 months')::bigint`),
 			difftest.Q(0, `SELECT date_trunc('day', interval '3 days 04:05'), date_trunc('year', interval '14 months 3 days'), date_trunc('hour', interval '27 hours 30 minutes'), date_trunc('quarter', interval '7 months 3 days'), date_trunc('decade', interval '25 years')`),
+			difftest.Q(0, `SELECT extract(hour FROM (on_day + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::int FROM ev WHERE id = 1`),
 			difftest.Q(0, `SELECT interval '1 quarter'`),
 			difftest.Q(0, `SELECT interval '1 month 1 mon'`),
 			difftest.S(0, `INSERT INTO once VALUES ('1 day')`),

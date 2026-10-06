@@ -332,6 +332,9 @@ func TestIntervals(t *testing.T) {
 		{`SELECT date_trunc('hour', interval '27 hours 30 minutes')`, "27:00:00"},
 		{`SELECT date_trunc('quarter', interval '7 months 3 days')`, "6 mons"},
 		{`SELECT date_trunc('decade', interval '25 years')`, "20 years"},
+		// date_trunc of an interval is an interval, so a date moved by it
+		// is a timestamp, whose hour extract reads.
+		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
 		// A column compares by the span, as the index of an interval does.
 		{`SELECT count(*)::text FROM plan WHERE every = interval '720 hours'`, "3"},
 		{`SELECT every FROM plan WHERE id = 3`, "720:00:00"},
