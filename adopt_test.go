@@ -1147,3 +1147,33 @@ func TestHandWrittenTxReadAfterSiblingAbort(t *testing.T) {
 		})
 	}, MaxPreemptions(2))
 }
+
+// A goroutine that first calls into detest after its pod crashed, such as
+// one that slept first, is dead with the pod and writes nothing.
+func TestGoroutineOfCrashedPodNeverRuns(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			go func() {
+				time.Sleep(time.Second)
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+			}()
+			_, err := db.Exec(`INSERT INTO "marks" ("id") VALUES ('pod')`)
+			return err
+		})
+		// Keeps the run going until the goroutine wakes.
+		s.Manual("keeper", 1, func(p *Proc) error {
+			time.Sleep(2 * time.Second)
+			p.Step("wake")
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			_, pod := st.Row(store, "marks", "pod")
+			_, late := st.Row(store, "marks", "late")
+			if late && !pod {
+				return errors.New("a goroutine of a crashed pod wrote")
+			}
+			return nil
+		})
+	}, MaxCrashes(1))
+}

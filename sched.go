@@ -242,6 +242,9 @@ type Proc struct {
 	// does not tell, since one that crashed with its family is done while its
 	// goroutine still runs.
 	returned bool
+	// killed marks a process detest started that crashed, so that a
+	// goroutine of its pod calling into detest only afterwards is dead too.
+	killed bool
 	// victimOf is the transaction this process waits for a lock on behalf
 	// of, once the transaction that closed a cycle of lock waits picked it as
 	// the deadlock victim. It is per process, since several goroutines may
@@ -862,6 +865,7 @@ func (r *run) crash(p *Proc) {
 	r.crashes++
 	r.note(p, "crashes: its transactions roll back, the mutexes it held are freed")
 	wasDone := p.state == stateDone
+	p.killed = true
 	freed := false
 	for _, m := range r.procs {
 		if m != p && (!m.adopted || m.family != p) {

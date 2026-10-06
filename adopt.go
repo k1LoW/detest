@@ -242,6 +242,14 @@ func (r *run) takeAdopted() bool {
 	pending = order
 	for _, np := range pending {
 		<-np.ev // the handshake's evSync
+		if np.root().killed {
+			// Its pod crashed before it first called, such as while it slept,
+			// so it is dead as well and is never run. It stays parked until
+			// the run ends, as a goroutine the crash caught at a step does.
+			r.finish(np)
+			r.note(np, "belongs to a crashed pod and never runs")
+			continue
+		}
 		r.runSync(np)
 	}
 	return true
