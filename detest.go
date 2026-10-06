@@ -99,6 +99,25 @@ func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
 // quiescence, and the result counts it.
 func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 
+// MaxSpins bounds how many steps one process takes without changing
+// committed state (a commit, an enqueue) while another could run (100 by
+// default). The steps other processes take in between do not reset the
+// count, so that a schedule switching at almost every step, as Random does,
+// reaches it too, while a change or a process blocking or ending does. Past
+// it, the process waits after each step until another has taken one. It is
+// the fairness assumption a real scheduler gives a process that busy-waits
+// through a yield point, such as one polling a flag or a row another process
+// sets, which would otherwise be resumed for ever by the first run and keep
+// the setter from running. Schedules where a process goes on longer than
+// that without changing anything are left out. A process that takes that
+// many steps while nothing else can run would spin for ever in production
+// too, and is reported as a progress violation. Processes that give way to
+// each other n times with no change in between, such as two that each wait
+// for the other, are kept out while any other process can take a step, and
+// reported as one once none can; raise n for code that does that much work
+// without committing.
+func MaxSpins(n int) Option { return func(s *Sim) { s.maxSpins = n } }
+
 // MaxPreemptions bounds the context switches away from a runnable process per
 // run (CHESS-style). 0 means unbounded.
 func MaxPreemptions(n int) Option {
@@ -168,6 +187,7 @@ type Sim struct {
 	maxCrashes       int
 	maxPreemptions   int
 	maxIdleTicks     int
+	maxSpins         int
 	boundPreemptions bool
 	maxRuns          int
 	maxDuration      time.Duration
@@ -201,7 +221,7 @@ type Sim struct {
 }
 
 func newSimDefaults() *Sim {
-	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3}
+	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100}
 }
 
 func newSim(t *testing.T, opts ...Option) *Sim {

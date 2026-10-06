@@ -326,6 +326,7 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.MaxFailures(n)` | Bounds the external-call failures per run (default 1) |
 | `detest.MaxRedeliveries(n)` | Bounds how many times a queue redelivers a message whose handler returned an error (default 1) |
 | `detest.MaxIdleTicks(n)` | Bounds a loop's idle ticks in a row with no progress in between. A run whose loop goes idle once more is cut, without the checks at quiescence (default 3) |
+| `detest.MaxSpins(n)` | Bounds the steps one process takes without a commit or an enqueue in between, counted across the steps of others, while another could run. Past it, the process waits for another to take a step, as a busy-wait would let a real scheduler run the process it waits for. With nothing else able to run, it is a progress violation. Processes that give way to each other that many times with no change in between are kept out while any other process can run, and a progress violation once none can (default 100) |
 | `detest.MaxRuns(n)` | Caps the runs of an exploration (default 200000) |
 | `detest.MaxDuration(d)` | Stops starting runs once `d` has passed (unbounded by default) |
 | `detest.Workers(n)` | Explores with n workers in parallel (default 1) |

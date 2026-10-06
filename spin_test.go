@@ -1,0 +1,417 @@
+package detest
+
+import (
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+// spinModel has a waiter that busy-waits on a flag through a yield point and
+// a setter that sets it (#45).
+func spinModel(withSetter bool) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag {
+				p.Step("wait")
+			}
+			return nil
+		})
+		if withSetter {
+			s.Manual("setter", 1, func(p *Proc) error {
+				p.Step("set")
+				flag = true
+				return nil
+			})
+		}
+	}
+}
+
+// A waiter that keeps yielding without changing anything gives way to the
+// setter, as a real scheduler would let it run, so every run ends.
+func TestBusyWaitGivesWayToOthers(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(true), nil, nil, 0)
+	if res.Violated || !res.Complete {
+		t.Fatalf("want a complete exploration without violation, got %s", res.report())
+	}
+}
+
+// A process that does more work alone than MaxSpins allows passes once
+// MaxSpins is raised above it.
+func TestMaxSpinsLetsLongWorkAlone(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		s.Manual("worker", 1, func(p *Proc) error {
+			for i := range 150 {
+				p.Step("work %d", i)
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, nil, nil, 0)
+	if !res.Violated || res.Kind != "progress" {
+		t.Fatalf("want 150 steps alone reported under the default, got %s", res.report())
+	}
+	res, _ = exploreBubble(t, model, []Option{MaxSpins(200)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation with MaxSpins(200), got %s", res.report())
+	}
+}
+
+// Giving way is the scheduler's fairness, not a preemption to explore, so
+// the waiter gives way even with no preemption budget.
+func TestBusyWaitGivesWayWithoutPreemptions(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(true), []Option{MaxPreemptions(0)}, nil, 0)
+	if res.Violated || !res.Complete {
+		t.Fatalf("want a complete exploration without violation, got %s", res.report())
+	}
+}
+
+// turnsModel has two processes that each wait for a flag only the other
+// would set.
+func turnsModel(t *testing.T, s *Sim) {
+	a, b := false, false
+	s.Seed(func() { a, b = false, false })
+	s.Manual("x", 1, func(p *Proc) error {
+		for !b {
+			p.Step("x waits")
+		}
+		a = true
+		return nil
+	})
+	s.Manual("y", 1, func(p *Proc) error {
+		for !a {
+			p.Step("y waits")
+		}
+		b = true
+		return nil
+	})
+}
+
+// Two processes that each wait for a flag only the other would set take turns
+// at spinning for ever, which is a progress violation naming them.
+func TestBusyWaitTakingTurnsIsAViolation(t *testing.T) {
+	res, _ := exploreBubble(t, turnsModel, nil, nil, 0)
+	if !res.Violated || res.Kind != "progress" || !strings.Contains(res.Err.Error(), "x#") || !strings.Contains(res.Err.Error(), "y#") {
+		t.Fatalf("want a progress violation naming x and y, got %s", res.report())
+	}
+}
+
+// A waiter gives way to a process doing work without committing as many
+// times as that work takes steps, within MaxSpins.
+func TestBusyWaitOnLongerWork(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag {
+				p.Step("wait")
+			}
+			return nil
+		})
+		s.Manual("worker", 1, func(p *Proc) error {
+			for i := range 50 {
+				p.Step("work %d", i)
+			}
+			flag = true
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// Giving way spends no preemption, so with a budget of one the setter can
+// still be preempted after the waiter gave way to it. The setter starts only
+// once the waiter waits, so reaching the waiter between set and finish takes
+// a switch to the setter and one back: two preemptions, or a handoff and one.
+func TestBusyWaitGivingWaySpendsNoPreemption(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		waiting, flag, done, sawDone := false, false, false, true
+		s.Seed(func() { waiting, flag, done, sawDone = false, false, false, true })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			waiting = true
+			for !flag {
+				p.Step("wait")
+			}
+			sawDone = done
+			return nil
+		})
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			p.Step("finish")
+			done = true
+			return nil
+		}, When(func() bool { return waiting }))
+		s.AtQuiescence(func(st *State) error {
+			if !sawDone {
+				return fmt.Errorf("the waiter ran between set and finish")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(1)}, nil, 0)
+	if !res.Violated {
+		t.Fatalf("want the waiter found between set and finish, got %s", res.report())
+	}
+}
+
+// Blocking ends a streak, so a process that waits on the clock after
+// MaxSpins steps is not taken for a spinner when it wakes.
+func TestBlockingEndsASpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		s.Manual("worker", 1, func(p *Proc) error {
+			for i := range 100 {
+				p.Step("work %d", i)
+			}
+			p.WaitUntil(p.Now() + 1)
+			p.Step("after the wait")
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, nil, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// A crash left as the only option is no step another process takes, so a
+// lone waiter is still reported with crashes enabled.
+func TestBusyWaitAloneIsAViolationWithCrashes(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(false), []Option{MaxCrashes(1)}, nil, 0)
+	if !res.Violated || res.Kind != "progress" || !strings.Contains(res.Err.Error(), "waiter") {
+		t.Fatalf("want a progress violation naming the waiter, got %s", res.report())
+	}
+}
+
+// A process that runs outside detest, woken from a channel, takes a step as
+// one resumed by the scheduler does, so the waiter gets to see the flag it
+// set. The setter runs alongside the waiter there, so the flag is atomic as
+// it would be in real code.
+func TestOutsideStepEndsASpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		var ch chan struct{}
+		var flag atomic.Bool
+		s.Seed(func() { ch = make(chan struct{}); flag.Store(false) })
+		s.Manual("setter", 1, func(p *Proc) error {
+			<-ch
+			flag.Store(true)
+			return nil
+		})
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for i := range 10 {
+				p.Step("before %d", i)
+			}
+			ch <- struct{}{}
+			for !flag.Load() {
+				p.Step("wait")
+			}
+			return nil
+		}, When(func() bool { return ch != nil }))
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(10), MaxPreemptions(0)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// A process outside detest that the step given way to wakes reports back
+// before the handoff bound is checked, so with MaxSpins(1) the flag it sets
+// ends the turns instead of the run being reported.
+func TestOutsideStepOnAHandoffEndsTheTurns(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		var ch chan struct{}
+		var flag, started atomic.Bool
+		s.Seed(func() { ch = make(chan struct{}); flag.Store(false); started.Store(false) })
+		s.Manual("setter", 1, func(p *Proc) error {
+			started.Store(true)
+			<-ch
+			flag.Store(true)
+			return nil
+		}, When(func() bool { return ch != nil }))
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag.Load() {
+				p.Step("wait")
+			}
+			return nil
+		}, When(started.Load))
+		s.Manual("waker", 1, func(p *Proc) error {
+			p.Step("wake")
+			close(ch)
+			for !flag.Load() {
+				p.Step("waker waits")
+			}
+			return nil
+		}, When(started.Load))
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// What the step given way to broke is reported before the handoff bound it
+// also reached, as it says more.
+func TestStepBrokenOnAHandoffIsReportedFirst(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		ySteps := 0
+		s.Seed(func() { ySteps = 0 })
+		s.Manual("x", 1, func(p *Proc) error {
+			for {
+				p.Step("x waits")
+			}
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			for {
+				p.Step("y waits")
+				ySteps++
+			}
+		})
+		s.Always(func(st *State) error {
+			if ySteps > 0 {
+				return fmt.Errorf("y stepped")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if !res.Violated || res.Kind != "always invariant" {
+		t.Fatalf("want the always invariant reported, got %s", res.report())
+	}
+}
+
+// A step that changes committed state is no spin, so with MaxSpins(1) a
+// process that enqueues and then yields once more is no spinner.
+func TestChangingStepIsNoSpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		q := s.Queue("jobs")
+		s.Manual("producer", 1, func(p *Proc) error {
+			q.Enqueue(p, Msg{"id": "a"})
+			p.Step("after enqueue")
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// A handoff to a process that ends on that step ends the turns, so with
+// MaxSpins(1) the waiter still sees the flag the setter set before ending.
+func TestHandoffToAnEndingProcessEndsTheTurns(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(true), []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// A process given way to that ends on a later step ends the turns too, so
+// with MaxSpins(1) the handoff to it does not count against the waiter's
+// later handoff to the setter.
+func TestEndingAfterAHandoffEndsTheTurns(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag {
+				p.Step("wait")
+			}
+			return nil
+		})
+		s.Manual("other", 1, func(p *Proc) error {
+			p.Step("other")
+			return nil
+		})
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// With MaxSpins(0), a process that has just enqueued has taken no step
+// without changing committed state, so it is no spinner until it takes one.
+func TestChangingStepIsNoSpinUnderZeroBound(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		q := s.Queue("jobs")
+		s.Manual("producer", 1, func(p *Proc) error {
+			q.Enqueue(p, Msg{"id": "a"})
+			p.Step("after enqueue")
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(0)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// Two waiters taking turns past MaxSpins are kept out while the setter they
+// both wait for can still start, rather than reported, as a real scheduler
+// would run the setter too.
+func TestTurnsGiveWayToAProcessOutsideThem(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		for _, name := range []string{"x", "y"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				for !flag {
+					p.Step("%s waits", name)
+				}
+				return nil
+			})
+		}
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated || !res.Complete {
+		t.Fatalf("want a complete exploration without violation, got %s", res.report())
+	}
+}
+
+// Under Random, which switches at almost every step, processes taking turns
+// at waiting for each other are still reported rather than run for ever.
+func TestBusyWaitTakingTurnsIsAViolationUnderRandom(t *testing.T) {
+	res, _ := exploreBubble(t, turnsModel, []Option{Random(1), MaxRuns(1)}, nil, 0)
+	if !res.Violated || res.Kind != "progress" {
+		t.Fatalf("want a progress violation, got %s", res.report())
+	}
+}
+
+// A change to committed state made outside a step, which countSpin does not
+// see, ends a spin as one made by a step does.
+func TestChangeOutsideAStepEndsASpin(t *testing.T) {
+	s := newSimDefaults()
+	p := &Proc{name: "waiter#1", state: stateReady, spins: s.maxSpins, spinVersion: 3}
+	r := &run{s: s, spinProc: p, version: 3}
+	if r.spinner() != p {
+		t.Fatal("want the waiter spinning before the change")
+	}
+	r.version++
+	if sp := r.spinner(); sp != nil {
+		t.Fatalf("want no spinner after the change, got %s", sp.name)
+	}
+}
+
+// With nothing else able to run, the waiter would spin forever, which is
+// reported as a progress violation naming it.
+func TestBusyWaitAloneIsAViolation(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(false), nil, nil, 0)
+	if !res.Violated || res.Kind != "progress" || !strings.Contains(res.Err.Error(), "waiter") {
+		t.Fatalf("want a progress violation naming the waiter, got %s", res.report())
+	}
+}
