@@ -122,7 +122,9 @@ func pointTable(db *DB, stmt sqlir.Statement) (table string, ok bool) {
 		}
 		table = db.resolve(s.Table)
 		def := isolatedTable(db, table)
-		if def == nil {
+		// MySQL also generates an AUTO_INCREMENT value for a NULL or a 0
+		// given, and a larger one given moves the counter on.
+		if def == nil || len(def.autoInc) > 0 {
 			return "", false
 		}
 		given := map[string]bool{}
@@ -140,9 +142,6 @@ func pointTable(db *DB, stmt sqlir.Statement) (table string, ok bool) {
 			}
 			// A sequence, or a function such as gen_random_uuid, hands out
 			// its values in the order of the inserts.
-			if def.autoInc[c] {
-				return "", false
-			}
 			if d, ok := def.defaults[c]; ok && hasEffects(d) {
 				return "", false
 			}
