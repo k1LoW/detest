@@ -175,6 +175,15 @@ func TestBlockingEndsASpin(t *testing.T) {
 	}
 }
 
+// A crash left as the only option is no step another process takes, so a
+// lone waiter is still reported with crashes enabled.
+func TestBusyWaitAloneIsAViolationWithCrashes(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(false), []Option{MaxCrashes(1)}, nil, 0)
+	if !res.Violated || res.Kind != "progress" || !strings.Contains(res.Err.Error(), "waiter") {
+		t.Fatalf("want a progress violation naming the waiter, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {

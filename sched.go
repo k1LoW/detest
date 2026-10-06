@@ -376,7 +376,10 @@ func (r *run) execute() (v *violation) {
 			return r.checkAlways()
 		}
 		opts := r.enabled()
-		if len(opts) == 0 {
+		// With a spinner kept out, crashes and losses left alone are no step
+		// another process takes, and taking one would stand in for the
+		// progress violation every run without it ends in.
+		if len(opts) == 0 || r.spinner() != nil && onlyFaults(opts) {
 			if r.advanceClock() {
 				continue
 			}
@@ -386,7 +389,9 @@ func (r *run) execute() (v *violation) {
 			if p := r.spinner(); p != nil {
 				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps in a row without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, r.spinCount)}
 			}
-			break
+			if len(opts) == 0 {
+				break
+			}
 		}
 		r.steps++
 		i := 0
@@ -440,6 +445,15 @@ func (r *run) execute() (v *violation) {
 		}
 	}
 	return nil
+}
+
+func onlyFaults(opts []option) bool {
+	for _, o := range opts {
+		if o.kind != optCrash && o.kind != optLose {
+			return false
+		}
+	}
+	return true
 }
 
 // countSpin counts the steps one process takes in a row without changing
