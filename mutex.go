@@ -113,7 +113,7 @@ func (s *Sim) RWMutex(name string) *RWMutex {
 
 // Lock acquires the write lock, waiting while any reader or writer holds it.
 func (rw *RWMutex) Lock() {
-	p := rw.s.Current()
+	p := rw.s.currentAs(func() string { return "lock " + rw.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
 	if p == nil {
@@ -155,7 +155,7 @@ func (rw *RWMutex) Unlock() {
 // RLock acquires a read lock, waiting while a writer holds the lock or waits
 // for it.
 func (rw *RWMutex) RLock() {
-	p := rw.s.Current()
+	p := rw.s.currentAs(func() string { return "rlock " + rw.name })
 	defer func() { absorbAbort(recover(), p, nil) }()
 	goneStale(p)
 	if p == nil {
