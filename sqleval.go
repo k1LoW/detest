@@ -1439,6 +1439,12 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		return args[0], nil
 	case "greatest", "least":
+		if slices.ContainsFunc(args, func(a any) bool { _, ok := derefValue(a).(pgInterval); return ok }) &&
+			slices.ContainsFunc(args, func(a any) bool { _, ok := derefValue(a).(pgInterval); return !ok && derefValue(a) != nil }) {
+			// Postgres reads '40 days' beside an interval as an interval,
+			// which compareValues does not, and would keep the first.
+			return nil, x.unsupported(name + " of an interval and a value of another type")
+		}
 		var best any
 		for i := range args {
 			v := d(i)

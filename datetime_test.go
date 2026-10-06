@@ -332,6 +332,8 @@ func TestIntervals(t *testing.T) {
 		{`SELECT date_trunc('hour', interval '27 hours 30 minutes')`, "27:00:00"},
 		{`SELECT date_trunc('quarter', interval '7 months 3 days')`, "6 mons"},
 		{`SELECT date_trunc('decade', interval '25 years')`, "20 years"},
+		{`SELECT greatest(interval '2 months', interval '40 days')`, "2 mons"},
+		{`SELECT least(interval '40 days', NULL, interval '2 months')`, "40 days"},
 		// date_trunc of an interval is an interval, so a date moved by it
 		// is a timestamp, whose hour extract reads.
 		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
@@ -393,6 +395,11 @@ func TestIntervals(t *testing.T) {
 		`SELECT CAST(interval '1 month 1.6 seconds' AS interval(0))`,
 		`SELECT '2024-01-31 23:59:59.6'::timestamp(0)`,
 		`SELECT now()::timestamptz(0)`,
+		// Postgres reads the text beside an interval as an interval.
+		`SELECT greatest(interval '2 months', '40 days')`,
+		`SELECT least(interval '2 months', '40 days')`,
+		`SELECT greatest('40 days', interval '2 months')`,
+		`SELECT least('40 days', every) FROM plan`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
