@@ -622,8 +622,8 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 // has to return, as database/sql holds the transaction's locks until it
 // does, and its own goroutine waits for them to roll the transaction back.
 // It is refused rather than given the context's error. pgx and go-sql-driver
-// only close the connection, and the server goes on running the statement:
-// a canceled autocommit UPDATE waiting for a row is applied once the row is
+// only close the connection, and the server goes on running the statement.
+// A canceled autocommit UPDATE waiting for a row is applied once the row is
 // free, on Postgres and on MySQL alike, and a MySQL transaction keeps its
 // locks until then. When that happens depends on the lock wait and on when
 // the server notices the closed connection, which detest does not model.
