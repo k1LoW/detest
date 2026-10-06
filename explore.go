@@ -185,9 +185,23 @@ func limitsOf(opts []Option) (maxRuns int, maxDuration time.Duration) {
 
 // exploreBubble declares and explores the simulation, alone or as a worker
 // taking subtrees from f.
-func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f *frontier, worker int) (*result, *string) {
-	var res *result
-	var expect *string
+func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f *frontier, worker int) (res *result, expect *string) {
+	defer func() {
+		// synctest panics when the bubble's root returns while a goroutine of
+		// it is still blocked, such as a process or an adopted goroutine of
+		// a run that ended blocked on a channel nothing will send to. The
+		// exploration was over by then, so its result, a violation that
+		// blocked process may have caused included, is kept and reported.
+		// Go cannot stop a goroutine, so the blocked ones stay behind.
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if !strings.Contains(fmt.Sprint(rec), "blocked goroutines remain") || res == nil {
+			panic(rec)
+		}
+		t.Logf("detest: goroutines of the code under test stayed blocked in the bubble after the exploration ended and are left behind")
+	}()
 	synctest.Test(t, func(t *testing.T) {
 		s := newSim(t, opts...)
 		if f != nil {

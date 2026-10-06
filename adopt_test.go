@@ -470,3 +470,30 @@ func TestAdoptedGoroutineStartsOneBeforeItsFirstCall(t *testing.T) {
 		}
 	}
 }
+
+// A process blocked for good on a channel is reported, and its goroutine
+// left blocked when the bubble ends does not discard the report.
+func TestProcessBlockedForeverReported(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		s.Manual("pod", 1, func(p *Proc) error {
+			<-make(chan struct{})
+			return nil
+		})
+		s.ExpectViolation("pod#1 is blocked on a channel")
+	})
+}
+
+// The same holds for a goroutine the code under test started.
+func TestAdoptedGoroutineBlockedForeverReported(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('a')`)
+				<-make(chan struct{})
+			}()
+			return nil
+		})
+		s.ExpectViolation("pod#1.1 is blocked on a channel")
+	})
+}
