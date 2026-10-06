@@ -232,6 +232,7 @@ type Proc struct {
 	// crashes.
 	adopted bool
 	parent  *Proc
+	creator string // the id of the goroutine that started an adopted one
 	family  *Proc
 	kids    int // goroutines adopted from this process, for naming them
 	// returned marks an adopted goroutine seen to have returned. Done alone

@@ -120,10 +120,9 @@ func (s *Sim) lookup(r *run, onProc bool) *Proc {
 // alongside the scheduler.
 func (r *run) adopt(gid string) *Proc {
 	_, creator := goroutineCreator()
-	np := &Proc{r: r, gid: gid, adopted: true,
+	np := &Proc{r: r, gid: gid, creator: creator, adopted: true,
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{})}
 	r.gidMu.Lock()
-	np.parent = r.byGid[creator]
 	if r.over() {
 		// Its run ended before it first called, so it is turned away at
 		// every call, in this run's cleanup and in any later run alike.
@@ -178,11 +177,19 @@ func (r *run) takeAdopted() bool {
 	if len(pending) == 0 {
 		return false
 	}
+	// The parent is looked up only now. A child can reach detest before the
+	// goroutine that started it registers, and after synctest.Wait every
+	// goroutine of the step that was going to has registered.
+	r.gidMu.Lock()
 	for _, np := range pending {
+		np.parent = r.byGid[np.creator]
 		if np.parent == nil {
+			// Its creator never called into detest, such as a goroutine that
+			// only starts others. The step's process stands for it.
 			np.parent = r.current
 		}
 	}
+	r.gidMu.Unlock()
 	// A goroutine may start one of its own before its first call into
 	// detest, so a parent can be pending in the same batch as its child. The
 	// batch is taken in by generations, a goroutine once its parent is in,
