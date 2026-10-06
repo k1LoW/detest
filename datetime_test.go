@@ -367,4 +367,16 @@ func TestIntervals(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO plan VALUES (6, $1)`, time.Hour); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a time.Duration: got %v, want ErrUnsupportedSQL", err)
 	}
+	// Postgres sums and averages intervals as intervals, which detest does
+	// not, so these are refused rather than computed as 0.
+	for _, q := range []string{
+		`SELECT sum(every) FROM plan`,
+		`SELECT avg(every) FROM plan`,
+		`SELECT sum(every) OVER () FROM plan`,
+		`SELECT avg(every) OVER (ORDER BY id) FROM plan`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
 }

@@ -1310,7 +1310,12 @@ func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind 
 				ranged = true
 			}
 			if !ok {
-				f, _ := toFloat(derefValue(val))
+				f, isNum := toFloat(derefValue(val))
+				if !isNum {
+					// Postgres sums and averages an interval as an interval,
+					// which this numeric fold would count as 0.
+					return nil, x.unsupported(fmt.Sprintf("%s of a %T", name, derefValue(val)))
+				}
 				total += f
 				known = false
 				continue
