@@ -284,7 +284,9 @@ func (s *Sim) Current() *Proc {
 	switch p.away.Load() {
 	case awayCrashed:
 		// Crashed with its family while outside detest, it wakes to nothing.
-		<-r.abort
+		// Its own run's end is awaited, which a later run it woke in has
+		// already passed, rather than the end of that later run.
+		<-p.r.abort
 		if !p.adopted {
 			panic(abortSentinel{})
 		}
