@@ -388,9 +388,35 @@ func TestIntervals(t *testing.T) {
 		`SELECT avg(every) FROM plan`,
 		`SELECT sum(every) OVER () FROM plan`,
 		`SELECT avg(every) OVER (ORDER BY id) FROM plan`,
+		// A cast with a precision or fields rounds or cuts the value.
+		`SELECT interval '1.5 months' MONTH`,
+		`SELECT CAST(interval '1 month 1.6 seconds' AS interval(0))`,
+		`SELECT '2024-01-31 23:59:59.6'::timestamp(0)`,
+		`SELECT now()::timestamptz(0)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
+	}
+
+	mustExec(t, db, `CREATE TABLE tagged (id int PRIMARY KEY, every interval, label text)`)
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		// A time.Duration, an integer to detest, is refused over an empty
+		// table too.
+		{`SELECT id FROM tagged WHERE every = $1`, time.Hour},
+		{`SELECT id FROM plan WHERE every < $1`, int64(3600)},
+		// Postgres gives $1 one type, which an interval and a text operand
+		// cannot share.
+		{`SELECT id FROM tagged WHERE every = $1 AND label = $1`, "1 day"},
+	} {
+		if _, err := db.Exec(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
+		}
+	}
+	if got := queryIDs(t, db, `SELECT id FROM plan WHERE every = $1 ORDER BY id`, "720 hours"); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Errorf("every = $1 with interval text: got %v", got)
 	}
 }
