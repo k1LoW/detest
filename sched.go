@@ -239,6 +239,10 @@ type Proc struct {
 	// does not tell, since one that crashed with its family is done while its
 	// goroutine still runs.
 	returned bool
+	// lingering marks a process detest started whose goroutine was still
+	// running when its run ended and reap gave up on it. It is turned away
+	// in later runs as a retired adopted goroutine is.
+	lingering bool
 	// away is awayOutside while the process is blocked outside detest, and
 	// awayCrashed once it crashed with its family there. Its goroutine reads
 	// it when it wakes, alongside the scheduler, hence atomic.
@@ -284,7 +288,7 @@ func (s *Sim) Current() *Proc {
 	// but the resumed one is parked inside detest and cannot be calling, so the
 	// lookup would return r.current anyway. It is skipped because goroutineID
 	// takes a runtime-wide lock, which parallel workers contend on.
-	if onProc && r.outside.Load() == 0 {
+	if onProc && r.outside.Load() == 0 && s.lingerN.Load() == 0 {
 		return r.current
 	}
 	p := s.lookup(r, onProc)
@@ -869,7 +873,9 @@ func (r *run) crash(p *Proc) {
 			continue
 		}
 		if m.state == stateBlockedOutside {
-			r.leaveOutside(m)
+			// It stays counted outside, so that Current looks its goroutine
+			// up when it wakes and finds it crashed, rather than take it on
+			// the fast path for the process being run.
 			m.away.Store(awayCrashed)
 		}
 		if m.state != stateDone {

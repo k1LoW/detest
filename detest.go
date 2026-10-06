@@ -210,6 +210,9 @@ type Sim struct {
 	// staleN is len(stale), read without staleMu by Current while a seed
 	// runs, which looks a goroutine up only when some is retired.
 	staleN atomic.Int32
+	// lingerN counts the processes detest started among stale, whose
+	// goroutines would otherwise take Current's fast path in a later run.
+	lingerN atomic.Int32
 	// schedGid is the goroutine that runs the seeds and the scheduler, whose
 	// calls into detest belong to no process.
 	schedGid string

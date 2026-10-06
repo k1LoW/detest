@@ -103,13 +103,14 @@ func (s *Sim) lookup(r *run, onProc bool) *Proc {
 	if ok {
 		return p
 	}
-	if onProc || gid == s.schedGid {
-		// The scheduler's own goroutine (a seed, an invariant) and a process
-		// of an ended run keep attributing their calls as before.
-		return r.current
-	}
 	if p := s.retired(gid); p != nil {
 		return p
+	}
+	if onProc || gid == s.schedGid {
+		// The scheduler's own goroutine (a seed, an invariant) and a process
+		// of an ended run that reap waited for keep attributing their calls
+		// as before.
+		return r.current
 	}
 	return r.adopt(gid)
 }
@@ -134,7 +135,7 @@ func (r *run) adopt(gid string) *Proc {
 			r.s.stale = map[string]*Proc{}
 		}
 		r.s.stale[gid] = np
-		r.s.staleN.Store(int32(len(r.s.stale))) //nolint:gosec // far below 2^31
+		r.s.recount()
 		r.s.staleMu.Unlock()
 		return np
 	}
@@ -328,6 +329,17 @@ func (r *run) retire() {
 		// such as one asleep or one its cut call returned errRunOver to.
 		if p.adopted && !p.returned {
 			keep = append(keep, p)
+			continue
+		}
+		if !p.adopted {
+			select {
+			case <-p.exited:
+			default:
+				// reap gave up on it, such as a crashed process blocked on
+				// a channel that a later run may close.
+				p.lingering = true
+				keep = append(keep, p)
+			}
 		}
 	}
 	if len(keep) == 0 {
@@ -350,7 +362,7 @@ func (r *run) retire() {
 			}
 		}
 	}
-	s.staleN.Store(int32(len(s.stale))) //nolint:gosec // far below 2^31
+	s.recount()
 }
 
 // staleLimit bounds the retired goroutines kept before the ones that returned
@@ -376,7 +388,7 @@ func (s *Sim) drainAdopted() {
 			}
 		}
 		n = len(s.stale)
-		s.staleN.Store(int32(n)) //nolint:gosec // far below 2^31
+		s.recount()
 		s.staleMu.Unlock()
 		if n == 0 {
 			return
@@ -389,6 +401,19 @@ func (s *Sim) drainAdopted() {
 // drainRounds bounds drainAdopted, for a goroutine that sleeps again and again.
 const drainRounds = 8
 
+// recount updates the counts Current reads without staleMu, which the caller
+// holds.
+func (s *Sim) recount() {
+	linger := 0
+	for _, p := range s.stale {
+		if p.lingering {
+			linger++
+		}
+	}
+	s.staleN.Store(int32(len(s.stale))) //nolint:gosec // far below 2^31
+	s.lingerN.Store(int32(linger))      //nolint:gosec // far below 2^31
+}
+
 func (s *Sim) retired(gid string) *Proc {
 	s.staleMu.Lock()
 	defer s.staleMu.Unlock()
@@ -399,7 +424,7 @@ func (s *Sim) retired(gid string) *Proc {
 // process detest started, which reap waits for before the next run, such a
 // goroutine may wake while a later run goes on, so it is turned away at every
 // call into detest before the call touches anything that run uses.
-func (p *Proc) stale() bool { return p != nil && p.adopted && p.r.over() }
+func (p *Proc) stale() bool { return p != nil && (p.adopted || p.lingering) && p.r.over() }
 
 // absorbAbort ends, at a call into detest, the unwinding of a goroutine
 // detest adopted when the end of the run cut the call short, returning
