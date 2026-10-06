@@ -277,6 +277,26 @@ func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) s
 	return ""
 }
 
+// intervalBranchMismatch refuses a string literal or a parameter beside an
+// interval among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF.
+// Postgres reads it as an interval, failing with 22007 on text that is none
+// whichever branch a row takes, and detest would keep it as text, which
+// compares with no interval.
+func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+	interval, untyped := false, false
+	for _, e := range exprs {
+		if untypedExpr(e) {
+			untyped = true
+		} else if expressionType(e, column) == "interval" {
+			interval = true
+		}
+	}
+	if interval && untyped {
+		return "a string literal or parameter beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF"
+	}
+	return ""
+}
+
 func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
 	if b.Op != "||" {
 		return ""

@@ -334,6 +334,12 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			if what := textArgumentMismatch(v, nil); what != "" {
 				return c.refuse(what)
 			}
+			switch v.Name {
+			case "coalesce", "greatest", "least", "nullif":
+				if what := intervalBranchMismatch(v.Args, nil); what != "" {
+					return c.refuse(what)
+				}
+			}
 		}
 		return c.exprs(v.Args)
 	case *sqlir.WindowFunc:
@@ -389,6 +395,11 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 	case *sqlir.Cast:
 		return c.expr(v.X)
 	case *sqlir.CaseExpr:
+		if !c.innodb {
+			if what := intervalBranchMismatch(caseBranches(v), nil); what != "" {
+				return c.refuse(what)
+			}
+		}
 		if err := c.expr(v.Arg); err != nil {
 			return err
 		}

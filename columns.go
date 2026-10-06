@@ -960,6 +960,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.untypedOperands(sc, e.X, item)
 				}
 			case *sqlir.CaseExpr:
+				if what := intervalBranchMismatch(caseBranches(e), sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				// The branches take the type of the typed ones.
 				c.timeParams(expressionType(e, sc.columnType), caseBranches(e)...)
 				if e.Arg != nil {
@@ -980,6 +984,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
+					if what := intervalBranchMismatch(e.Args, sc.columnType); what != "" {
+						err = c.x.unsupported(what)
+						return
+					}
 					// The arguments take the type of the typed ones.
 					c.timeParams(expressionType(e, sc.columnType), e.Args...)
 				}
