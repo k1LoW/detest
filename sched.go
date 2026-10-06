@@ -1435,6 +1435,7 @@ func (p *Proc) wait() {
 	held := p.inSim
 	if held {
 		p.inSim = false
+		p.r.s.emHolder.Store(nil)
 		p.r.s.em.Unlock()
 	}
 	select {
@@ -1460,12 +1461,14 @@ func (p *Proc) wait() {
 		if held {
 			p.r.s.em.Lock()
 			p.inSim = true
+			p.r.s.emHolder.Store(p)
 		}
 		panic(stmtCanceled{p: p})
 	}
 	if held {
 		p.r.s.em.Lock()
 		p.inSim = true
+		p.r.s.emHolder.Store(p)
 	}
 }
 

@@ -251,6 +251,10 @@ type Sim struct {
 	// scheduler resumed. Everything else in detest runs one goroutine at a
 	// time by the scheduler's design and needs no lock.
 	em sync.Mutex
+	// emHolder is the process holding em, nil while none or a goroutine
+	// that is no process does, so that a call that does not resolve its
+	// process can tell whether its caller holds it already (see enterAny).
+	emHolder atomic.Pointer[Proc]
 	// epoch counts the times synctest.Wait returned, so that the goroutines
 	// that ran between two of them, and only those, share one (see
 	// recordShared).
@@ -339,12 +343,24 @@ func (s *Sim) enter(p *Proc) func() {
 		return s.em.Unlock
 	}
 	p.inSim = true
+	s.emHolder.Store(p)
 	return func() {
 		if p.inSim {
 			p.inSim = false
+			s.emHolder.Store(nil)
 			s.em.Unlock()
 		}
 	}
+}
+
+// enterAny is enter for an entry point that does not resolve its caller,
+// such as SeedRowNow, which a fake may call from inside an external call's
+// effect, whose process holds the mutex already.
+func (s *Sim) enterAny() func() {
+	if h := s.emHolder.Load(); h != nil && h.isCaller() {
+		return func() {}
+	}
+	return s.enter(nil)
 }
 
 // declare panics when a declaration method is called after the declaration

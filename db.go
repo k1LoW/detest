@@ -792,6 +792,7 @@ func (def *tableDef) reads(col string) bool {
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
 func (db *DB) SeedRowNow(table string, row Row) {
+	defer db.s.enterAny()()
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
 		return
