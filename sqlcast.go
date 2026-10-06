@@ -166,6 +166,21 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 	return out, err
 }
 
+// castTo is x.cast of v for c, cut to the length of a varchar(n) cast, as
+// an explicit cast cuts longer text.
+func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
+	out, err := x.cast(v, c.Type)
+	if err != nil || c.Len == 0 {
+		return out, err
+	}
+	if s, ok := derefValue(out).(string); ok {
+		if r := []rune(s); len(r) > c.Len {
+			return string(r[:c.Len]), nil
+		}
+	}
+	return out, nil
+}
+
 // castInteger casts v to an integer before the target type's width is
 // checked: text as the integer input function reads it, and a fraction
 // rounded. nil is a value castValue leaves as it is.
@@ -297,11 +312,13 @@ func castValue(v any, typ string) (any, error) {
 		// A numeric's text keeps the digits it was written or computed
 		// with (1.50, 3.0) and a float's is formatted by Postgres's own
 		// rules, neither of which the float detest keeps gives.
-		switch v.(type) {
+		switch x := v.(type) {
 		case float64, float32:
 			return nil, errUnknownExpr{"a cast of a numeric or a float to text"}
-		case time.Time, time.Duration:
-			return nil, errUnknownExpr{"a cast of a timestamp or an interval to text"}
+		case time.Time:
+			return nil, errUnknownExpr{"a cast of a timestamp to text"}
+		case pgInterval:
+			return x.String(), nil
 		}
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":
@@ -338,7 +355,7 @@ func castValue(v any, typ string) (any, error) {
 		return uuidValue(c), nil
 	case "interval":
 		switch v := v.(type) {
-		case time.Duration:
+		case pgInterval:
 			return v, nil
 		case string:
 			d, ierr := parseInterval(v)
@@ -355,8 +372,18 @@ func castValue(v any, typ string) (any, error) {
 		// A time is kept in UTC, the session's TimeZone: an instant as a
 		// timestamptz, and the clock a timestamptz shows there as a
 		// timestamp. Text is left as it is, as before.
-		if t, ok := v.(time.Time); ok {
-			return t.UTC(), nil
+		switch v := v.(type) {
+		case time.Time:
+			return v.UTC(), nil
+		case string:
+			// Text without a zone stays text for a timestamptz, as a column
+			// write refuses it: the server's TimeZone is not modeled there.
+			if tm, hasZone, ok := pgParseTime(v); ok && (typ == "timestamp" || hasZone) {
+				if typ == "timestamp" {
+					return time.Date(tm.Year(), tm.Month(), tm.Day(), tm.Hour(), tm.Minute(), tm.Second(), tm.Nanosecond(), time.UTC), nil
+				}
+				return tm.UTC(), nil
+			}
 		}
 	case "date":
 		switch v := v.(type) {

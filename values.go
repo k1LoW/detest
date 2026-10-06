@@ -44,6 +44,13 @@ func equalValues(a, b any) bool {
 // an insert did not give.
 func sameRow(a, b Row) bool {
 	for k, v := range a {
+		// '1 mon' and '30 days' are equal but move a time to other days,
+		// so a row changed from one to the other is a change.
+		if x, ok := derefValue(v).(pgInterval); ok {
+			if y, ok := derefValue(b[k]).(pgInterval); ok && x != y {
+				return false
+			}
+		}
 		if !sameValue(v, b[k]) {
 			return false
 		}
@@ -65,6 +72,11 @@ func sameValue(a, b any) bool {
 	if ta, ok := a.(time.Time); ok {
 		if tb, ok := b.(time.Time); ok {
 			return ta.Equal(tb)
+		}
+	}
+	if ia, ok := a.(pgInterval); ok {
+		if ib, ok := b.(pgInterval); ok {
+			return ia.span() == ib.span()
 		}
 	}
 	if ba, ok := a.([]byte); ok {
@@ -95,6 +107,13 @@ func compareValues(a, b any) (int, bool) {
 			return 0, false
 		}
 		return ta.Compare(tb), true
+	}
+	if ia, ok := a.(pgInterval); ok {
+		ib, ok := b.(pgInterval)
+		if !ok {
+			return 0, false
+		}
+		return cmp.Compare(ia.span(), ib.span()), true
 	}
 	// Postgres takes NaN as equal to NaN and greater than every other
 	// number, so ORDER BY and min/max place it as Postgres does.
@@ -200,6 +219,10 @@ func valueKey(v any) string {
 		return "b0"
 	case time.Time:
 		return "t" + t.UTC().Format(time.RFC3339Nano)
+	case pgInterval:
+		// Equal intervals, '1 mon' and '30 days', are one key, as in an
+		// index or a DISTINCT.
+		return "i" + strconv.FormatInt(t.span(), 10)
 	}
 	if isNumber(v) {
 		if n, ok := integer(v); ok {

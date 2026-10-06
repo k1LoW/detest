@@ -851,7 +851,7 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			continue
 		}
 		switch t {
-		case "bool", "timestamp", "timestamptz", "date":
+		case "bool", "timestamp", "timestamptz", "date", "interval":
 			if x.tx.db.kind.InnoDB() || v == sqlir.Unknown {
 				continue
 			}
@@ -1048,6 +1048,29 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 		// an integer parameter as the text the driver sends, and the value
 		// does not tell the two apart.
 		return nil, x.unsupported(fmt.Sprintf("a %T written to the boolean column %q", v, col))
+	}
+	if t == "interval" {
+		if fsp < 0 && v != nil {
+			// interval(0) rounds the seconds and interval day drops the
+			// time, which detest does not do to the value it stores.
+			return nil, x.unsupported(fmt.Sprintf("a write to the interval column %q, declared with a precision or fields", col))
+		}
+		switch v := v.(type) {
+		case pgInterval:
+			return v, nil
+		case string:
+			iv, ierr := parseInterval(v)
+			switch {
+			case ierr == nil:
+				return iv, nil
+			case ierr.malformed:
+				return nil, x.tx.db.kind.Error(sqlir.InvalidDatetimeFormat, fmt.Sprintf("invalid input syntax for type interval: %q", v), relname(table), col, "")
+			}
+			return nil, x.unsupported(ierr.what + fmt.Sprintf(", written to the interval column %q", col))
+		}
+		// A time.Duration bound to a parameter reaches the driver as an
+		// integer, which pgx and lib/pq send differently.
+		return nil, x.unsupported(fmt.Sprintf("a %T written to the interval column %q", v, col))
 	}
 	if t == "date" {
 		// The date as written or as the driver's time.Time holds it: pgx

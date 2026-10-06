@@ -1339,7 +1339,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, paramBool(v, val)), v.Type)
+		return x.castTo(v, x.halfToInteger(v, paramBool(v, val)))
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -2270,7 +2270,7 @@ func toDriverValue(v any) driver.Value {
 	switch x := v.(type) {
 	case nil, int64, float64, bool, []byte, string, time.Time:
 		return x
-	case time.Duration:
+	case pgInterval:
 		return x.String()
 	case uuidValue:
 		return string(x)

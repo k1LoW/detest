@@ -111,7 +111,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.cast(x.halfToInteger(v, paramDate(v, paramBool(v, val))), v.Type)
+		return x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, val))))
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -133,6 +133,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			}
 			if f, ok := toFloat(derefValue(val)); ok {
 				return -f, nil
+			}
+			if iv, ok := derefValue(val).(pgInterval); ok {
+				return iv.neg(), nil
 			}
 		}
 		return nil, errUnknownExpr{"unary " + v.Op}
@@ -688,7 +691,7 @@ func trailingSpaceLiteral(e sqlir.Expr) bool {
 
 func isTemporal(v any) bool {
 	switch derefValue(v).(type) {
-	case time.Time, time.Duration:
+	case time.Time, pgInterval:
 		return true
 	}
 	return false
@@ -704,9 +707,6 @@ func isFloat(v any) bool {
 
 func isNumber(v any) bool {
 	v = derefValue(v)
-	if _, ok := v.(time.Duration); ok {
-		return false // an interval, though its kind is an integer
-	}
 	_, ok := toFloat(v)
 	return ok
 }
@@ -729,21 +729,36 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			s = k
 		case []byte:
 			s = string(k)
-		case int64:
+		case nil:
+			return v, nil
+		default:
+			if _, isInterval := derefValue(other).(pgInterval); isInterval {
+				// A time.Duration reaches detest as an integer, which pgx
+				// and lib/pq encode as an interval differently.
+				return nil, x.unsupported(fmt.Sprintf("a %T parameter compared with an interval", k))
+			}
+			n, isInt := k.(int64)
+			if _, isBool := derefValue(other).(bool); !isInt || !isBool {
+				return v, nil
+			}
 			// An integer bound to a parameter Postgres infers as boolean
 			// reaches it as the text the driver sends, so active = $1
 			// with 1 is true and with 2 fails as boolean input does.
-			if _, isBool := derefValue(other).(bool); !isBool {
-				return v, nil
-			}
-			s = strconv.FormatInt(k, 10)
-		default:
-			return v, nil
+			s = strconv.FormatInt(n, 10)
 		}
 	default:
 		return v, nil
 	}
 	switch derefValue(other).(type) {
+	case pgInterval:
+		iv, ierr := parseInterval(s)
+		switch {
+		case ierr == nil:
+			return iv, nil
+		case ierr.malformed:
+			return nil, x.tx.db.kind.Error(sqlir.InvalidDatetimeFormat, fmt.Sprintf("invalid input syntax for type interval: %q", s), "", "", "")
+		}
+		return nil, errUnknownExpr{ierr.what}
 	case uuidValue:
 		c, ok := canonicalUUID(s)
 		if !ok {
@@ -914,7 +929,7 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 }
 
 // arith handles numeric arithmetic and timestamp/interval arithmetic
-// (intervals are time.Duration).
+// (intervals are pgInterval).
 func arith(op string, l, r any) (any, error) {
 	l, r = derefValue(l), derefValue(r)
 	if l == nil || r == nil {
@@ -922,36 +937,45 @@ func arith(op string, l, r any) (any, error) {
 	}
 	if t, ok := l.(time.Time); ok {
 		switch rv := r.(type) {
-		case time.Duration:
+		case pgInterval:
 			if op == "+" {
-				return t.Add(rv), nil
+				return rv.addToTime(t), nil
 			}
 			if op == "-" {
-				return t.Add(-rv), nil
+				return rv.neg().addToTime(t), nil
 			}
 		case time.Time:
 			if op == "-" {
-				return t.Sub(rv), nil
+				return timeDifference(t, rv), nil
 			}
 		}
 		return nil, errUnknownExpr{"timestamp arithmetic " + op}
 	}
-	if d, ok := l.(time.Duration); ok {
+	if iv, ok := l.(pgInterval); ok {
 		switch rv := r.(type) {
-		case time.Duration:
+		case pgInterval:
 			if op == "+" {
-				return d + rv, nil
+				return iv.add(rv), nil
 			}
 			if op == "-" {
-				return d - rv, nil
+				return iv.add(rv.neg()), nil
 			}
 		case time.Time:
 			if op == "+" {
-				return rv.Add(d), nil
+				return iv.addToTime(rv), nil
 			}
 		}
 		if f, ok := toFloat(r); ok && op == "*" {
-			return time.Duration(float64(d) * f), nil
+			if out, ok := iv.mul(f); ok {
+				return out, nil
+			}
+			return nil, errUnknownExpr{"an interval product out of range"}
+		}
+		return nil, errUnknownExpr{"interval arithmetic " + op}
+	}
+	if iv, ok := r.(pgInterval); ok {
+		if f, ok := toFloat(l); ok && op == "*" {
+			return arith(op, iv, f)
 		}
 		return nil, errUnknownExpr{"interval arithmetic " + op}
 	}
@@ -1605,13 +1629,20 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !ok {
 			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T unit", d(0))}
 		}
-		if u, known := timeUnits[strings.ToLower(unit)]; !known || extractOnly[u] {
+		u, known := timeUnits[strings.ToLower(unit)]
+		if !known || extractOnly[u] {
 			return nil, x.errUnit(unit) // whatever the source, as in Postgres
+		}
+		if iv, ok := d(1).(pgInterval); ok {
+			r, ok := iv.trunc(u)
+			if !ok {
+				// Postgres refuses a week, which months do not hold whole.
+				return nil, errUnknownExpr{"date_trunc of an interval to " + u}
+			}
+			return r, nil
 		}
 		t, ok := d(1).(time.Time)
 		if !ok {
-			// An interval keeps its days apart from its time, which a
-			// duration does not.
 			return nil, errUnknownExpr{fmt.Sprintf("date_trunc of a %T", d(1))}
 		}
 		r, ok := dateTrunc(unit, t)
@@ -1647,7 +1678,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		// make_interval(secs => x) is the form that appears in backoff SQL; a
 		// single argument is taken as seconds.
 		if f, ok := toFloat(d(0)); ok {
-			return time.Duration(f * float64(time.Second)), nil
+			return pgInterval{micros: int64(math.RoundToEven(f * 1e6))}, nil
 		}
 	case "pg_try_advisory_xact_lock", "pg_advisory_xact_lock":
 		var kb strings.Builder

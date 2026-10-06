@@ -9,6 +9,13 @@ import (
 // expressionType uses only types the statement or its declared columns tell
 // us. It never evaluates an argument while resolving a function signature.
 func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+	return expressionTypeIn(e, column, nil)
+}
+
+// expressionTypeIn is expressionType with subquery, when given, typing a
+// scalar subquery in its own scope, which expressionType reads in the scope
+// around it.
+func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	switch e := e.(type) {
 	case *sqlir.Cast:
 		return e.Type
@@ -33,17 +40,26 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "bool"
 		}
 		if e.Op == "-" {
-			return expressionType(e.X, column)
+			return expressionTypeIn(e.X, column, subquery)
 		}
 	case *sqlir.BinaryExpr:
 		switch e.Op {
 		case "||":
 			return "text"
 		case "+", "-", "*", "/", "%":
-			l, r := expressionType(e.L, column), expressionType(e.R, column)
+			l, r := expressionTypeIn(e.L, column, subquery), expressionTypeIn(e.R, column, subquery)
 			// A date moved by an interval is a timestamp.
 			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
 				return "timestamp"
+			}
+			isTime := func(t string) bool { return t == "timestamp" || t == "timestamptz" }
+			switch {
+			case isTime(l) && isTime(r) && e.Op == "-":
+				return "interval"
+			case l == "interval" && isTime(r) && e.Op == "+":
+				return r
+			case (l == "interval" || r == "interval") && e.Op == "*":
+				return "interval"
 			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
@@ -71,7 +87,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "int4"
 		case "sum":
 			if len(e.Args) > 0 {
-				switch typ := expressionType(e.Args[0], column); typ {
+				switch typ := expressionTypeIn(e.Args[0], column, subquery); typ {
 				case "int", "int2", "int4", "integer", "smallint":
 					return "int8"
 				case "int8", "bigint":
@@ -81,7 +97,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 				}
 			}
 		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
-			return commonType(e.Args, column)
+			return commonType(e.Args, column, subquery)
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -90,7 +106,7 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "int8"
 		case "lag", "lead", "first_value", "last_value":
 			if len(e.Args) > 0 {
-				return expressionType(e.Args[0], column)
+				return expressionTypeIn(e.Args[0], column, subquery)
 			}
 		case "random":
 			return "float8"
@@ -103,22 +119,27 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 		case "date_part":
 			return "float8"
 		case "date_trunc":
-			// A timestamp's stays a timestamp, and a date's becomes a
-			// timestamptz, as any other's.
-			if len(e.Args) == 2 && expressionType(e.Args[1], column) == "timestamp" {
-				return "timestamp"
+			// A timestamp's stays a timestamp and an interval's an
+			// interval, and a date's becomes a timestamptz, as any other's.
+			if len(e.Args) == 2 {
+				if typ := expressionTypeIn(e.Args[1], column, subquery); typ == "timestamp" || typ == "interval" {
+					return typ
+				}
 			}
 			return "timestamptz"
 		case "gen_random_uuid", "uuid_generate_v4":
 			return "uuid"
 		}
 	case *sqlir.WindowFunc:
-		return expressionType(e.Func, column)
+		return expressionTypeIn(e.Func, column, subquery)
 	case *sqlir.CaseExpr:
-		return commonType(caseBranches(e), column)
+		return commonType(caseBranches(e), column, subquery)
 	case *sqlir.SubQuery:
+		if subquery != nil {
+			return subquery(e)
+		}
 		if e.Select != nil && len(e.Select.Targets) == 1 {
-			return expressionType(e.Select.Targets[0].Expr, column)
+			return expressionTypeIn(e.Select.Targets[0].Expr, column, subquery)
 		}
 	case *sqlir.Exists, *sqlir.InExpr, *sqlir.ArrayCmp, *sqlir.IsNull:
 		return "bool"
@@ -130,11 +151,11 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 // arguments of COALESCE or the branches of CASE: the first one known, except
 // that dates and timestamps meet at the widest of them, a timestamptz over a
 // timestamp over a date.
-func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
+func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
 	best := ""
 	for _, e := range exprs {
-		typ := expressionType(e, column)
+		typ := expressionTypeIn(e, column, subquery)
 		if typ == "" {
 			continue
 		}
@@ -222,10 +243,15 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 				}
 			}
 		case "interval":
-			// An interval keeps its days apart from its time, which the
-			// duration detest holds does not, so only its length is known.
-			if unit != unknownUnit && (f.Name == "date_trunc" || unit != "epoch") {
-				return f.Name + " of an interval other than extract(epoch FROM ...)"
+			// Units of a calendar position Postgres refuses for an interval,
+			// which has none.
+			switch unit {
+			case "week":
+				if f.Name == "date_trunc" {
+					return "date_trunc of an interval to week"
+				}
+			case "dow", "isodow", "doy", "isoyear", "julian", "timezone", "timezone_hour", "timezone_minute":
+				return f.Name + " of " + unit + " from an interval"
 			}
 		default:
 			return f.Name + " of a " + typ
@@ -259,6 +285,84 @@ func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) s
 		return "date - date"
 	}
 	return ""
+}
+
+// intervalBranchMismatch refuses a value other than an interval or NULL
+// beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST,
+// NULLIF or the value and default of LAG and LEAD. Postgres reads a string
+// literal or a parameter there as an interval, failing with 22007 on text
+// that is none whichever branch a row takes, and fails a branch of another
+// type with 42804. detest would keep the value as it is, which compares with
+// no interval. A column whose type the check cannot resolve, of a * or a
+// set operation, may be an interval, so it is refused beside an interval or
+// a value of another type too.
+//
+// subquery, when given, types a scalar subquery in its own scope, which
+// expressionType reads in the scope around it.
+func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+	interval, other, unresolved := false, false, false
+	for _, e := range exprs {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		typ := expressionTypeIn(e, column, subquery)
+		switch {
+		case untypedBranch(e):
+			other = true
+		case typ == "interval":
+			interval = true
+		case typ == "unresolved column type":
+			unresolved = true
+		case typ != "":
+			other = true
+		}
+	}
+	if interval && other || unresolved && (interval || other) {
+		return "a value other than an interval beside an interval, or beside a column of unresolved type, among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"
+	}
+	return ""
+}
+
+// untypedBranch reports a string literal or a parameter, or a CASE or
+// COALESCE of nothing else or of NULL only, which Postgres resolves to
+// text, as in COALESCE('bogus', '') and COALESCE(NULL, NULL).
+func untypedBranch(e sqlir.Expr) bool {
+	var branches []sqlir.Expr
+	switch e := e.(type) {
+	case *sqlir.CaseExpr:
+		branches = caseBranches(e)
+	case *sqlir.FuncCall:
+		if e.Name == "lag" || e.Name == "lead" {
+			return false
+		}
+		branches = branchArgs(e)
+	default:
+		return untypedExpr(e)
+	}
+	for _, b := range branches {
+		if k, ok := b.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		if !untypedBranch(b) {
+			return false
+		}
+	}
+	return len(branches) > 0
+}
+
+// branchArgs are the arguments of f that Postgres resolves to one type, for
+// intervalBranchMismatch: all of them, or the value and the default of LAG
+// and LEAD, whose offset is an integer.
+func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
+	switch f.Name {
+	case "coalesce", "greatest", "least", "nullif":
+		return f.Args
+	case "lag", "lead":
+		if len(f.Args) == 3 {
+			return []sqlir.Expr{f.Args[0], f.Args[2]}
+		}
+	}
+	return nil
 }
 
 func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
