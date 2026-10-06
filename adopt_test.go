@@ -1211,3 +1211,18 @@ func TestGoroutineOfHelperBelongsToHelpersProcess(t *testing.T) {
 		t.Errorf("the goroutine is not a's:\n%s", res.Trace)
 	}
 }
+
+// A goroutine that sleeps after its last call into detest and then returns
+// is not taken for one blocked for good.
+func TestAdoptedGoroutineReturnsAfterTrailingSleep(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('g')`)
+				time.Sleep(time.Hour)
+			}()
+			return nil
+		})
+	})
+}

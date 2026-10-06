@@ -441,6 +441,11 @@ func (r *run) execute() (v *violation) {
 			if r.waitOutside() {
 				continue
 			}
+			// One that slept after its last call may have returned while the
+			// wait lasted, sending nothing.
+			if r.reapAdopted() {
+				continue
+			}
 			break
 		}
 		r.steps++
