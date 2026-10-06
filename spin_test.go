@@ -184,6 +184,36 @@ func TestBusyWaitAloneIsAViolationWithCrashes(t *testing.T) {
 	}
 }
 
+// A process that runs outside detest, woken from a channel, takes a step as
+// one resumed by the scheduler does, so the waiter gets to see the flag it
+// set.
+func TestOutsideStepEndsASpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		var ch chan struct{}
+		flag := false
+		s.Seed(func() { ch, flag = make(chan struct{}), false })
+		s.Manual("setter", 1, func(p *Proc) error {
+			<-ch
+			flag = true
+			return nil
+		})
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for i := range 10 {
+				p.Step("before %d", i)
+			}
+			ch <- struct{}{}
+			for !flag {
+				p.Step("wait")
+			}
+			return nil
+		}, When(func() bool { return ch != nil }))
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(10), MaxPreemptions(0)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {

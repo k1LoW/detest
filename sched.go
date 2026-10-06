@@ -767,6 +767,9 @@ func (r *run) settleOutside() {
 // takeOutside handles the event of a process that was blocked outside detest.
 func (r *run) takeOutside(p *Proc, ev procEvent) {
 	r.outside.Add(-1)
+	// A process outside detest took a step, which may have made true what a
+	// spinning process waits for, so the spin ends as when another is resumed.
+	r.spinProc = nil
 	r.note(p, "resumes from the primitive it blocked on")
 	if ev.kind != evSync {
 		r.handleEvent(p, ev)
