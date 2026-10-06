@@ -1020,6 +1020,7 @@ func (r *run) waitOutside() bool {
 	for _, p := range waiting {
 		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.ev)})
 	}
+	r.s.publish() // goroutines woken by a timer run while the select waits
 	timeout := time.NewTimer(outsideWaitLimit)
 	defer timeout.Stop()
 	cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timeout.C)})
