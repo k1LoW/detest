@@ -193,11 +193,15 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 // same database. Postgres does not detect it (the holder is idle in
 // transaction), so the statement hangs until a timeout.
 func (tx *Tx) selfWait(conflict []*Tx, what, kind string) error {
+	// The process waiting is the one running the operation, which may be a
+	// goroutine its process handed the transaction to, and it waits for
+	// itself only when it is the one that would end the other transaction.
+	w := tx.proc()
 	for _, o := range conflict {
-		if o.p == tx.p {
+		if o.p == w {
 			tx.aborted = true
-			tx.p.r.note(tx.proc(), "waits for %s held by its own open transaction", what)
-			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", tx.p.name, kind)}
+			tx.p.r.note(w, "waits for %s held by its own open transaction", what)
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", w.name, kind)}
 			return ErrSelfWait
 		}
 	}

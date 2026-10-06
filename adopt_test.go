@@ -1570,3 +1570,32 @@ func TestSharedTxOperationsInEitherOrder(t *testing.T) {
 		})
 	})
 }
+
+// A goroutine running its process's hand-written transaction may wait for a
+// row another transaction of the process holds, which the process, still
+// running, then ends. That is no wait for its own transaction.
+func TestGoroutineWaitsForItsProcessesOtherTransaction(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Seed(func() { store.SeedRow("counters", Row{"id": "r", "n": int64(0)}) })
+		s.Manual("pod", 1, func(p *Proc) error {
+			other, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			if _, err := other.Exec(`UPDATE "counters" SET "n" = 1 WHERE "id" = 'r'`); err != nil {
+				return err
+			}
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				var gerr error
+				wg.Go(func() { _, _, gerr = tx.GetForUpdate("counters", "r") })
+				if err := other.Commit(); err != nil {
+					return err
+				}
+				wg.Wait()
+				return gerr
+			})
+		})
+	})
+}
