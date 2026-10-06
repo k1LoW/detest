@@ -1791,6 +1791,14 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		}
 		names := e.TypeCast.TypeName.GetNames()
 		typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
+		switch typ {
+		case "interval", "timestamp", "timestamptz":
+			// interval '1.5 months' month drops the days and ::timestamp(0)
+			// rounds the seconds, which the cast without them does not.
+			if len(e.TypeCast.TypeName.GetTypmods()) > 0 {
+				return nil, c.unsupported("a cast to " + typ + " with a precision or fields")
+			}
+		}
 		return &sqlir.Cast{X: x, Type: typ}, nil
 	case *pg.Node_AExpr:
 		return c.aExpr(e.AExpr)
