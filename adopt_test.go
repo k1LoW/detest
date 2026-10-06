@@ -1599,3 +1599,39 @@ func TestGoroutineWaitsForItsProcessesOtherTransaction(t *testing.T) {
 		})
 	})
 }
+
+// Two processes the test declared that share a *sql.Tx, one beginning it and
+// the other running a statement on it, are refused as well.
+func TestDeclaredProcessesSharingSQLTxRefused(t *testing.T) {
+	var mu sync.Mutex
+	var got error
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		var shared *sql.Tx
+		s.Seed(func() { shared = nil })
+		s.Manual("owner", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			shared = tx
+			p.Step("hand it over")
+			return tx.Rollback()
+		})
+		s.Manual("user", 1, func(p *Proc) error {
+			if shared == nil {
+				return nil
+			}
+			_, err := shared.Exec(`INSERT INTO "marks" ("id") VALUES ('u')`)
+			if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+				mu.Lock()
+				got = err
+				mu.Unlock()
+			}
+			return nil
+		}, After(func(*State) bool { return shared != nil }))
+	})
+	if got == nil {
+		t.Error("no run refused the other process's statement as unsupported")
+	}
+}

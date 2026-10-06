@@ -292,16 +292,17 @@ func recoverRunOver(err *error) {
 
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
-// borrowed reports whether p, a goroutine the code under test started, runs
-// on a transaction another process began, or the reverse. Its statements
-// would yield as the process that began it, whose own goroutine may be
-// waiting for p meanwhile, so detest refuses it rather than schedule it
-// under the wrong process. Rollback is not checked, since database/sql rolls
+// borrowed reports whether p runs on a transaction another process began,
+// whether one of them is a goroutine the code under test started or both
+// are processes the test declared sharing a *sql.Tx. Its statements would
+// yield as the process that began it, whose own goroutine may be waiting
+// for p meanwhile, so detest refuses it rather than schedule it under the
+// wrong process. Rollback is not checked, since database/sql rolls
 // a transaction back from a goroutine of its own when its context ends.
 func (c *sqlConn) borrowed(p *Proc) bool { return borrowedTx(c.tx, p) }
 
 func borrowedTx(tx *Tx, p *Proc) bool {
-	return p != nil && tx != nil && tx.p != nil && p != tx.p && !tx.p.r.over() && (p.adopted || tx.p.adopted)
+	return p != nil && tx != nil && tx.p != nil && p != tx.p && !tx.p.r.over()
 }
 
 // statementTx returns the transaction a statement runs in: the open one, or an
