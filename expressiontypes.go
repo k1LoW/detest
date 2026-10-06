@@ -41,6 +41,10 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 			return "text"
 		case "+", "-", "*", "/", "%":
 			l, r := expressionType(e.L, column), expressionType(e.R, column)
+			// A date moved by an interval is a timestamp.
+			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
+				return "timestamp"
+			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
 					return typ
@@ -178,6 +182,12 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 					unit = u
 				}
 			}
+		}
+		// Postgres picks the overload by the source's type, and one it does
+		// not know, a parameter or a string literal, matches several of them
+		// (42725), whatever value is bound.
+		if untypedExpr(f.Args[1]) {
+			return f.Name + " of a parameter or a string literal of no type"
 		}
 		switch typ := expressionType(f.Args[1], column); typ {
 		case "", "unresolved column type", "timestamp", "timestamptz":

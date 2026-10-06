@@ -147,6 +147,9 @@ func TestTimeParametersTypedAsDateOrTimestamp(t *testing.T) {
 		{`SELECT id FROM ev WHERE on_day IN ($1)`, []int64{1}},
 		{`SELECT id FROM ev WHERE ts = $1::timestamp`, []int64{1}},
 		{`SELECT id FROM ev WHERE date_trunc('day', ts) = $1::date`, []int64{1}},
+		// A date moved by an interval is a timestamp, so $1 keeps its clock.
+		{`SELECT id FROM ev WHERE on_day + interval '30 minutes' = $1`, []int64{1}},
+		{`SELECT id FROM ev WHERE interval '30 minutes' + on_day = $1`, []int64{1}},
 	} {
 		if got := queryIDs(t, db, tt.q, at); !slices.Equal(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
@@ -192,6 +195,11 @@ func TestDatetimeErrorsAndRefusals(t *testing.T) {
 		`SELECT extract(julian FROM at) FROM ev`,
 		`SELECT extract(timezone FROM at) FROM ev`,
 		`SELECT date_trunc('day', at, 'Asia/Tokyo') FROM ev`,
+		// Postgres cannot pick the overload for a source of no type (42725).
+		`SELECT date_trunc('day', $1)`,
+		`SELECT extract(year FROM $1)`,
+		`SELECT date_part('year', $1)`,
+		`SELECT date_trunc('day', '2024-05-20')`,
 		`SET TIME ZONE 'Asia/Tokyo'`,
 		`SET timezone = 'America/New_York'`,
 		`SELECT CURRENT_TIME`,
