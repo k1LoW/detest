@@ -108,11 +108,13 @@ func (iv pgInterval) mul(f float64) (pgInterval, bool) {
 	}
 	monthsF := float64(iv.months) * f
 	months := math.Trunc(monthsF)
-	monthRemainderDays := (monthsF - months) * daysPerMonth
+	// TSROUND, rint to six places, of both remainders, without which
+	// '1 month' * 0.3333333333 comes out a microsecond short of 10 days.
+	tsround := func(x float64) float64 { return math.RoundToEven(x*1e6) / 1e6 }
+	monthRemainderDays := tsround((monthsF - months) * daysPerMonth)
 	daysF := float64(iv.days) * f
 	days := math.Trunc(daysF)
-	secRemainder := (daysF - days + monthRemainderDays - math.Trunc(monthRemainderDays)) * 86400
-	secRemainder = math.Round(secRemainder*1e6) / 1e6
+	secRemainder := tsround((daysF - days + monthRemainderDays - math.Trunc(monthRemainderDays)) * 86400)
 	if math.Abs(secRemainder) >= 86400 {
 		days += math.Trunc(secRemainder / 86400)
 		secRemainder -= math.Trunc(secRemainder/86400) * 86400
