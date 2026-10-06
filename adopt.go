@@ -66,6 +66,39 @@ func goroutineCreator() (gid, creator string) {
 	return gid, creator
 }
 
+// liveCreators maps the id of every goroutine of the program that has a
+// creator to the creator's id, from a dump of all their stacks, which stops
+// the world.
+func liveCreators() map[string]string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	creators := map[string]string{}
+	for block := range strings.SplitSeq(string(buf), "\n\n") {
+		id := strings.TrimPrefix(block, "goroutine ")
+		i := strings.IndexByte(id, ' ')
+		if i <= 0 {
+			continue
+		}
+		id = id[:i]
+		const in = " in goroutine "
+		if j := strings.LastIndex(block, in); j >= 0 {
+			c := block[j+len(in):]
+			if k := strings.IndexAny(c, " \n"); k >= 0 {
+				c = c[:k]
+			}
+			creators[id] = c
+		}
+	}
+	return creators
+}
+
 // liveGoroutines returns the ids of every goroutine of the program. It stops
 // the world, so it is called only when the run cannot go on without knowing
 // which adopted goroutines returned.
@@ -189,12 +222,29 @@ func (r *run) takeAdopted() bool {
 	// The parent is looked up only now. A child can reach detest before the
 	// goroutine that started it registers, and after synctest.Wait every
 	// goroutine of the step that was going to has registered.
+	var creators map[string]string // read once per batch, only when needed
 	r.gidMu.Lock()
 	for _, np := range pending {
 		np.parent = r.byGid[np.creator]
+		if np.parent != nil {
+			continue
+		}
+		// Its creator never called into detest, such as a helper goroutine
+		// that only starts others. The chain of creators is followed through
+		// the goroutines still alive to the first one detest knows, which
+		// may belong to another process than the step's.
+		if creators == nil {
+			creators = liveCreators()
+		}
+		for gid, seen := creators[np.creator], 0; gid != "" && seen < len(creators); gid, seen = creators[gid], seen+1 {
+			if p, ok := r.byGid[gid]; ok {
+				np.parent = p
+				break
+			}
+		}
 		if np.parent == nil {
-			// Its creator never called into detest, such as a goroutine that
-			// only starts others. The step's process stands for it.
+			// The chain broke at a creator that already returned. The step's
+			// process stands for it.
 			np.parent = r.current
 		}
 	}

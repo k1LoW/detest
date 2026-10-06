@@ -1177,3 +1177,37 @@ func TestGoroutineOfCrashedPodNeverRuns(t *testing.T) {
 		})
 	}, MaxCrashes(1))
 }
+
+// A goroutine started by a helper that never calls into detest belongs to
+// the process that started the helper, not to whichever process the
+// scheduler ran last, as long as the helper is alive to tell.
+func TestGoroutineOfHelperBelongsToHelpersProcess(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Manual("a", 1, func(p *Proc) error {
+			go func() { // the helper, waiting for what it starts
+				time.Sleep(time.Second)
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('c')`)
+				})
+				wg.Wait()
+			}()
+			return nil
+		})
+		s.Manual("b", 1, func(p *Proc) error {
+			for range 3 {
+				time.Sleep(400 * time.Millisecond)
+				p.Step("tick")
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error { return errors.New("done") })
+	}, nil, nil, 0)
+	if !res.Violated {
+		t.Fatal("expected the run to reach quiescence")
+	}
+	if !strings.Contains(res.Trace, "a#1 ") || !strings.Contains(res.Trace, "starts goroutine a#1.1") {
+		t.Errorf("the goroutine is not a's:\n%s", res.Trace)
+	}
+}
