@@ -244,12 +244,24 @@ func pinnedTable(db *DB, name, alias string, where sqlir.Expr) (string, bool) {
 	return table, true
 }
 
-// isolatedTable returns the definition of a table with a primary key and no
-// foreign key to or from it, and nil for any other.
+// isolatedTable returns the definition of a table with a primary key, no
+// foreign key to or from it, and no CHECK or generated column that changes
+// state, such as one calling setval, and nil for any other. Each of those
+// reads or writes beyond the rows a statement touches.
 func isolatedTable(db *DB, table string) *tableDef {
 	def := db.defs[table]
 	if def == nil || len(def.pk) == 0 || len(def.fks) > 0 {
 		return nil
+	}
+	for _, c := range def.checks {
+		if hasEffects(c.Expr) {
+			return nil
+		}
+	}
+	for _, g := range def.generated {
+		if hasEffects(g.Expr) {
+			return nil
+		}
 	}
 	for _, other := range db.defs {
 		for _, fk := range other.fks {
