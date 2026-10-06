@@ -1488,3 +1488,31 @@ func TestMySQLSharedTxDeadlockStaysRolledBack(t *testing.T) {
 		s.Sometimes("x was the deadlock victim", func(st *State) bool { return victim })
 	}, MaxPreemptions(2))
 }
+
+// Goroutines sharing a hand-written transaction run its operations one at a
+// time, as a connection runs its statements. On MySQL a failing statement
+// rolls back to the mark it took, and run interleaved with a sibling's
+// successful write it would take that write with it.
+func TestMySQLSharedTxStatementsSerialized(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", mysql.New())
+		s.Seed(func() { store.SeedRow("marks", Row{"id": "dup"}) })
+		var bErr error
+		s.Seed(func() { bErr = errors.New("not run") })
+		s.Manual("x", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				wg.Go(func() { _ = tx.Insert("marks", Row{"id": "dup"}) }) // fails
+				wg.Go(func() { bErr = tx.Insert("marks", Row{"id": "b"}) })
+				wg.Wait()
+				return nil
+			})
+		})
+		s.AtQuiescence(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "b"); bErr == nil && !ok {
+				return errors.New("a write that succeeded was not committed")
+			}
+			return nil
+		})
+	})
+}

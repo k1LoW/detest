@@ -407,6 +407,7 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 	if caller = tx.caller(func() string { return "select " + table }); caller.stale() {
 		runtime.Goexit()
 	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil
@@ -1726,6 +1727,10 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 type Tx struct {
 	db *DB
 	p  *Proc
+	// conn serializes the operations of a hand-written transaction several
+	// goroutines of its process use, as a connection runs one statement at
+	// a time (see enterOp).
+	conn txConn
 	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
 	// transaction holds. Letting a lock go or weakening it then changes what
 	// such a read finds, so an idle loop may tick again even if no row
@@ -1854,6 +1859,7 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 	if caller = tx.caller(func() string { return "get " + table + " " + key }); caller.stale() {
 		runtime.Goexit()
 	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil, false
@@ -1874,6 +1880,7 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 	if caller = tx.caller(func() string { return "get for update " + table + " " + key }); caller.stale() {
 		return nil, false, errRunOver
 	}
+	defer tx.enterOp(caller)()
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return nil, false, err
@@ -1894,6 +1901,7 @@ func (tx *Tx) Insert(table string, row Row) (err error) {
 	if caller = tx.caller(func() string { return fmt.Sprint("insert ", table, row) }); caller.stale() {
 		return errRunOver
 	}
+	defer tx.enterOp(caller)()
 	row = tx.db.typedRow(table, row)
 	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
@@ -1906,6 +1914,7 @@ func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", key, fields) }); caller.stale() {
 		return false, errRunOver
 	}
+	defer tx.enterOp(caller)()
 	n, err := tx.UpdateWhere(table, func(r Row) bool { return r.Key() == key }, fields, fmt.Sprintf("id=%s", key))
 	return n == 1, err
 }
@@ -1919,6 +1928,7 @@ func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
 	if caller = tx.caller(func() string { return fmt.Sprint("cas ", table, " ", key, " ", field, from, to) }); caller.stale() {
 		return false, errRunOver
 	}
+	defer tx.enterOp(caller)()
 	from, _ = tx.db.typedValue(table, field, from)
 	to, _ = tx.db.typedValue(table, field, to)
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
@@ -2041,6 +2051,7 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", desc, fields) }); caller.stale() {
 		return 0, errRunOver
 	}
+	defer tx.enterOp(caller)()
 	return tx.updateWhere(table, publicPred(pred), tx.db.typedRow(table, fields), desc)
 }
 
@@ -2052,6 +2063,7 @@ func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 	if caller = tx.caller(func() string { return "delete " + table + " " + key }); caller.stale() {
 		return false, errRunOver
 	}
+	defer tx.enterOp(caller)()
 	var found bool
 	err = tx.asStatement(func() error {
 		var err error
@@ -2071,6 +2083,7 @@ func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	if caller = tx.caller(func() string { return fmt.Sprint("enqueue ", q.name, msg) }); caller.stale() {
 		runtime.Goexit()
 	}
+	defer tx.enterOp(caller)()
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
@@ -2331,6 +2344,66 @@ func (tx *Tx) caller(first func() string) *Proc {
 		return nil
 	}
 	return tx.db.s.currentAs(first)
+}
+
+// txConn is the connection of a hand-written transaction, which one
+// operation uses at a time. A process waiting for it is blocked as for a
+// mutex, so it takes part in the cycles of waits detest reports.
+type txConn struct {
+	by    *Proc // the process running an operation, nil while none does
+	depth int   // operations of by in progress, which may call each other
+}
+
+func (c *txConn) holders(*Proc) []*Proc {
+	if c.by == nil {
+		return nil
+	}
+	return []*Proc{c.by}
+}
+
+func (c *txConn) reset() {}
+
+func (c *txConn) crash(p *Proc) bool {
+	if c.by != p {
+		return false
+	}
+	c.by, c.depth = nil, 0
+	return true
+}
+
+// enterOp waits until no other process runs an operation of the
+// transaction and takes it for p, returning what gives it back. A real
+// connection runs one statement at a time, while the goroutines a process
+// hands its transaction to would otherwise interleave at their yield points,
+// such as a failed statement on MySQL rolling back to its mark and taking a
+// sibling's write that came after the mark with it.
+func (tx *Tx) enterOp(p *Proc) func() {
+	if p == nil || tx.p == nil || tx.atomic {
+		return func() {}
+	}
+	c := &tx.conn
+	for c.by != nil && c.by != p {
+		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
+	}
+	c.by = p
+	c.depth++
+	return func() {
+		if c.by != p {
+			return
+		}
+		if c.depth--; c.depth > 0 {
+			return
+		}
+		c.by = nil
+		if tx.p.r.over() {
+			return
+		}
+		for _, w := range tx.p.r.procs {
+			if w.state == stateBlockedLock && w.waitLock == c {
+				w.state, w.waitLock = stateReady, nil // each re-checks when resumed
+			}
+		}
+	}
 }
 
 // proc returns the process running the calling operation of the
