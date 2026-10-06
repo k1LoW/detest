@@ -334,6 +334,9 @@ func TestIntervals(t *testing.T) {
 		{`SELECT date_trunc('decade', interval '25 years')`, "20 years"},
 		{`SELECT greatest(interval '2 months', interval '40 days')`, "2 mons"},
 		{`SELECT least(interval '40 days', NULL, interval '2 months')`, "40 days"},
+		{`SELECT COALESCE(NULL, every, interval '1 day') FROM plan WHERE id = 2`, "30 days"},
+		{`SELECT CASE WHEN id = 2 THEN every ELSE NULL END FROM plan WHERE id = 2`, "30 days"},
+		{`SELECT lead(every, 1, interval '0') OVER (ORDER BY id) FROM plan WHERE id = 4`, "00:00:00"},
 		// date_trunc of an interval is an interval, so a date moved by it
 		// is a timestamp, whose hour extract reads.
 		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
@@ -404,6 +407,13 @@ func TestIntervals(t *testing.T) {
 		`SELECT min(COALESCE(every, '40 days')) FROM plan`,
 		`SELECT CASE WHEN id = 1 THEN every ELSE '1 day' END FROM plan`,
 		`SELECT nullif(every, '1 month') FROM plan`,
+		// A branch of another type fails with 42804 on Postgres.
+		`SELECT COALESCE(interval '1 month', 'bogus'::text)`,
+		`SELECT CASE WHEN true THEN interval '1 month' ELSE 'bogus'::text END`,
+		`SELECT COALESCE(every, 1) FROM plan`,
+		// LAG and LEAD resolve their value and default to one type.
+		`SELECT lead(every, 1, '30 days') OVER (ORDER BY id) FROM plan`,
+		`SELECT lag(every, 1, 'bogus'::text) OVER (ORDER BY id) FROM plan`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

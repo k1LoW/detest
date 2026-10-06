@@ -982,12 +982,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if e.Name == "nullif" && len(e.Args) == 2 {
 					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
+				if what := intervalBranchMismatch(branchArgs(e), sc.columnType); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
-					if what := intervalBranchMismatch(e.Args, sc.columnType); what != "" {
-						err = c.x.unsupported(what)
-						return
-					}
 					// The arguments take the type of the typed ones.
 					c.timeParams(expressionType(e, sc.columnType), e.Args...)
 				}

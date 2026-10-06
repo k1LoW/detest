@@ -277,24 +277,47 @@ func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) s
 	return ""
 }
 
-// intervalBranchMismatch refuses a string literal or a parameter beside an
-// interval among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF.
-// Postgres reads it as an interval, failing with 22007 on text that is none
-// whichever branch a row takes, and detest would keep it as text, which
-// compares with no interval.
+// intervalBranchMismatch refuses a value other than an interval or NULL
+// beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST,
+// NULLIF or the value and default of LAG and LEAD. Postgres reads a string
+// literal or a parameter there as an interval, failing with 22007 on text
+// that is none whichever branch a row takes, and fails a branch of another
+// type with 42804. detest would keep the value as it is, which compares with
+// no interval.
 func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
-	interval, untyped := false, false
+	interval, other := false, false
 	for _, e := range exprs {
-		if untypedExpr(e) {
-			untyped = true
-		} else if expressionType(e, column) == "interval" {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		switch typ := expressionType(e, column); {
+		case untypedExpr(e):
+			other = true
+		case typ == "interval":
 			interval = true
+		case typ != "" && typ != "unresolved column type":
+			other = true
 		}
 	}
-	if interval && untyped {
-		return "a string literal or parameter beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF"
+	if interval && other {
+		return "a value other than an interval beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"
 	}
 	return ""
+}
+
+// branchArgs are the arguments of f that Postgres resolves to one type, for
+// intervalBranchMismatch: all of them, or the value and the default of LAG
+// and LEAD, whose offset is an integer.
+func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
+	switch f.Name {
+	case "coalesce", "greatest", "least", "nullif":
+		return f.Args
+	case "lag", "lead":
+		if len(f.Args) == 3 {
+			return []sqlir.Expr{f.Args[0], f.Args[2]}
+		}
+	}
+	return nil
 }
 
 func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {

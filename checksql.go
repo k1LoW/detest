@@ -334,17 +334,19 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			if what := textArgumentMismatch(v, nil); what != "" {
 				return c.refuse(what)
 			}
-			switch v.Name {
-			case "coalesce", "greatest", "least", "nullif":
-				if what := intervalBranchMismatch(v.Args, nil); what != "" {
-					return c.refuse(what)
-				}
+			if what := intervalBranchMismatch(branchArgs(v), nil); what != "" {
+				return c.refuse(what)
 			}
 		}
 		return c.exprs(v.Args)
 	case *sqlir.WindowFunc:
 		if what := windowArityMismatch(v.Func); what != "" {
 			return unsupported(what, c.query)
+		}
+		if !c.innodb {
+			if what := intervalBranchMismatch(branchArgs(v.Func), nil); what != "" {
+				return c.refuse(what)
+			}
 		}
 		if err := c.exprs(v.Func.Args); err != nil {
 			return err
