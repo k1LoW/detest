@@ -639,3 +639,102 @@ func TestAdoptedGoroutineBeginsTxInLaterRun(t *testing.T) {
 		s.ExpectViolation("a mark")
 	})
 }
+
+// A goroutine of an ended run that takes a mutex in a later run ends there,
+// rather than run its critical section without the mutex.
+func TestStaleGoroutineEndsAtLock(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mu := s.Mutex("mu")
+		entered := 0
+		s.Seed(func() { entered = 0 })
+		s.Manual("pod", 1, func(p *Proc) error {
+			time.Sleep(2 * time.Second)
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('a')`)
+			}()
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('b')`) // cut here
+				time.Sleep(time.Second)
+				mu.Lock()
+				entered++
+				mu.Unlock()
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if entered > 0 {
+				return errors.New("a goroutine of an ended run entered the critical section")
+			}
+			if _, ok := st.Row(store, "marks", "a"); ok {
+				return errors.New("a mark")
+			}
+			return nil
+		})
+		s.ExpectViolation("a mark")
+	})
+}
+
+// A fake's hand-written transaction handed to a goroutine its process
+// started runs as that goroutine, which waits for row locks itself.
+func handWrittenTxByGoroutine(s *Sim) *DB {
+	_, store := s.DB("app", postgres.New())
+	s.Seed(func() { store.SeedRow("counters", Row{"id": "c", "n": int64(0)}) })
+	for _, name := range []string{"x", "y"} {
+		s.Manual(name, 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var err error
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					row, _, gerr := tx.GetForUpdate("counters", "c")
+					if gerr != nil {
+						err = gerr
+						return
+					}
+					_, err = tx.Update("counters", "c", Row{"n": row.Int64("n") + 1})
+				})
+				wg.Wait()
+				return err
+			})
+		})
+	}
+	return store
+}
+
+func TestHandWrittenTxRunByGoroutine(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		store := handWrittenTxByGoroutine(s)
+		s.AtQuiescence(func(st *State) error {
+			row, _ := st.Row(store, "counters", "c")
+			if n := row.Int64("n"); n != 2 {
+				return fmt.Errorf("lost update: n = %d", n)
+			}
+			return nil
+		})
+		s.Sometimes("a goroutine waits for the other transaction's lock", func(st *State) bool {
+			row, _ := st.Row(store, "counters", "c")
+			return row.Int64("n") == 1
+		})
+	})
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		handWrittenTxByGoroutine(s)
+		s.AtQuiescence(func(st *State) error { return errors.New("done") })
+	}, nil, nil, 0)
+	if !res.Violated || !strings.Contains(res.Trace, "x#1.1  app: select public.counters id=c for update") {
+		t.Errorf("the goroutine does not run the transaction's operations:\n%s", res.Trace)
+	}
+}
+
+// A process that wakes from a sleep and calls an external service with its
+// own *Proc is taken back by the scheduler before the call picks an outcome.
+func TestExternalCallAfterSleepDeterministic(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		ext := s.External("svc")
+		for _, name := range []string{"x", "y"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				time.Sleep(time.Second)
+				return ext.Do(p, "call", func() error { return nil })
+			})
+		}
+	}, Workers(4))
+}

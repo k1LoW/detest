@@ -436,10 +436,55 @@ func absorbAbort(rec any, p *Proc, err *error) {
 	if rec == nil {
 		return
 	}
-	if _, ok := rec.(abortSentinel); !ok || p == nil || !p.adopted {
+	if _, ok := rec.(abortSentinel); !ok {
 		panic(rec)
 	}
-	if err != nil {
-		*err = errRunOver
+	adopted := p != nil && p.adopted
+	if p == nil {
+		// A call that does not name its process, such as one of a Tx, which
+		// another goroutine than its owner may run.
+		onProc, sure := onProcGoroutine()
+		adopted = !onProc && sure
+	}
+	if !adopted {
+		panic(rec)
+	}
+	if err == nil {
+		// Returning would read as success, such as a Lock that did not take
+		// the mutex, so the goroutine ends here, its deferred calls running.
+		runtime.Goexit()
+	}
+	*err = errRunOver
+}
+
+// comeBack hands p to the scheduler before a call into detest when it woke
+// outside detest, so that nothing the call does, not even a choice, runs
+// alongside the scheduler. Current does this for a call that resolves its
+// process, and every entry point that is handed one does it too.
+func (p *Proc) comeBack() {
+	switch p.away.Load() {
+	case awayCrashed:
+		// Crashed with its family while outside detest, it wakes to nothing.
+		// Its own run's end is awaited, which a later run it woke in has
+		// already passed, rather than the end of that later run.
+		<-p.r.abort
+		if !p.adopted {
+			panic(abortSentinel{})
+		}
+	case awayOutside:
+		if p.adopted {
+			p.handshake()
+		} else {
+			p.send(procEvent{kind: evSync})
+			p.wait()
+		}
+	}
+}
+
+// goneStale ends a stale goroutine at an entry point that has no error to
+// return, as absorbAbort does.
+func goneStale(p *Proc) {
+	if p.stale() {
+		runtime.Goexit()
 	}
 }

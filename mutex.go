@@ -38,9 +38,7 @@ func (s *Sim) Mutex(name string) *Mutex {
 func (mu *Mutex) Lock() {
 	p := mu.s.Current()
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return
-	}
+	goneStale(p)
 	if p == nil {
 		if mu.held {
 			panic(fmt.Sprintf("detest: mutex %s locked outside a process while held", mu.name))
@@ -117,9 +115,7 @@ func (s *Sim) RWMutex(name string) *RWMutex {
 func (rw *RWMutex) Lock() {
 	p := rw.s.Current()
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return
-	}
+	goneStale(p)
 	if p == nil {
 		if rw.writing || rw.readLocked() {
 			panic(fmt.Sprintf("detest: rwmutex %s locked outside a process while held", rw.name))
@@ -161,9 +157,7 @@ func (rw *RWMutex) Unlock() {
 func (rw *RWMutex) RLock() {
 	p := rw.s.Current()
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return
-	}
+	goneStale(p)
 	if p == nil {
 		if rw.writing {
 			panic(fmt.Sprintf("detest: rwmutex %s read-locked outside a process while write-locked", rw.name))

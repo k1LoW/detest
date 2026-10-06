@@ -67,6 +67,7 @@ func (s *Sim) External(name string, opts ...ExternalOption) *External {
 // and rolls the effect back; ErrUnavailable is a transport failure.
 func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) (err error) {
 	defer func() { absorbAbort(recover(), p, &err) }()
+	p.comeBack()
 	if p.stale() {
 		return errRunOver
 	}
@@ -111,6 +112,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 // returns ErrUnavailable, modeling a response lost after the callee committed.
 func (e *External) Do(p *Proc, desc string, call func() error) (err error) {
 	defer func() { absorbAbort(recover(), p, &err) }()
+	p.comeBack()
 	if p.stale() {
 		return errRunOver
 	}

@@ -310,6 +310,7 @@ func encodeKey(vals []any) string {
 // Tx runs fn in a transaction: commit on nil, rollback on error.
 func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 	defer func() { absorbAbort(recover(), p, &err) }()
+	p.comeBack()
 	if p.stale() {
 		return errRunOver
 	}
@@ -347,9 +348,8 @@ func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
 // Get reads one committed row outside a transaction (autocommit statement).
 func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return nil, false
-	}
+	p.comeBack()
+	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
 	r, ok := db.committed[table][key]
@@ -376,9 +376,8 @@ func sequenceName(s string) string {
 // Select reads committed rows outside a transaction (autocommit statement).
 func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return nil
-	}
+	p.comeBack()
+	goneStale(p)
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
 	return db.selectCommitted(table, pred)
@@ -392,6 +391,8 @@ func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, nil) }()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil
@@ -1705,6 +1706,11 @@ func (db *DB) indexChange(name string, ch sqlir.SchemaChange) error {
 type Tx struct {
 	db *DB
 	p  *Proc
+	// run is the process running the transaction's current operation when
+	// it is another than p, such as a goroutine p started that a fake's
+	// hand-written transaction is handed to. It yields and waits for locks,
+	// while p keeps owning the transaction and its locks.
+	run *Proc
 	// passedOver records that NOWAIT or SKIP LOCKED gave up on a row this
 	// transaction holds. Letting a lock go or weakening it then changes what
 	// such a read finds, so an idle loop may tick again even if no row
@@ -1820,6 +1826,8 @@ type savepoint struct {
 
 // Get reads one row.
 func (tx *Tx) Get(table, key string) (Row, bool) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, nil) }()
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil, false
@@ -1829,7 +1837,9 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 }
 
 // GetForUpdate reads one row and takes its lock (SELECT ... FOR UPDATE).
-func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
+func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return nil, false, err
@@ -1843,19 +1853,25 @@ func (tx *Tx) GetForUpdate(table, key string) (Row, bool, error) {
 }
 
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
-func (tx *Tx) Insert(table string, row Row) error {
+func (tx *Tx) Insert(table string, row Row) (err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
 
 // Update sets columns of one row. Returns false when the row does not exist.
-func (tx *Tx) Update(table, key string, fields Row) (bool, error) {
+func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	n, err := tx.UpdateWhere(table, func(r Row) bool { return r.Key() == key }, fields, fmt.Sprintf("id=%s", key))
 	return n == 1, err
 }
 
 // CAS updates one row only if column field equals from (UPDATE ... WHERE id=?
 // AND field=?). Returns whether a row was updated.
-func (tx *Tx) CAS(table, key, field string, from, to any) (bool, error) {
+func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
 		lazyString(func() string { return fmt.Sprintf("id=%s and %s=%v -> %v", key, field, from, to) }))
 	return n == 1, err
@@ -1969,14 +1985,18 @@ func (db *DB) duplicateKey(table, constraint string) error {
 // UpdateWhere updates every row matching pred and returns the count. Each
 // matching row is locked, then pred is re-evaluated on the version visible after
 // the lock is granted.
-func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (int, error) {
+func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (_ int, err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	return tx.updateWhere(table, pred, fields, desc)
 }
 
 // Delete removes one row. Returns whether it existed.
-func (tx *Tx) Delete(table, key string) (bool, error) {
+func (tx *Tx) Delete(table, key string) (_ bool, err error) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, &err) }()
 	var found bool
-	err := tx.asStatement(func() error {
+	err = tx.asStatement(func() error {
 		var err error
 		found, err = tx.delete(table, key)
 		return err
@@ -1986,6 +2006,8 @@ func (tx *Tx) Delete(table, key string) (bool, error) {
 
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
+	// Another goroutine than its owner's may run it (see run).
+	defer func() { absorbAbort(recover(), nil, nil) }()
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
 
@@ -2225,7 +2247,19 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	if tx.atomic || tx.p == nil {
 		return
 	}
-	tx.p.yieldf(format, args...)
+	tx.run = nil
+	if c := tx.db.s.Current(); c != nil && c != tx.p && c.r == tx.p.r {
+		tx.run = c
+	}
+	tx.proc().yieldf(format, args...)
+}
+
+// proc returns the process running the transaction's current operation.
+func (tx *Tx) proc() *Proc {
+	if tx.run != nil {
+		return tx.run
+	}
+	return tx.p
 }
 
 func (tx *Tx) view(table, key string) (Row, bool) {

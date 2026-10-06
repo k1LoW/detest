@@ -156,17 +156,17 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 		}
 		// The timeout is decided before a deadlock victim, since a timeout
 		// that ends this wait breaks the cycle and no victim is aborted.
-		if tx.lockTimeout && tx.p.Choose("lock timeout on "+lk.table, 2) == 1 {
+		if tx.lockTimeout && tx.proc().Choose("lock timeout on "+lk.table, 2) == 1 {
 			cancelWait()
 			tx.aborted = true
-			tx.p.r.note(tx.p, "lock timeout waiting for %s/%s", lk.table, lk.key)
+			tx.p.r.note(tx.proc(), "lock timeout waiting for %s/%s", lk.table, lk.key)
 			markPassedOver(conflict) // gave up on the lock, as NOWAIT does
 			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
 		}
 		if err := tx.breakCycle(conflict, what); err != nil {
 			return err
 		}
-		tx.p.blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
+		tx.proc().blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
 		if err := tx.victim(); err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func (tx *Tx) selfWait(conflict []*Tx, what, kind string) error {
 	for _, o := range conflict {
 		if o.p == tx.p {
 			tx.aborted = true
-			tx.p.r.note(tx.p, "waits for %s held by its own open transaction", what)
+			tx.p.r.note(tx.proc(), "waits for %s held by its own open transaction", what)
 			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by its own open transaction (RPC inside a transaction writing the same row?)", tx.p.name, kind)}
 			return ErrSelfWait
 		}
@@ -205,26 +205,26 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 		if tx.db.kind.InnoDB() {
 			v = innodbVictim(members)
 		} else {
-			v = members[tx.p.Choose("deadlock victim", len(members))]
+			v = members[tx.proc().Choose("deadlock victim", len(members))]
 		}
 		// The victim gives up on the locks it waited for, as NOWAIT does,
 		// so their holders' release may let an idle loop it ran in retry.
 		if v == tx {
 			markPassedOver(conflict)
 			tx.aborted = true
-			tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+			tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
-		markPassedOver(v.p.waitRow.blockers())
+		markPassedOver(v.proc().waitRow.blockers())
 		v.deadlockVictim = true
-		v.p.state = stateReady
-		v.p.waitRow = nil
+		v.proc().state = stateReady
+		v.proc().waitRow = nil
 	}
 	// A cycle left after another victim was picked is one the database
 	// detects too, once that victim's abort wakes this wait.
 	for _, o := range conflict {
-		if cycle == nil && tx.p.r.waitsFor(o.p, tx.p) {
-			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.p.name, what, o.p.name)}
+		if cycle == nil && tx.p.r.waitsFor(o.p, tx.proc()) {
+			tx.p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s held by %s, closing a cycle of waits the database cannot detect (a mutex held across a statement?)", tx.proc().name, what, o.p.name)}
 			break
 		}
 	}
@@ -446,7 +446,7 @@ func (tx *Tx) victim() error {
 	}
 	tx.deadlockVictim = false
 	tx.aborted = true
-	tx.p.r.note(tx.p, "deadlock detected, transaction aborted")
+	tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 	return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 }
 

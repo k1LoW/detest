@@ -295,25 +295,7 @@ func (s *Sim) Current() *Proc {
 	if p == nil {
 		return nil
 	}
-	switch p.away.Load() {
-	case awayCrashed:
-		// Crashed with its family while outside detest, it wakes to nothing.
-		// Its own run's end is awaited, which a later run it woke in has
-		// already passed, rather than the end of that later run.
-		<-p.r.abort
-		if !p.adopted {
-			panic(abortSentinel{})
-		}
-	case awayOutside:
-		// Back from outside detest, it is run on by the scheduler before it
-		// does anything here, as syncOutside does for a statement.
-		if p.adopted {
-			p.handshake()
-		} else {
-			p.send(procEvent{kind: evSync})
-			p.wait()
-		}
-	}
+	p.comeBack()
 	return p
 }
 
@@ -658,9 +640,8 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 // by an external environment. It is a yield point.
 func (p *Proc) Step(format string, args ...any) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return
-	}
+	p.comeBack()
+	goneStale(p)
 	p.yieldf(format, args...)
 }
 
@@ -1124,9 +1105,8 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
 	defer func() { absorbAbort(recover(), p, nil) }()
-	if p.stale() {
-		return
-	}
+	p.comeBack()
+	goneStale(p)
 	if p.r.clock >= t {
 		return
 	}
@@ -1139,18 +1119,18 @@ func (p *Proc) WaitUntil(t int64) {
 
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
-	if p.stale() {
-		return 0
-	}
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p.comeBack()
+	goneStale(p)
 	return p.r.choose(label, n)
 }
 
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
-	if p.stale() {
-		return // its run is over and must not grow
-	}
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p.comeBack()
+	goneStale(p) // its run is over and must not grow
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
