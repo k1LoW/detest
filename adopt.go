@@ -734,6 +734,7 @@ func (s *Sim) leave() { s.hb.Add(1) }
 func (s *Sim) settled() {
 	synctest.Wait()
 	s.hb.Load()
+	s.epoch.Add(1)
 }
 
 // goneStale ends a stale goroutine at an entry point that has no error to

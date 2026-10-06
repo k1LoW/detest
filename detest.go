@@ -251,6 +251,10 @@ type Sim struct {
 	// scheduler resumed. Everything else in detest runs one goroutine at a
 	// time by the scheduler's design and needs no lock.
 	em sync.Mutex
+	// epoch counts the times synctest.Wait returned, so that the goroutines
+	// that ran between two of them, and only those, share one (see
+	// recordShared).
+	epoch atomic.Int64
 }
 
 func newSimDefaults() *Sim {

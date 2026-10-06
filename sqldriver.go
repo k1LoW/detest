@@ -432,7 +432,23 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	tx.shared = query
 	defer func() { tx.shared = "" }()
 	c.db.s.countShared(tx.p.r)
-	return c.parseExec(ctx, query, args)
+	mark := tx.markShared()
+	rows, n, err := c.parseExec(ctx, query, args)
+	a := &sharedAccess{gid: goroutineID(), db: c.db, query: query, write: true}
+	if stmt, perr := parseWith(c.db.kind.Parser(), query); perr == nil {
+		if sel, ok := stmt.stmt.(*sqlir.SelectStmt); ok && err == nil {
+			// A read alone commutes with other reads. A locking one does not,
+			// and a failed statement may have aborted the transaction.
+			a.write = sel.Lock != nil
+		}
+		if _, ok := pointTable(c.db, stmt.stmt); ok && err == nil {
+			if keys := tx.sinceShared(mark); len(keys) > 0 {
+				a.keys = keys
+			}
+		}
+	}
+	tx.p.r.recordShared(a)
+	return rows, n, err
 }
 
 func (c *sqlConn) parseExec(ctx context.Context, query string, args []driver.Value) (*sqlRows, int64, error) {

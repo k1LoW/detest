@@ -293,3 +293,87 @@ func TestOnSQLLock(t *testing.T) {
 		}
 	}
 }
+
+// Goroutines sharing a transaction that update the same row in one step
+// leave the committed value to the order database/sql hands them the
+// connection in, which a replay does not repeat, so the exploration stops.
+func TestGoroutinesSharingSQLTxOnOneRowStop(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE counters (id bigint PRIMARY KEY, n bigint NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Seed(func() { store.SeedRow("counters", Row{"id": int64(1), "n": int64(0)}) })
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var wg sync.WaitGroup
+			for _, n := range []int64{1, 2} {
+				wg.Go(func() { _, _ = tx.Exec(`UPDATE counters SET n = $1 WHERE id = 1`, n) })
+			}
+			wg.Wait()
+			return tx.Commit()
+		})
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "depends on their order") {
+		t.Fatalf("want the exploration stopped for order-dependent statements, got:\n%s", res.report())
+	}
+}
+
+// An outbox poller locks rows with SKIP LOCKED and has a goroutine per row
+// delete it by its key, which commute, so the exploration goes on.
+func TestOutboxGoroutinesDeleteSharedSQLTxRows(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE outbox (id bigint PRIMARY KEY, payload text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Seed(func() {
+			for i := range int64(3) {
+				store.SeedRow("outbox", Row{"id": i + 1, "payload": "m"})
+			}
+		})
+		poll := func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			rows, err := tx.Query(`SELECT id FROM outbox ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED`)
+			if err != nil {
+				return err
+			}
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					return err
+				}
+				ids = append(ids, id)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			var wg sync.WaitGroup
+			errs := make([]error, len(ids))
+			for i, id := range ids {
+				wg.Go(func() { _, errs[i] = tx.Exec(`DELETE FROM outbox WHERE id = $1`, id) })
+			}
+			wg.Wait()
+			if err := errors.Join(errs...); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		s.Manual("poller", 2, poll)
+		s.AtQuiescence(func(st *State) error {
+			if n := len(st.Rows(store, "outbox")); n > 1 {
+				return fmt.Errorf("%d rows left after two polls of two", n)
+			}
+			return nil
+		})
+	})
+}

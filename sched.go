@@ -213,6 +213,10 @@ type run struct {
 	cancelMu sync.Mutex
 	cancels  []txCancel
 	cancelCh chan struct{}
+	// sharedLog is the statements goroutines ran on shared transactions in
+	// the step of epoch sharedEpoch, guarded by the engine mutex.
+	sharedEpoch int64
+	sharedLog   []sharedAccess
 	// began is set once the scheduler first resumes a process. Goroutines
 	// woken outside detest read it, unlike current, which the scheduler
 	// changes while they run.
