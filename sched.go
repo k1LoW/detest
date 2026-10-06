@@ -465,8 +465,8 @@ func (r *run) countSpin(o option, before int) {
 	switch {
 	case o.kind != optResume || o.p.state != stateReady:
 		// A process that blocked or ended waits rather than spins, and what
-		// it waited for ends the streak.
-		r.spinProc = nil
+		// it waited for ends the streak and the turns.
+		r.endSpin()
 	case r.version != before:
 		// The step changed committed state, which is no spin: the streak
 		// starts after it. No streak is kept at zero, which MaxSpins(0)
@@ -488,7 +488,7 @@ func (r *run) handoff(p *Proc, before int) *violation {
 	// The step it gave way to changed something, or the process it gave way
 	// to blocked or ended there, which ends the turns as it ends a spin.
 	if to := r.current; r.version != before || to == nil || to.state != stateReady {
-		r.handoffs, r.spinners, r.gaveTo = 0, nil, nil
+		r.endSpin()
 		return nil
 	}
 	if before != r.handoffVersion {
@@ -505,6 +505,14 @@ func (r *run) handoff(p *Proc, before int) *violation {
 		return nil
 	}
 	return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between, so they would go on for ever; raise MaxSpins if they do that much work without committing", strings.Join(r.spinners, ", "), strings.Join(r.gaveTo, ", "), r.handoffs)}
+}
+
+// endSpin ends both the streak of one process and the turns processes take
+// at spinning. Either left behind would count against a later spin that has
+// nothing to do with it.
+func (r *run) endSpin() {
+	r.spinProc = nil
+	r.handoffs, r.spinners, r.gaveTo = 0, nil, nil
 }
 
 // spinner returns the process that took MaxSpins steps in a row without
@@ -778,8 +786,9 @@ func (r *run) settleOutside() {
 func (r *run) takeOutside(p *Proc, ev procEvent) {
 	r.outside.Add(-1)
 	// A process outside detest took a step, which may have made true what a
-	// spinning process waits for, so the spin ends as when another is resumed.
-	r.spinProc = nil
+	// spinning process waits for, so the spin and the turns end as when
+	// another is resumed.
+	r.endSpin()
 	r.note(p, "resumes from the primitive it blocked on")
 	if ev.kind != evSync {
 		r.handleEvent(p, ev)

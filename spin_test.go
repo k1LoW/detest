@@ -272,6 +272,35 @@ func TestHandoffToAnEndingProcessEndsTheTurns(t *testing.T) {
 	}
 }
 
+// A process given way to that ends on a later step ends the turns too, so
+// with MaxSpins(1) the handoff to it does not count against the waiter's
+// later handoff to the setter.
+func TestEndingAfterAHandoffEndsTheTurns(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			for !flag {
+				p.Step("wait")
+			}
+			return nil
+		})
+		s.Manual("other", 1, func(p *Proc) error {
+			p.Step("other")
+			return nil
+		})
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // With MaxSpins(0), a process that has just enqueued has taken no step
 // without changing committed state, so it is no spinner until it takes one.
 func TestChangingStepIsNoSpinUnderZeroBound(t *testing.T) {
