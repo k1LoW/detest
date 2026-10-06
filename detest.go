@@ -98,9 +98,12 @@ func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
 // quiescence, and the result counts it.
 func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 
-// MaxSpins bounds how many steps in a row one process takes without changing
+// MaxSpins bounds how many steps one process takes without changing
 // committed state (a commit, an enqueue) while another could run (100 by
-// default). Past it, the process waits until another has taken a step. It is
+// default). The steps other processes take in between do not reset the
+// count, so that a schedule switching at almost every step, as Random does,
+// reaches it too, while a change or a process blocking or ending does. Past
+// it, the process waits after each step until another has taken one. It is
 // the fairness assumption a real scheduler gives a process that busy-waits
 // through a yield point, such as one polling a flag or a row another process
 // sets, which would otherwise be resumed for ever by the first run and keep

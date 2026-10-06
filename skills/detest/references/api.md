@@ -53,7 +53,7 @@ msgs := st.Queue(q)
 | `MaxCrashes(n)` | 0 | Any process may die at any step: its transactions roll back, mutexes free, message redelivered |
 | `MaxFailures(n)` | 1 | External-call failures per run |
 | `MaxRedeliveries(n)` | 1 | Redeliveries of a failed message |
-| `MaxSpins(n)` | 100 | Steps in a row of one process with no commit or enqueue while another could run; past it the process waits for another to step, so a busy-wait lets its setter run. With nothing else able to run, or after giving way that many times with no change in between, it is a progress violation; raise it only for code that does that much work without committing |
+| `MaxSpins(n)` | 100 | Steps of one process with no commit or enqueue in between, counted across the steps of others, while another could run; past it the process waits for another to step, so a busy-wait lets its setter run. With nothing else able to run, or after giving way that many times with no change in between, it is a progress violation; raise it only for code that does that much work without committing |
 | `MaxIdleTicks(n)` | 3 | Idle ticks of a loop in a row that leave its budget unspent, counted again from zero after progress: a change by a manual process, a message handler or the scheduler, or a tick of any loop, this one included, that did work; a run past it is cut, not checked at quiescence, and counted as `N runs cut at MaxIdleTicks`. Loops waking each other is the usual cause, rarely a need to raise it |
 | `MaxPreemptions(n)` | unbounded | Context switches away from a runnable process per run. 2 or 3 keeps large scenarios tractable and still finds most races |
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |

@@ -68,28 +68,31 @@ func TestBusyWaitGivesWayWithoutPreemptions(t *testing.T) {
 	}
 }
 
+// turnsModel has two processes that each wait for a flag only the other
+// would set.
+func turnsModel(t *testing.T, s *Sim) {
+	a, b := false, false
+	s.Seed(func() { a, b = false, false })
+	s.Manual("x", 1, func(p *Proc) error {
+		for !b {
+			p.Step("x waits")
+		}
+		a = true
+		return nil
+	})
+	s.Manual("y", 1, func(p *Proc) error {
+		for !a {
+			p.Step("y waits")
+		}
+		b = true
+		return nil
+	})
+}
+
 // Two processes that each wait for a flag only the other would set take turns
 // at spinning for ever, which is a progress violation naming them.
 func TestBusyWaitTakingTurnsIsAViolation(t *testing.T) {
-	model := func(t *testing.T, s *Sim) {
-		a, b := false, false
-		s.Seed(func() { a, b = false, false })
-		s.Manual("x", 1, func(p *Proc) error {
-			for !b {
-				p.Step("x waits")
-			}
-			a = true
-			return nil
-		})
-		s.Manual("y", 1, func(p *Proc) error {
-			for !a {
-				p.Step("y waits")
-			}
-			b = true
-			return nil
-		})
-	}
-	res, _ := exploreBubble(t, model, nil, nil, 0)
+	res, _ := exploreBubble(t, turnsModel, nil, nil, 0)
 	if !res.Violated || res.Kind != "progress" || !strings.Contains(res.Err.Error(), "x#") || !strings.Contains(res.Err.Error(), "y#") {
 		t.Fatalf("want a progress violation naming x and y, got %s", res.report())
 	}
@@ -318,12 +321,21 @@ func TestChangingStepIsNoSpinUnderZeroBound(t *testing.T) {
 	}
 }
 
+// Under Random, which switches at almost every step, processes taking turns
+// at waiting for each other are still reported rather than run for ever.
+func TestBusyWaitTakingTurnsIsAViolationUnderRandom(t *testing.T) {
+	res, _ := exploreBubble(t, turnsModel, []Option{Random(1), MaxRuns(1)}, nil, 0)
+	if !res.Violated || res.Kind != "progress" {
+		t.Fatalf("want a progress violation, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {
 	s := newSimDefaults()
-	p := &Proc{name: "waiter#1", state: stateReady}
-	r := &run{s: s, spinProc: p, spinCount: s.maxSpins, spinVersion: 3, version: 3}
+	p := &Proc{name: "waiter#1", state: stateReady, spins: s.maxSpins, spinVersion: 3}
+	r := &run{s: s, spinProc: p, version: 3}
 	if r.spinner() != p {
 		t.Fatal("want the waiter spinning before the change")
 	}

@@ -180,11 +180,9 @@ type run struct {
 	// measuring marks the run Prioritized measures k on, which is no run of
 	// the exploration and so reports nothing of what it reached or refused.
 	measuring bool
-	// spinProc took the last spinCount steps in a row, with committed state
-	// at spinVersion throughout (see MaxSpins).
-	spinProc    *Proc
-	spinCount   int
-	spinVersion int
+	// spinProc took the last step, and is the spinner once its own count of
+	// steps without a change reaches MaxSpins (see MaxSpins).
+	spinProc *Proc
 	// handoffs counts the times a spinning process gave way with committed
 	// state at handoffVersion, and spinners and gaveTo name the processes on
 	// either side, so that processes taking turns at spinning are caught too.
@@ -232,6 +230,13 @@ type Proc struct {
 	// time it finds nothing to do would wake its loop forever.
 	started int
 	bumps   int
+	// spins counts the steps the process took with committed state at
+	// spinVersion, for MaxSpins. It is kept across the steps other processes
+	// take in between, or a schedule that switches at almost every step, as
+	// Random does, would never let a count reach MaxSpins, and processes
+	// taking turns at waiting for each other would go on for ever.
+	spins       int
+	spinVersion int
 }
 
 // Name returns the instance name, such as "sweeper#2".
@@ -387,7 +392,7 @@ func (r *run) execute() (v *violation) {
 				continue
 			}
 			if p := r.spinner(); p != nil {
-				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps in a row without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, r.spinCount)}
+				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
 			}
 			if len(opts) == 0 {
 				break
@@ -459,8 +464,8 @@ func onlyFaults(opts []option) bool {
 	return true
 }
 
-// countSpin counts the steps one process takes in a row without changing
-// committed state, for MaxSpins.
+// countSpin counts the steps a process takes without changing committed
+// state, for MaxSpins.
 func (r *run) countSpin(o option, before int) {
 	switch {
 	case o.kind != optResume || o.p.state != stateReady:
@@ -468,14 +473,17 @@ func (r *run) countSpin(o option, before int) {
 		// it waited for ends the streak and the turns.
 		r.endSpin()
 	case r.version != before:
-		// The step changed committed state, which is no spin: the streak
-		// starts after it. No streak is kept at zero, which MaxSpins(0)
-		// would take for a spin.
+		// The step changed committed state, which is no spin: the count
+		// starts after it. No spinner is kept at a count of zero, which
+		// MaxSpins(0) would take for a spin.
+		o.p.spins, o.p.spinVersion = 0, r.version
 		r.spinProc = nil
-	case o.p == r.spinProc && r.version == r.spinVersion:
-		r.spinCount++
 	default:
-		r.spinProc, r.spinCount, r.spinVersion = o.p, 1, r.version
+		if o.p.spinVersion != r.version {
+			o.p.spins, o.p.spinVersion = 0, r.version
+		}
+		o.p.spins++
+		r.spinProc = o.p
 	}
 }
 
@@ -507,21 +515,24 @@ func (r *run) handoff(p *Proc, before int) *violation {
 	return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between, so they would go on for ever; raise MaxSpins if they do that much work without committing", strings.Join(r.spinners, ", "), strings.Join(r.gaveTo, ", "), r.handoffs)}
 }
 
-// endSpin ends both the streak of one process and the turns processes take
-// at spinning. Either left behind would count against a later spin that has
+// endSpin ends the counts of every process and the turns processes take at
+// spinning. Any left behind would count against a later spin that has
 // nothing to do with it.
 func (r *run) endSpin() {
 	r.spinProc = nil
+	for _, p := range r.procs {
+		p.spins = 0
+	}
 	r.handoffs, r.spinners, r.gaveTo = 0, nil, nil
 }
 
-// spinner returns the process that took MaxSpins steps in a row without
-// changing committed state and can still run, or nil. The version is checked
+// spinner returns the process that took the last step and MaxSpins steps
+// without changing committed state, and can still run, or nil. The version is checked
 // here too, as a change made outside a step, such as the rollback of a
 // transaction a process outside detest left open, is no step that countSpin
 // sees.
 func (r *run) spinner() *Proc {
-	if p := r.spinProc; p != nil && r.spinCount >= r.s.maxSpins && p.state == stateReady && r.version == r.spinVersion {
+	if p := r.spinProc; p != nil && p.spins >= r.s.maxSpins && p.state == stateReady && r.version == p.spinVersion {
 		return p
 	}
 	return nil
