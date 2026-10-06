@@ -156,6 +156,25 @@ func TestBusyWaitGivingWaySpendsNoPreemption(t *testing.T) {
 	}
 }
 
+// Blocking ends a streak, so a process that waits on the clock after
+// MaxSpins steps is not taken for a spinner when it wakes.
+func TestBlockingEndsASpin(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		s.Manual("worker", 1, func(p *Proc) error {
+			for i := range 100 {
+				p.Step("work %d", i)
+			}
+			p.WaitUntil(p.Now() + 1)
+			p.Step("after the wait")
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, nil, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // With nothing else able to run, the waiter would spin forever, which is
 // reported as a progress violation naming it.
 func TestBusyWaitAloneIsAViolation(t *testing.T) {

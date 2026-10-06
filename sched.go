@@ -446,7 +446,9 @@ func (r *run) execute() (v *violation) {
 // committed state, for MaxSpins.
 func (r *run) countSpin(o option) {
 	switch {
-	case o.kind != optResume:
+	case o.kind != optResume || o.p.state != stateReady:
+		// A process that blocked or ended waits rather than spins, and what
+		// it waited for ends the streak.
 		r.spinProc = nil
 	case o.p == r.spinProc && r.version == r.spinVersion:
 		r.spinCount++
