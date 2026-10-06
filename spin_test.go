@@ -3,6 +3,7 @@ package detest
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -186,15 +187,16 @@ func TestBusyWaitAloneIsAViolationWithCrashes(t *testing.T) {
 
 // A process that runs outside detest, woken from a channel, takes a step as
 // one resumed by the scheduler does, so the waiter gets to see the flag it
-// set.
+// set. The setter runs alongside the waiter there, so the flag is atomic as
+// it would be in real code.
 func TestOutsideStepEndsASpin(t *testing.T) {
 	model := func(t *testing.T, s *Sim) {
 		var ch chan struct{}
-		flag := false
-		s.Seed(func() { ch, flag = make(chan struct{}), false })
+		var flag atomic.Bool
+		s.Seed(func() { ch = make(chan struct{}); flag.Store(false) })
 		s.Manual("setter", 1, func(p *Proc) error {
 			<-ch
-			flag = true
+			flag.Store(true)
 			return nil
 		})
 		s.Manual("waiter", 1, func(p *Proc) error {
@@ -202,7 +204,7 @@ func TestOutsideStepEndsASpin(t *testing.T) {
 				p.Step("before %d", i)
 			}
 			ch <- struct{}{}
-			for !flag {
+			for !flag.Load() {
 				p.Step("wait")
 			}
 			return nil
