@@ -484,9 +484,12 @@ func (r *run) handoff(p *Proc, before int) *violation {
 }
 
 // spinner returns the process that took MaxSpins steps in a row without
-// changing committed state and can still run, or nil.
+// changing committed state and can still run, or nil. The version is checked
+// here too, as a change made outside a step, such as the rollback of a
+// transaction a process outside detest left open, is no step that countSpin
+// sees.
 func (r *run) spinner() *Proc {
-	if p := r.spinProc; p != nil && r.spinCount >= r.s.maxSpins && p.state == stateReady {
+	if p := r.spinProc; p != nil && r.spinCount >= r.s.maxSpins && p.state == stateReady && r.version == r.spinVersion {
 		return p
 	}
 	return nil

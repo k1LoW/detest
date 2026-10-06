@@ -175,6 +175,21 @@ func TestBlockingEndsASpin(t *testing.T) {
 	}
 }
 
+// A change to committed state made outside a step, which countSpin does not
+// see, ends a spin as one made by a step does.
+func TestChangeOutsideAStepEndsASpin(t *testing.T) {
+	s := newSimDefaults()
+	p := &Proc{name: "waiter#1", state: stateReady}
+	r := &run{s: s, spinProc: p, spinCount: s.maxSpins, spinVersion: 3, version: 3}
+	if r.spinner() != p {
+		t.Fatal("want the waiter spinning before the change")
+	}
+	r.version++
+	if sp := r.spinner(); sp != nil {
+		t.Fatalf("want no spinner after the change, got %s", sp.name)
+	}
+}
+
 // With nothing else able to run, the waiter would spin forever, which is
 // reported as a progress violation naming it.
 func TestBusyWaitAloneIsAViolation(t *testing.T) {
