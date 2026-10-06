@@ -1450,6 +1450,13 @@ func (p *Proc) wait() {
 			<-p.r.abort
 			panic(abortSentinel{})
 		}
+		// The statement's deferred calls still change the engine as it
+		// unwinds, so it holds the mutex again until the driver gives it
+		// back.
+		if held {
+			p.r.s.em.Lock()
+			p.inSim = true
+		}
 		panic(stmtCanceled{p: p})
 	}
 	if held {
