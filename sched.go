@@ -945,8 +945,14 @@ const reapLimit = time.Hour
 // outside detest when nothing else can run. The bubble's clock is fake, so it
 // only fires when no earlier timer exists, and costs no real time. It outlasts
 // the sleeps of the code under test, such as a lease or a backoff of minutes,
-// which a shorter limit would report as a process blocked for good.
-const outsideWaitLimit = 24 * time.Hour
+// which a shorter limit would report as a process blocked for good. A sleep of
+// a day or more is still reported so. Telling a timer wait from a wait nothing
+// will end is not done, since a select over a context and a ticker looks the
+// same as one over channels alone in a goroutine dump, and waiting without a
+// limit turns a real deadlock into synctest's panic, which loses the schedule.
+// The extra nanosecond keeps the limit from firing together with a sleep of
+// exactly a day, which would leave the outcome to the runtime.
+const outsideWaitLimit = 24*time.Hour + time.Nanosecond
 
 func (r *run) handleEvent(p *Proc, ev procEvent) {
 	switch ev.kind {
