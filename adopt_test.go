@@ -1545,3 +1545,28 @@ func TestFakeWithParentsProcCalledFromGoroutine(t *testing.T) {
 		}
 	}
 }
+
+// Goroutines sharing a hand-written transaction may run their operations on
+// it in either order, as a connection could, so both outcomes are reached.
+func TestSharedTxOperationsInEitherOrder(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				wg.Go(func() { _ = tx.Insert("counters", Row{"id": "x", "n": int64(0)}) })
+				wg.Go(func() { _, _ = tx.Update("counters", "x", Row{"n": int64(1)}) })
+				wg.Wait()
+				return nil
+			})
+		})
+		s.Sometimes("the insert ran first", func(st *State) bool {
+			row, ok := st.Row(store, "counters", "x")
+			return ok && row.Int64("n") == 1
+		})
+		s.Sometimes("the update ran first", func(st *State) bool {
+			row, ok := st.Row(store, "counters", "x")
+			return ok && row.Int64("n") == 0
+		})
+	})
+}

@@ -2382,6 +2382,15 @@ func (tx *Tx) enterOp(p *Proc) func() {
 		return func() {}
 	}
 	c := &tx.conn
+	if p != tx.p && c.by != p {
+		// Goroutines the process handed the transaction to reach here in an
+		// order of detest's own, so that whichever comes first would always
+		// run first. Yielding before taking it lets the explorer try each
+		// order a connection could have run their statements in. The
+		// process that began the transaction takes it without a yield, as
+		// one using its transaction alone always did.
+		p.yieldf("%s: use the transaction of %s", tx.db.name, tx.p.name)
+	}
 	for c.by != nil && c.by != p {
 		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
 	}
