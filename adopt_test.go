@@ -969,3 +969,88 @@ func TestStaleGoroutineTxInsertTakesNoSequence(t *testing.T) {
 		s.ExpectViolation("a mark with id 1")
 	})
 }
+
+// Every goroutine waiting on behalf of a transaction picked as a deadlock
+// victim sees the abort, rather than only the first one resumed.
+func TestDeadlockVictimSeenByEveryWaiter(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		_, store := s.DB("app", postgres.New())
+		s.Seed(func() {
+			for _, id := range []string{"a", "b", "c"} {
+				store.SeedRow("counters", Row{"id": id, "n": int64(0)})
+			}
+		})
+		var mixed []string
+		s.Seed(func() { mixed = nil })
+		s.Manual("x", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("counters", "a"); err != nil {
+					return err
+				}
+				var wg sync.WaitGroup
+				var done []error // in the order the goroutines finished
+				for _, id := range []string{"b", "c"} {
+					wg.Go(func() {
+						_, _, err := tx.GetForUpdate("counters", id)
+						done = append(done, err)
+					})
+				}
+				wg.Wait()
+				if len(done) == 2 && errors.Is(done[0], ErrDeadlock) && done[1] == nil {
+					mixed = append(mixed, fmt.Sprintf("%v, then %v", done[0], done[1]))
+				}
+				return errors.Join(done...)
+			})
+			return nil
+		})
+		s.Manual("y", 1, func(p *Proc) error {
+			_ = store.Tx(p, func(tx *Tx) error {
+				for _, id := range []string{"b", "c", "a"} {
+					if _, _, err := tx.GetForUpdate("counters", id); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(mixed) > 0 {
+				return fmt.Errorf("a waiter went on after the transaction was aborted: %s", mixed[0])
+			}
+			return nil
+		})
+	}, MaxPreemptions(2))
+}
+
+// An adopted goroutine whose stack is too deep to classify is still ended
+// at a hand-written transaction's operation the end of the run cuts short.
+func TestDeepAdoptedGoroutineAbortedInTx(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				var wg sync.WaitGroup
+				var deep func(n int)
+				deep = func(n int) {
+					if n == 0 {
+						_ = tx.Insert("marks", Row{"id": "deep"}) // cut here
+						return
+					}
+					deep(n - 1)
+				}
+				wg.Go(func() { deep(600) })
+				wg.Go(func() { _, _ = db.Exec(`INSERT INTO "flags" ("id") VALUES ('f')`) })
+				wg.Wait()
+				return nil
+			})
+		})
+		s.Always(func(st *State) error {
+			if len(st.Rows(store, "flags")) > 0 {
+				return errors.New("flag set")
+			}
+			return nil
+		})
+		s.ExpectViolation("flag set")
+	})
+}

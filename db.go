@@ -393,8 +393,9 @@ func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 // Select returns rows matching pred (all rows when pred is nil), sorted by key.
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, nil) }()
-	if tx.enter(func() string { return "select " + table }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
+	if caller = tx.caller(func() string { return "select " + table }); caller.stale() {
 		runtime.Goexit()
 	}
 	table = tx.db.resolve(table)
@@ -1721,17 +1722,14 @@ type Tx struct {
 	moved      map[lockKey]string // the keys this transaction changed, as DB.moved
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
-	start   time.Time
-	locks   []lockKey
-	aborted bool
-	// deadlockVictim is set by the transaction that closed a cycle of lock
-	// waits when the explorer picked this waiting one to break it.
-	deadlockVictim bool
-	closed         bool
-	deferred       []func()
-	atomic         bool
-	block          bool // begun with BeginTx, so SAVEPOINT may be used
-	checking       bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
+	start    time.Time
+	locks    []lockKey
+	aborted  bool
+	closed   bool
+	deferred []func()
+	atomic   bool
+	block    bool // begun with BeginTx, so SAVEPOINT may be used
+	checking bool // CheckSQL's, which is a block for SAVEPOINT but stands for autocommit too
 	// undo counts the undo records of the transaction's row changes, and
 	// lockStructs the lock structs its statements and waits took, which
 	// InnoDB weighs a deadlock victim by.
@@ -1826,8 +1824,9 @@ type savepoint struct {
 // Get reads one row.
 func (tx *Tx) Get(table, key string) (Row, bool) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, nil) }()
-	if tx.enter(func() string { return "get " + table + " " + key }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
+	if caller = tx.caller(func() string { return "get " + table + " " + key }); caller.stale() {
 		runtime.Goexit()
 	}
 	table = tx.db.resolve(table)
@@ -1841,8 +1840,9 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 // GetForUpdate reads one row and takes its lock (SELECT ... FOR UPDATE).
 func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return "get for update " + table + " " + key }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return "get for update " + table + " " + key }); caller.stale() {
 		return nil, false, errRunOver
 	}
 	table = tx.db.resolve(table)
@@ -1860,8 +1860,9 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 // Insert adds a row. Returns ErrUniqueViolation when the key exists.
 func (tx *Tx) Insert(table string, row Row) (err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return fmt.Sprint("insert ", table, row) }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return fmt.Sprint("insert ", table, row) }); caller.stale() {
 		return errRunOver
 	}
 	return tx.asStatement(func() error { return tx.insert(table, row) })
@@ -1870,8 +1871,9 @@ func (tx *Tx) Insert(table string, row Row) (err error) {
 // Update sets columns of one row. Returns false when the row does not exist.
 func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return fmt.Sprint("update ", table, " ", key, fields) }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", key, fields) }); caller.stale() {
 		return false, errRunOver
 	}
 	n, err := tx.UpdateWhere(table, func(r Row) bool { return r.Key() == key }, fields, fmt.Sprintf("id=%s", key))
@@ -1882,8 +1884,9 @@ func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 // AND field=?). Returns whether a row was updated.
 func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return fmt.Sprint("cas ", table, " ", key, " ", field, from, to) }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return fmt.Sprint("cas ", table, " ", key, " ", field, from, to) }); caller.stale() {
 		return false, errRunOver
 	}
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
@@ -2001,8 +2004,9 @@ func (db *DB) duplicateKey(table, constraint string) error {
 // the lock is granted.
 func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (_ int, err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return fmt.Sprint("update ", table, " ", desc, fields) }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return fmt.Sprint("update ", table, " ", desc, fields) }); caller.stale() {
 		return 0, errRunOver
 	}
 	return tx.updateWhere(table, pred, fields, desc)
@@ -2011,8 +2015,9 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 // Delete removes one row. Returns whether it existed.
 func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, &err) }()
-	if tx.enter(func() string { return "delete " + table + " " + key }) {
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, &err) }()
+	if caller = tx.caller(func() string { return "delete " + table + " " + key }); caller.stale() {
 		return false, errRunOver
 	}
 	var found bool
@@ -2027,10 +2032,11 @@ func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 // Enqueue publishes a message when the transaction commits (outbox pattern).
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	// Another goroutine than its owner's may run it (see run).
-	defer func() { absorbAbort(recover(), nil, nil) }()
+	var caller *Proc
+	defer func() { absorbAbort(recover(), caller, nil) }()
 	// It does not yield, so resolving the caller here is what adopts a
 	// goroutine calling for the first time.
-	if tx.enter(func() string { return fmt.Sprint("enqueue ", q.name, msg) }) {
+	if caller = tx.caller(func() string { return fmt.Sprint("enqueue ", q.name, msg) }); caller.stale() {
 		runtime.Goexit()
 	}
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
@@ -2275,17 +2281,19 @@ func (tx *Tx) yieldf(format string, args ...any) {
 	tx.procAs(func() string { return fmt.Sprintf(format, args...) }).yieldf(format, args...)
 }
 
-// enter resolves the caller of an operation of the transaction before the
+// caller resolves the caller of an operation of the transaction before the
 // operation reads or changes anything, which adopts a goroutine calling for
-// the first time and takes back one that woke outside detest, and reports
-// whether the caller is a goroutine of an ended run, to be turned away. An
-// insert evaluates defaults such as nextval before it yields, which would
-// otherwise take a later run's sequence values.
-func (tx *Tx) enter(first func() string) bool {
+// the first time and takes back one that woke outside detest. A goroutine of
+// an ended run it returns is stale, to be turned away. An insert evaluates
+// defaults such as nextval before it yields, which would otherwise take a
+// later run's sequence values. The operation's recovery from the end of the
+// run is handed the process too, which a stack too deep to classify leaves
+// unknown otherwise.
+func (tx *Tx) caller(first func() string) *Proc {
 	if tx.p == nil || tx.atomic {
-		return false
+		return nil
 	}
-	return tx.db.s.currentAs(first).stale()
+	return tx.db.s.currentAs(first)
 }
 
 // proc returns the process running the calling operation of the

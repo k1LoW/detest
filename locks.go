@@ -79,6 +79,13 @@ func (tx *Tx) lock(lk lockKey) error { return tx.lockMode(lk, lockUpdate) }
 // a deadlock error, as Postgres's detector does; a cycle through a mutex or
 // another transaction of this process hangs in Postgres and is reported.
 func (tx *Tx) lockMode(lk lockKey, mode lockMode) error {
+	// Another goroutine using the transaction may have had it aborted, such
+	// as by a deadlock, while this operation stood at its yield point after
+	// its own check. Postgres refuses any statement of an aborted
+	// transaction, so the operation fails here rather than take the lock.
+	if err := tx.check(); err != nil {
+		return err
+	}
 	var key lockStruct
 	if !strings.HasPrefix(lk.table, "\x00") {
 		key = structKey(lk.table, "PRIMARY", mode, "record")
@@ -170,6 +177,11 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 		if err := tx.victim(); err != nil {
 			return err
 		}
+		// Another goroutine using the transaction may have had it
+		// aborted while this one waited.
+		if err := tx.check(); err != nil {
+			return err
+		}
 	}
 }
 
@@ -215,9 +227,13 @@ func (tx *Tx) breakCycle(conflict []*Tx, what string) error {
 			tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 			return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")
 		}
-		v.deadlockVictim = true
+		// The victim is aborted now, so that another goroutine using it,
+		// which may take a lock before its waiter resumes, fails as in an
+		// aborted transaction rather than wait on its behalf.
+		v.aborted = true
 		for _, w := range v.waiters() {
 			markPassedOver(w.waitRow.blockers())
+			w.victimOf = v
 			w.state = stateReady
 			w.waitRow = nil
 		}
@@ -443,10 +459,11 @@ func entryIndex(lk lockKey) (table, index string) {
 // victim ends a wait that another transaction's deadlock check broke by
 // picking tx as the victim.
 func (tx *Tx) victim() error {
-	if !tx.deadlockVictim {
+	p := tx.proc()
+	if p.victimOf != tx {
 		return nil
 	}
-	tx.deadlockVictim = false
+	p.victimOf = nil
 	tx.aborted = true
 	tx.p.r.note(tx.proc(), "deadlock detected, transaction aborted")
 	return tx.db.kind.Error(sqlir.Deadlock, "deadlock detected", "", "", "")

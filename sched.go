@@ -242,6 +242,11 @@ type Proc struct {
 	// does not tell, since one that crashed with its family is done while its
 	// goroutine still runs.
 	returned bool
+	// victimOf is the transaction this process waits for a lock on behalf
+	// of, once the transaction that closed a cycle of lock waits picked it as
+	// the deadlock victim. It is per process, since several goroutines may
+	// wait on behalf of one transaction, and each must see the abort.
+	victimOf *Tx
 	// lingering marks a process detest started whose goroutine was still
 	// running when its run ended and reap gave up on it. It is turned away
 	// in later runs as a retired adopted goroutine is.

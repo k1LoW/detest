@@ -200,6 +200,11 @@ func (tx *Tx) moveIntention(table string, row, old Row) error {
 		if err := tx.victim(); err != nil {
 			return err
 		}
+		// Another goroutine using the transaction may have had it
+		// aborted while this one waited.
+		if err := tx.check(); err != nil {
+			return err
+		}
 	}
 }
 
