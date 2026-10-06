@@ -463,6 +463,13 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	if tx.p.r.over() {
 		return nil, 0, errRunOver
 	}
+	// The process that began the transaction crashed or returned, which
+	// drops its connection with the transaction. A goroutine detest did not
+	// adopt outlives it, and must not reach the closed transaction, which
+	// ROLLBACK TO SAVEPOINT, unlike other statements, does not check.
+	if tx.closed {
+		return nil, 0, driver.ErrBadConn
+	}
 	// As in runQuery, the context may have ended while it waited for the
 	// mutex.
 	if err := ctx.Err(); err != nil {

@@ -2,6 +2,7 @@ package detest
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
@@ -569,5 +570,48 @@ func TestProcessInsertAfterGoroutineOnSharedSQLTx(t *testing.T) {
 				return nil
 			})
 		})
+	}
+}
+
+// A goroutine that outlives the process whose transaction it shares, which
+// rolls the transaction back as it returns, finds the connection gone
+// rather than changing the closed transaction.
+func TestGoroutineOnSharedSQLTxAfterItsProcessReturned(t *testing.T) {
+	var mu sync.Mutex
+	var errs []error
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`SAVEPOINT a`); err != nil {
+				return err
+			}
+			go func() {
+				time.Sleep(time.Second)
+				_, err := tx.Exec(`ROLLBACK TO SAVEPOINT a`)
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}()
+			return nil
+		})
+		// Keeps the run going while the goroutine wakes.
+		s.Manual("other", 1, func(p *Proc) error {
+			time.Sleep(2 * time.Second)
+			return nil
+		})
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errs) == 0 {
+		t.Fatal("the goroutine never ran its statement")
+	}
+	for _, err := range errs {
+		if !errors.Is(err, driver.ErrBadConn) {
+			t.Errorf("a statement on the transaction of a process that returned got %v, want driver.ErrBadConn", err)
+		}
 	}
 }
