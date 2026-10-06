@@ -652,3 +652,38 @@ func TestGoroutineOnSharedSQLTxCanceledOnArrivalStops(t *testing.T) {
 		t.Fatalf("want the exploration stopped for a canceled shared statement, got:\n%s", res.report())
 	}
 }
+
+// A process whose transaction's context ends while the transaction is idle,
+// and which then writes the same row in another transaction, is not taken to
+// wait for its own transaction for good. database/sql rolls the first back
+// from a goroutine of its own, and detest rolls it back at the scheduler's
+// next step, which comes before the process's statement takes its lock, as
+// the statement yields first.
+func TestWriteAfterOwnIdleTransactionCanceled(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Seed(func() { store.SeedRow("counters", Row{"id": "c", "n": int64(0)}) })
+		s.Manual("pod", 1, func(p *Proc) error {
+			ctx, cancel := context.WithCancel(p.Context())
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				cancel()
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE "counters" SET "n" = 1 WHERE "id" = 'c'`); err != nil {
+				cancel()
+				return err
+			}
+			cancel()
+			_, err = db.Exec(`UPDATE "counters" SET "n" = 2 WHERE "id" = 'c'`)
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			row, _ := st.Row(store, "counters", "c")
+			if n := row.Int64("n"); n != 2 {
+				return fmt.Errorf("n = %d", n)
+			}
+			return nil
+		})
+	})
+}
