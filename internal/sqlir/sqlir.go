@@ -517,6 +517,9 @@ type RowExpr struct{ Items []Expr }
 type Cast struct {
 	X    Expr
 	Type string
+	// Len is the length of a Postgres varchar(n) or char(n) cast, which
+	// cuts longer text to n characters; 0 for none.
+	Len int
 }
 
 // CaseExpr is CASE [x] WHEN ... THEN ... ELSE ... END.

@@ -226,7 +226,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - A cast of a `numeric` or a float to text, and `||` of one
 - `round` of a value ending in .5, and a cast of one to an integer, when the statement does not show whether it is a `numeric` or a float
 - Text and a number in the same column of a set operation, or among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`
-- Values written to a column that Postgres converts by rules detest does not model, namely a value shorter than its `char(n)` column, text without a time zone written to a `timestamptz` column, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, and number text written as `0x10`, `0x1p2` or `1_000`
+- Values written to a column that Postgres converts by rules detest does not model, namely a value shorter than its `char(n)` column or than a cast to `char(n)`, text without a time zone written to a `timestamptz` column, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, and number text written as `0x10`, `0x1p2` or `1_000`
 
 *Locking*
 
@@ -254,7 +254,7 @@ A `numeric` value is kept as a float. It reads back without the trailing zeros i
 
 Arithmetic on numerics is exact where the statement shows that its operands are numerics, as literals and casts do, so `0.1 + 0.2 = 0.3` holds. A column's value does not show whether the column is a `numeric` or a float, which the two compute differently, so a result such as `amount + 0.2` is kept as the range of values the server may give. A comparison, more arithmetic, or a write to a `numeric(p, s)` column goes on when every value in the range gives the same outcome, and any other use of it, such as reading it back, fails with `detest.ErrUnsupportedSQL`. Sums and averages are kept the same way.
 
-A `numeric(p, s)` column rounds what it stores to `s` places, half away from zero, and refuses a value of more than `p - s` digits before the point (22003). A `varchar(n)` or `char(n)` column refuses a longer value (22001), after dropping the spaces past `n` as Postgres does.
+A `numeric(p, s)` column rounds what it stores to `s` places, half away from zero, and refuses a value of more than `p - s` digits before the point (22003). A `varchar(n)` or `char(n)` column refuses a longer value (22001), after dropping the spaces past `n` as Postgres does, and a cast to either cuts it to `n` characters.
 
 **MySQL**
 

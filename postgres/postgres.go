@@ -1799,7 +1799,14 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 				return nil, c.unsupported("a cast to " + typ + " with a precision or fields")
 			}
 		}
-		return &sqlir.Cast{X: x, Type: typ}, nil
+		cast := &sqlir.Cast{X: x, Type: typ}
+		if typ == "varchar" || typ == "bpchar" {
+			// char alone is char(1), which the parser spells out.
+			if mods := typmods(e.TypeCast.TypeName); len(mods) == 1 {
+				cast.Len = mods[0]
+			}
+		}
+		return cast, nil
 	case *pg.Node_AExpr:
 		return c.aExpr(e.AExpr)
 	case *pg.Node_BoolExpr:

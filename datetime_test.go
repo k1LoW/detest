@@ -337,6 +337,12 @@ func TestIntervals(t *testing.T) {
 		{`SELECT COALESCE(NULL, every, interval '1 day') FROM plan WHERE id = 2`, "30 days"},
 		{`SELECT CASE WHEN id = 2 THEN every ELSE NULL END FROM plan WHERE id = 2`, "30 days"},
 		{`SELECT lead(every, 1, interval '0') OVER (ORDER BY id) FROM plan WHERE id = 4`, "00:00:00"},
+		// An explicit cast to varchar(n) or char(n) cuts longer text.
+		{`SELECT CAST(interval '1 month' AS varchar(1))`, "1"},
+		{`SELECT 'abc'::varchar(2)`, "ab"},
+		{`SELECT 'abc'::char`, "a"},
+		{`SELECT 'abc'::char(3)`, "abc"},
+		{`SELECT 'abc'::varchar`, "abc"},
 		// date_trunc of an interval is an interval, so a date moved by it
 		// is a timestamp, whose hour extract reads.
 		{`SELECT extract(hour FROM (date '2024-01-01' + date_trunc('hour', interval '1 day 3 hours 20 minutes')))::text`, "3"},
@@ -414,6 +420,15 @@ func TestIntervals(t *testing.T) {
 		// LAG and LEAD resolve their value and default to one type.
 		`SELECT lead(every, 1, '30 days') OVER (ORDER BY id) FROM plan`,
 		`SELECT lag(every, 1, 'bogus'::text) OVER (ORDER BY id) FROM plan`,
+		// A CASE or COALESCE of untyped values only is text.
+		`SELECT COALESCE(interval '1 month', COALESCE('bogus', ''))`,
+		`SELECT COALESCE(every, CASE WHEN id = 1 THEN '1 day' ELSE NULL END) FROM plan`,
+		// A derived column's type is not known before the run, so the
+		// rows where it holds an interval refuse the call.
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT greatest(v.every, '40 days') FROM (SELECT every FROM plan) v`,
+		// char(n) pads shorter text with spaces, which detest does not.
+		`SELECT 'ab'::char(3)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
