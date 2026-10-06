@@ -429,6 +429,8 @@ func TestIntervals(t *testing.T) {
 		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT interval '1 month' AS every) v`,
 		`SELECT greatest(v.every, '40 days') FROM (SELECT every FROM plan) v`,
 		`SELECT CASE WHEN false THEN v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lead(v.every, 1, 'bogus') OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lag(v.every, 1, '1 day') OVER (ORDER BY v.id) FROM (SELECT id, every FROM plan) v`,
 		// char(n) pads text with spaces it compares without, which
 		// detest's strings do not.
 		`SELECT 'ab'::char(3)`,

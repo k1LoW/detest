@@ -1262,6 +1262,21 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 			if err != nil {
 				return err
 			}
+			if len(w.Func.Args) == 3 && !x.tx.db.kind.InnoDB() && untypedBranch(w.Func.Args[2]) {
+				// Postgres reads the default as the value's type, an interval
+				// included, which detest does not. The column check refuses
+				// a value whose type it knows; this catches a derived one in
+				// the rows where it holds an interval.
+				own, err := arg(it, 0)
+				if err != nil {
+					return err
+				}
+				_, ownInterval := derefValue(own).(pgInterval)
+				_, resultInterval := derefValue(v).(pgInterval)
+				if ownInterval || resultInterval {
+					return x.unsupported(name + " of an interval with a default of no type")
+				}
+			}
 		default:
 			return x.unsupported("window function " + name)
 		}
