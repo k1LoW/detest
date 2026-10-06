@@ -414,6 +414,10 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 		p.syncOutside()
 	}
 	defer c.db.s.enter(p)()
+	// The context may have ended while the statement waited above.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if p != nil {
 		p.stmtDone = ctx.Done()
 		defer func() { p.stmtDone = nil }()
@@ -435,6 +439,11 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	defer c.db.s.enter(nil)()
 	if tx.p.r.over() {
 		return nil, 0, errRunOver
+	}
+	// As in runQuery, the context may have ended while it waited for the
+	// mutex.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	tx.shared = query
 	defer func() { tx.shared = "" }()
