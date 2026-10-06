@@ -293,8 +293,18 @@ func TestIntervals(t *testing.T) {
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE plan (id int PRIMARY KEY, every interval NOT NULL)`)
 	mustExec(t, db, `INSERT INTO plan VALUES (1, '1 month'), (2, '30 days'), (3, $1), (4, '1 year')`, "720:00:00")
+	mustExec(t, db, `CREATE VIEW plan_view AS SELECT id, every FROM plan`)
+	mustExec(t, db, `CREATE SEQUENCE seq`)
 
 	for _, tt := range []struct{ q, want string }{
+		// A derived interval column beside an interval or NULL runs.
+		{`SELECT COALESCE(v.every, interval '0') FROM (SELECT every FROM plan WHERE id = 2) v`, "30 days"},
+		{`WITH v AS (SELECT every FROM plan) SELECT max(COALESCE(every, NULL)) FROM v`, "1 year"},
+		{`SELECT CASE WHEN id = 4 THEN every ELSE interval '0' END FROM plan_view WHERE id = 4`, "1 year"},
+		// LAG and LEAD evaluate their value once a row and the default only
+		// when it is returned.
+		{`SELECT max(n)::text FROM (SELECT id, lead(nextval('seq'), 0, '0') OVER (ORDER BY id) AS n FROM plan) w`, "4"},
+		{`SELECT nextval('seq')::text`, "5"},
 		{`SELECT (interval '1 month' = interval '30 days')::text`, "true"},
 		{`SELECT (interval '1 day' = interval '24 hours')::text`, "true"},
 		{`SELECT (interval '1 year' > interval '360 days')::text`, "false"},
@@ -424,13 +434,26 @@ func TestIntervals(t *testing.T) {
 		// A CASE or COALESCE of untyped values only is text.
 		`SELECT COALESCE(interval '1 month', COALESCE('bogus', ''))`,
 		`SELECT COALESCE(every, CASE WHEN id = 1 THEN '1 day' ELSE NULL END) FROM plan`,
-		// A derived column's type is not known before the run, so the
-		// rows where it holds an interval refuse the call.
+		// A column of a subquery, a CTE or a view has the type of its
+		// select list item, so these are refused before the run, over an
+		// empty result, a NULL value and a branch no row takes alike.
 		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT interval '1 month' AS every) v`,
 		`SELECT greatest(v.every, '40 days') FROM (SELECT every FROM plan) v`,
 		`SELECT CASE WHEN false THEN v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT CASE WHEN true THEN v.every ELSE 'bogus'::text END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT CASE WHEN true THEN -v.every ELSE 'bogus' END FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT NULL::interval AS every) v`,
+		`SELECT COALESCE(v.every, 'bogus') FROM (SELECT every FROM plan WHERE false) v`,
 		`SELECT lead(v.every, 1, 'bogus') OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lead(v.every, 1, 'bogus'::text) OVER () FROM (SELECT interval '1 month' AS every) v`,
+		`SELECT lead(v.every, 0, 'bogus'::text) OVER () FROM (SELECT interval '1 month' AS every) v`,
 		`SELECT lag(v.every, 1, '1 day') OVER (ORDER BY v.id) FROM (SELECT id, every FROM plan) v`,
+		`WITH v AS (SELECT every FROM plan) SELECT COALESCE(every, '1 day') FROM v`,
+		`SELECT COALESCE(every, '1 day') FROM plan_view`,
+		// A column of a * or a set operation is of a type the check does
+		// not resolve, which may be an interval.
+		`SELECT COALESCE(s.every, '1 day') FROM (SELECT * FROM plan) s`,
+		`SELECT COALESCE(u.every, '1 day') FROM (SELECT every FROM plan UNION ALL SELECT every FROM plan) u`,
 		// char(n) pads text with spaces it compares without, which
 		// detest's strings do not.
 		`SELECT 'ab'::char(3)`,

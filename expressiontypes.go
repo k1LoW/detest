@@ -283,9 +283,11 @@ func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) s
 // literal or a parameter there as an interval, failing with 22007 on text
 // that is none whichever branch a row takes, and fails a branch of another
 // type with 42804. detest would keep the value as it is, which compares with
-// no interval.
+// no interval. A column whose type the check cannot resolve, of a * or a
+// set operation, may be an interval, so it is refused beside an interval or
+// a value of another type too.
 func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
-	interval, other := false, false
+	interval, other, unresolved := false, false, false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
@@ -295,12 +297,14 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 			other = true
 		case typ == "interval":
 			interval = true
-		case typ != "" && typ != "unresolved column type":
+		case typ == "unresolved column type":
+			unresolved = true
+		case typ != "":
 			other = true
 		}
 	}
-	if interval && other {
-		return "a value other than an interval beside an interval among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"
+	if interval && other || unresolved && (interval || other) {
+		return "a value other than an interval beside an interval, or beside a column of unresolved type, among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"
 	}
 	return ""
 }
