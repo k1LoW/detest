@@ -158,6 +158,14 @@ func (t *sqlTx) Commit() (err error) {
 	if tx.p.stale() {
 		return errRunOver // the run's databases are reset, or are a later run's
 	}
+	if borrowedTx(tx, t.c.current()) {
+		t.c.tx = tx // still open, for database/sql to roll back
+		err := unsupported("a transaction used by another goroutine than the one that began it", "COMMIT")
+		if u, ok := errors.AsType[*sqlir.ErrUnsupportedSQL](err); ok {
+			t.c.db.s.refuse(u)
+		}
+		return err
+	}
 	if tx.p != nil {
 		// The process keeps the transaction until the commit is done, so a
 		// crash at the commit's yield point rolls it back.
@@ -251,6 +259,18 @@ func recoverRunOver(err *error) {
 
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
+// borrowed reports whether p, a goroutine the code under test started, runs
+// on a transaction another process began, or the reverse. Its statements
+// would yield as the process that began it, whose own goroutine may be
+// waiting for p meanwhile, so detest refuses it rather than schedule it
+// under the wrong process. Rollback is not checked, since database/sql rolls
+// a transaction back from a goroutine of its own when its context ends.
+func (c *sqlConn) borrowed(p *Proc) bool { return borrowedTx(c.tx, p) }
+
+func borrowedTx(tx *Tx, p *Proc) bool {
+	return p != nil && tx != nil && tx.p != nil && p != tx.p && !tx.p.r.over() && (p.adopted || tx.p.adopted)
+}
+
 // statementTx returns the transaction a statement runs in: the open one, or an
 // autocommit transaction committed right after the statement.
 // dropStaleTx forgets a transaction of an ended run that the connection still
@@ -296,6 +316,9 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 	if p := c.current(); p != nil {
 		if p.stale() {
 			return nil, 0, errRunOver
+		}
+		if c.borrowed(p) {
+			return nil, 0, unsupported("a transaction used by another goroutine than the one that began it", query)
 		}
 		p.syncOutside()
 	}

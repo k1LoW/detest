@@ -564,3 +564,41 @@ func TestAdoptedGoroutineWokenBySeedNotRun(t *testing.T) {
 		s.ExpectViolation("g mark")
 	})
 }
+
+// A goroutine that runs a statement or commits on a transaction its parent
+// began is refused, rather than scheduled as the parent.
+func TestAdoptedGoroutineOnParentTxRefused(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("commit=%v", commit), func(t *testing.T) {
+			var mu sync.Mutex
+			var got error
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				s.Manual("pod", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					var gerr error
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						if commit {
+							gerr = tx.Commit()
+						} else {
+							_, gerr = tx.Exec(`INSERT INTO "marks" ("id") VALUES ('g')`)
+						}
+					})
+					wg.Wait()
+					mu.Lock()
+					got = gerr
+					mu.Unlock()
+					return nil
+				})
+			})
+			if _, ok := errors.AsType[*ErrUnsupportedSQL](got); !ok {
+				t.Errorf("the goroutine got %v, want an unsupported error", got)
+			}
+		})
+	}
+}
