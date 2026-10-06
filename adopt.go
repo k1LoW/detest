@@ -290,6 +290,10 @@ func (r *run) takeAdopted() bool {
 		pending = rest
 	}
 	pending = order
+	// Goroutines run on to their first yield point here, which, as a
+	// process back from outside detest, may make true what a spinning
+	// process waits for.
+	r.endSpin()
 	for _, np := range pending {
 		<-np.ev // the handshake's evSync
 		if np.root().killed {
