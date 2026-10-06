@@ -86,13 +86,18 @@ func (iv pgInterval) addToTime(t time.Time) time.Time {
 // the clock t shows in loc, which keeps the clock across a daylight saving
 // change, and the time to the instant that clock is, as Postgres adds them.
 func (iv pgInterval) addToInstant(t instant, loc *time.Location) instant {
-	if iv.months == 0 && iv.days == 0 {
-		// Without them the clock is not read at all, so an instant whose
-		// clock a zone shows twice stays the one it is.
-		return newInstant(t.Add(time.Duration(iv.micros) * time.Microsecond))
+	// The months and then the days, each added to the clock the instant
+	// before shows and read back as an instant, as timestamptz_pl_interval
+	// does: a month that lands on a clock time a zone skips is read on
+	// before the days are added. Without either, the clock is not read at
+	// all, so an instant whose clock a zone shows twice stays the one it is.
+	if iv.months != 0 {
+		t = instantAt(pgInterval{months: iv.months}.addCalendar(wallIn(t.Time, loc)), loc)
 	}
-	w := iv.addCalendar(wallIn(t.Time, loc))
-	return newInstant(instantAt(w, loc).Add(time.Duration(iv.micros) * time.Microsecond))
+	if iv.days != 0 {
+		t = instantAt(pgInterval{days: iv.days}.addCalendar(wallIn(t.Time, loc)), loc)
+	}
+	return newInstant(t.Add(time.Duration(iv.micros) * time.Microsecond))
 }
 
 // addCalendar is t moved by iv's months and days, on the clock t holds.
