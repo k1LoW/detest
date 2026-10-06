@@ -37,6 +37,10 @@ func (s *Sim) Mutex(name string) *Mutex {
 // Lock acquires the mutex, waiting while another process holds it.
 func (mu *Mutex) Lock() {
 	p := mu.s.Current()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	if p.stale() {
+		return
+	}
 	if p == nil {
 		if mu.held {
 			panic(fmt.Sprintf("detest: mutex %s locked outside a process while held", mu.name))
@@ -53,6 +57,15 @@ func (mu *Mutex) Lock() {
 
 // Unlock releases the mutex. As with sync.Mutex, any goroutine may unlock it.
 func (mu *Mutex) Unlock() {
+	if mu.s.Current().stale() {
+		return // it never took the lock in this run
+	}
+	if r := mu.s.run; r != nil && r.over() {
+		// An adopted goroutine whose Lock the end of the run cut short unlocks
+		// a mutex it never got. The next run resets the mutex anyway.
+		mu.held, mu.holder = false, nil
+		return
+	}
 	if !mu.held {
 		panic(fmt.Sprintf("detest: unlock of unlocked mutex %s", mu.name))
 	}
@@ -103,6 +116,10 @@ func (s *Sim) RWMutex(name string) *RWMutex {
 // Lock acquires the write lock, waiting while any reader or writer holds it.
 func (rw *RWMutex) Lock() {
 	p := rw.s.Current()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	if p.stale() {
+		return
+	}
 	if p == nil {
 		if rw.writing || rw.readLocked() {
 			panic(fmt.Sprintf("detest: rwmutex %s locked outside a process while held", rw.name))
@@ -125,6 +142,13 @@ func (rw *RWMutex) Lock() {
 
 // Unlock releases the write lock.
 func (rw *RWMutex) Unlock() {
+	if rw.s.Current().stale() {
+		return
+	}
+	if r := rw.s.run; r != nil && r.over() {
+		rw.writing, rw.writer = false, nil // as Mutex.Unlock
+		return
+	}
 	if !rw.writing {
 		panic(fmt.Sprintf("detest: unlock of unlocked rwmutex %s", rw.name))
 	}
@@ -136,6 +160,10 @@ func (rw *RWMutex) Unlock() {
 // for it.
 func (rw *RWMutex) RLock() {
 	p := rw.s.Current()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	if p.stale() {
+		return
+	}
 	if p == nil {
 		if rw.writing {
 			panic(fmt.Sprintf("detest: rwmutex %s read-locked outside a process while write-locked", rw.name))
@@ -157,7 +185,13 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
+	if r := rw.s.run; r != nil && r.over() {
+		return // as Mutex.Unlock, the next run resets the read locks
+	}
 	p := rw.s.Current()
+	if p.stale() {
+		return
+	}
 	switch {
 	case p != nil && rw.readers[p] > 0:
 	case rw.outsideReaders > 0:

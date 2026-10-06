@@ -134,6 +134,8 @@ The simulations replace what the application talks to at the client boundary, th
 - A store detest has no simulation of, such as SQLite, MongoDB, DynamoDB, Spanner, or Redis holding locks or counters
 - Go memory shared between goroutines without one of the mutexes above, which `go test -race` checks
 
+Goroutines the code under test starts itself, such as an `errgroup`'s or the one a worker hands a claimed job to, are scheduled too. Each becomes a process of its own the first time it calls into one of these boundaries, named after the process that started it (`worker#1.1`), and a crash takes it down with that process.
+
 ### Database
 
 `s.DB(name, server)` returns a `*sql.DB` backed by an in-memory driver. Production code, including GORM, sqlx and sqlc, runs on it unchanged.

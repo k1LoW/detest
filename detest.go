@@ -18,6 +18,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,6 +199,17 @@ type Sim struct {
 	progress *workerProgress // bumped on every scheduler step, read by the stall watchdog
 
 	run *run // current run
+	// live is run for Current, which goroutines adopted from an ended run
+	// call while the scheduler starts the next one.
+	live atomic.Pointer[run]
+
+	// stale maps the adopted goroutines still alive after their run ended to
+	// their processes (see run.retire).
+	staleMu sync.Mutex
+	stale   map[string]*Proc
+	// schedGid is the goroutine that runs the seeds and the scheduler, whose
+	// calls into detest belong to no process.
+	schedGid string
 }
 
 func newSimDefaults() *Sim {

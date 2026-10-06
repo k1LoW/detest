@@ -195,6 +195,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 		}
 		s.frontier, s.worker = f, worker
 		defer s.closeSQL() // the bubble cannot end while the pools' goroutines run
+		defer s.drainAdopted()
 		fn(t, s)
 		s.frozen = true
 		res = s.check()

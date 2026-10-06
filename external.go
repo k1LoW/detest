@@ -65,7 +65,11 @@ func (s *Sim) External(name string, opts ...ExternalOption) *External {
 // db (the remote service's own database); the explorer picks the outcome. The
 // effect's returned error is an application error (NotFound, FailedPrecondition)
 // and rolls the effect back; ErrUnavailable is a transport failure.
-func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) error {
+func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error) (err error) {
+	defer func() { absorbAbort(recover(), p, &err) }()
+	if p.stale() {
+		return errRunOver
+	}
 	n := len(e.outcomes)
 	if p.r.failures >= p.r.s.maxFailures {
 		n = 1
@@ -85,7 +89,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 	}
 	tx := db.newTx(p)
 	tx.atomic = true
-	err := effect(tx)
+	err = effect(tx)
 	if err != nil {
 		tx.rollback()
 		p.r.note(p, "%s(%s): %s, effect rejected: %v", e.name, desc, out, err)
@@ -105,7 +109,11 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 // ErrUnavailable without running it; FailAfter runs it (its effects, including
 // SQL issued through detest's driver, happen and yield as usual) and then
 // returns ErrUnavailable, modeling a response lost after the callee committed.
-func (e *External) Do(p *Proc, desc string, call func() error) error {
+func (e *External) Do(p *Proc, desc string, call func() error) (err error) {
+	defer func() { absorbAbort(recover(), p, &err) }()
+	if p.stale() {
+		return errRunOver
+	}
 	n := len(e.outcomes)
 	if p.r.failures >= p.r.s.maxFailures {
 		n = 1
@@ -123,7 +131,7 @@ func (e *External) Do(p *Proc, desc string, call func() error) error {
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
 	}
-	err := call()
+	err = call()
 	switch {
 	case err != nil:
 		p.r.note(p, "%s(%s): %s, callee returned: %v", e.name, desc, out, err)
@@ -152,13 +160,16 @@ type transport struct {
 	h http.Handler
 }
 
-func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *transport) RoundTrip(req *http.Request) (_ *http.Response, err error) {
 	p := t.e.s.Current()
 	if p == nil {
 		return t.serve(req), nil // outside any process, such as in a seed
 	}
+	if p.stale() {
+		return nil, errRunOver
+	}
 	var resp *http.Response
-	err := t.e.Do(p, req.Method+" "+req.URL.Path, func() error {
+	err = t.e.Do(p, req.Method+" "+req.URL.Path, func() error {
 		resp = t.serve(req)
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("%s", resp.Status)

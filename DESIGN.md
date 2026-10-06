@@ -39,6 +39,17 @@ A process is a goroutine running user code, such as a request handler, a worker 
 
 Switching only at yield points is the main modeling decision. Code between two yield points runs atomically. This keeps the number of schedules proportional to the operations that interact through shared state, rather than to every instruction. The cost is that a data race on memory between two yield points is out of scope; `go test -race` covers that.
 
+### Goroutines the code under test starts
+
+Production code often starts goroutines of its own, such as an `errgroup` polling several jobs at once or a worker handing a claimed job to a goroutine and going back to its loop. Such a goroutine becomes a process of its own the first time it calls into detest, named after the process that started it (`worker#1.1`, and `worker#1.1.1` for one it starts in turn). Its operations are then scheduled like any process's, rather than run under the name of whichever process the scheduler resumed last.
+
+- A goroutine detest started for a process is told apart by the function at the bottom of its stack, which `runtime.Callers` reads cheaply. Only other goroutines are looked up by their goroutine id, since `runtime.Stack` takes a lock the whole runtime shares, which parallel workers would contend on at every statement.
+- The goroutine is parked in its first call into detest before it does anything there, and the scheduler takes it in after the step that started it. Goroutines that arrive together are ordered by their parents, and between siblings by goroutine id, which follows the order they were started in. A misordering would replay another path, which detest reports as nondeterminism, never silently.
+- A goroutine gives no sign when it returns. One that stops reporting back is first taken as blocked outside detest, and once nothing else can run, a dump of the goroutines tells the ones that returned from the ones still blocked.
+- A goroutine still alive when its run ends, such as one asleep on a timer, unwinds as a process of that run when it wakes in a later one, and is never adopted by the later run.
+
+A goroutine that sleeps before its first call into detest is invisible until it makes that call, so the run may end at quiescence without it. Likewise, a goroutine started in one run whose first call comes after that run ended is adopted by the run it calls in.
+
 ### Choices
 
 Every nondeterministic decision is a numbered choice among options.
@@ -140,7 +151,7 @@ A queue is at least once and unordered. A consumer whose handler returns an erro
 
 ### Crashes
 
-`MaxCrashes` lets any process die at any step. Its transactions roll back as its connection drops, the mutexes it held are freed, and the message it was handling is redelivered. detest does not know which processes share a pod, so a crash kills one process.
+`MaxCrashes` lets any process die at any step. Its transactions roll back as its connection drops, the mutexes it held are freed, and the message it was handling is redelivered. detest does not know which declared processes share a pod, so a crash kills one process, together with the goroutines adopted from it, as a goroutine cannot die without its pod. The crash may strike while any of them stands at a step, such as while the process waits in `errgroup.Wait` and its goroutines poll.
 
 ## Checking
 

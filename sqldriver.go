@@ -114,6 +114,9 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 		return nil, err
 	}
 	p := c.current()
+	if p.stale() {
+		return nil, errRunOver
+	}
 	tx := c.db.newTx(p)
 	// The session's settings hold for a transaction it begins, inside a
 	// process or not.
@@ -152,6 +155,9 @@ func (t *sqlTx) Commit() (err error) {
 	if tx == nil {
 		return nil
 	}
+	if tx.p.stale() {
+		return errRunOver // the run's databases are reset, or are a later run's
+	}
 	if tx.p != nil {
 		// The process keeps the transaction until the commit is done, so a
 		// crash at the commit's yield point rolls it back.
@@ -183,6 +189,9 @@ func (t *sqlTx) Rollback() (err error) {
 	t.c.tx = nil
 	if tx == nil {
 		return nil
+	}
+	if tx.p.stale() {
+		return errRunOver // as Commit
 	}
 	if tx.p != nil {
 		defer tx.p.forgetTxUnlessOver(tx)
@@ -285,6 +294,9 @@ func (c *sqlConn) runQuery(query string, named []driver.NamedValue) (*sqlRows, i
 		args[i] = nv.Value
 	}
 	if p := c.current(); p != nil {
+		if p.stale() {
+			return nil, 0, errRunOver
+		}
 		p.syncOutside()
 	}
 	stmt, err := parseWith(c.db.kind.Parser(), query)

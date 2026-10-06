@@ -308,14 +308,18 @@ func encodeKey(vals []any) string {
 }
 
 // Tx runs fn in a transaction: commit on nil, rollback on error.
-func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) error {
+func (db *DB) Tx(p *Proc, fn func(tx *Tx) error) (err error) {
+	defer func() { absorbAbort(recover(), p, &err) }()
+	if p.stale() {
+		return errRunOver
+	}
 	if p.tx != nil {
 		panic("detest: nested transaction on " + p.name)
 	}
 	tx := db.newTx(p)
 	p.tx = tx
 	p.yieldf("%s: begin", db.name)
-	err := fn(tx)
+	err = fn(tx)
 	if tx.closed {
 		p.tx = nil
 		return err

@@ -186,7 +186,7 @@ s.Loop("reaper", 2, func(p *detest.Proc) error {
 })
 ```
 
-Goroutines the code under test starts itself are not scheduled by detest; a process waiting for them on a channel is reported as blocked. Prefer an entry point that runs synchronously, or model the goroutine as its own process with `p.Spawn`.
+Goroutines the code under test starts itself, such as an `errgroup` polling jobs or a worker handing a claimed job to a goroutine, need no wiring. Each becomes a process the first time it calls into detest, named after the one that started it (`worker#1.1`), and is scheduled like any other, so an iteration such as `claimAndRun` that starts one can be called as it is. Two cases stay out of sight. A goroutine that sleeps before its first call into detest is seen only once it calls, so a process that only starts such a goroutine may reach quiescence without it. A goroutine that blocks for good on a channel is reported like a process doing so.
 
 ## Time and randomness
 
