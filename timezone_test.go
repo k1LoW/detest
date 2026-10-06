@@ -64,11 +64,28 @@ func TestServerTimeZone(t *testing.T) {
 	for _, q := range []string{
 		`SELECT lag(ts, 0, at) OVER (ORDER BY id) FROM ev WHERE id = 1`,
 		`SELECT lead(ts, 1, at) OVER (ORDER BY id) FROM ev WHERE id = 1`,
+		`SELECT coalesce(lag(ts, 0, at) OVER (ORDER BY id), ts) FROM ev WHERE id = 1`,
+		// Aggregates are converted as other arguments are.
+		`SELECT coalesce(max(ts), max(at)) FROM ev WHERE id = 1`,
+		// So is text beside a timestamptz, read in the session's zone.
+		`SELECT CASE WHEN true THEN '2024-05-20 00:30' ELSE at END FROM ev WHERE id = 1`,
+		`SELECT coalesce($1, at) FROM ev WHERE id = 1`,
 	} {
 		var got time.Time
-		if err := db.QueryRow(q).Scan(&got); err != nil || !got.Equal(at) {
+		var args []any
+		if q == `SELECT coalesce($1, at) FROM ev WHERE id = 1` {
+			args = []any{"2024-05-20 00:30"}
+		}
+		if err := db.QueryRow(q, args...).Scan(&got); err != nil || !got.Equal(at) {
 			t.Errorf("%s: got %v, %v, want %v", q, got, err, at)
 		}
+	}
+	var day time.Time
+	if err := db.QueryRow(`SELECT date_trunc('day', max(on_day)) FROM ev`).Scan(&day); err != nil || !day.Equal(time.Date(2024, 5, 20, 0, 0, 0, 0, jst)) {
+		t.Errorf("date_trunc of a date aggregate: got %v, %v", day, err)
+	}
+	if _, err := db.Exec(`SELECT coalesce('nonsense', at) FROM ev`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("text detest does not read beside a timestamptz: got %v, want ErrUnsupportedSQL", err)
 	}
 	// A set operation does not convert a timestamp beside a timestamptz.
 	if _, err := db.Exec(`SELECT ts FROM ev UNION SELECT at FROM ev`); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -137,12 +154,14 @@ func TestSetTimeZoneRefusals(t *testing.T) {
 		`SET TIME ZONE 'Nowhere/City'`,
 		`SET TIME ZONE INTERVAL '+09:00' HOUR TO MINUTE`,
 		`SET timezone FROM CURRENT`,
+		`SET TIME ZONE 168`,
+		`SET TIME ZONE -170.5`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	for _, q := range []string{`SET TIME ZONE 'Asia/Tokyo'`, `SET timezone = 'America/New_York'`, `SET TIME ZONE 9`, `SET TIME ZONE -3.5`, `SET LOCAL TIME ZONE 'Europe/London'`, `SET TIME ZONE 'utc'`} {
+	for _, q := range []string{`SET TIME ZONE 'Asia/Tokyo'`, `SET timezone = 'America/New_York'`, `SET TIME ZONE 9`, `SET TIME ZONE -3.5`, `SET TIME ZONE 167`, `SET LOCAL TIME ZONE 'Europe/London'`, `SET TIME ZONE 'utc'`} {
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("%s: got %v, want nil", q, err)
 		}

@@ -86,6 +86,10 @@ func (c *pgConv) timeZoneSet(v *pg.VariableSetStmt) (zone *time.Location, ok boo
 	}
 	// An offset in hours east of UTC, which Postgres takes to the second.
 	secs := math.Round(hours * 3600)
+	if math.Abs(secs) >= 168*3600 {
+		// Postgres refuses an offset of a week or more (22023).
+		return nil, true, c.unsupported("SET TIME ZONE to an offset of 168 hours or more")
+	}
 	if secs == 0 {
 		return time.UTC, true, nil
 	}

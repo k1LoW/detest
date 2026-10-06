@@ -1299,6 +1299,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
+		if err := x.timeArgs(v, args); err != nil {
+			return nil, err
+		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
 				return out, err

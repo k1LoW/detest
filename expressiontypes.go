@@ -104,7 +104,15 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "int4"
 		case "nextval", "setval", "count", "row_number", "rank", "dense_rank":
 			return "int8"
-		case "lag", "lead", "first_value", "last_value":
+		case "lag", "lead":
+			// The value and the default resolve to one type.
+			if args := branchArgs(e); len(args) > 0 {
+				return commonType(args, column, subquery)
+			}
+			if len(e.Args) > 0 {
+				return expressionTypeIn(e.Args[0], column, subquery)
+			}
+		case "first_value", "last_value":
 			if len(e.Args) > 0 {
 				return expressionTypeIn(e.Args[0], column, subquery)
 			}

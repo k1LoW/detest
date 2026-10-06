@@ -414,7 +414,10 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), x.toTimeType(out, x.exprTypes[v]))
+				if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
+					return nil, err
+				}
+				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 			}
 		}
 		if v.Else != nil {
@@ -422,7 +425,10 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), x.toTimeType(out, x.exprTypes[v]))
+			if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
+				return nil, err
+			}
+			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -454,22 +460,8 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
-		switch v.Name {
-		case "coalesce", "greatest", "least":
-			// A timestamp beside a timestamptz is read as one before the
-			// arguments are compared or returned.
-			if typ := x.exprTypes[v]; typ != "" {
-				for i := range args {
-					args[i] = x.toTimeType(args[i], typ)
-				}
-			}
-		case "date_trunc":
-			// A date is truncated as the timestamptz Postgres casts it to.
-			if len(v.Args) == 2 && !x.tx.db.kind.InnoDB() && x.sourceType(v.Args[1]) == "date" {
-				if t, ok := x.asInstant(args[1]); ok {
-					args[1] = t
-				}
-			}
+		if err := x.timeArgs(v, args); err != nil {
+			return nil, err
 		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {

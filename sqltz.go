@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -281,16 +282,57 @@ func (x *sqlExec) noteType(e sqlir.Expr, typ string) {
 // toTimeType converts v to typ, the type Postgres resolves the branches of
 // CASE or COALESCE or the arguments of GREATEST or LEAST to, where one is a
 // timestamp or a date and another a timestamptz.
-func (x *sqlExec) toTimeType(v any, typ string) any {
+//
+// A string literal or a parameter among them is read as typ too, and text
+// detest does not read as one is refused.
+func (x *sqlExec) toTimeType(v any, typ string) (any, error) {
 	switch t := derefValue(v).(type) {
 	case time.Time:
 		if typ == "timestamptz" {
-			return instantAt(t, x.tx.zone())
+			return instantAt(t, x.tx.zone()), nil
 		}
 	case instant:
 		if typ == "timestamp" {
-			return wallIn(t.Time, x.tx.zone())
+			return wallIn(t.Time, x.tx.zone()), nil
+		}
+	case string:
+		if typ == "" {
+			return v, nil
+		}
+		out, err := x.cast(t, typ)
+		if err != nil {
+			return nil, err
+		}
+		if _, text := out.(string); text {
+			return nil, x.unsupported(fmt.Sprintf("the %s text %q, in a format detest does not parse", typ, t))
+		}
+		return out, nil
+	}
+	return v, nil
+}
+
+// timeArgs converts the arguments of a call as Postgres resolves them before
+// it runs the function: those of COALESCE, GREATEST and LEAST to the type
+// they resolve to together, and a date given to date_trunc to the
+// timestamptz Postgres casts it to.
+func (x *sqlExec) timeArgs(f *sqlir.FuncCall, args []any) error {
+	switch f.Name {
+	case "coalesce", "greatest", "least":
+		if typ := x.exprTypes[f]; typ != "" {
+			for i := range args {
+				v, err := x.toTimeType(args[i], typ)
+				if err != nil {
+					return err
+				}
+				args[i] = v
+			}
+		}
+	case "date_trunc":
+		if len(f.Args) == 2 && !x.tx.db.kind.InnoDB() && x.sourceType(f.Args[1]) == "date" {
+			if t, ok := x.asInstant(args[1]); ok {
+				args[1] = t
+			}
 		}
 	}
-	return v
+	return nil
 }
