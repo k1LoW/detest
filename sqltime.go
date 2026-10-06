@@ -86,7 +86,9 @@ func parseInterval(s string) (time.Duration, *intervalError) {
 			}
 			for _, u := range []int64{3600e6, 60e6, 1e6} {
 				if seen[u] {
-					return 0, &intervalError{"a time with an hour, minute or second unit", false}
+					// Postgres fails a time with an hour, a minute or a second
+					// given apart, and a second time, as malformed.
+					return 0, &intervalError{"a time with an hour, minute or second unit", true}
 				}
 				seen[u] = true
 			}
@@ -158,19 +160,23 @@ func parseClock(f string) (*big.Rat, *intervalError) {
 	if len(parts) > 3 {
 		return nil, &intervalError{"a time of more than three parts", true}
 	}
+	units := []int64{3600e6, 60e6, 1e6}
+	if len(parts) == 2 && strings.Contains(parts[1], ".") {
+		units = units[1:] // m:s.f, as Postgres reads '1:2.5'
+	}
 	total := new(big.Rat)
 	for i, p := range parts {
 		if p == "" || strings.ContainsAny(p, "+-eE/") {
 			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), true}
 		}
-		if i < 2 && strings.Contains(p, ".") {
+		if i < len(parts)-1 && strings.Contains(p, ".") {
 			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), false}
 		}
 		n, ok := new(big.Rat).SetString(p)
 		if !ok {
 			return nil, &intervalError{fmt.Sprintf("the time %q in interval text", f), true}
 		}
-		unit := []int64{3600e6, 60e6, 1e6}[i]
+		unit := units[i]
 		total.Add(total, new(big.Rat).Mul(n, new(big.Rat).SetInt64(unit)))
 	}
 	if neg {
