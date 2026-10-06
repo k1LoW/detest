@@ -103,6 +103,13 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 			c.tx, err = nil, errRunOver
 		}
 	}()
+	// The caller is resolved before anything else, as a goroutine of an
+	// ended run must not read the connection's state, nor s.run, which the
+	// scheduler may be setting for the next run.
+	p := c.current()
+	if p.stale() {
+		return nil, errRunOver
+	}
 	c.dropStaleTx()
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
@@ -112,10 +119,6 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	iso, err := txIsolation(c.db.kind, sql.IsolationLevel(opts.Isolation))
 	if err != nil {
 		return nil, err
-	}
-	p := c.current()
-	if p.stale() {
-		return nil, errRunOver
 	}
 	tx := c.db.newTx(p)
 	// The session's settings hold for a transaction it begins, inside a

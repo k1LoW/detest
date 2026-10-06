@@ -602,3 +602,40 @@ func TestAdoptedGoroutineOnParentTxRefused(t *testing.T) {
 		})
 	}
 }
+
+// A goroutine cut at a yield point that begins a transaction when it wakes
+// during a later run is turned away before it touches the connection.
+func TestAdoptedGoroutineBeginsTxInLaterRun(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			// The rerun sleeps here while the goroutine cut in the first run
+			// wakes.
+			time.Sleep(2 * time.Second)
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('a')`)
+			}()
+			go func() {
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('b')`) // cut here
+				time.Sleep(time.Second)
+				tx, err := db.Begin()
+				if err != nil {
+					return
+				}
+				_, _ = tx.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+				_ = tx.Commit()
+			}()
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "late"); ok {
+				return errors.New("late mark")
+			}
+			if _, ok := st.Row(store, "marks", "a"); ok {
+				return errors.New("a mark")
+			}
+			return nil
+		})
+		s.ExpectViolation("a mark")
+	})
+}
