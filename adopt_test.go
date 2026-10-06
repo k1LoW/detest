@@ -931,3 +931,41 @@ func TestHandWrittenTxDeadlockThroughSecondWaiter(t *testing.T) {
 		t.Error("no run detected the deadlock")
 	}
 }
+
+// A goroutine that inserts through its parent's hand-written transaction
+// takes no value of a sequence before its turn: neither on its first call,
+// before it is taken in, nor as a goroutine of an ended run during a later
+// run, where it is turned away first.
+func TestStaleGoroutineTxInsertTakesNoSequence(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE marks (id serial PRIMARY KEY, name text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("pod", 1, func(p *Proc) error {
+			// The rerun sleeps here while the goroutine of the first run wakes.
+			time.Sleep(2 * time.Second)
+			return store.Tx(p, func(tx *Tx) error {
+				go func() {
+					_, _ = db.Exec(`INSERT INTO marks (name) VALUES ('a')`)
+				}()
+				go func() {
+					_ = tx.Insert("marks", Row{"name": "g"}) // cut here
+					time.Sleep(time.Second)
+					_ = tx.Insert("marks", Row{"name": "late"})
+				}()
+				time.Sleep(5 * time.Second)
+				return nil
+			})
+		})
+		s.Always(func(st *State) error {
+			for _, r := range st.Rows(store, "marks") {
+				if r.Str("name") == "a" {
+					return fmt.Errorf("a mark with id %d", r.Int64("id"))
+				}
+			}
+			return nil
+		})
+		s.ExpectViolation("a mark with id 1")
+	})
+}

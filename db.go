@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -393,6 +394,9 @@ func (db *DB) Peek(table string) []Row { return db.selectCommitted(table, nil) }
 func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, nil) }()
+	if tx.enter(func() string { return "select " + table }) {
+		runtime.Goexit()
+	}
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil
@@ -1823,6 +1827,9 @@ type savepoint struct {
 func (tx *Tx) Get(table, key string) (Row, bool) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, nil) }()
+	if tx.enter(func() string { return "get " + table + " " + key }) {
+		runtime.Goexit()
+	}
 	table = tx.db.resolve(table)
 	if tx.check() != nil {
 		return nil, false
@@ -1835,6 +1842,9 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return "get for update " + table + " " + key }) {
+		return nil, false, errRunOver
+	}
 	table = tx.db.resolve(table)
 	if err := tx.check(); err != nil {
 		return nil, false, err
@@ -1851,6 +1861,9 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 func (tx *Tx) Insert(table string, row Row) (err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return fmt.Sprint("insert ", table, row) }) {
+		return errRunOver
+	}
 	return tx.asStatement(func() error { return tx.insert(table, row) })
 }
 
@@ -1858,6 +1871,9 @@ func (tx *Tx) Insert(table string, row Row) (err error) {
 func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return fmt.Sprint("update ", table, " ", key, fields) }) {
+		return false, errRunOver
+	}
 	n, err := tx.UpdateWhere(table, func(r Row) bool { return r.Key() == key }, fields, fmt.Sprintf("id=%s", key))
 	return n == 1, err
 }
@@ -1867,6 +1883,9 @@ func (tx *Tx) Update(table, key string, fields Row) (_ bool, err error) {
 func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return fmt.Sprint("cas ", table, " ", key, " ", field, from, to) }) {
+		return false, errRunOver
+	}
 	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
 		lazyString(func() string { return fmt.Sprintf("id=%s and %s=%v -> %v", key, field, from, to) }))
 	return n == 1, err
@@ -1983,6 +2002,9 @@ func (db *DB) duplicateKey(table, constraint string) error {
 func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc string) (_ int, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return fmt.Sprint("update ", table, " ", desc, fields) }) {
+		return 0, errRunOver
+	}
 	return tx.updateWhere(table, pred, fields, desc)
 }
 
@@ -1990,6 +2012,9 @@ func (tx *Tx) UpdateWhere(table string, pred func(Row) bool, fields Row, desc st
 func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, &err) }()
+	if tx.enter(func() string { return "delete " + table + " " + key }) {
+		return false, errRunOver
+	}
 	var found bool
 	err = tx.asStatement(func() error {
 		var err error
@@ -2003,11 +2028,10 @@ func (tx *Tx) Delete(table, key string) (_ bool, err error) {
 func (tx *Tx) Enqueue(q *Queue, msg Msg) {
 	// Another goroutine than its owner's may run it (see run).
 	defer func() { absorbAbort(recover(), nil, nil) }()
-	// It does not yield, so the caller is resolved here, which adopts a
-	// goroutine calling for the first time and takes back one that woke
-	// outside detest before the transaction changes.
-	if tx.p != nil && !tx.atomic {
-		goneStale(tx.db.s.currentAs(func() string { return fmt.Sprint("enqueue ", q.name, msg) }))
+	// It does not yield, so resolving the caller here is what adopts a
+	// goroutine calling for the first time.
+	if tx.enter(func() string { return fmt.Sprint("enqueue ", q.name, msg) }) {
+		runtime.Goexit()
 	}
 	tx.deferred = append(tx.deferred, func() { q.push(tx.p, msg) })
 }
@@ -2249,6 +2273,19 @@ func (tx *Tx) yieldf(format string, args ...any) {
 		return
 	}
 	tx.procAs(func() string { return fmt.Sprintf(format, args...) }).yieldf(format, args...)
+}
+
+// enter resolves the caller of an operation of the transaction before the
+// operation reads or changes anything, which adopts a goroutine calling for
+// the first time and takes back one that woke outside detest, and reports
+// whether the caller is a goroutine of an ended run, to be turned away. An
+// insert evaluates defaults such as nextval before it yields, which would
+// otherwise take a later run's sequence values.
+func (tx *Tx) enter(first func() string) bool {
+	if tx.p == nil || tx.atomic {
+		return false
+	}
+	return tx.db.s.currentAs(first).stale()
 }
 
 // proc returns the process running the calling operation of the
