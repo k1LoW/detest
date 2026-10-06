@@ -237,6 +237,12 @@ type Sim struct {
 	// schedGid is the goroutine that runs the seeds and the scheduler, whose
 	// calls into detest belong to no process.
 	schedGid string
+	// schedEntry is the function at the bottom of that goroutine's stack,
+	// which tells it apart from others without reading the goroutine id.
+	schedEntry uintptr
+	// ended is a run that is over, which goroutines of earlier runs turned
+	// away before they were ever known are given as theirs.
+	ended *run
 }
 
 func newSimDefaults() *Sim {

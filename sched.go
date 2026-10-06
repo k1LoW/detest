@@ -306,17 +306,19 @@ func (s *Sim) currentAs(first func() string) *Proc {
 		return nil
 	}
 	if !r.began.Load() {
-		// A seed, before any process ran. It may wake a goroutine retired
-		// from an earlier run, such as by closing that run's channel, which
-		// must be turned away rather than run as part of the seed.
-		// A process detest started that reap gave up on is retired too, and
-		// the scheduler's own goroutine never is.
-		if s.staleN.Load() > 0 {
-			if p := s.retired(goroutineID()); p != nil {
-				return p
-			}
+		// A seed, before any process ran. It may wake a goroutine of an
+		// earlier run, such as by closing that run's channel, which must be
+		// turned away rather than run as part of the seed: a retired one, or
+		// one that never called into detest before. No process ran yet, so a
+		// caller other than the scheduler's own goroutine is one of those.
+		if s.onSchedGoroutine() {
+			return nil
 		}
-		return nil
+		gid := goroutineID()
+		if p := s.retired(gid); p != nil {
+			return p
+		}
+		return s.retireUnknown(gid)
 	}
 	onProc, _ := onProcGoroutine()
 	// While no process is blocked outside detest, every process detest started
@@ -1602,6 +1604,7 @@ func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.
 		s.schedGid = goroutineID()
+		s.schedEntry, _ = bottomEntry()
 	}
 	s.run = r
 	s.live.Store(r)

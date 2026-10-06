@@ -1272,3 +1272,38 @@ func TestAdoptedAtRequestKeepsItsBody(t *testing.T) {
 		})
 	}, MaxFailures(0))
 }
+
+// A goroutine of an earlier run that never called into detest, woken by a
+// later run's seed, is turned away rather than run as part of the seed.
+func TestUnknownGoroutineWokenBySeedNotRun(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		var ch chan struct{}
+		s.Seed(func() {
+			if ch != nil {
+				close(ch)
+				synctest.Wait() // the woken goroutine gets as far as it can
+			}
+			ch = make(chan struct{})
+		})
+		s.Manual("pod", 1, func(p *Proc) error {
+			wake := ch
+			go func() {
+				<-wake
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('late')`)
+			}()
+			p.Step("go on")
+			return nil
+		})
+		s.Manual("other", 1, func(p *Proc) error {
+			p.Step("another run")
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if _, ok := st.Row(store, "marks", "late"); ok {
+				return errors.New("a goroutine of an earlier run wrote during a seed")
+			}
+			return nil
+		})
+	})
+}

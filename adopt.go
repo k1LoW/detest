@@ -39,6 +39,53 @@ func onProcGoroutine() (yes, sure bool) {
 	return false, true
 }
 
+// bottomEntry returns the entry of the function the calling goroutine
+// started with, and whether its stack was shallow enough to read it.
+func bottomEntry() (uintptr, bool) {
+	var pcs [512]uintptr
+	n := runtime.Callers(2, pcs[:])
+	if n < 2 || n == len(pcs) {
+		return 0, false
+	}
+	// The bottom frame is runtime.goexit, and the one above it the
+	// goroutine's function.
+	f := runtime.FuncForPC(pcs[n-2] - 1)
+	if f == nil {
+		return 0, false
+	}
+	return f.Entry(), true
+}
+
+// onSchedGoroutine reports whether the caller is the goroutine that runs the
+// seeds and the scheduler, by its stack where that is cheap to read.
+func (s *Sim) onSchedGoroutine() bool {
+	if e, ok := bottomEntry(); ok && s.schedEntry != 0 {
+		return e == s.schedEntry
+	}
+	return goroutineID() == s.schedGid
+}
+
+// retireUnknown turns away a goroutine of an earlier run that called into
+// detest for the first time while a later run's seeds ran. It is given a run
+// that is over, so that it is stale at this call and every later one.
+func (s *Sim) retireUnknown(gid string) *Proc {
+	s.staleMu.Lock()
+	defer s.staleMu.Unlock()
+	if s.ended == nil {
+		abort := make(chan struct{})
+		close(abort)
+		s.ended = &run{s: s, abort: abort, byGid: map[string]*Proc{}}
+	}
+	p := &Proc{r: s.ended, gid: gid, adopted: true, state: stateDone,
+		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{})}
+	if s.stale == nil {
+		s.stale = map[string]*Proc{}
+	}
+	s.stale[gid] = p
+	s.recount()
+	return p
+}
+
 // goroutineCreator returns the calling goroutine's id and the id of the
 // goroutine that started it, from its full stack.
 func goroutineCreator() (gid, creator string) {
