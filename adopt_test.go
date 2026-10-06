@@ -439,3 +439,34 @@ func TestCrashedGoroutineNotAdoptedLater(t *testing.T) {
 		})
 	}, MaxCrashes(1))
 }
+
+// A goroutine that starts one of its own before its first call into detest
+// reaches detest in the same step as its child, and both are taken in, the
+// child named after its parent.
+func TestAdoptedGoroutineStartsOneBeforeItsFirstCall(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		s.Manual("pod", 1, func(p *Proc) error {
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				wg.Go(func() {
+					_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('child')`)
+				})
+				_, _ = db.Exec(`INSERT INTO "marks" ("id") VALUES ('parent')`)
+			})
+			wg.Wait()
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			return errors.New("done")
+		})
+	}, nil, nil, 0)
+	if !res.Violated {
+		t.Fatal("expected the run to reach quiescence")
+	}
+	for _, name := range []string{"pod#1.1 ", "pod#1.1.1 "} {
+		if !strings.Contains(res.Trace, name) {
+			t.Errorf("the trace does not name %q:\n%s", name, res.Trace)
+		}
+	}
+}

@@ -183,18 +183,44 @@ func (r *run) takeAdopted() bool {
 			np.parent = r.current
 		}
 	}
-	sort.SliceStable(pending, func(i, j int) bool {
-		a, b := pending[i], pending[j]
-		if a.parent != b.parent {
-			return parentName(a) < parentName(b)
+	// A goroutine may start one of its own before its first call into
+	// detest, so a parent can be pending in the same batch as its child. The
+	// batch is taken in by generations, a goroutine once its parent is in,
+	// so that a child is named after a parent that has a name.
+	var order []*Proc
+	for len(pending) > 0 {
+		var ready, rest []*Proc
+		for _, np := range pending {
+			if np.parent == nil || np.parent.pt != nil {
+				ready = append(ready, np)
+			} else {
+				rest = append(rest, np)
+			}
 		}
-		ai, _ := strconv.ParseUint(a.gid, 10, 64)
-		bi, _ := strconv.ParseUint(b.gid, 10, 64)
-		return ai < bi
-	})
-	for _, np := range pending {
-		r.enlist(np)
+		if len(ready) == 0 {
+			// Only a parent that is never taken in, such as one adopted
+			// after its run ended, is left. The step's process stands for it.
+			for _, np := range rest {
+				np.parent = r.current
+			}
+			ready, rest = rest, nil
+		}
+		sort.SliceStable(ready, func(i, j int) bool {
+			a, b := ready[i], ready[j]
+			if a.parent != b.parent {
+				return parentName(a) < parentName(b)
+			}
+			ai, _ := strconv.ParseUint(a.gid, 10, 64)
+			bi, _ := strconv.ParseUint(b.gid, 10, 64)
+			return ai < bi
+		})
+		for _, np := range ready {
+			r.enlist(np)
+		}
+		order = append(order, ready...)
+		pending = rest
 	}
+	pending = order
 	for _, np := range pending {
 		<-np.ev // the handshake's evSync
 		r.runSync(np)
