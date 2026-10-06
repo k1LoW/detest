@@ -876,6 +876,11 @@ func (c *pgConv) columnLimits(col *sqlir.ColumnDef, t *pg.TypeName) error {
 		if len(mods) == 1 && mods[0] < 6 {
 			col.FSP = mods[0]
 		}
+	case "interval":
+		// The table loads so that a dump builds, and a write is refused.
+		if len(t.GetTypmods()) > 0 {
+			col.FSP = -1
+		}
 	}
 	return nil
 }

@@ -356,6 +356,20 @@ func TestIntervals(t *testing.T) {
 	}
 
 	// The unique key of an interval is its span too.
+	// A column declared with a precision or fields loads, and a value
+	// written to it is refused, as Postgres rounds or drops part of it.
+	mustExec(t, db, `CREATE TABLE narrow (id int PRIMARY KEY, secs interval(0), days interval day, hm interval hour to minute)`)
+	mustExec(t, db, `INSERT INTO narrow (id) VALUES (1)`)
+	for _, q := range []string{
+		`INSERT INTO narrow (id, secs) VALUES (2, '1.6 seconds')`,
+		`INSERT INTO narrow (id, days) VALUES (3, '3 days 04:05')`,
+		`UPDATE narrow SET hm = interval '1 hour' WHERE id = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+
 	mustExec(t, db, `CREATE TABLE once (every interval PRIMARY KEY)`)
 	mustExec(t, db, `INSERT INTO once VALUES ('1 day')`)
 	if _, err := db.Exec(`INSERT INTO once VALUES ('24 hours')`); !errors.Is(err, ErrUniqueViolation) {

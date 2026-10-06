@@ -1050,6 +1050,11 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 		return nil, x.unsupported(fmt.Sprintf("a %T written to the boolean column %q", v, col))
 	}
 	if t == "interval" {
+		if fsp < 0 && v != nil {
+			// interval(0) rounds the seconds and interval day drops the
+			// time, which detest does not do to the value it stores.
+			return nil, x.unsupported(fmt.Sprintf("a write to the interval column %q, declared with a precision or fields", col))
+		}
 		switch v := v.(type) {
 		case pgInterval:
 			return v, nil
