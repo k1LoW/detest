@@ -1081,11 +1081,12 @@ func (x *sqlExec) pgStoredValue(table, col, t string, v any, fsp int) (any, erro
 func (x *sqlExec) pgStoredTime(t, col string, v any) (time.Time, error) {
 	switch v := v.(type) {
 	case time.Time:
-		// A timestamp keeps the time's own clock, as the driver sends it.
-		if w, ok := wallClock(t, v).(time.Time); ok {
+		// A timestamp keeps the time's own clock, as the driver sends it,
+		// and a timestamptz the instant, kept in UTC.
+		if w, ok := wallClock(t, v).(time.Time); ok && t == "timestamp" {
 			return w, nil
 		}
-		return v, nil
+		return v.UTC(), nil
 	case string:
 		tm, hasZone, ok := pgParseTime(v)
 		if !ok {

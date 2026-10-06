@@ -147,12 +147,52 @@ func TestTimeParametersTypedAsDateOrTimestamp(t *testing.T) {
 		{`SELECT id FROM ev WHERE on_day IN ($1)`, []int64{1}},
 		{`SELECT id FROM ev WHERE ts = $1::timestamp`, []int64{1}},
 		{`SELECT id FROM ev WHERE date_trunc('day', ts) = $1::date`, []int64{1}},
+		// The arguments of COALESCE take the type of the typed one.
+		{`SELECT id FROM ev WHERE COALESCE($1, on_day) = on_day`, []int64{1}},
+		{`SELECT id FROM ev WHERE CASE WHEN true THEN $1 ELSE ts END = ts`, []int64{1}},
 		// A date moved by an interval is a timestamp, so $1 keeps its clock.
 		{`SELECT id FROM ev WHERE on_day + interval '30 minutes' = $1`, []int64{1}},
 		{`SELECT id FROM ev WHERE interval '30 minutes' + on_day = $1`, []int64{1}},
 	} {
 		if got := queryIDs(t, db, tt.q, at); !slices.Equal(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+}
+
+// A timestamptz is kept in UTC, so writing one to a date or a timestamp
+// takes its date and clock there, as Postgres does in a session in UTC,
+// whatever the zone of the time it came from.
+func TestTimestamptzWrittenToDateOrTimestamp(t *testing.T) {
+	s := datetimeDB(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE ev (id int PRIMARY KEY, ts timestamp, on_day date)`)
+	at := time.Date(2024, 5, 20, 0, 30, 0, 0, time.FixedZone("JST", 9*3600)) // 2024-05-19 15:30 UTC
+	mustExec(t, db, `INSERT INTO ev VALUES (1, $1::timestamptz, $1::timestamptz)`, at)
+	mustExec(t, db, `INSERT INTO ev VALUES (2, now(), now())`)
+	for _, tt := range []struct {
+		q    string
+		want []int64
+	}{
+		{`SELECT extract(day FROM on_day)::int FROM ev WHERE id = 1`, []int64{19}},
+		{`SELECT extract(hour FROM ts)::int FROM ev WHERE id = 1`, []int64{15}},
+		{`SELECT id FROM ev WHERE on_day = CURRENT_DATE`, []int64{2}},
+		{`SELECT id FROM ev WHERE ts::date = on_day ORDER BY id`, []int64{1, 2}},
+	} {
+		if got := queryIDs(t, db, tt.q); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+	// The cast of a literal or a parameter is read before any row.
+	for _, tt := range []struct {
+		q    string
+		args []any
+	}{
+		{`SELECT id FROM ev WHERE false AND 'nonsense'::interval > interval '0'`, nil},
+		{`SELECT id FROM ev WHERE id = 9 AND $1::interval > interval '0'`, []any{"1 dayz"}},
+	} {
+		if _, err := db.Exec(tt.q, tt.args...); !errors.Is(err, ErrInvalidDatetimeFormat) {
+			t.Errorf("%s: got %v, want 22007", tt.q, err)
 		}
 	}
 }

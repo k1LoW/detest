@@ -351,6 +351,13 @@ func castValue(v any, typ string) (any, error) {
 			return nil, errUnknownExpr{ierr.what}
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to interval", v)}
+	case "timestamptz", "timestamp":
+		// A time is kept in UTC, the session's TimeZone: an instant as a
+		// timestamptz, and the clock a timestamptz shows there as a
+		// timestamp. Text is left as it is, as before.
+		if t, ok := v.(time.Time); ok {
+			return t.UTC(), nil
+		}
 	case "date":
 		switch v := v.(type) {
 		case time.Time:

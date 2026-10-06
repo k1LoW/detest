@@ -1539,6 +1539,10 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			}
 			return ts.Truncate(time.Duration(math.Pow10(9 - int(p)))), nil
 		}
+		// A timestamptz is kept in UTC, the session's TimeZone, so a write
+		// of it to a date or a timestamp takes its date and clock there,
+		// where a time bound to a parameter keeps its own (wallClock).
+		ts = ts.UTC()
 		if len(args) == 0 {
 			return ts, nil
 		}
