@@ -263,6 +263,15 @@ func TestChangingStepIsNoSpin(t *testing.T) {
 	}
 }
 
+// A handoff to a process that ends on that step ends the turns, so with
+// MaxSpins(1) the waiter still sees the flag the setter set before ending.
+func TestHandoffToAnEndingProcessEndsTheTurns(t *testing.T) {
+	res, _ := exploreBubble(t, spinModel(true), []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated {
+		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
 // A change to committed state made outside a step, which countSpin does not
 // see, ends a spin as one made by a step does.
 func TestChangeOutsideAStepEndsASpin(t *testing.T) {

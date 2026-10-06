@@ -484,8 +484,10 @@ func (r *run) countSpin(o option, before int) {
 // Processes that only take turns at spinning would then go on for ever, so
 // MaxSpins handoffs with no change in between are a progress violation.
 func (r *run) handoff(p *Proc, before int) *violation {
-	if r.version != before {
-		r.handoffs, r.spinners, r.gaveTo = 0, nil, nil // the step it gave way to changed something
+	// The step it gave way to changed something, or the process it gave way
+	// to blocked or ended there, which ends the turns as it ends a spin.
+	if to := r.current; r.version != before || to == nil || to.state != stateReady {
+		r.handoffs, r.spinners, r.gaveTo = 0, nil, nil
 		return nil
 	}
 	if before != r.handoffVersion {
