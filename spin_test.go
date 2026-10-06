@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -116,6 +117,42 @@ func TestBusyWaitOnLongerWork(t *testing.T) {
 	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(1)}, nil, 0)
 	if res.Violated {
 		t.Fatalf("want no violation, got %s", res.report())
+	}
+}
+
+// Giving way spends no preemption, so with a budget of one the setter can
+// still be preempted after the waiter gave way to it. The setter starts only
+// once the waiter waits, so reaching the waiter between set and finish takes
+// a switch to the setter and one back: two preemptions, or a handoff and one.
+func TestBusyWaitGivingWaySpendsNoPreemption(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		waiting, flag, done, sawDone := false, false, false, true
+		s.Seed(func() { waiting, flag, done, sawDone = false, false, false, true })
+		s.Manual("waiter", 1, func(p *Proc) error {
+			waiting = true
+			for !flag {
+				p.Step("wait")
+			}
+			sawDone = done
+			return nil
+		})
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			p.Step("finish")
+			done = true
+			return nil
+		}, When(func() bool { return waiting }))
+		s.AtQuiescence(func(st *State) error {
+			if !sawDone {
+				return fmt.Errorf("the waiter ran between set and finish")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(1)}, nil, 0)
+	if !res.Violated {
+		t.Fatalf("want the waiter found between set and finish, got %s", res.report())
 	}
 }
 

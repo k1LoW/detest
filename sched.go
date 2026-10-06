@@ -406,7 +406,9 @@ func (r *run) execute() (v *violation) {
 		o := opts[i]
 		cur := r.current
 		gaveWay, before := r.spinner(), r.version
-		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && (o.kind != optResume || o.p != cur))
+		// Moving off a spinner is fairness, not a preemption: it could not
+		// have gone on, so the switch spends none of the budget.
+		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && cur != gaveWay && (o.kind != optResume || o.p != cur))
 		r.countSpin(o)
 		if gaveWay != nil {
 			if v := r.handoff(gaveWay, before); v != nil {
