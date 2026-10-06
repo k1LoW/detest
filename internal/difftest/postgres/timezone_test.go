@@ -55,6 +55,10 @@ var tzCases = []difftest.Case{
 			difftest.Q(0, `SELECT id, extract(epoch FROM date_trunc('day', at))::bigint, extract(hour FROM at)::int FROM ev ORDER BY id`),
 			difftest.Q(0, `SELECT '2024-02-10 02:30'::timestamptz + interval '1 month 1 day' = '2024-03-11 07:30+00'::timestamptz, '2024-02-10 02:30'::timestamptz + interval '1 month' + interval '1 day' = '2024-03-11 07:30+00'::timestamptz`),
 			difftest.Q(0, `SELECT '2024-03-10 02:30'::timestamptz = '2024-03-10 07:30+00'::timestamptz, '2024-11-03 01:30'::timestamptz = '2024-11-03 06:30+00'::timestamptz, timestamp '2024-03-10 02:30' = '2024-03-10 07:30+00'::timestamptz, timestamp '2024-11-03 01:30' = '2024-11-03 06:30+00'::timestamptz`),
+			// Down to the hour, date_trunc keeps the instant's own offset,
+			// so the first and the second 01:30 of a fold stay apart.
+			difftest.Q(0, `SELECT extract(epoch FROM date_trunc('minute', timestamptz '2024-11-03 05:30:30+00'))::bigint, extract(epoch FROM date_trunc('hour', timestamptz '2024-11-03 05:30:30+00'))::bigint, extract(epoch FROM date_trunc('hour', timestamptz '2024-11-03 06:30:30+00'))::bigint, extract(epoch FROM date_trunc('day', timestamptz '2024-11-03 06:30:30+00'))::bigint`),
+			difftest.Q(0, `SELECT id, extract(epoch FROM date_trunc('microseconds', at))::bigint = extract(epoch FROM at)::bigint FROM ev ORDER BY id`),
 			difftest.S(0, `SET TIME ZONE 'Australia/Sydney'`),
 			difftest.Q(0, `SELECT '2024-10-06 02:30'::timestamptz = '2024-10-05 16:30+00'::timestamptz, '2024-04-07 02:30'::timestamptz = '2024-04-06 16:30+00'::timestamptz`),
 			difftest.S(0, `SET TIME ZONE 9.5`),

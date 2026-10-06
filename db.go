@@ -51,6 +51,10 @@ func keyString(v any) string {
 		return pgInterval{micros: v.span()}.String()
 	case instant:
 		return v.UTC().Format(time.RFC3339Nano)
+	case time.Time:
+		// As an instant's, so that a key read through the transaction
+		// API, where a timestamptz is a time.Time, finds its row again.
+		return v.UTC().Format(time.RFC3339Nano)
 	}
 	return fmt.Sprint(v)
 }
@@ -277,7 +281,7 @@ var defaultSearchPath = []string{"public"}
 // SeedRow inserts a committed row during Seed.
 func (db *DB) SeedRow(table string, row Row) {
 	table = db.resolve(table)
-	row = row.clone()
+	row = db.typedRow(table, row).clone()
 	if err := db.assignKey(table, row); err != nil {
 		panic(err)
 	}

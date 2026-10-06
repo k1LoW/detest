@@ -80,6 +80,12 @@ func TestServerTimeZone(t *testing.T) {
 			t.Errorf("%s: got %v, %v, want %v", q, got, err, at)
 		}
 	}
+	// NULLIF returns its first argument's type, a timestamp here, which
+	// COALESCE around it keeps as a clock.
+	var clock time.Time
+	if err := db.QueryRow(`SELECT coalesce(nullif(ts, at), ts) FROM ev WHERE id = 4`).Scan(&clock); err != nil || clock != time.Date(2024, 5, 19, 15, 30, 0, 0, time.UTC) {
+		t.Errorf("COALESCE of NULLIF of a timestamp: got %v, %v", clock, err)
+	}
 	var day time.Time
 	if err := db.QueryRow(`SELECT date_trunc('day', max(on_day)) FROM ev`).Scan(&day); err != nil || !day.Equal(time.Date(2024, 5, 20, 0, 0, 0, 0, jst)) {
 		t.Errorf("date_trunc of a date aggregate: got %v, %v", day, err)
@@ -175,14 +181,19 @@ func TestTimestamptzThroughTheTransactionAPI(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		db, store := s.DB("app", postgres.New(postgres.TimeZone("Asia/Tokyo")))
 		mustExec(t, db, `CREATE TABLE ev (id text PRIMARY KEY, at timestamptz, done bool NOT NULL DEFAULT false)`)
-		s.Seed(func() { mustExec(t, db, `INSERT INTO ev (id, at) VALUES ('a', $1)`, at) })
+		mustExec(t, db, `CREATE TABLE slot (at timestamptz PRIMARY KEY)`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO ev (id, at) VALUES ('a', $1)`, at)
+			mustExec(t, db, `INSERT INTO slot VALUES ($1)`, at)
+			store.SeedRow("ev", Row{"id": "c", "at": at, "done": false})
+		})
 		s.Manual("api", 1, func(p *Proc) error {
 			return store.Tx(p, func(tx *Tx) error {
 				r, ok := tx.Get("ev", "a")
 				if v, isTime := r["at"].(time.Time); !ok || !isTime || !v.Equal(at) {
 					t.Errorf("Get: got %#v", r["at"])
 				}
-				if n := len(tx.Select("ev", func(r Row) bool { v, _ := r["at"].(time.Time); return v.Equal(at) })); n != 1 {
+				if n := len(tx.Select("ev", func(r Row) bool { v, _ := r["at"].(time.Time); return v.Equal(at) })); n != 2 {
 					t.Errorf("Select: got %d rows", n)
 				}
 				if err := tx.Insert("ev", Row{"id": "b", "at": at.UTC(), "done": false}); err != nil {
@@ -191,8 +202,24 @@ func TestTimestamptzThroughTheTransactionAPI(t *testing.T) {
 				if ok, err := tx.CAS("ev", "a", "at", at, at.Add(time.Hour)); !ok || err != nil {
 					t.Errorf("CAS: %v, %v", ok, err)
 				}
+				// The key of a row read back finds the row.
+				rows := tx.Select("slot", nil)
+				if len(rows) != 1 {
+					t.Fatalf("slot: got %d rows", len(rows))
+				}
+				if _, ok := tx.Get("slot", rows[0].Key()); !ok {
+					t.Errorf("Get by the key %q of a timestamptz row: not found", rows[0].Key())
+				}
 				return nil
 			})
+		})
+		s.Manual("sql", 1, func(p *Proc) error {
+			// A time seeded into a timestamptz column is the instant it is.
+			var h int
+			if err := db.QueryRowContext(p.Context(), `SELECT extract(hour FROM at)::int FROM ev WHERE id = 'c'`).Scan(&h); err != nil || h != 0 {
+				t.Errorf("seeded timestamptz: got hour %d, %v", h, err)
+			}
+			return nil
 		})
 		s.AtQuiescence(func(st *State) error {
 			for _, r := range st.Rows(store, "ev") {

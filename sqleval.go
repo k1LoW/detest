@@ -1681,9 +1681,15 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !ok {
 			return nil, x.errUnit(unit)
 		}
-		if _, tz := d(1).(instant); tz {
+		if src, tz := d(1).(instant); tz {
 			// A timestamptz is truncated on its clock in the session's
-			// TimeZone, and stays a timestamptz.
+			// TimeZone, and stays a timestamptz. Down to the hour it keeps
+			// its own offset, as Postgres does, so an instant a zone's
+			// clock shows twice stays in its own hour; from the day up the
+			// clock is read again.
+			if truncKeepsOffset(u) {
+				return newInstant(src.Add(r.Sub(t))), nil
+			}
 			return instantAt(r, x.tx.zone()), nil
 		}
 		return r, nil

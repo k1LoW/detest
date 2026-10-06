@@ -279,6 +279,13 @@ func (x *sqlExec) noteType(e sqlir.Expr, typ string) {
 	x.exprTypes[e] = typ
 }
 
+// truncKeepsOffset reports a unit date_trunc truncates a timestamptz to on
+// the offset it has, the hour or finer, as Postgres does not look its
+// zone up again below the day.
+func truncKeepsOffset(u string) bool {
+	return u == "microseconds" || u == "milliseconds" || u == "second" || u == "minute" || u == "hour"
+}
+
 // toTimeType converts v to typ, the type Postgres resolves the branches of
 // CASE or COALESCE or the arguments of GREATEST or LEAST to, where one is a
 // timestamp or a date and another a timestamptz.

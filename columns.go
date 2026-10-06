@@ -1111,7 +1111,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					// The arguments take the type of the typed ones.
-					typ := expressionType(e, sc.columnType)
+					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
 				case "date_trunc":

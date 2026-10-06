@@ -96,8 +96,15 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 					return typ
 				}
 			}
-		case "min", "max", "abs", "coalesce", "greatest", "least", "nullif":
+		case "min", "max", "abs", "coalesce", "greatest", "least":
 			return commonType(e.Args, column, subquery)
+		case "nullif":
+			// NULLIF returns its first argument, of its own type: a
+			// timestamp compared with a timestamptz by the cross-type =
+			// stays a timestamp.
+			if len(e.Args) > 0 {
+				return expressionTypeIn(e.Args[0], column, subquery)
+			}
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
