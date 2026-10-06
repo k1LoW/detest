@@ -184,12 +184,12 @@ type run struct {
 	// steps without a change reaches MaxSpins (see MaxSpins).
 	spinProc *Proc
 	// handoffs counts the times a spinning process gave way with committed
-	// state at handoffVersion, and spinners and gaveTo name the processes on
+	// state at handoffVersion, and spinners and gaveTo are the processes on
 	// either side, so that processes taking turns at spinning are caught too.
 	handoffs       int
 	handoffVersion int
-	spinners       []string
-	gaveTo         []string
+	spinners       []*Proc
+	gaveTo         []*Proc
 	// outside counts the processes blocked outside detest, which may wake and
 	// call into detest without being resumed. Those calls run concurrently with
 	// the resumed process, hence atomic.
@@ -384,12 +384,15 @@ func (r *run) execute() (v *violation) {
 		// With a spinner kept out, crashes and losses left alone are no step
 		// another process takes, and taking one would stand in for the
 		// progress violation every run without it ends in.
-		if len(opts) == 0 || r.spinner() != nil && onlyFaults(opts) {
+		if len(opts) == 0 || (r.spinner() != nil || r.turnsSpent()) && onlyFaults(opts) {
 			if r.advanceClock() {
 				continue
 			}
 			if r.waitOutside() {
 				continue
+			}
+			if r.turnsSpent() {
+				return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between while nothing else could run, so they would go on for ever; raise MaxSpins if they do that much work without committing", procNames(r.spinners), procNames(r.gaveTo), r.handoffs)}
 			}
 			if p := r.spinner(); p != nil {
 				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
@@ -418,11 +421,10 @@ func (r *run) execute() (v *violation) {
 		gaveWay, before := r.spinner(), r.version
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
-		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && cur != gaveWay && (o.kind != optResume || o.p != cur))
+		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
 		r.countSpin(o, before)
-		var spun *violation
 		if gaveWay != nil {
-			spun = r.handoff(gaveWay, before)
+			r.handoff(gaveWay, before)
 		}
 		if r.pending != nil {
 			return r.pending
@@ -432,19 +434,6 @@ func (r *run) execute() (v *violation) {
 		}
 		if r.cut {
 			return nil // only the checks at quiescence are skipped
-		}
-		// Reported after what the step itself broke, which says more.
-		if spun != nil {
-			// A process outside detest the step woke may have reported back
-			// already, which ends the turns as a step of its own does. It is
-			// settled here, as the next step would before anything else.
-			r.settleOutside()
-			if r.pending != nil {
-				return r.pending
-			}
-			if r.handoffs > r.s.maxSpins {
-				return spun
-			}
 		}
 	}
 	for _, p := range r.procs {
@@ -500,28 +489,46 @@ func (r *run) countSpin(o option, before int) {
 // process take a step, which may make true what the spinner waits for
 // without changing committed state, so the spinner may run again after it.
 // Processes that only take turns at spinning would then go on for ever, so
-// MaxSpins handoffs with no change in between are a progress violation.
-func (r *run) handoff(p *Proc, before int) *violation {
+// past MaxSpins handoffs with no change in between the spinners are kept out
+// as well (see turnsSpent).
+func (r *run) handoff(p *Proc, before int) {
 	// The step it gave way to changed something, or the process it gave way
 	// to blocked or ended there, which ends the turns as it ends a spin.
 	if to := r.current; r.version != before || to == nil || to.state != stateReady {
 		r.endSpin()
-		return nil
+		return
 	}
 	if before != r.handoffVersion {
 		r.handoffs, r.handoffVersion, r.spinners, r.gaveTo = 0, before, nil, nil
 	}
 	r.handoffs++
-	if !slices.Contains(r.spinners, p.name) {
-		r.spinners = append(r.spinners, p.name)
+	if !slices.Contains(r.spinners, p) {
+		r.spinners = append(r.spinners, p)
 	}
-	if to := r.current; to != nil && !slices.Contains(r.gaveTo, to.name) {
-		r.gaveTo = append(r.gaveTo, to.name)
+	if !slices.Contains(r.gaveTo, r.current) {
+		r.gaveTo = append(r.gaveTo, r.current)
 	}
-	if r.handoffs <= r.s.maxSpins {
-		return nil
+}
+
+// turnsSpent reports whether the spinners gave way more than MaxSpins times
+// with no change in between. They are then kept out while any other process
+// can take a step, as a real scheduler would eventually run that one too,
+// and a progress violation only once none can.
+func (r *run) turnsSpent() bool {
+	return r.handoffs > r.s.maxSpins && r.version == r.handoffVersion
+}
+
+// keptOut reports whether p is kept from taking the next step for spinning.
+func (r *run) keptOut(p *Proc) bool {
+	return p == r.spinner() || r.turnsSpent() && slices.Contains(r.spinners, p)
+}
+
+func procNames(ps []*Proc) string {
+	names := make([]string, len(ps))
+	for i, p := range ps {
+		names[i] = p.name
 	}
-	return &violation{kind: "progress", err: fmt.Errorf("spinning %s gave way to %s %d times with no change to committed state in between, so they would go on for ever; raise MaxSpins if they do that much work without committing", strings.Join(r.spinners, ", "), strings.Join(r.gaveTo, ", "), r.handoffs)}
+	return strings.Join(names, ", ")
 }
 
 // endSpin ends the counts of every process and the turns processes take at
@@ -608,10 +615,9 @@ func (r *run) enabled() []option {
 	curRunnable := cur != nil && cur.state == stateReady
 	// A spinning process gives way, spent preemption budget or not, as the
 	// switch is the scheduler's fairness rather than a choice to explore.
-	spinner := r.spinner()
-	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable && cur != spinner
+	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable && !r.keptOut(cur)
 	for _, p := range r.procs {
-		if p.state != stateReady || p == spinner {
+		if p.state != stateReady || r.keptOut(p) {
 			continue
 		}
 		if bounded && p != cur {

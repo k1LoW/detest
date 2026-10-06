@@ -356,6 +356,33 @@ func TestChangingStepIsNoSpinUnderZeroBound(t *testing.T) {
 	}
 }
 
+// Two waiters taking turns past MaxSpins are kept out while the setter they
+// both wait for can still start, rather than reported, as a real scheduler
+// would run the setter too.
+func TestTurnsGiveWayToAProcessOutsideThem(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		flag := false
+		s.Seed(func() { flag = false })
+		for _, name := range []string{"x", "y"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				for !flag {
+					p.Step("%s waits", name)
+				}
+				return nil
+			})
+		}
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("set")
+			flag = true
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxSpins(1)}, nil, 0)
+	if res.Violated || !res.Complete {
+		t.Fatalf("want a complete exploration without violation, got %s", res.report())
+	}
+}
+
 // Under Random, which switches at almost every step, processes taking turns
 // at waiting for each other are still reported rather than run for ever.
 func TestBusyWaitTakingTurnsIsAViolationUnderRandom(t *testing.T) {

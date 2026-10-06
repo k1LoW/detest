@@ -53,7 +53,7 @@ These are progress violations, deadlocks the database cannot detect (through mut
 
 ## `took N steps without changing committed state while nothing else could run`, `gave way to ... N times with no change to committed state`
 
-A process kept stepping, through `p.Step`, a mutex or a query, without a commit or an enqueue, while every other process was done or blocked, or kept giving way to processes that changed nothing either. It is usually a busy-wait whose condition only a process that cannot run any more would make true, or two processes each waiting for the other, which spin for ever in production too. If the processes do that much real work without committing, such as a long transaction with the others waiting on its locks, raise `detest.MaxSpins`.
+A process kept stepping, through `p.Step`, a mutex or a query, without a commit or an enqueue, while every other process was done or blocked, or kept giving way to processes that changed nothing either until no other process could run. It is usually a busy-wait whose condition only a process that cannot run any more would make true, or two processes each waiting for the other, which spin for ever in production too. If the processes do that much real work without committing, such as a long transaction with the others waiting on its locks, raise `detest.MaxSpins`.
 
 ## The exploration is too large or slow
 
