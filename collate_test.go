@@ -299,6 +299,40 @@ func TestPersistedCollate(t *testing.T) {
 	}
 }
 
+// The built-in name type orders by C whatever the database's collation, as
+// a column, through a cast and as a domain's base; and a quoted domain name
+// holding a dot keeps its mark through a rename.
+func TestNameTypeCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n name, s text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n text)`)
+	mustExec(t, db, `ALTER TABLE u ALTER COLUMN n TYPE name`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT id FROM t ORDER BY n`, []string{"2", "3", "1"}},
+		{`SELECT id FROM t ORDER BY s::name`, []string{"2", "3", "1"}},
+		{`SELECT id FROM t ORDER BY s`, []string{"3", "2", "1"}},
+		{`SELECT id FROM u ORDER BY n`, []string{"2", "3", "1"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
+	}
+	mustExec(t, db, `CREATE DOMAIN ident AS name`)
+	mustExec(t, db, `CREATE DOMAIN "a.b" AS text COLLATE "C"`)
+	mustExec(t, db, `ALTER DOMAIN "a.b" RENAME TO c`)
+	for _, q := range []string{`SELECT id FROM t ORDER BY s::ident`, `SELECT id FROM t ORDER BY s::c`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

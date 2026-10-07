@@ -1174,13 +1174,13 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		// another schema, may still be collated, and refusing is safe.
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
-		if db.collatedDomains[ch.Table[strings.LastIndex(ch.Table, ".")+1:]] {
+		if db.collatedDomains[ch.Columns[0].Name] {
 			db.collatedDomains[ch.RenameTo] = true
 		}
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
-		if c := col.Collation; (c != "" && c != "default") || db.collatedDomains[col.Type] {
+		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}
 			}
@@ -1308,7 +1308,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.types[col.Name] = col.Type
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
-			} else if c := cmp.Or(col.Collation, db.domainCollation(col.Type)); c != "" && c != "default" {
+			} else if c := cmp.Or(col.Collation, db.domainCollation(col.Type), typeCollation(col.Type)); c != "" && c != "default" {
 				if def.collations == nil {
 					def.collations = map[string]string{}
 				}

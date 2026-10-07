@@ -80,6 +80,15 @@ func (db *DB) domainCollation(typ string) string {
 	return ""
 }
 
+// typeCollation is the collation a built-in type declares instead of the
+// database's: name's is C (typcollation in pg_type).
+func typeCollation(typ string) string {
+	if typ == "name" {
+		return "C"
+	}
+	return ""
+}
+
 // collatableType reports whether a value of typ has a collation.
 func collatableType(typ string) bool {
 	switch typ {
@@ -169,6 +178,14 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 		}
 		if !collatableType(e.Type) {
 			return collationUse{}, nil
+		}
+		if c := typeCollation(e.Type); c != "" {
+			// A cast to name with no collation of its own takes name's.
+			u, err := x.collationOf(e.X)
+			if err != nil || u.explicit || u.unknown || u.name != "" {
+				return u, err
+			}
+			return collationUse{name: c}, nil
 		}
 	case *sqlir.CaseExpr:
 		// The result takes the collation of the branches, not of the

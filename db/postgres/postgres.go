@@ -506,7 +506,13 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			for _, n := range r.Object.GetList().GetItems() {
 				parts = append(parts, n.GetString_().GetSval())
 			}
-			return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", RenameTo: r.Newname}}, true, nil
+			if len(parts) == 0 {
+				return nil, true, nil
+			}
+			// Columns[0].Name is the bare name, which a dot in a quoted
+			// identifier would make Table's last part misread.
+			return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", RenameTo: r.Newname,
+				Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}}, true, nil
 		}
 		return nil, true, nil
 	case *pg.Node_DoStmt:
