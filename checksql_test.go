@@ -92,11 +92,13 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT * FROM t WHERE id = ANY(ARRAY[1, 2]) AND name LIKE 'x%' AND a BETWEEN 1 AND 2`,
 			`UPDATE t SET n = n + 1, updated_at = now() WHERE id = $1 AND version = $2`,
 			`SELECT * FROM generate_series(1, 3)`,
+			`INSERT INTO t (id, name) VALUES ($1, $2), ($3, $4)`,
 		},
 		mysql.New(): {
 			"SELECT LOWER(name), IFNULL(n, 0), UUID() FROM t WHERE created_at > NOW()",
 			"INSERT INTO t (id) VALUES (?) ON DUPLICATE KEY UPDATE n = VALUES(n)",
 			"SELECT LAST_INSERT_ID(), CAST(n AS SIGNED) FROM t WHERE a <=> ?",
+			"INSERT INTO t (id, name) VALUES (?, ?), (?, ?)",
 		},
 	}
 	for srv, qs := range refused {
@@ -111,6 +113,19 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			if err := CheckSQL(srv, q); err != nil {
 				t.Errorf("%s: got %v, want nil", q, err)
 			}
+		}
+	}
+}
+
+// An error of the probe's data in one statement of a script does not hide a
+// refused statement after it.
+func TestCheckSQLChecksEveryStatementOfAScript(t *testing.T) {
+	for _, q := range []string{
+		`INSERT INTO t (id) VALUES ($1), ($2); SET search_path TO tenant_1`,
+		`SELECT 1 / 0; SET search_path TO tenant_1`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
 }
