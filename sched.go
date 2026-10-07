@@ -1509,6 +1509,9 @@ type txCancel struct {
 	// scheduler wakes, rather than roll tx back.
 	wake map[lockKey]bool
 	gaps map[string]bool
+	// conn is set when a goroutine gave back tx's connection outside a
+	// step (see seamTx), whose waiters the scheduler wakes.
+	conn bool
 	// why says in the trace why tx rolls back, when no statement of p was
 	// canceled.
 	why string
@@ -1543,6 +1546,10 @@ func (r *run) takeCancels() bool {
 		}
 		if c.gaps != nil {
 			c.tx.wakeGaps(c.gaps)
+			continue
+		}
+		if c.conn {
+			c.tx.wakeConn()
 			continue
 		}
 		if p := c.p; p != nil {
@@ -1644,7 +1651,7 @@ func callerLoc() string {
 // isLibraryFrame reports frames of the database and ORM plumbing between a
 // model and detest's driver, so trace locations point at the caller's code.
 func isLibraryFrame(fn string) bool {
-	for _, prefix := range []string{"database/sql", "gorm.io/", "github.com/pganalyze/", "github.com/wasilibs/", "reflect.", "runtime."} {
+	for _, prefix := range []string{"database/sql", "gorm.io/", "github.com/k1LoW/detest/db/seam/gormpool.", "github.com/pganalyze/", "github.com/wasilibs/", "reflect.", "runtime."} {
 		if strings.HasPrefix(fn, prefix) {
 			return true
 		}

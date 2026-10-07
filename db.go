@@ -2410,6 +2410,16 @@ func (tx *Tx) enterOp(p *Proc) func() {
 	if !p.inSim {
 		exit = tx.db.s.enter(p)
 	}
+	tx.takeConn(p)
+	return func() {
+		defer exit()
+		tx.giveConn(p)
+	}
+}
+
+// takeConn is enterOp's wait for the connection, with the engine mutex held
+// by p.
+func (tx *Tx) takeConn(p *Proc) {
 	c := &tx.conn
 	if p != tx.p && c.by != p {
 		// Goroutines the process handed the transaction to reach here in an
@@ -2428,23 +2438,36 @@ func (tx *Tx) enterOp(p *Proc) func() {
 	}
 	c.by = p
 	c.depth++
-	return func() {
-		defer exit()
-		if c.by != p {
-			return
-		}
-		if c.depth--; c.depth > 0 {
-			return
-		}
-		c.by = nil
-		p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
-		if tx.p.r.over() {
-			return
-		}
-		for _, w := range tx.p.r.procs {
-			if w.state == stateBlockedLock && w.waitLock == c {
-				w.state, w.waitLock = stateReady, nil // each re-checks when resumed
-			}
+}
+
+// giveConn gives back what takeConn took for p, with the engine mutex held,
+// and wakes the processes waiting for the connection.
+func (tx *Tx) giveConn(p *Proc) {
+	if tx.dropConn(p) {
+		tx.wakeConn()
+	}
+}
+
+// dropConn is giveConn without the wake, reporting whether the connection
+// is free now.
+func (tx *Tx) dropConn(p *Proc) bool {
+	c := &tx.conn
+	if c.by != p {
+		return false
+	}
+	if c.depth--; c.depth > 0 {
+		return false
+	}
+	c.by = nil
+	p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
+	return !tx.p.r.over()
+}
+
+func (tx *Tx) wakeConn() {
+	c := &tx.conn
+	for _, w := range tx.p.r.procs {
+		if w.state == stateBlockedLock && w.waitLock == c {
+			w.state, w.waitLock = stateReady, nil // each re-checks when resumed
 		}
 	}
 }
