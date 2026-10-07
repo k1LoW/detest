@@ -164,6 +164,19 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "bytea ordered byte by byte",
+		Schema: []string{
+			`CREATE TABLE bb (id int PRIMARY KEY, payload bytea)`,
+		},
+		Seed:  []string{`INSERT INTO bb VALUES (1, '\x62'), (2, '\x42'), (3, '\x09'), (4, '\x0a'), (5, '\x0a00')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM bb ORDER BY payload`),
+			difftest.Q(0, `SELECT id FROM bb WHERE payload < '\x0a01' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM bb ORDER BY payload DESC LIMIT 2`),
+		},
+	},
+	{
 		Name: "COLLATE and column collations on a C database",
 		Schema: []string{
 			`CREATE TABLE w (id int PRIMARY KEY, name text, code text COLLATE "C")`,

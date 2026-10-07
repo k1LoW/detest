@@ -420,16 +420,11 @@ func (db *DB) declaresCollations() bool {
 	return len(db.collatedDomains) > 0
 }
 
-// textValue is v as text, a string or the []byte database/sql may pass a
-// string argument as, which detest takes as text elsewhere too.
+// textValue is v as text. A []byte is not text here: it is how a bytea
+// value is held, which Postgres orders byte by byte whatever the collation.
 func textValue(v any) (string, bool) {
-	switch t := derefValue(v).(type) {
-	case string:
-		return t, true
-	case []byte:
-		return string(t), true
-	}
-	return "", false
+	t, ok := derefValue(v).(string)
+	return t, ok
 }
 
 // compareOrdered is compareValues with text ordered by c, and two strings c

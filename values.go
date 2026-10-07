@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"math"
@@ -126,6 +127,12 @@ func compareValues(a, b any) (int, bool) {
 			return 0, false
 		}
 		return cmp.Compare(ia.span(), ib.span()), true
+	}
+	// bytea orders byte by byte; formatted, [10] would sort before [9].
+	if ba, ok := a.([]byte); ok {
+		if bb, ok := b.([]byte); ok {
+			return bytes.Compare(ba, bb), true
+		}
 	}
 	// Postgres takes NaN as equal to NaN and greater than every other
 	// number, so ORDER BY and min/max place it as Postgres does.
