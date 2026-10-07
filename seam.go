@@ -25,6 +25,12 @@ func (h seamTx) Enter(op, query string, args ...any) (release func(), err error)
 	}
 	exit := s.enter(caller)
 	defer exit()
+	if caller == tx.p {
+		// Goroutines running alongside the process reach their own Enter
+		// first, as its statements let them (see Proc.drain), so that it
+		// sees them wanting the connection and yields to them.
+		caller.drain()
+	}
 	tx.takeConn(caller)
 	return func() { tx.giveConnOutside(caller) }, nil
 }
@@ -39,6 +45,14 @@ func (tx *Tx) giveConnOutside(p *Proc) {
 	if tx.dropConn(p) {
 		tx.p.r.postCancel(txCancel{tx: tx, conn: true})
 	}
+}
+
+// adoptingAny reports whether goroutines that called into detest wait to be
+// taken in at the scheduler's next step (see takeAdopted).
+func (r *run) adoptingAny() bool {
+	r.gidMu.Lock()
+	defer r.gidMu.Unlock()
+	return len(r.adopting) > 0
 }
 
 // seamCaller returns the process that holds the transaction's connection

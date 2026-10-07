@@ -136,6 +136,42 @@ func TestGoroutinesSharingTxReplay(t *testing.T) {
 	}, detest.Workers(8))
 }
 
+// A goroutine waiting for the transaction's connection may take it between
+// two statements of the process that began the transaction, not only before
+// or after both.
+func TestGoroutineBetweenOwnerStatements(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		gdb, store := open(t, s, counters)
+		s.Seed(func() { store.SeedRow("counters", detest.Row{"id": "c", "n": int64(0)}) })
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
+			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
+				step := func(k int) error {
+					return tx.Exec(`UPDATE counters SET n = n * 10 + ? WHERE id = 'c'`, k).Error
+				}
+				var childErr error
+				var wg sync.WaitGroup
+				wg.Go(func() { childErr = step(3) })
+				if err := step(1); err != nil {
+					return err
+				}
+				if err := step(2); err != nil {
+					return err
+				}
+				wg.Wait()
+				return childErr
+			})
+		}))
+		for _, n := range []int{312, 132, 123} {
+			s.Sometimes(fmt.Sprintf("n is %d", n), func(st *detest.State) bool {
+				r, ok := st.Row(store, "counters", "c")
+				return ok && r.Int("n") == n
+			})
+		}
+	})
+}
+
 // A goroutine sharing a GORM transaction waits for a row another process
 // holds, rather than being refused, and the cycle it closes with that
 // process is detected as a deadlock.

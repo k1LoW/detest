@@ -2377,6 +2377,10 @@ func (tx *Tx) caller(first func() string) *Proc {
 type txConn struct {
 	by    *Proc // the process running an operation, nil while none does
 	depth int   // operations of by in progress, which may call each other
+	// waiting counts the goroutines the process handed the transaction to
+	// that want the connection, from their yield before taking it until they
+	// have it, woken or not.
+	waiting int
 }
 
 func (c *txConn) holders(*Proc) []*Proc {
@@ -2421,17 +2425,31 @@ func (tx *Tx) enterOp(p *Proc) func() {
 // by p.
 func (tx *Tx) takeConn(p *Proc) {
 	c := &tx.conn
+	wants := false
 	if p != tx.p && c.by != p {
 		// Goroutines the process handed the transaction to reach here in an
 		// order of detest's own, so that whichever comes first would always
 		// run first. Yielding before taking it lets the explorer try each
 		// order a connection could have run their statements in. The
 		// process that began the transaction takes it without a yield, as
-		// one using its transaction alone always did.
+		// one using its transaction alone always did, unless goroutines
+		// want it too, which would otherwise always come after it.
+		c.waiting, wants = c.waiting+1, true
 		p.yieldf("%s: use the transaction of %s", tx.db.name, tx.p.name)
+	} else if c.by == nil && (c.waiting > 0 || p.r.adoptingAny()) {
+		// A goroutine still being adopted may be one that wants it too, and
+		// reaches its own yield above only at the scheduler's next step.
+		p.yieldf("%s: use the transaction", tx.db.name)
 	}
 	for c.by != nil && c.by != p {
 		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
+	}
+	if wants {
+		// Not deferred: a goroutine cut at the yield or the wait unwinds
+		// without the engine mutex. One crashed on its own leaves the count
+		// up, which only adds a yield for the process for the rest of the
+		// run.
+		c.waiting--
 	}
 	if c.by != p {
 		p.conns = append(p.conns, c)
