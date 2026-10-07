@@ -48,6 +48,13 @@ func CheckSQL(d Server, query string) error {
 	probe.atomic, probe.block, probe.checking = true, true, true
 	args := make([]driver.Value, 65536) // more than any statement binds
 	_, err = s.exec(probe, args)
+	// An error of the server, such as 23505, is an outcome of the probe's
+	// data rather than of what detest can run: every parameter is NULL and a
+	// table without a schema is keyed by id, so the rows of a multi-row
+	// INSERT collide.
+	if _, ok := errors.AsType[*DBError](err); ok {
+		return nil
+	}
 	return err
 }
 
