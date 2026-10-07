@@ -3,6 +3,7 @@ package gormpool_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -47,14 +48,46 @@ func openOn(t *testing.T, s *detest.Sim, onMySQL bool, schema ...string) (*gorm.
 
 const counters = `CREATE TABLE counters (id varchar(16) PRIMARY KEY, n int NOT NULL)`
 
+// failures collects the errors processes return, which detest only records
+// in the trace, so that a test requires every explored schedule to succeed
+// rather than one of them.
+type failures struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (f *failures) check(err error) error {
+	// A process cut short by the end of its run, such as one crashed by
+	// MaxCrashes, unwinds with this error, and nothing it does counts.
+	if err != nil && !strings.Contains(err.Error(), "detest: the run ended") {
+		f.mu.Lock()
+		f.errs = append(f.errs, err)
+		f.mu.Unlock()
+	}
+	return err
+}
+
+func (f *failures) wrap(fn func(p *detest.Proc) error) func(p *detest.Proc) error {
+	return func(p *detest.Proc) error { return f.check(fn(p)) }
+}
+
+func (f *failures) report(t *testing.T) {
+	t.Helper()
+	if len(f.errs) > 0 {
+		t.Errorf("%d runs failed, the first with: %v", len(f.errs), f.errs[0])
+	}
+}
+
 // Goroutines sharing a GORM transaction take turns on its connection, and
 // both orders of two updates of one row are explored. On the *sql.DB alone
 // the order is the runtime's, and the exploration stops.
 func TestGoroutinesSharingTxExplored(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := open(t, s, counters)
 		s.Seed(func() { store.SeedRow("counters", detest.Row{"id": "c", "n": int64(0)}) })
-		s.Manual("pod", 1, func(p *detest.Proc) error {
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
 			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
 				var wg sync.WaitGroup
 				errs := make([]error, 2)
@@ -64,7 +97,7 @@ func TestGoroutinesSharingTxExplored(t *testing.T) {
 				wg.Wait()
 				return errors.Join(errs...)
 			})
-		})
+		}))
 		for _, n := range []int{1, 2} {
 			s.Sometimes(fmt.Sprintf("n is %d", n), func(st *detest.State) bool {
 				r, ok := st.Row(store, "counters", "c")
@@ -77,10 +110,12 @@ func TestGoroutinesSharingTxExplored(t *testing.T) {
 // A violation found through goroutines sharing a GORM transaction replays
 // the same way, the order they took the connection in included.
 func TestGoroutinesSharingTxReplay(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := open(t, s, counters)
 		s.Seed(func() { store.SeedRow("counters", detest.Row{"id": "c", "n": int64(0)}) })
-		s.Manual("pod", 1, func(p *detest.Proc) error {
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
 			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
 				var wg sync.WaitGroup
 				errs := make([]error, 3)
@@ -90,7 +125,7 @@ func TestGoroutinesSharingTxReplay(t *testing.T) {
 				wg.Wait()
 				return errors.Join(errs...)
 			})
-		})
+		}))
 		s.Always(func(st *detest.State) error {
 			if r, ok := st.Row(store, "counters", "c"); ok && r.Int("n") == 2 {
 				return errors.New("n is 2")
@@ -113,6 +148,8 @@ func TestGoroutineSharingTxWaitsAndDeadlocks(t *testing.T) {
 }
 
 func testWaitsAndDeadlocks(t *testing.T, onMySQL bool) {
+	fails := &failures{}
+	defer fails.report(t)
 	var mu sync.Mutex
 	deadlocks, refused := 0, 0
 	count := func(err error) error {
@@ -126,7 +163,7 @@ func testWaitsAndDeadlocks(t *testing.T, onMySQL bool) {
 			refused++
 			return nil
 		}
-		return err
+		return fails.check(err)
 	}
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := openOn(t, s, onMySQL, counters)
@@ -177,6 +214,8 @@ func TestOutboxPollers(t *testing.T) { testOutboxPollers(t) }
 func TestOutboxPollersCrash(t *testing.T) { testOutboxPollers(t, detest.MaxCrashes(1)) }
 
 func testOutboxPollers(t *testing.T, opts ...detest.Option) {
+	fails := &failures{}
+	defer fails.report(t)
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := open(t, s,
 			`CREATE TABLE outbox (id varchar(16) PRIMARY KEY)`,
@@ -186,7 +225,7 @@ func testOutboxPollers(t *testing.T, opts ...detest.Option) {
 				store.SeedRow("outbox", detest.Row{"id": id})
 			}
 		})
-		s.Manual("poller", 1, func(p *detest.Proc) error {
+		s.Manual("poller", 1, fails.wrap(func(p *detest.Proc) error {
 			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
 				var ids []string
 				if err := tx.Raw(`SELECT id FROM outbox ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED`).Scan(&ids).Error; err != nil {
@@ -204,7 +243,7 @@ func testOutboxPollers(t *testing.T, opts ...detest.Option) {
 				wg.Wait()
 				return errors.Join(errs...)
 			})
-		}, detest.Instances(2))
+		}), detest.Instances(2))
 		s.AtQuiescence(func(st *detest.State) error {
 			if n := len(st.Rows(store, "outbox")) + len(st.Rows(store, "sent")); n != 3 {
 				return fmt.Errorf("%d rows in outbox and sent, want 3", n)
@@ -218,9 +257,11 @@ func testOutboxPollers(t *testing.T, opts ...detest.Option) {
 // goroutine runs one, which stalls on the *sql.DB alone, as both park
 // inside database/sql's locks.
 func TestOwnerAlongsideGoroutine(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := open(t, s, `CREATE TABLE marks (id text PRIMARY KEY)`)
-		s.Manual("pod", 1, func(p *detest.Proc) error {
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
 			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
 				var err error
 				var wg sync.WaitGroup
@@ -229,7 +270,7 @@ func TestOwnerAlongsideGoroutine(t *testing.T) {
 				wg.Wait()
 				return errors.Join(err, ownErr)
 			})
-		})
+		}))
 		s.AtQuiescence(func(st *detest.State) error {
 			if n := len(st.Rows(store, "marks")); n != 2 {
 				return fmt.Errorf("%d marks, want 2", n)
@@ -245,12 +286,14 @@ type mark struct{ ID string }
 // default transaction, a nested transaction rolled back to its savepoint,
 // and the *sql.DB GORM hands out.
 func TestGORMOnPool(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
 	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
 		gdb, store := open(t, s, `CREATE TABLE marks (id text PRIMARY KEY)`)
 		if _, err := gdb.DB(); err != nil {
 			t.Fatal(err)
 		}
-		s.Manual("pod", 1, func(p *detest.Proc) error {
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
 			g := gdb.WithContext(p.Context())
 			if err := g.Create(&mark{ID: "a"}).Error; err != nil {
 				return err
@@ -270,7 +313,7 @@ func TestGORMOnPool(t *testing.T) {
 				})
 				return nil
 			})
-		})
+		}))
 		s.AtQuiescence(func(st *detest.State) error {
 			var ids []string
 			for _, r := range st.Rows(store, "marks") {
@@ -278,6 +321,60 @@ func TestGORMOnPool(t *testing.T) {
 			}
 			if fmt.Sprint(ids) != "[a b]" {
 				return fmt.Errorf("marks %v, want [a b]", ids)
+			}
+			return nil
+		})
+	})
+}
+
+// A query keeps the transaction's connection until its rows are closed. A
+// goroutine whose statement got in while the rows were open would park in
+// the driver holding database/sql's lock of the connection, and reading the
+// rows would then stall the run.
+func TestRowsHoldConnection(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		gdb, store := open(t, s, `CREATE TABLE marks (id text PRIMARY KEY)`)
+		s.Seed(func() {
+			store.SeedRow("marks", detest.Row{"id": "a"})
+			store.SeedRow("marks", detest.Row{"id": "b"})
+		})
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
+			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
+				rows, err := tx.Raw(`SELECT id FROM marks ORDER BY id`).Rows()
+				if err != nil {
+					return err
+				}
+				var childErr error
+				var wg sync.WaitGroup
+				wg.Go(func() { childErr = tx.Exec(`INSERT INTO marks (id) VALUES ('child')`).Error })
+				// A statement outside the transaction lets the goroutine run
+				// while the rows are open.
+				if err := gdb.WithContext(p.Context()).Exec(`SELECT 1`).Error; err != nil {
+					return err
+				}
+				var ids []string
+				for rows.Next() {
+					var id string
+					if err := rows.Scan(&id); err != nil {
+						return err
+					}
+					ids = append(ids, id)
+				}
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				wg.Wait()
+				if fmt.Sprint(ids) != "[a b]" {
+					return fmt.Errorf("read %v, want [a b]", ids)
+				}
+				return childErr
+			})
+		}))
+		s.AtQuiescence(func(st *detest.State) error {
+			if n := len(st.Rows(store, "marks")); n != 3 {
+				return fmt.Errorf("%d marks, want 3", n)
 			}
 			return nil
 		})
