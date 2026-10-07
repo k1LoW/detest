@@ -144,7 +144,7 @@ Isolation levels are implemented per kind of server, since their semantics diffe
 
 ### Queues
 
-A queue is at least once and unordered. A consumer whose handler returns an error has its message redelivered up to `MaxRedeliveries`. `Duplicates` and `Losses` add duplicate delivery and loss as choices, to check idempotency and backstops.
+A queue is at least once and unordered. A consumer whose handler returns an error has its message redelivered up to `MaxRedeliveries`, and then dropped. The bound keeps the search finite, where a broker would go on redelivering, so `State.Dropped` lists the drops for an invariant to tell such a run from a settled one. `Duplicates` and `Losses` add duplicate delivery and loss as choices, to check idempotency and backstops. A lost message is not listed among the drops, as the invariants are to hold without it.
 
 ### External services
 

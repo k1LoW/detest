@@ -306,7 +306,7 @@ For MySQL, these fail with `detest.ErrUnsupportedSQL` besides the forms above.
 
 `s.Queue(name)` is an at-least-once, unordered queue, and `s.OnMessage(name, q, fn)` its consumer.
 
-- A handler that returns an error has its message redelivered, up to `detest.MaxRedeliveries` times
+- A handler that returns an error has its message redelivered, up to `detest.MaxRedeliveries` times, and the message is then dropped. `st.Dropped(q)` lists the dropped messages, so that an invariant that the work completes can skip a run the broker would still be redelivering in
 - `detest.Duplicates(n)` delivers up to n messages twice per run
 - `detest.Losses(n)` loses up to n messages per run, to check that a backstop covers them
 - `q.Enqueue(p, msg)` publishes at once, and `tx.Enqueue(q, msg)` on commit

@@ -50,6 +50,7 @@ type Queue struct {
 	name       string
 	s          *Sim
 	msgs       []*qmsg
+	dropped    []Msg
 	nextID     int
 	dupBudget  int
 	dups       int
@@ -100,6 +101,7 @@ func (q *Queue) Enqueue(p *Proc, msg Msg) {
 
 func (q *Queue) reset() {
 	q.msgs = nil
+	q.dropped = nil
 	q.nextID = 0
 	q.dupBudget = q.dups
 	q.lossBudget = q.losses

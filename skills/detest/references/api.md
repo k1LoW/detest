@@ -44,6 +44,7 @@ rows := st.Rows(store, "orders")            // []RowView sorted by key, committe
 row, ok := st.Row(store, "products", "p1")  // by primary key values, in order
 row.Str("status"); row.Int64("stock"); row.Bool("paid"); v, ok := row.Get("col")
 msgs := st.Queue(q)
+dropped := st.Dropped(q)                    // dropped after MaxRedeliveries; not settled, a broker would redeliver
 ```
 
 ## Options (`opts` of Explore)

@@ -539,13 +539,76 @@ func TestMaxRedeliveries(t *testing.T) {
 			attempts++
 			return errors.New("boom")
 		})
+		s.Always(func(st *State) error {
+			if attempts < 3 && len(st.Dropped(q)) != 0 {
+				return fmt.Errorf("%v dropped after %d attempts", st.Dropped(q), attempts)
+			}
+			return nil
+		})
 		s.AtQuiescence(func(st *State) error {
 			if attempts != 3 || len(st.Queue(q)) != 0 {
 				return fmt.Errorf("%d attempts, %d left", attempts, len(st.Queue(q)))
 			}
+			if d := st.Dropped(q); len(d) != 1 || d[0].Str("id") != "e1" {
+				return fmt.Errorf("dropped %v", d)
+			}
 			return nil
 		})
 	}, MaxRedeliveries(2))
+}
+
+// Each copy of a duplicated message is listed as dropped on its own.
+func TestDroppedListsEachCopy(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		q := s.Queue("events", Duplicates(1))
+		s.Seed(func() { q.SeedMsg(Msg{"id": "e1"}) })
+		s.OnMessage("consumer", q, func(p *Proc, msg Msg) error {
+			p.Step("work") // a snapshot taken here must not hide the drop that follows
+			return errors.New("boom")
+		})
+		s.AtQuiescence(func(st *State) error {
+			if n := len(st.Dropped(q)); n != 1 && n != 2 {
+				return fmt.Errorf("%d dropped", n)
+			}
+			return nil
+		})
+		s.Sometimes("both copies dropped", func(st *State) bool { return len(st.Dropped(q)) == 2 })
+	}, MaxRedeliveries(0))
+}
+
+// A message handled on its redelivery, and one lost through Losses, are
+// not dropped.
+func TestDroppedOmitsRedeliveredAndLost(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		q := s.Queue("events", Losses(1))
+		s.Seed(func() {
+			q.SeedMsg(Msg{"id": "e1"})
+			q.SeedMsg(Msg{"id": "e2"})
+		})
+		var attempts map[string]int
+		inFlight, handled := 0, 0
+		s.Seed(func() { attempts, inFlight, handled = map[string]int{}, 0, 0 })
+		s.OnMessage("consumer", q, func(p *Proc, msg Msg) error {
+			inFlight++
+			defer func() { inFlight-- }()
+			id := msg.Str("id")
+			attempts[id]++
+			if attempts[id] == 1 {
+				return errors.New("boom")
+			}
+			handled++
+			return nil
+		})
+		s.Always(func(st *State) error {
+			if d := st.Dropped(q); len(d) != 0 {
+				return fmt.Errorf("dropped %v", d)
+			}
+			return nil
+		})
+		s.Sometimes("a message lost", func(st *State) bool {
+			return inFlight == 0 && len(st.Queue(q)) == 0 && handled < 2
+		})
+	})
 }
 
 // Shards split the runs: each explores less than the whole, and together
