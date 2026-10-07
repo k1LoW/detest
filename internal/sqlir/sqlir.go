@@ -652,7 +652,9 @@ type Impl struct {
 // negative number when a sorts before b, a positive one when after, and 0
 // when the collation does not tell them apart, which detest then orders
 // byte by byte, as Postgres does for a deterministic collation. It must be a
-// total order and give the same answer for the same strings every time.
+// total preorder, consistent and transitive with strings it does not tell
+// apart as equivalents, and give the same answer for the same strings every
+// time.
 type Collation interface {
 	Compare(a, b string) int
 }
@@ -882,8 +884,10 @@ func (s *Impl) NamedCollation(name string) (Collation, bool) {
 	case "default":
 		return s.TextCollation(), true
 	}
-	c, ok := s.collations[name]
-	return c, ok
+	// A name declared with a nil comparator is not declared, so that it is
+	// refused rather than ordered by bytes.
+	c := s.collations[name]
+	return c, c != nil
 }
 
 // Collation is the server's default collation, for MySQL.

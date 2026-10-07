@@ -293,6 +293,17 @@ func TestDomainOnlyCollation(t *testing.T) {
 	}
 }
 
+// A collation declared with a nil comparator is not declared.
+func TestNilNamedCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": nil})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE "fold")`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B')`)
+	if _, err := db.Exec(`SELECT id FROM t ORDER BY name`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering by a collation declared nil: got %v, want unsupported", err)
+	}
+}
+
 // A COLLATE a table keeps in a CHECK is evaluated on a later write, which
 // orders by it rather than by bytes on a database of the C collation.
 func TestPersistedCollate(t *testing.T) {
