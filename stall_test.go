@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -96,4 +97,74 @@ func TestMaxStallsRejectsDurations(t *testing.T) {
 			MaxStalls(1, d)
 		}()
 	}
+}
+
+// Stalling a process other than the current one leaves the current one
+// current, so the stall gives no preemption away. Under MaxPreemptions(0)
+// another process then steps in between two steps of a process only when
+// that process stalled itself, which shows as time passing between them.
+// a sleeps holding a row b then waits for, and its commit makes b runnable
+// beside a, which is where a stall of the other one comes up. c can start
+// only from then on, so only a free switch would start it before a's next
+// step.
+func TestStallKeepsThePreemptionBound(t *testing.T) {
+	type entry struct {
+		name string
+		at   time.Time
+	}
+	var log []entry
+	var committed bool
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE rows (id text PRIMARY KEY, n int NOT NULL)`)
+		mustExec(t, db, `CREATE TABLE marks (id text PRIMARY KEY)`)
+		s.Seed(func() {
+			log, committed = log[:0], false
+			mustExec(t, db, `INSERT INTO rows VALUES ('r', 0)`)
+		})
+		for _, name := range []string{"a", "b", "c"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				ctx := p.Context()
+				if name != "c" {
+					tx, err := db.BeginTx(ctx, nil)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE rows SET n = n + 1 WHERE id = 'r'`); err != nil {
+						_ = tx.Rollback()
+						return err
+					}
+					if name == "a" {
+						// Lets b start and wait for the row a holds.
+						time.Sleep(time.Second)
+					}
+					if err := tx.Commit(); err != nil {
+						return err
+					}
+					committed = committed || name == "a"
+				}
+				for _, i := range []string{"1", "2"} {
+					if _, err := db.ExecContext(ctx, `INSERT INTO marks VALUES ($1)`, name+i); err != nil {
+						return err
+					}
+					log = append(log, entry{name, time.Now()})
+				}
+				return nil
+			}, When(func() bool { return name != "c" || committed }))
+		}
+		s.AtQuiescence(func(*State) error {
+			for i, first := range log {
+				for j := i + 1; j < len(log); j++ {
+					if log[j].name != first.name {
+						continue
+					}
+					if j > i+1 && log[j].at.Equal(first.at) {
+						return fmt.Errorf("%s stepped in between the steps of %s, which did not stall", log[i+1].name, first.name)
+					}
+					break
+				}
+			}
+			return nil
+		})
+	}, MaxPreemptions(0), MaxStalls(1, time.Minute))
 }

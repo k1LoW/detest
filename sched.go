@@ -1087,7 +1087,13 @@ func (r *run) stallProc(p *Proc) {
 	r.stalls++
 	r.note(p, "stalls for %s", r.s.stallFor)
 	p.stall, p.stalling = r.s.stallFor, true
+	// resume makes p current, and a current process that cannot run lifts
+	// the preemption bound. The stall is no step of p, so the process that
+	// was current stays so, or stalling another would switch away from it
+	// for free.
+	cur := r.current
 	r.resume(p)
+	r.current = cur
 }
 
 // crash kills p where it stands, at a yield point or waiting for a lock, with
