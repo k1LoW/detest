@@ -115,8 +115,13 @@ ORDER BY c.relname`, schema)
 		var defs []string
 		cols, err := db.QueryContext(ctx, `
 SELECT quote_ident(a.attname), format_type(a.atttypid, a.atttypmod),
-       coalesce(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity, a.attgenerated, a.attnotnull
+       coalesce(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity, a.attgenerated, a.attnotnull,
+       CASE WHEN a.attcollation <> 0 AND a.attcollation <> ty.typcollation
+            THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) ELSE '' END
 FROM pg_attribute a
+JOIN pg_type ty ON ty.oid = a.atttypid
+LEFT JOIN pg_collation co ON co.oid = a.attcollation
+LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`, t.oid)
@@ -124,13 +129,18 @@ ORDER BY a.attnum`, t.oid)
 			return "", err
 		}
 		for cols.Next() {
-			var name, typ, def, identity, generated string
+			var name, typ, def, identity, generated, collation string
 			var notNull bool
-			if err := cols.Scan(&name, &typ, &def, &identity, &generated, &notNull); err != nil {
+			if err := cols.Scan(&name, &typ, &def, &identity, &generated, &notNull, &collation); err != nil {
 				cols.Close()
 				return "", err
 			}
 			col := name + " " + typ
+			if collation != "" {
+				// A collation of the column's own orders its text instead of
+				// the database's, which detest has to know to order it.
+				col += " COLLATE " + collation
+			}
 			switch {
 			case identity == "a":
 				col += " GENERATED ALWAYS AS IDENTITY"

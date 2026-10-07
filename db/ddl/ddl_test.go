@@ -40,6 +40,7 @@ func TestFromPostgres(t *testing.T) {
 		`CREATE TABLE public.orders (tenant_id text, id uuid DEFAULT gen_random_uuid(), ref text, deleted_at timestamptz, PRIMARY KEY (tenant_id, id))`,
 		`CREATE UNIQUE INDEX orders_ref_live ON public.orders (tenant_id, ref) WHERE deleted_at IS NULL`,
 		`CREATE TABLE billing.invoices (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, total int, doubled int GENERATED ALWAYS AS (total * 2) STORED)`,
+		`CREATE TABLE public.codes (code text COLLATE "C" PRIMARY KEY, label text)`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -51,7 +52,12 @@ func TestFromPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log(schema)
-	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)"} {
+	if strings.Contains(schema, "label text COLLATE") {
+		t.Error("DDL writes the database's collation on a column that declares none")
+	}
+	// A column's own collation is written, and one that is the database's is
+	// not.
+	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("DDL lacks %q", want)
 		}
