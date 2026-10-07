@@ -17,6 +17,11 @@ func (foldCase) Compare(a, b string) int {
 	return strings.Compare(strings.ToLower(a), strings.ToLower(b))
 }
 
+// reverse orders text against byte order.
+type reverse struct{}
+
+func (reverse) Compare(a, b string) int { return strings.Compare(b, a) }
+
 // The database's collation orders the text that declares none, in every
 // place that orders it, and equality stays byte equality.
 func TestCollationOrdersText(t *testing.T) {
@@ -98,18 +103,30 @@ func TestNamedCollations(t *testing.T) {
 	}
 }
 
-// A collation qualified by a schema other than pg_catalog keeps the schema,
-// as two schemas may have collations of the same name.
+// A collation qualified by a schema other than pg_catalog is declared with
+// each part quoted, as two schemas may have collations of the same name and
+// an unqualified collation may be named app.fold itself.
 func TestSchemaQualifiedCollations(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"app.fold": foldCase{}})))
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{`"app"."fold"`: foldCase{}, "app.fold": reverse{}})))
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE app.fold, code text)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
-	if got := rowsOf(t, db, `SELECT id FROM t ORDER BY name`); !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
-		t.Errorf("ORDER BY a column of app.fold: got %v", got)
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT id FROM t ORDER BY name`, []string{"3", "2", "1"}},
+		{`SELECT id FROM t ORDER BY code COLLATE app.fold`, []string{"3", "2", "1"}},
+		// The unqualified collation named app.fold is another one.
+		{`SELECT id FROM t ORDER BY code COLLATE "app.fold"`, []string{"1", "3", "2"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
 	}
 	for _, q := range []string{
 		`SELECT id FROM t ORDER BY code COLLATE fold`,
+		`SELECT id FROM t ORDER BY code COLLATE "app"."other.fold"`,
 		`SELECT id FROM t ORDER BY code COLLATE other.fold`,
 		`SELECT id FROM t ORDER BY code COLLATE app."C"`,
 	} {
