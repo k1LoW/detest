@@ -116,10 +116,9 @@ ORDER BY c.relname`, schema)
 		cols, err := db.QueryContext(ctx, `
 SELECT quote_ident(a.attname), format_type(a.atttypid, a.atttypmod),
        coalesce(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity, a.attgenerated, a.attnotnull,
-       CASE WHEN a.attcollation <> 0 AND a.attcollation <> ty.typcollation
+       CASE WHEN a.attcollation <> 0 AND NOT (cn.nspname = 'pg_catalog' AND co.collname = 'default')
             THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) ELSE '' END
 FROM pg_attribute a
-JOIN pg_type ty ON ty.oid = a.atttypid
 LEFT JOIN pg_collation co ON co.oid = a.attcollation
 LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -137,8 +136,10 @@ ORDER BY a.attnum`, t.oid)
 			}
 			col := name + " " + typ
 			if collation != "" {
-				// A collation of the column's own orders its text instead of
-				// the database's, which detest has to know to order it.
+				// A collation other than the database's orders the column's
+				// text, which detest has to know to order it. It is written
+				// whether the column or its type declares it, as a domain's
+				// definition is not.
 				col += " COLLATE " + collation
 			}
 			switch {

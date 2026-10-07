@@ -41,6 +41,8 @@ func TestFromPostgres(t *testing.T) {
 		`CREATE UNIQUE INDEX orders_ref_live ON public.orders (tenant_id, ref) WHERE deleted_at IS NULL`,
 		`CREATE TABLE billing.invoices (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, total int, doubled int GENERATED ALWAYS AS (total * 2) STORED)`,
 		`CREATE TABLE public.codes (code text COLLATE "C" PRIMARY KEY, label text)`,
+		`CREATE DOMAIN public.tag AS text COLLATE "C"`,
+		`CREATE TABLE public.tagged (id int PRIMARY KEY, t public.tag)`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -57,7 +59,7 @@ func TestFromPostgres(t *testing.T) {
 	}
 	// A column's own collation is written, and one that is the database's is
 	// not.
-	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`} {
+	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t tag COLLATE pg_catalog."C"`} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("DDL lacks %q", want)
 		}
