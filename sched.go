@@ -1727,7 +1727,7 @@ func callerLoc() string {
 // isLibraryFrame reports frames of the database and ORM plumbing between a
 // model and detest's driver, so trace locations point at the caller's code.
 func isLibraryFrame(fn string) bool {
-	for _, prefix := range []string{"database/sql", "gorm.io/", "github.com/k1LoW/detest/db/seam/gormpool.", "github.com/pganalyze/", "github.com/wasilibs/", "reflect.", "runtime."} {
+	for _, prefix := range []string{"database/sql", "gorm.io/", "github.com/k1LoW/detest/db/seam/gormpool.", "github.com/k1LoW/detest/db/seam/sqlcdbtx.", "github.com/k1LoW/detest/db/seam/sqlxext.", "github.com/k1LoW/detest/internal/seam.", "github.com/jmoiron/sqlx.", "github.com/pganalyze/", "github.com/wasilibs/", "reflect.", "runtime."} {
 		if strings.HasPrefix(fn, prefix) {
 			return true
 		}
