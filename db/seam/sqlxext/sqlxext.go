@@ -22,7 +22,7 @@
 // and in the test:
 //
 //	sqlDB, store := s.DB("app", postgres.New())
-//	db := sqlxext.New(sqlx.NewDb(sqlDB, "postgres"))
+//	db := sqlxext.New(sqlDB, "postgres")
 //	st := &Store{begin: func(ctx context.Context) (Tx, error) { return db.BeginTxx(ctx, nil) }}
 //
 // Code that holds a *sqlx.Tx runs on the *sqlx.DB all the same. A
@@ -37,6 +37,11 @@
 // A commit or a rollback by a goroutine other than the one that began the
 // transaction is still refused. A statement prepared on the transaction
 // runs without the package.
+//
+// A mapper other than sqlx's default and unsafe mode are refused, as the
+// functions sqlx.NamedExecContext, sqlx.NamedQueryContext and
+// sqlx.PreparexContext read them only from sqlx's own types, and would run
+// a Tx of the package with the defaults instead.
 package sqlxext
 
 import (
@@ -52,8 +57,22 @@ import (
 // through the package.
 type DB struct{ *sqlx.DB }
 
-// New returns the DB to begin the code's transactions on.
-func New(db *sqlx.DB) *DB { return &DB{DB: db} }
+// New returns the DB to begin the code's transactions on, as sqlx.NewDb
+// returns one for the driver named driverName, with sqlx's default mapper.
+// It takes the *sql.DB rather than a *sqlx.DB, as sqlx's default mapper
+// cannot be told from another one on a *sqlx.DB.
+func New(db *sql.DB, driverName string) *DB { return &DB{DB: sqlx.NewDb(db, driverName)} }
+
+// MapperFunc panics, as a mapper other than sqlx's default is refused (see
+// the package doc).
+func (d *DB) MapperFunc(func(string) string) {
+	panic("sqlxext: a mapper other than sqlx's default is unsupported, as sqlx's named functions would not see it on a Tx of the package")
+}
+
+// Unsafe panics, as unsafe mode is refused (see the package doc).
+func (d *DB) Unsafe() *DB {
+	panic("sqlxext: unsafe mode is unsupported, as sqlx.PreparexContext would not see it on a Tx of the package")
+}
 
 // BeginTxx begins a transaction on the *sqlx.DB.
 func (d *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {

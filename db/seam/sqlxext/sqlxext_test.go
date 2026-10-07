@@ -52,7 +52,7 @@ func open(t *testing.T, s *detest.Sim) (*Store, *detest.DB) {
 	if _, err := sqlDB.Exec(`CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	db := sqlxext.New(sqlx.NewDb(sqlDB, "postgres"))
+	db := sqlxext.New(sqlDB, "postgres")
 	return &Store{begin: func(ctx context.Context) (Tx, error) { return db.BeginTxx(ctx, nil) }}, store
 }
 
@@ -174,5 +174,24 @@ func TestGoroutineSharingTxWaitsAndDeadlocks(t *testing.T) {
 	})
 	if deadlocks == 0 {
 		t.Error("no run detected the deadlock through the goroutine")
+	}
+}
+
+// A mapper other than sqlx's default and unsafe mode are refused rather than
+// lost on the way to sqlx's named functions.
+func TestMapperAndUnsafeRefused(t *testing.T) {
+	db := sqlxext.New(nil, "postgres")
+	for name, f := range map[string]func(){
+		"MapperFunc": func() { db.MapperFunc(strings.ToUpper) },
+		"Unsafe":     func() { db.Unsafe() },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s did not panic", name)
+				}
+			}()
+			f()
+		}()
 	}
 }
