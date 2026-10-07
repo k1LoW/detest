@@ -305,6 +305,11 @@ func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
 func (x *sqlExec) keyCollations(keys []sqlir.OrderKey, vals [][]any) ([]sqlir.Collation, error) {
 	out := make([]sqlir.Collation, len(keys))
 	for i, k := range keys {
+		if _, row := k.Expr.(*sqlir.RowExpr); row {
+			// Postgres orders a row field by field, each by its own
+			// collation, where compareValues would compare the row's text.
+			return nil, x.unsupported("a row as an ORDER BY key")
+		}
 		c, err := x.orderCollation(k.Expr)
 		if err != nil {
 			return nil, err

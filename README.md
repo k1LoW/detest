@@ -212,7 +212,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - Column alias lists on a table, a CTE or a view (`FROM t AS x(a, b)`, `WITH c(a) AS (...)`)
 - `RIGHT` and `FULL` joins, `JOIN ... USING`, `NATURAL JOIN`, `TABLESAMPLE`, `SELECT INTO`, `INSERT ... DEFAULT VALUES`
 - Set-returning functions other than `generate_series` in `FROM`, such as `unnest`, and any set-returning function in the select list, `generate_series` included
-- `ANY (subquery)` with an operator other than `=`, row comparisons of different shapes
+- `ANY (subquery)` with an operator other than `=`, row comparisons of different shapes, a row as an `ORDER BY` key (`ORDER BY (name, id)`)
 - Window frames other than the default and the whole partition, window functions other than the seven listed and the aggregates, and a window call with other arguments than the function takes
 - Aggregates other than `count`, `sum`, `min`, `max` and `avg`, such as `array_agg`, `string_agg`, `bool_or`, `every` and `json_agg`, and `FILTER`, `ORDER BY` and `WITHIN GROUP` in aggregates
 
