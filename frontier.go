@@ -365,7 +365,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		// as state it leaves behind shows in the next run.
 		r := s.newRunMeasuring(nil, true)
 		r.rng, r.seen, r.path = s.measuringRng(), seen, fnvOffset
-		r.prio = newPrioritized(r.rng, 1, 1, 0, 0)
+		r.prio = newPrioritized(r.rng, 1, 1, 0, 0, 0)
 		r.execute()
 		k = r.steps
 	}
@@ -383,7 +383,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 				for _, q := range s.queues {
 					losses += q.lossBudget
 				}
-				r.prio = newPrioritized(r.rng, s.strategy.depth, k, s.maxCrashes, losses)
+				r.prio = newPrioritized(r.rng, s.strategy.depth, k, s.maxCrashes, losses, s.maxStalls)
 			}
 		}
 		r.tracing = s.verbose

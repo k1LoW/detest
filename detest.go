@@ -91,6 +91,22 @@ func MaxRedeliveries(n int) Option { return func(s *Sim) { s.maxRedeliveries = n
 // detest does not know which processes share a pod.
 func MaxCrashes(n int) Option { return func(s *Sim) { s.maxCrashes = n } }
 
+// MaxStalls bounds the process stalls per run, 0 (the default) for none,
+// and sets how long each lasts. A stall is a choice at every step. Any
+// process that could be resumed may sleep for d on the fake clock instead,
+// as in a long GC pause or a slow call detest does not see. The others go
+// on meanwhile, and the clock reaches the end of the stall once none of
+// them can run, so a lock's TTL or a lease that is shorter than d expires
+// under the stalled process. It checks code that trusts a lock or a lease
+// with a deadline to still be held when it acts. d must be positive and at
+// most a day, the longest the scheduler waits on the fake clock.
+func MaxStalls(n int, d time.Duration) Option {
+	if n > 0 && (d <= 0 || d >= outsideWaitLimit) {
+		panic(fmt.Sprintf("detest: MaxStalls duration %s is not positive and at most a day", d))
+	}
+	return func(s *Sim) { s.maxStalls, s.stallFor = n, d }
+}
+
 // MaxIdleTicks bounds how many idle ticks of a loop in a row leave its
 // budget unspent while nothing else makes progress (3 by default). An idle
 // tick is free so that a sweep keeps ticking until it has work, and a change
@@ -187,6 +203,8 @@ type Sim struct {
 	maxFailures      int
 	maxRedeliveries  int
 	maxCrashes       int
+	maxStalls        int
+	stallFor         time.Duration
 	maxPreemptions   int
 	maxIdleTicks     int
 	maxSpins         int

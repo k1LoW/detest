@@ -18,6 +18,7 @@ The invariant is always a business rule, checked from committed rows (`st.Rows`,
 10. Writes to the database and a second system
 11. Mutexes mixed with row locks, and calls inside transactions
 12. Server-specific traps
+13. Locks and leases that expire
 
 ## 1. Lost update
 
@@ -130,3 +131,13 @@ The invariant is always a business rule, checked from committed rows (`st.Rows`,
 - **PostgreSQL Read Committed**: each statement sees a new snapshot, so two statements in one transaction can see different data; an `UPDATE ... WHERE` re-checks its condition after waiting for a lock and may then skip the row (zero rows affected).
 - **MySQL Repeatable Read**: plain reads see the snapshot taken at the transaction's first read, while `UPDATE` and locking reads see the latest data, so code that reads then writes back loses updates even inside a transaction; locking reads take gap locks, so two transactions that check for a missing row with `FOR UPDATE` and then insert it deadlock.
 - **Unique index waits**: a concurrent insert of the same key waits for the first transaction, then fails or succeeds depending on whether it committed.
+
+## 13. Locks and leases that expire
+
+**Look for** a lock taken with a TTL (`SET key NX PX`, a `locked_until` column, a lease row) and work done under it that assumes it is still held when it writes, with no fencing token or database lock behind the write.
+
+**Scenario** two workers that run at the same time, as one `Manual` type with `detest.Instances(2)` or as two `Manual` types (a `Manual` type runs one instance at a time by default), the store faked as in `references/wiring.md`, and `detest.MaxStalls(1, d)` with `d` longer than the TTL. A competitor that retries with `time.Sleep` reaches the expiry on its own, and one that tries once needs `MaxStalls(2, d)` so that it stalls past the TTL too.
+
+**Invariant** the guarded effect happened once, such as one invoice per account and period.
+
+**Fixes** a fencing token checked by the write, or a row lock or unique constraint in the database that does not depend on the lock still being held.

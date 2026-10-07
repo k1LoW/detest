@@ -62,6 +62,7 @@ Every nondeterministic decision is a numbered choice among options.
 - how an external call ends, among success, failure before its effect, and failure after it (the response lost);
 - whether a lock wait times out, when `lock_timeout` is set;
 - whether a process crashes here (`MaxCrashes`), whether a message is lost (`Losses`) or delivered twice (`Duplicates`);
+- whether a process stalls here (`MaxStalls`), sleeping on the bubble's fake clock before its step while the others go on. It stands at its yield point again when it wakes, so processes whose stalls end at the same instant run in the order the schedule picks, not in the order the runtime wakes them;
 - choices a fake makes with `Proc.Choose`.
 
 A run is fully determined by its sequence of picks. That sequence is what a violation reports (`DETEST_REPLAY=0,0,1,...`), what `Replay` pins in a regression test, and what the explorer enumerates.
