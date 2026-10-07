@@ -7,8 +7,8 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/postgres"
-	"github.com/k1LoW/detest/postgres/pqerr"
+	"github.com/k1LoW/detest/db/postgres"
+	"github.com/k1LoW/detest/db/postgres/pqerr"
 )
 
 // Production code that branches on *pq.Error takes the same branch on

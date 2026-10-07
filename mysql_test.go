@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 	"github.com/k1LoW/detest/internal/sqlir"
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
 )
 
 func TestMySQLStatements(t *testing.T) {

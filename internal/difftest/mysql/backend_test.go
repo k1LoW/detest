@@ -13,8 +13,8 @@ import (
 
 	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/mysql/mysqlerr"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/mysql/mysqlerr"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"github.com/testcontainers/testcontainers-go/wait"

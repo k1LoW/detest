@@ -9,8 +9,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/ddl"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/ddl"
+	"github.com/k1LoW/detest/db/postgres"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )

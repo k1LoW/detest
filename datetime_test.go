@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func iv(months, days int64, d time.Duration) pgInterval {

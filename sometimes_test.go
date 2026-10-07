@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // stockModel declares two buyers of the last item in stock, with a reachable

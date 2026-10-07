@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 	"github.com/k1LoW/detest/internal/sqlir"
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
 )
 
 // A statement waiting for a row lock whose context ends is refused, as the

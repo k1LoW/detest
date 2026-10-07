@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // Two handlers read-check-write a row while holding a detest.Mutex injected in

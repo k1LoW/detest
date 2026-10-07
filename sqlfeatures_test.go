@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // The statements below run outside any process (no run, no yields), which

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // ticketModel declares two processes that each take a ticket from a counter

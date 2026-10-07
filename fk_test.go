@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func TestForeignKeys(t *testing.T) {

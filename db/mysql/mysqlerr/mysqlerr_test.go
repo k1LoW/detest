@@ -10,8 +10,8 @@ import (
 	glogger "gorm.io/gorm/logger"
 
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/mysql/mysqlerr"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/mysql/mysqlerr"
 )
 
 type user struct {

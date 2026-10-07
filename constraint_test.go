@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func TestNotNullAndCheckConstraints(t *testing.T) {

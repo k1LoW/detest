@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // keys lists a table's rows as "id:col" for the given column, sorted.

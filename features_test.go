@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // A loop tick that finds nothing returns ErrIdle and does not spend the

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // jobModel declares a worker that claims a job in one transaction and

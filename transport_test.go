@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 

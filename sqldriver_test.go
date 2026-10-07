@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/k1LoW/detest/db/postgres"
 	"github.com/k1LoW/detest/internal/sqlir"
-	"github.com/k1LoW/detest/postgres"
 )
 
 func TestPostgresScriptSessionLockTimeout(t *testing.T) {

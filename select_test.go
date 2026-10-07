@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // rowsOf runs q and returns its rows as strings, columns joined by ",".

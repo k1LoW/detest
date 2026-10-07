@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // claimJob declares two workers that each claim the next pending job with

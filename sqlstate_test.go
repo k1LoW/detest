@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // Statements Postgres rejects fail with its SQLSTATE, so code that branches

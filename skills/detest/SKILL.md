@@ -143,8 +143,8 @@ Do not proceed on an invariant the user has not agreed with. A wrong invariant p
 Adding detest changes `go.mod` and `go.sum`, and may raise the `go` line to 1.26. Tell the user what will change and get a yes before running:
 
 ```sh
-go get github.com/k1LoW/detest/postgres@latest            # or .../mysql
-go get github.com/k1LoW/detest/postgres/pgxerr@latest     # the error converter the test uses, if any
+go get github.com/k1LoW/detest/db/postgres@latest            # or .../mysql
+go get github.com/k1LoW/detest/db/postgres/pgxerr@latest     # the error converter the test uses, if any
 ```
 
 Get the packages the test imports, not only the module root. `go get` of the root records the checksums of the root's dependencies only, and the build then fails on the server package's ones (the SQL parsers). Avoid `go mod tidy` for this, since it also upgrades unrelated dependencies.

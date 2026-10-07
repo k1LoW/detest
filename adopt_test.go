@@ -13,8 +13,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // incr adds one to the counter with a read and a write, which lose an update
