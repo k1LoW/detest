@@ -455,7 +455,11 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 	case *pg.Node_DropStmt:
 		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_DOMAIN {
 			for _, obj := range s.DropStmt.Objects {
-				changes = append(changes, sqlir.SchemaChange{Table: typeName(obj.GetTypeName()), Object: "domain", Drop: true})
+				var parts []string
+				for _, n := range obj.GetTypeName().GetNames() {
+					parts = append(parts, n.GetString_().GetSval())
+				}
+				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "domain", Drop: true})
 			}
 			return changes, true, nil
 		}
@@ -495,6 +499,14 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return []sqlir.SchemaChange{{Table: rangeVarName(r.Relation), RenameConstraint: [2]string{r.Subname, r.Newname}, IfExists: r.MissingOk}}, true, nil
 		case pg.ObjectType_OBJECT_INDEX:
 			return []sqlir.SchemaChange{{Table: rangeVarName(r.Relation), Object: "index", RenameConstraint: [2]string{r.Relation.GetRelname(), r.Newname}, IfExists: r.MissingOk}}, true, nil
+		case pg.ObjectType_OBJECT_DOMAIN, pg.ObjectType_OBJECT_TYPE:
+			// A domain's collation follows it to its new name; renaming
+			// another type changes nothing detest keeps.
+			var parts []string
+			for _, n := range r.Object.GetList().GetItems() {
+				parts = append(parts, n.GetString_().GetSval())
+			}
+			return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", RenameTo: r.Newname}}, true, nil
 		}
 		return nil, true, nil
 	case *pg.Node_DoStmt:

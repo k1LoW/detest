@@ -263,11 +263,36 @@ func TestDomainCollations(t *testing.T) {
 	if _, err := db.Exec(`SELECT id FROM twice ORDER BY v`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("ordering a domain two schemas declare: got %v, want unsupported", err)
 	}
+	// A drop or a rename of a domain moves only the domain it names.
+	mustExec(t, db, `CREATE DOMAIN kept AS text COLLATE "C"`)
+	mustExec(t, db, `DROP DOMAIN IF EXISTS other.kept`)
+	mustExec(t, db, `CREATE DOMAIN old AS text COLLATE "C"`)
+	mustExec(t, db, `ALTER DOMAIN old RENAME TO renamed`)
+	mustExec(t, db, `CREATE TABLE k (id int PRIMARY KEY, a kept, b renamed)`)
+	mustExec(t, db, `INSERT INTO k VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
+	for _, q := range []string{`SELECT id FROM k ORDER BY a`, `SELECT id FROM k ORDER BY b`} {
+		if got := rowsOf(t, db, q); !reflect.DeepEqual(got, []string{"2", "3", "1"}) {
+			t.Errorf("%s: got %v, want the domain's C order", q, got)
+		}
+	}
 	// IF NOT EXISTS skips a relation of any kind, a view among them.
 	mustExec(t, db, `CREATE VIEW vw AS SELECT id FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS vw AS SELECT id, name FROM t`)
 	if _, ok := store.defs[store.resolve("vw")]; ok {
 		t.Error("CREATE TABLE IF NOT EXISTS ... AS made a table beside the view")
+	}
+}
+
+// A view's column takes a COLLATE in its query, which detest does not
+// carry, so ordering it is refused even on a database of the C collation.
+func TestViewCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": foldCase{}})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B')`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT name COLLATE "fold" AS name FROM t`)
+	if _, err := db.Exec(`SELECT name FROM v ORDER BY name`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering a view column a COLLATE sets: got %v, want unsupported", err)
 	}
 }
 

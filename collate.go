@@ -312,11 +312,61 @@ func decide(c sqlir.Collation, vals ...any) (sqlir.Collation, error) {
 	return nil, nil
 }
 
+// qualifyDomain is a domain's name with the schema an unqualified name is
+// created in.
+func (db *DB) qualifyDomain(name string) string {
+	if strings.Contains(name, ".") {
+		return name
+	}
+	return db.searchPath()[0] + "." + name
+}
+
+// hasCollate reports whether a COLLATE stands anywhere under n.
+func hasCollate(n any) bool {
+	found := false
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		if found {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Interface, reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			if !v.CanInterface() {
+				return
+			}
+			if _, ok := reflect.TypeAssert[*sqlir.Collate](v); ok {
+				found = true
+				return
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			for _, f := range v.Fields() {
+				walk(f)
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(n))
+	return found
+}
+
 // declaresCollations reports whether a column of the database declares a
-// collation other than the database's. "default" is the database's, and so
+// collation other than the database's, or a view's query a COLLATE, which
+// the view's columns take. "default" is the database's, and so
 // are C and POSIX on a database of the C collation.
 func (db *DB) declaresCollations() bool {
 	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
+	for _, v := range db.views {
+		if hasCollate(v.View) {
+			return true
+		}
+	}
 	for _, def := range db.defs {
 		for _, name := range def.collations {
 			if name == "default" {

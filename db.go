@@ -1172,9 +1172,28 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "domain" && ch.Drop:
+		// Only the domain of that schema goes; a same-named one of another
+		// schema, or none, leaves what detest keeps as it is.
 		name := ch.Table[strings.LastIndex(ch.Table, ".")+1:]
+		if db.domainSchemas[name] == db.qualifyDomain(ch.Table) {
+			delete(db.domains, name)
+			delete(db.domainSchemas, name)
+		}
+		return nil
+	case ch.Object == "domain" && ch.RenameTo != "":
+		name := ch.Table[strings.LastIndex(ch.Table, ".")+1:]
+		old := db.qualifyDomain(ch.Table)
+		if db.domainSchemas[name] != old {
+			return nil // not a domain detest keeps, or of another schema
+		}
+		c := db.domains[name]
 		delete(db.domains, name)
 		delete(db.domainSchemas, name)
+		nw := old[:strings.LastIndex(old, ".")+1] + ch.RenameTo
+		if q, ok := db.domainSchemas[ch.RenameTo]; ok && q != nw {
+			c = ambiguousCollation
+		}
+		db.domains[ch.RenameTo], db.domainSchemas[ch.RenameTo] = c, nw
 		return nil
 	case ch.Object == "domain":
 		// A domain without COLLATE takes its base type's, which another
@@ -1187,10 +1206,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.domains == nil {
 			db.domains, db.domainSchemas = map[string]string{}, map[string]string{}
 		}
-		qualified := ch.Table
-		if !strings.Contains(qualified, ".") {
-			qualified = db.searchPath()[0] + "." + qualified
-		}
+		qualified := db.qualifyDomain(ch.Table)
 		if q, ok := db.domainSchemas[col.Name]; ok && q != qualified {
 			// detest resolves a column's type by its bare name, which
 			// cannot tell the two domains apart.
