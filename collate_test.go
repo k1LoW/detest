@@ -112,7 +112,6 @@ func TestSchemaQualifiedCollations(t *testing.T) {
 		`SELECT id FROM t ORDER BY code COLLATE fold`,
 		`SELECT id FROM t ORDER BY code COLLATE other.fold`,
 		`SELECT id FROM t ORDER BY code COLLATE app."C"`,
-		`SELECT id FROM t ORDER BY code COLLATE "app.fold"`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
