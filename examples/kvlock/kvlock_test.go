@@ -118,7 +118,8 @@ func expiry(ttl time.Duration) time.Time {
 }
 
 // simulate declares two workers billing the same account and period, and
-// the invariant that it is billed once.
+// the invariant that it is billed at most once and no worker failed but
+// for a reason the job is retried on.
 func simulate(bill func(context.Context, *sql.DB, KV, string, string) error) func(t *testing.T, s *detest.Sim) {
 	return func(t *testing.T, s *detest.Sim) {
 		db, store := s.DB("app", postgres.New())
@@ -131,19 +132,29 @@ func simulate(bill func(context.Context, *sql.DB, KV, string, string) error) fun
 			}
 		}
 		kv := newFakeKV(s, "redis")
+		// An error a process returns only shows in the trace, so one the
+		// billing should never return is kept for the invariant to report.
+		var failed error
 		s.Seed(func() {
+			failed = nil
 			if _, err := db.Exec(`INSERT INTO accounts VALUES ('a1')`); err != nil {
 				t.Fatal(err)
 			}
 		})
 		s.Manual("worker", 2, func(p *detest.Proc) error {
 			err := bill(p.Context(), db, kv, "a1", "2026-10")
-			if errors.Is(err, detest.ErrUnavailable) {
+			if errors.Is(err, detest.ErrUnavailable) || errors.Is(err, ErrBusy) {
 				return nil // the job is retried later, which the invariant does not wait for
+			}
+			if err != nil && failed == nil {
+				failed = err
 			}
 			return err
 		}, detest.Instances(2))
 		s.AtQuiescence(func(st *detest.State) error {
+			if failed != nil {
+				return fmt.Errorf("billing failed: %w", failed)
+			}
 			n := 0
 			for _, row := range st.Rows(store, "invoices") {
 				if row.Str("account") == "a1" && row.Str("period") == "2026-10" {
