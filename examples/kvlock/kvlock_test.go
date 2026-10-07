@@ -1,6 +1,7 @@
 package kvlock
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -19,7 +20,8 @@ import (
 // bubble's fake clock, which MaxStalls and sleeping processes advance. It
 // has no transactions, scripts or data types beyond strings, so it stands
 // for Redis or memcached only where the code under test sends these
-// commands.
+// commands. Values are copied in and out, as a client sends and receives
+// bytes, so a caller reusing its buffer changes nothing in the store.
 type fakeKV struct {
 	s     *detest.Sim
 	write *detest.External
@@ -54,7 +56,7 @@ func (kv *fakeKV) Get(_ context.Context, key string) ([]byte, error) {
 		if !ok {
 			return errNotFound
 		}
-		v = e.value
+		v = bytes.Clone(e.value)
 		return nil
 	})
 	return v, err
@@ -62,7 +64,7 @@ func (kv *fakeKV) Get(_ context.Context, key string) ([]byte, error) {
 
 func (kv *fakeKV) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	return kv.do(kv.write, "SET "+key, func() error {
-		kv.m[key] = entry{value: value, expires: expiry(ttl)}
+		kv.m[key] = entry{value: bytes.Clone(value), expires: expiry(ttl)}
 		return nil
 	})
 }
@@ -75,7 +77,7 @@ func (kv *fakeKV) SetNX(_ context.Context, key string, value []byte, ttl time.Du
 		if _, ok := kv.live(key); ok {
 			return nil
 		}
-		kv.m[key] = entry{value: value, expires: expiry(ttl)}
+		kv.m[key] = entry{value: bytes.Clone(value), expires: expiry(ttl)}
 		set = true
 		return nil
 	})
