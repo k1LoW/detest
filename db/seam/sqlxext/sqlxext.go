@@ -95,13 +95,15 @@ func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Re
 	return t.tx.ExecContext(ctx, query, args...)
 }
 
+// NamedExecContext binds arg before it waits for the connection, as sqlx
+// binds it before it reaches the database, so that an arg that fails to
+// bind returns at once rather than after a wait production does not have.
 func (t *Tx) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
-	release, err := t.seam.Enter("exec", query, arg)
+	bound, args, err := t.tx.BindNamed(query, arg)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	return t.tx.NamedExecContext(ctx, query, arg)
+	return t.ExecContext(ctx, bound, args...)
 }
 
 func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
