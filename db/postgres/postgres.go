@@ -71,7 +71,8 @@ func Collation(c sqlir.Collation) Option {
 
 // Collations declares the collations COLLATE and a column may name, besides
 // "C", "POSIX" and "default", which detest knows. A name qualified by a
-// schema other than pg_catalog is declared with it, as "app.name". A
+// schema other than pg_catalog is declared with it, as "app.name", and a
+// part holding a dot or a double quote in double quotes, as `"en.us"`. A
 // statement that orders text by a collation neither names is refused.
 func Collations(named map[string]sqlir.Collation) Option {
 	return func(cf *config) { cf.collations = named }
@@ -635,11 +636,16 @@ func unqualify(e sqlir.Expr) {
 // collationName is the name a COLLATE clause gives, without pg_catalog,
 // which pg_dump qualifies the built-in ones with (pg_catalog."C"), and with
 // any other schema, as "app.name", since two schemas may have collations of
-// the same name; empty without one.
+// the same name; empty without one. A part holding a dot or a double quote
+// is written quoted, so that the collation "app.name" is not app.name.
 func collationName(cc *pg.CollateClause) string {
 	var parts []string
 	for _, n := range cc.GetCollname() {
-		parts = append(parts, n.GetString_().GetSval())
+		p := n.GetString_().GetSval()
+		if strings.ContainsAny(p, `."`) {
+			p = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+		}
+		parts = append(parts, p)
 	}
 	if len(parts) > 1 && parts[0] == "pg_catalog" {
 		parts = parts[1:]
