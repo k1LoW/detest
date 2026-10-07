@@ -1322,6 +1322,30 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		return out, err
 	case *sqlir.BinaryExpr:
+		if v.Op == "AND" || v.Op == "OR" {
+			// Three-valued, as eval does for a row.
+			decides := v.Op == "OR"
+			l, err := x.evalAgg(v.L, g)
+			if err != nil {
+				return nil, err
+			}
+			lb, lok := derefValue(l).(bool)
+			if lok && lb == decides {
+				return decides, nil
+			}
+			r, err := x.evalAgg(v.R, g)
+			if err != nil {
+				return nil, err
+			}
+			rb, rok := derefValue(r).(bool)
+			switch {
+			case rok && rb == decides:
+				return decides, nil
+			case !lok || !rok:
+				return nil, nil
+			}
+			return !decides, nil
+		}
 		l, err := x.evalAggRaw(v.L, g)
 		if err != nil {
 			return nil, err
@@ -1335,6 +1359,14 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		switch v.Op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			lr, lok := v.L.(*sqlir.RowExpr)
+			rr, rok := v.R.(*sqlir.RowExpr)
+			if lok || rok {
+				if !lok || !rok || len(lr.Items) != len(rr.Items) {
+					return nil, x.unsupported("row comparison")
+				}
+				return x.compareRows(v.Op, lr.Items, l, rr.Items, r)
+			}
 			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
 				return nil, err
 			}
@@ -1347,6 +1379,16 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 			return nil, err
 		}
 		return x.arithValue(v, l, r, res), nil
+	case *sqlir.RowExpr:
+		vals := make([]any, len(v.Items))
+		for i, it := range v.Items {
+			val, err := x.evalAgg(it, g)
+			if err != nil {
+				return nil, err
+			}
+			vals[i] = val
+		}
+		return vals, nil
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {
@@ -1365,7 +1407,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
-		return nil, x.unsupported("an aggregate inside NOT, CASE, IS NULL, IN or a row")
+		return nil, x.unsupported("an aggregate inside NOT, CASE, IS NULL or IN")
 	}
 	return x.eval(e, g.env)
 }

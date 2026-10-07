@@ -139,6 +139,26 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "AND, OR and row comparisons over aggregates in HAVING",
+		Schema: []string{
+			`CREATE TABLE l (id int PRIMARY KEY, g int NOT NULL, k text, at int)`,
+		},
+		Seed: []string{
+			`INSERT INTO l VALUES (1, 1, 'env', 5), (2, 1, 'team', 3), (3, 2, 'env', 3), (4, 3, 'env', 7), (5, 3, NULL, NULL), (6, 4, NULL, NULL)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING count(DISTINCT k) = 1 AND g < 3 ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING count(*) = 1 OR g = 1 ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING count(*) > 1 AND max(at) > 5 ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING max(at) > 4 OR min(k) = 'team' ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING (max(at) > 4 OR max(at) < 4) AND count(*) < 2 ORDER BY g`),
+			difftest.Q(0, `SELECT g, min(at) FROM l GROUP BY g HAVING (min(at), g) >= (3, 2) ORDER BY min(at), g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING (min(at), g) < (5, 9) ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM l GROUP BY g HAVING (count(*), g) = (2, 3)`),
+		},
+	},
+	{
 		Name: "IN and NOT IN over a subquery with NULLs",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,
