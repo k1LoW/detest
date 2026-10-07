@@ -231,7 +231,7 @@ func TestCollationsAcrossStatements(t *testing.T) {
 // TABLE IF NOT EXISTS ... AS on a table that exists does nothing.
 func TestDomainCollations(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	db, store := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
 	mustExec(t, db, `CREATE DOMAIN tag AS text COLLATE "C"`)
 	mustExec(t, db, `CREATE DOMAIN nested AS tag`)
 	mustExec(t, db, `CREATE DOMAIN gone AS text COLLATE "C"`)
@@ -253,6 +253,21 @@ func TestDomainCollations(t *testing.T) {
 		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
 		}
+	}
+	// detest resolves a column's domain by its bare name, so two schemas'
+	// domains of one name leave its collation unknown.
+	mustExec(t, db, `CREATE SCHEMA other`)
+	mustExec(t, db, `CREATE DOMAIN other.tag AS text`)
+	mustExec(t, db, `CREATE TABLE twice (id int PRIMARY KEY, v tag)`)
+	mustExec(t, db, `INSERT INTO twice VALUES (1, 'a')`)
+	if _, err := db.Exec(`SELECT id FROM twice ORDER BY v`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering a domain two schemas declare: got %v, want unsupported", err)
+	}
+	// IF NOT EXISTS skips a relation of any kind, a view among them.
+	mustExec(t, db, `CREATE VIEW vw AS SELECT id FROM t`)
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS vw AS SELECT id, name FROM t`)
+	if _, ok := store.defs[store.resolve("vw")]; ok {
+		t.Error("CREATE TABLE IF NOT EXISTS ... AS made a table beside the view")
 	}
 }
 

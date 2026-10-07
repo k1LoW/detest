@@ -544,7 +544,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 // execCreateTableAs declares the table, without keys, and fills it with the
 // query's rows.
 func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, error) {
-	if _, exists := x.tx.db.defs[x.tx.db.resolve(st.Table)]; exists && st.IfNotExists {
+	db := x.tx.db
+	_, isView := db.views[db.resolve(st.Table)]
+	_, isSeq := db.seqDefs[sequenceName(db.resolve(st.Table))]
+	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq) && st.IfNotExists {
 		// Postgres leaves the table as it is, without running the query.
 		return &sqlResult{}, nil
 	}

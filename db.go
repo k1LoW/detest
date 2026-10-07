@@ -152,14 +152,17 @@ type DB struct {
 	// schema-qualified ("public.orders"); resolve maps a name as written.
 	defs map[string]*tableDef
 	// domains are the collations domains declare, by the domain's name,
-	// which a column of the domain orders by.
-	domains  map[string]string
-	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views    map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs     map[string]int64                    // sequence values of the run, for nextval
-	uuids    int64                               // gen_random_uuid values handed out in the run
-	ignored  map[string]bool                     // tables Ignore took out of the simulation
+	// which a column of the domain orders by, and domainSchemas the
+	// qualified name each was created as. A name two schemas give domains
+	// of has ambiguousCollation, which nothing orders by.
+	domains       map[string]string
+	domainSchemas map[string]string
+	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views         map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs       map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs          map[string]int64                    // sequence values of the run, for nextval
+	uuids         int64                               // gen_random_uuid values handed out in the run
+	ignored       map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -1169,7 +1172,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "domain" && ch.Drop:
-		delete(db.domains, ch.Table)
+		name := ch.Table[strings.LastIndex(ch.Table, ".")+1:]
+		delete(db.domains, name)
+		delete(db.domainSchemas, name)
 		return nil
 	case ch.Object == "domain":
 		// A domain without COLLATE takes its base type's, which another
@@ -1180,9 +1185,18 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			c = ""
 		}
 		if db.domains == nil {
-			db.domains = map[string]string{}
+			db.domains, db.domainSchemas = map[string]string{}, map[string]string{}
 		}
-		db.domains[ch.Table] = c
+		qualified := ch.Table
+		if !strings.Contains(qualified, ".") {
+			qualified = db.searchPath()[0] + "." + qualified
+		}
+		if q, ok := db.domainSchemas[col.Name]; ok && q != qualified {
+			// detest resolves a column's type by its bare name, which
+			// cannot tell the two domains apart.
+			c = ambiguousCollation
+		}
+		db.domains[col.Name], db.domainSchemas[col.Name] = c, qualified
 		return nil
 	case ch.Object == "sequence" && ch.Drop:
 		name := db.seqName(ch.Table)

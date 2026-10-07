@@ -66,6 +66,11 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	return out, nil
 }
 
+// ambiguousCollation is the collation of a domain name two schemas declare
+// domains of, which no collation is declared under, so that ordering by it
+// is refused.
+const ambiguousCollation = "domains of one name in two schemas"
+
 // isDomain reports whether typ is a domain the schema declares.
 func isDomain(db *DB, typ string) bool {
 	_, ok := db.domains[typ]

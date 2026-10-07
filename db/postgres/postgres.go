@@ -521,7 +521,14 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := names[len(names)-1].GetString_().GetSval()
-		return []sqlir.SchemaChange{{Table: name, Object: "domain", Create: true,
+		var parts []string
+		for _, n := range names {
+			parts = append(parts, n.GetString_().GetSval())
+		}
+		// Table is the qualified name, so that domains of one name in two
+		// schemas can be told apart; Columns[0].Name is the bare name a
+		// column's type is written with.
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause)}}}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
