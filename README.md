@@ -246,7 +246,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 
 *Schema*
 
-- `ALTER COLUMN ... TYPE ... USING`, `CREATE TABLE ... LIKE`, `ADD CONSTRAINT ... USING INDEX`, `CREATE TEMPORARY TABLE`, and adding a generated column to a table that holds rows
+- `CREATE TABLE ... LIKE`, `ADD CONSTRAINT ... USING INDEX`, `CREATE TEMPORARY TABLE`, and, on a table that holds rows, `ALTER COLUMN ... TYPE ... USING` and adding a generated column
 - The system catalogs and `information_schema`, which are not there, so a query of them fails as of an undefined table
 
 *Statements*

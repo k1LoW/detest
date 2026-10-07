@@ -636,6 +636,19 @@ var writeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "a column type changed with USING on a table without rows",
+		Schema: []string{
+			`CREATE TABLE s (id int PRIMARY KEY, created_by text)`,
+			`ALTER TABLE s ALTER COLUMN created_by TYPE uuid USING created_by::uuid`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO s VALUES (1, '00000000-0000-0000-0000-00000000000A')`),
+			difftest.S(0, `INSERT INTO s VALUES (2, 'nope')`),
+			difftest.Q(0, `SELECT id FROM s WHERE created_by = '{00000000-0000-0000-0000-00000000000a}'`),
+		},
+	},
+	{
 		Name:   "a plain select reads its snapshot after waiting",
 		Schema: stockSchema, Seed: stockSeed, Conns: 3,
 		Steps: []difftest.Step{

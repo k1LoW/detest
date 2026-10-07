@@ -511,6 +511,12 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			if slices.ContainsFunc(ch.Columns, func(c sqlir.ColumnDef) bool { return c.Generated != nil }) {
 				return nil, x.unsupported("adding a generated column to a table with rows")
 			}
+			// USING converts the rows by an expression, which the rewrite
+			// under the new type does not run. A migration runs it on a table
+			// without rows, where the expression is never evaluated.
+			if slices.ContainsFunc(ch.Columns, func(c sqlir.ColumnDef) bool { return c.Using }) {
+				return nil, x.unsupported("ALTER COLUMN TYPE with USING on a table with rows")
+			}
 		}
 		if err := tx.db.applySchema(st, tx); err != nil {
 			return nil, err

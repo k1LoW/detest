@@ -276,6 +276,9 @@ type ColumnDef struct {
 	Type string
 	// TypeOnly changes the type and leaves the default (ALTER COLUMN TYPE).
 	TypeOnly bool
+	// Using marks ALTER COLUMN TYPE ... USING, which converts the rows by an
+	// expression rather than by a cast to the new type.
+	Using bool
 	// NotNull adds NOT NULL (in CREATE TABLE, ADD COLUMN or SET NOT NULL);
 	// DropNotNull removes it.
 	NotNull     bool
