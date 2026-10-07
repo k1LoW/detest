@@ -1183,6 +1183,8 @@ func (r *run) redeliver(p *Proc) {
 		p.pt.queue.msgs = append(p.pt.queue.msgs, p.msg)
 		r.queuesTouched = true
 	} else {
+		p.pt.queue.dropped = append(p.pt.queue.dropped, p.msg.msg)
+		r.queuesTouched = true
 		r.note(p, "drop %s after %d redeliveries", p.msg, p.msg.redelivered-1)
 	}
 }
@@ -1737,9 +1739,10 @@ func isLibraryFrame(fn string) bool {
 
 // State is a snapshot of the committed contents of databases and queues for invariants.
 type State struct {
-	dbs    map[string]map[string]map[string]Row
-	queues map[string][]Msg
-	prev   *State
+	dbs     map[string]map[string]map[string]Row
+	queues  map[string][]Msg
+	dropped map[string][]Msg
+	prev    *State
 }
 
 // Prev returns the snapshot taken at the previous Always check, or nil.
@@ -1807,6 +1810,16 @@ func (v RowView) Clone() Row { return publicRow(v.r.clone()) }
 // Queue returns the messages currently in a queue.
 func (st *State) Queue(q *Queue) []Msg { return st.queues[q.name] }
 
+// Dropped returns the messages q has dropped so far in the run, because their
+// handler returned an error on the delivery after MaxRedeliveries
+// redeliveries, in the order they were dropped. A broker would go on
+// redelivering them, so a run with a drop has not settled where production
+// would, and an invariant that the work completes can skip it. Each copy of a
+// duplicated message is listed when it is dropped, whatever became of the
+// other. Messages lost through Losses are not listed, since the invariants
+// are to hold without them.
+func (st *State) Dropped(q *Queue) []Msg { return st.dropped[q.name] }
+
 // snapshot shares the committed rows instead of copying them: a commit
 // replaces a row rather than changing it, and State clones a row only when an
 // invariant reads it. A table untouched since the previous snapshot of the run
@@ -1816,7 +1829,7 @@ func (r *run) snapshot() *State {
 		return r.snap
 	}
 	r.queuesTouched = false
-	st := &State{dbs: make(map[string]map[string]map[string]Row, len(r.s.dbs)), queues: map[string][]Msg{}}
+	st := &State{dbs: make(map[string]map[string]map[string]Row, len(r.s.dbs)), queues: map[string][]Msg{}, dropped: map[string][]Msg{}}
 	for _, db := range r.s.dbs {
 		var prev map[string]map[string]Row
 		if r.snap != nil {
@@ -1839,6 +1852,9 @@ func (r *run) snapshot() *State {
 	for _, q := range r.s.queues {
 		for _, m := range q.msgs {
 			st.queues[q.name] = append(st.queues[q.name], m.msg)
+		}
+		if len(q.dropped) > 0 {
+			st.dropped[q.name] = slices.Clone(q.dropped)
 		}
 	}
 	return st
