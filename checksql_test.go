@@ -117,6 +117,19 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 	}
 }
 
+// An error of the probe's data in one statement of a script does not hide a
+// refused statement after it.
+func TestCheckSQLChecksEveryStatementOfAScript(t *testing.T) {
+	for _, q := range []string{
+		`INSERT INTO t (id) VALUES ($1), ($2); SET search_path TO tenant_1`,
+		`SELECT 1 / 0; SET search_path TO tenant_1`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
 // knownFuncs and mysqlFuncs are what CheckSQL and callFunc agree on, so
 // every name in them must have a case in callFunc's switch, and every case
 // must be in one of them. Otherwise CheckSQL would pass a function the run

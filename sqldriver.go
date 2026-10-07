@@ -42,20 +42,33 @@ func CheckSQL(d Server, query string) error {
 	if err := checkStatic(s.stmt, query, kind.InnoDB()); err != nil {
 		return err
 	}
-	pdb := &DB{name: "probe", kind: kind}
-	pdb.reset()
-	probe := pdb.newTx(nil)
-	probe.atomic, probe.block, probe.checking = true, true, true
-	args := make([]driver.Value, 65536) // more than any statement binds
-	_, err = s.exec(probe, args)
-	// An error of the server, such as 23505, is an outcome of the probe's
-	// data rather than of what detest can run. Every parameter is NULL and a
-	// table without a schema is keyed by id, so the rows of a multi-row
-	// INSERT collide.
-	if _, ok := errors.AsType[*DBError](err); ok {
-		return nil
+	stmts := []sqlir.Statement{s.stmt}
+	if script, ok := s.stmt.(*sqlir.Script); ok {
+		stmts = script.Stmts
 	}
-	return err
+	args := make([]driver.Value, 65536) // more than any statement binds
+	for _, stmt := range stmts {
+		// Each statement of a script gets a probe of its own rather than
+		// running after the one before it. A script stops at its first error,
+		// and a probe that went on would abort with 25P02, which hides the
+		// statements after the error as well.
+		pdb := &DB{name: "probe", kind: kind}
+		pdb.reset()
+		probe := pdb.newTx(nil)
+		probe.atomic, probe.block, probe.checking = true, true, true
+		_, err := (&parsedStatement{query: query, stmt: stmt}).exec(probe, args)
+		// An error of the server, such as 23505, is an outcome of the probe's
+		// data rather than of what detest can run. Every parameter is NULL and
+		// a table without a schema is keyed by id, so the rows of a multi-row
+		// INSERT collide.
+		if _, ok := errors.AsType[*DBError](err); ok {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type sqlConnector struct{ db *DB }
