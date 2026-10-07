@@ -172,6 +172,12 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			}
 			return !decides, nil
 		}
+		switch v.Op {
+		case "=", "<>", "!=", "<", "<=", ">", ">=":
+			if out, ok, err := x.compareRowSubquery(v, en); ok || err != nil {
+				return out, err
+			}
+		}
 		l, err := x.evalRaw(v.L, en)
 		if err != nil {
 			return nil, err
@@ -566,6 +572,44 @@ func (x *sqlExec) untypedPair(le sqlir.Expr, l any, re sqlir.Expr, r any) (any, 
 // compareRows compares two rows as Postgres does: = and <> pair by pair in
 // three-valued logic, and an ordering by the first pair that is not equal,
 // which is NULL when that pair holds a NULL.
+// compareRowSubquery compares a row with a subquery of as many columns, as
+// (a, b) = (SELECT a, b FROM ...) does. ok is false when v is not that form.
+// Postgres takes the pair as a row comparison only with the row on the left;
+// a subquery on the left is a scalar subquery, which must have one column.
+func (x *sqlExec) compareRowSubquery(v *sqlir.BinaryExpr, en *env) (_ any, ok bool, _ error) {
+	row, rok := v.L.(*sqlir.RowExpr)
+	sub, sok := v.R.(*sqlir.SubQuery)
+	if !rok || !sok {
+		return nil, false, nil
+	}
+	rowVals, err := x.evalRaw(row, en)
+	if err != nil {
+		return nil, true, err
+	}
+	cols, rows, err := x.evalSelect(sub.Select, en)
+	if err != nil {
+		return nil, true, err
+	}
+	if len(cols) != len(row.Items) {
+		return nil, true, x.unsupported("a row compared with a subquery of another number of columns")
+	}
+	if len(rows) > 1 {
+		return nil, true, x.tx.db.kind.Error(sqlir.CardinalityViolation, "more than one row returned by a subquery used as an expression", "", "", "")
+	}
+	if len(rows) == 0 {
+		return nil, true, nil
+	}
+	subVals := make([]any, len(cols))
+	subItems := make([]sqlir.Expr, len(cols))
+	for i, c := range cols {
+		// Each column takes the type the subquery gives it, as a scalar
+		// subquery's single column does.
+		subVals[i], subItems[i] = rows[0][c], sub
+	}
+	out, err := x.compareRows(v.Op, row.Items, rowVals, subItems, subVals)
+	return out, true, err
+}
+
 func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Expr, rv any) (any, error) {
 	l, lok := lv.([]any)
 	r, rok := rv.([]any)

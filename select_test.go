@@ -936,6 +936,8 @@ func TestRowComparison(t *testing.T) {
 		`SELECT count(*) FROM p WHERE a IN (SELECT a, b FROM p)`,
 		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
+		`SELECT count(*) FROM p WHERE (SELECT a, b FROM p LIMIT 1) = (a, b)`,
+		`SELECT count(*) FROM p WHERE (a, b) = (SELECT a, b, name FROM p LIMIT 1)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
