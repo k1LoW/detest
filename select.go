@@ -1234,7 +1234,7 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 			}
 			var err error
 			var coll sqlir.Collation
-			if len(w.Func.Args) > 0 {
+			if len(w.Func.Args) > 0 && (name == "min" || name == "max") {
 				if coll, err = x.orderCollation(w.Func.Args[0]); err == nil {
 					coll, err = decide(coll, vals...)
 				}

@@ -1297,12 +1297,16 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				}
 				vals = append(vals, x.aggOperand(v.Name, val))
 			}
-			coll, err := x.orderCollation(v.Args[0])
-			if err == nil {
-				coll, err = decide(coll, vals...)
-			}
-			if err != nil {
-				return nil, err
+			// Only min and max order their argument.
+			var coll sqlir.Collation
+			if v.Name == "min" || v.Name == "max" {
+				var err error
+				if coll, err = x.orderCollation(v.Args[0]); err == nil {
+					coll, err = decide(coll, vals...)
+				}
+				if err != nil {
+					return nil, err
+				}
 			}
 			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]), coll)
 		}
