@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // External.Do wraps a real in-process callee: with FailAfter the callee's

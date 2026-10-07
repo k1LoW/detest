@@ -10,8 +10,8 @@ import (
 	glogger "gorm.io/gorm/logger"
 
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/postgres"
-	"github.com/k1LoW/detest/postgres/pgxerr"
+	"github.com/k1LoW/detest/db/postgres"
+	"github.com/k1LoW/detest/db/postgres/pgxerr"
 )
 
 type user struct {

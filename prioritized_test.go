@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // windowModel breaks only when b runs right after a's 20th step and before

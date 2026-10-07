@@ -9,8 +9,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func arrayDB(t *testing.T) *sql.DB {

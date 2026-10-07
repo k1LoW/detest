@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/k1LoW/detest/mysql"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // WITH ... UPDATE and WITH ... DELETE run their CTEs once, before the rows to

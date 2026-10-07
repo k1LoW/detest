@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // simulate declares a worker that runs twice, which may crash at any step

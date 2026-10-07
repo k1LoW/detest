@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // counterModel declares two handlers that read-check-write a counter, with the

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // orderModel declares a checkout that records an order and publishes an event

@@ -3,7 +3,7 @@ package detest
 import (
 	"testing"
 
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 func TestIgnoredTable(t *testing.T) {

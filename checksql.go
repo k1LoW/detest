@@ -21,7 +21,7 @@ var knownFuncs = map[string]bool{
 }
 
 // mysqlFuncs are the functions callFunc computes on InnoDB only, under the
-// executor's names for them (mysql/expr.go). Written in a statement for
+// executor's names for them (db/mysql/expr.go). Written in a statement for
 // Postgres they name no function the server has, so they are refused there.
 var mysqlFuncs = map[string]bool{
 	"last_insert_id": true, "mysql_concat": true, "mysql_greatest": true, "mysql_least": true, "mysql_nullif": true,

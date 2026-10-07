@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/k1LoW/detest"
-	"github.com/k1LoW/detest/postgres"
+	"github.com/k1LoW/detest/db/postgres"
 )
 
 // simulate declares a transfer from a to b and one from b to a, and the
