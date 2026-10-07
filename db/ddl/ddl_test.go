@@ -19,7 +19,7 @@ import (
 func TestFromPostgres(t *testing.T) {
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()
-	ctr, err := tcpostgres.Run(ctx, "postgres:18-alpine", tcpostgres.BasicWaitStrategies())
+	ctr, err := tcpostgres.Run(ctx, "postgres:18", tcpostgres.BasicWaitStrategies())
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatal(err)

@@ -38,8 +38,16 @@ func start() error {
 		// testcontainers' own reaper container gets a fixed 60 seconds to
 		// start, so a start that fails is tried again.
 		for attempt := range 3 {
-			pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18-alpine", testcontainers.WithWaitStrategyAndDeadline(10*time.Minute,
-				wait.ForLog("database system is ready to accept connections").WithOccurrence(2), wait.ForListeningPort("5432/tcp")))
+			// The Debian image, as applications run Postgres on glibc rather
+			// than on Alpine's musl, with the C collation detest gives by
+			// default. Its own default, en_US.utf8, orders text otherwise.
+			// LC_CTYPE stays en_US.UTF-8 so that lower and upper map
+			// characters beyond ASCII, and the encoding stays UTF8, which
+			// --lc-collate=C alone would turn into SQL_ASCII.
+			pgCtr, pgErr = tcpostgres.Run(ctx, "postgres:18",
+				testcontainers.WithEnv(map[string]string{"POSTGRES_INITDB_ARGS": "--encoding=UTF8 --lc-collate=C --lc-ctype=en_US.UTF-8"}),
+				testcontainers.WithWaitStrategyAndDeadline(10*time.Minute,
+					wait.ForLog("database system is ready to accept connections").WithOccurrence(2), wait.ForListeningPort("5432/tcp")))
 			if pgErr == nil {
 				break
 			}
@@ -58,9 +66,27 @@ func start() error {
 		if pgURL, pgErr = url.Parse(dsn); pgErr != nil {
 			return
 		}
-		pgAdmin, pgErr = sql.Open("pgx", dsn)
+		if pgAdmin, pgErr = sql.Open("pgx", dsn); pgErr != nil {
+			return
+		}
+		pgErr = checkCollation(ctx, pgAdmin)
 	})
 	return pgErr
+}
+
+// checkCollation fails when the server orders text other than as C does,
+// which detest's default collation is, so that a change of image or locale
+// does not make every case compare against another order.
+func checkCollation(ctx context.Context, db *sql.DB) error {
+	var collate string
+	var upperFirst bool
+	if err := db.QueryRowContext(ctx, `SELECT datcollate, 'B' < 'a' FROM pg_database WHERE datname = current_database()`).Scan(&collate, &upperFirst); err != nil {
+		return err
+	}
+	if collate != "C" || !upperFirst {
+		return fmt.Errorf("the server's collation is %q, which does not order text as C does", collate)
+	}
+	return nil
 }
 
 func TestMain(m *testing.M) {
