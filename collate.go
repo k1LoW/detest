@@ -3,6 +3,7 @@ package detest
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -26,6 +27,40 @@ func (x *sqlExec) noteCollation(r *sqlir.ColumnRef, sc *colScope) {
 		x.colls = map[*sqlir.ColumnRef]colNote{}
 	}
 	x.colls[r] = colNote{name: name, known: known}
+}
+
+// outputCollations are the collations of the n columns sel gives, empty for
+// the database's, which CREATE TABLE AS keeps on the columns it creates as
+// Postgres does. A query whose columns detest cannot map to its select
+// list, as with a * or a set operation, is refused where a column or a
+// COLLATE sets a collation.
+func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, error) {
+	db := x.tx.db
+	if db.kind.InnoDB() {
+		return nil, nil
+	}
+	if x.declared == nil {
+		d := db.declaresCollations()
+		x.declared = &d
+	}
+	if !*x.declared && !x.collates {
+		return nil, nil
+	}
+	if sel.SetOp != "" || len(sel.Values) > 0 || len(sel.Targets) != n || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+	}
+	out := make([]string, n)
+	for i, t := range sel.Targets {
+		u, err := x.collationOf(t.Expr)
+		if err != nil {
+			return nil, err
+		}
+		if u.unknown {
+			return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+		}
+		out[i] = u.name
+	}
+	return out, nil
 }
 
 // noteOutput records that the ORDER BY key k names or numbers the select
@@ -81,6 +116,32 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return x.collationOf(out)
 		}
 		return collationUse{}, nil
+	case *sqlir.WindowFunc:
+		// The result is the function's; PARTITION BY and ORDER BY only
+		// group and order the rows it reads.
+		return x.collationOf(e.Func)
+	case *sqlir.IsNull, *sqlir.InExpr, *sqlir.ArrayCmp, *sqlir.RowExpr:
+		// A boolean or a row has no collation to pass on, whatever its
+		// operands have.
+		return collationUse{}, nil
+	case *sqlir.UnaryExpr:
+		if e.Op == "NOT" {
+			return collationUse{}, nil
+		}
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "||":
+		default:
+			// The comparisons, LIKE, AND, OR and the arithmetic give a
+			// boolean or a number; only || gives text.
+			return collationUse{}, nil
+		}
+	case *sqlir.Cast:
+		switch e.Type {
+		case "text", "varchar", "bpchar", "char", "character varying", "character", "name":
+		default:
+			return collationUse{}, nil
+		}
 	case *sqlir.CaseExpr:
 		// The result takes the collation of the branches, not of the
 		// conditions.
@@ -269,6 +330,13 @@ func compareOrdered(c sqlir.Collation, a, b any) (int, bool) {
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
 	if v.Name != "greatest" && v.Name != "least" {
 		return x.callFunc(v.Name, args)
+	}
+	// database/sql lets a string argument come as []byte, which callFunc
+	// takes as the string.
+	for i, a := range args {
+		if b, ok := derefValue(a).([]byte); ok {
+			args[i] = string(b)
+		}
 	}
 	c, err := x.orderCollation(v.Args...)
 	if err == nil {

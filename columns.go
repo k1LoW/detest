@@ -100,6 +100,10 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		err = c.update(st)
 	case *sqlir.DeleteStmt:
 		err = c.delete(st)
+	case *sqlir.CreateTableAsStmt:
+		// Checked as Postgres plans the query, and so that the collations
+		// of its columns are known to the table it creates.
+		_, err = c.query(st.Select, nil)
 	}
 	if err != nil {
 		return err

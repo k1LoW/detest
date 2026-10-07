@@ -157,6 +157,38 @@ func TestDerivedTextCollation(t *testing.T) {
 	}
 }
 
+// The collation of an expression comes from what gives its result: not from
+// a window's PARTITION BY, nor through a boolean, and CREATE TABLE AS keeps
+// the collation of each column it creates.
+func TestCollationOfResults(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
+	mustExec(t, db, `CREATE TABLE u AS SELECT id, name COLLATE "C" AS name, name AS plain FROM t`)
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT first_value(name) OVER (PARTITION BY name COLLATE "C") FROM t ORDER BY 1`, []string{"a", "B", "b"}},
+		{`SELECT id FROM t ORDER BY concat((name COLLATE "C") IS NULL, name)`, []string{"3", "2", "1"}},
+		{`SELECT id FROM u ORDER BY name`, []string{"2", "3", "1"}},
+		{`SELECT id FROM u ORDER BY plain`, []string{"3", "2", "1"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
+	}
+	if _, err := db.Exec(`CREATE TABLE w AS SELECT * FROM t WHERE name COLLATE "C" > ''`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CREATE TABLE AS of a * with a COLLATE: got %v, want unsupported", err)
+	}
+	// A string argument that database/sql passes as []byte is text to
+	// greatest and least, as to the other functions.
+	if got := rowsOf(t, db, `SELECT greatest($1::text, $2::text)`, []byte("a"), []byte("B")); !reflect.DeepEqual(got, []string{"B"}) {
+		t.Errorf("greatest of []byte arguments: got %v", got)
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

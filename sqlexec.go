@@ -552,10 +552,24 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	for _, c := range cols {
 		ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: c})
 	}
+	colls, err := x.outputCollations(st.Select, len(cols))
+	if err != nil {
+		return nil, err
+	}
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err
 	}
 	table := x.tx.db.resolve(st.Table)
+	if def := x.tx.db.defs[table]; def != nil {
+		for i, name := range colls {
+			if name != "" && name != "default" {
+				if def.collations == nil {
+					def.collations = map[string]string{}
+				}
+				def.collations[cols[i]] = name
+			}
+		}
+	}
 	if st.Materialized {
 		x.tx.db.matviews[table] = st
 	}
