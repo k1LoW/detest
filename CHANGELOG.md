@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.3.0](https://github.com/k1LoW/detest/compare/v0.2.0...v0.3.0) - 2026-10-07
+
+- refactor: move the server packages and ddl under db/ by @k1LoW in https://github.com/k1LoW/detest/pull/58
+- feat: schedule goroutines sharing a GORM transaction through gormpool by @k1LoW in https://github.com/k1LoW/detest/pull/60
+- feat: stall processes past a TTL, and fake a key-value store on ext.Do by @k1LoW in https://github.com/k1LoW/detest/pull/61
+- feat: add sqlcdbtx and sqlxext, seam packages for sqlc and sqlx by @k1LoW in https://github.com/k1LoW/detest/pull/62
+- feat: list the messages dropped after MaxRedeliveries in State by @k1LoW in https://github.com/k1LoW/detest/pull/63
+
 ## [v0.2.0](https://github.com/k1LoW/detest/compare/v0.1.1...v0.2.0) - 2026-10-06
 
 - refactor: move expression evaluation and casts out of sqlexec.go by @k1LoW in https://github.com/k1LoW/detest/pull/35
