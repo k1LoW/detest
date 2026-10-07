@@ -285,6 +285,20 @@ func TestDomainOnlyCollation(t *testing.T) {
 	}
 }
 
+// A COLLATE a table keeps in a CHECK is evaluated on a later write, which
+// orders by it rather than by bytes on a database of the C collation.
+func TestPersistedCollate(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": foldCase{}})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text CHECK (name COLLATE "fold" < 'm'))`)
+	// Under fold, 'B' sorts before 'm'; by bytes it does too, but 'Z' does
+	// only by bytes, so fold refuses it where C would take it.
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'B')`)
+	if _, err := db.Exec(`INSERT INTO t VALUES (2, 'Z')`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("a CHECK ordered by fold: got %v, want a check violation", err)
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

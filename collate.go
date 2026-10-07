@@ -318,27 +318,31 @@ func decide(c sqlir.Collation, vals ...any) (sqlir.Collation, error) {
 	return nil, nil
 }
 
-// hasCollate reports whether a COLLATE stands anywhere under n.
+// hasCollate reports whether a COLLATE stands anywhere under n, which may
+// be a table definition with unexported fields: it reads types only, never
+// the values behind them.
 func hasCollate(n any) bool {
+	collate := reflect.TypeFor[*sqlir.Collate]()
 	found := false
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
-		if found {
+		if found || !v.IsValid() {
 			return
 		}
 		switch v.Kind() {
-		case reflect.Interface, reflect.Pointer:
+		case reflect.Pointer:
 			if v.IsNil() {
 				return
 			}
-			if !v.CanInterface() {
-				return
-			}
-			if _, ok := reflect.TypeAssert[*sqlir.Collate](v); ok {
+			if v.Type() == collate {
 				found = true
 				return
 			}
 			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
 		case reflect.Struct:
 			for _, f := range v.Fields() {
 				walk(f)
@@ -347,6 +351,10 @@ func hasCollate(n any) bool {
 			for i := range v.Len() {
 				walk(v.Index(i))
 			}
+		case reflect.Map:
+			for it := v.MapRange(); it.Next(); {
+				walk(it.Value())
+			}
 		}
 	}
 	walk(reflect.ValueOf(n))
@@ -354,13 +362,23 @@ func hasCollate(n any) bool {
 }
 
 // declaresCollations reports whether a column or a domain of the database
-// declares a collation other than the database's, or a view's query a
-// COLLATE, which the view's columns take. "default" is the database's, and so
+// declares a collation other than the database's, or a COLLATE stands in a
+// view's or a materialized view's query, or in an expression a table keeps
+// and evaluates on a later write, a CHECK, a default, a generated column or
+// an index's predicate, which the column check of that write does not see. "default" is the database's, and so
 // are C and POSIX on a database of the C collation.
 func (db *DB) declaresCollations() bool {
 	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
 	for _, v := range db.views {
 		if hasCollate(v.View) {
+			return true
+		}
+	}
+	if hasCollate(db.matviews) {
+		return true
+	}
+	for _, def := range db.defs {
+		if hasCollate(def) {
 			return true
 		}
 	}
