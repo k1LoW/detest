@@ -52,7 +52,7 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	}
 	out := make([]string, n)
 	for i, t := range sel.Targets {
-		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !isDomain(db, typ) {
+		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] {
 			continue // a number or a boolean has no collation to keep
 		}
 		u, err := x.collationOf(t.Expr)
@@ -67,15 +67,17 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	return out, nil
 }
 
-// ambiguousCollation is the collation of a domain name two schemas declare
-// domains of, which no collation is declared under, so that ordering by it
-// is refused.
-const ambiguousCollation = "domains of one name in two schemas"
+// domainCollation stands for the collation of a domain that declares one,
+// which no collation is declared under, so that ordering by it is refused.
+const domainCollation = "a domain's collation"
 
-// isDomain reports whether typ is a domain the schema declares.
-func isDomain(db *DB, typ string) bool {
-	_, ok := db.domains[typ]
-	return ok
+// domainCollation is domainCollation for a type that is a collated domain,
+// and empty for any other.
+func (db *DB) domainCollation(typ string) string {
+	if db.collatedDomains[typ] {
+		return domainCollation
+	}
+	return ""
 }
 
 // collatableType reports whether a value of typ has a collation.
@@ -161,7 +163,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return collationUse{}, nil
 		}
 	case *sqlir.Cast:
-		if c, ok := x.tx.db.domains[e.Type]; ok {
+		if c := x.tx.db.domainCollation(e.Type); c != "" {
 			// A cast to a domain takes the domain's collation.
 			return collationUse{name: c}, nil
 		}
@@ -263,6 +265,9 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 		return undecided{x.unsupported("text of a subquery, view or CTE ordered where a column or COLLATE sets a collation")}, nil
 	}
 	name := u.name
+	if name == domainCollation {
+		return nil, x.unsupported("text of a domain that declares a collation, which detest does not follow")
+	}
 	if name == "" {
 		name = "default"
 	}
@@ -311,15 +316,6 @@ func decide(c sqlir.Collation, vals ...any) (sqlir.Collation, error) {
 		}
 	}
 	return nil, nil
-}
-
-// qualifyDomain is a domain's name with the schema an unqualified name is
-// created in.
-func (db *DB) qualifyDomain(name string) string {
-	if strings.Contains(name, ".") {
-		return name
-	}
-	return db.searchPath()[0] + "." + name
 }
 
 // hasCollate reports whether a COLLATE stands anywhere under n.
@@ -386,7 +382,7 @@ func (db *DB) declaresCollations() bool {
 	}
 	// A domain's collation reaches text through a cast to the domain even
 	// when no column is of it.
-	return slices.ContainsFunc(slices.Collect(maps.Values(db.domains)), other)
+	return len(db.collatedDomains) > 0
 }
 
 // compareOrdered is compareValues with text ordered by c, and two strings c

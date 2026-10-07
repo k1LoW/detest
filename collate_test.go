@@ -190,16 +190,14 @@ func TestCollationOfResults(t *testing.T) {
 	}
 }
 
-// A column of a domain orders by the domain's collation, a table CREATE
-// TABLE IF NOT EXISTS ... AS finds is left as it is, a number keeps no
-// collation, and each statement of a script sees the collations the ones
-// before it declared.
+// A table CREATE TABLE IF NOT EXISTS ... AS finds is left as it is, a
+// number keeps no collation, and each statement of a script sees the
+// collations the ones before it declared.
 func TestCollationsAcrossStatements(t *testing.T) {
 	s := newSim(t)
 	db, store := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
-	mustExec(t, db, `CREATE DOMAIN public.tag AS text COLLATE "C"`)
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, v tag)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
 	mustExec(t, db, `CREATE TABLE u AS SELECT id, name FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS u AS SELECT id, name COLLATE "C" AS name FROM t`)
 	mustExec(t, db, `CREATE TABLE n AS SELECT id, name, length(name COLLATE "C") AS n FROM t`)
@@ -207,7 +205,6 @@ func TestCollationsAcrossStatements(t *testing.T) {
 		q    string
 		want []string
 	}{
-		{`SELECT id FROM t ORDER BY v`, []string{"2", "3", "1"}},
 		{`SELECT id FROM u ORDER BY name`, []string{"3", "2", "1"}},
 	} {
 		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
@@ -226,53 +223,45 @@ func TestCollationsAcrossStatements(t *testing.T) {
 	}
 }
 
-// A domain's collation follows the domain: through a cast to it, into a
-// domain based on it, and out of the schema when it is dropped; and CREATE
-// TABLE IF NOT EXISTS ... AS on a table that exists does nothing.
+// detest does not follow a domain's collation, so text of a domain that
+// declares one, or is based on one that does, is not ordered, whether a
+// column is of it or a cast makes text of it. A domain without one orders
+// as text does. CREATE TABLE IF NOT EXISTS ... AS on any relation that
+// exists does nothing.
 func TestDomainCollations(t *testing.T) {
 	s := newSim(t)
 	db, store := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
 	mustExec(t, db, `CREATE DOMAIN tag AS text COLLATE "C"`)
 	mustExec(t, db, `CREATE DOMAIN nested AS tag`)
-	mustExec(t, db, `CREATE DOMAIN gone AS text COLLATE "C"`)
-	mustExec(t, db, `DROP DOMAIN gone`)
-	mustExec(t, db, `CREATE DOMAIN gone AS text`)
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, n nested, g gone)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b', 'b'), (2, 'B', 'B', 'B'), (3, 'a', 'a', 'a')`)
+	mustExec(t, db, `CREATE DOMAIN old AS text COLLATE "C"`)
+	mustExec(t, db, `ALTER DOMAIN old RENAME TO renamed`)
+	mustExec(t, db, `CREATE DOMAIN plain AS text`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, a tag, n nested, r renamed, p plain)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b', 'b', 'b', 'b'), (2, 'B', 'B', 'B', 'B', 'B'), (3, 'a', 'a', 'a', 'a', 'a')`)
 	mustExec(t, db, `CREATE TABLE c AS SELECT id, name::tag AS name FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS c AS SELECT id + 100 AS id, name FROM t`)
+	for _, q := range []string{
+		`SELECT id FROM t ORDER BY a`,
+		`SELECT id FROM t ORDER BY n`,
+		`SELECT id FROM t ORDER BY r`,
+		`SELECT id FROM t ORDER BY name::tag`,
+		`SELECT id FROM t WHERE a < 'b'`,
+		`SELECT id FROM c ORDER BY name`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
 	for _, tc := range []struct {
 		q    string
 		want []string
 	}{
-		{`SELECT id FROM t ORDER BY name::tag`, []string{"2", "3", "1"}},
-		{`SELECT id FROM t ORDER BY n`, []string{"2", "3", "1"}},
-		{`SELECT id FROM t ORDER BY g`, []string{"3", "2", "1"}},
-		{`SELECT id FROM c ORDER BY name`, []string{"2", "3", "1"}},
+		{`SELECT id FROM t ORDER BY p`, []string{"3", "2", "1"}},
+		{`SELECT id FROM t WHERE a = 'B'`, []string{"2"}},
+		{`SELECT count(*) FROM c`, []string{"3"}},
 	} {
 		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
-		}
-	}
-	// detest resolves a column's domain by its bare name, so two schemas'
-	// domains of one name leave its collation unknown.
-	mustExec(t, db, `CREATE SCHEMA other`)
-	mustExec(t, db, `CREATE DOMAIN other.tag AS text`)
-	mustExec(t, db, `CREATE TABLE twice (id int PRIMARY KEY, v tag)`)
-	mustExec(t, db, `INSERT INTO twice VALUES (1, 'a')`)
-	if _, err := db.Exec(`SELECT id FROM twice ORDER BY v`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("ordering a domain two schemas declare: got %v, want unsupported", err)
-	}
-	// A drop or a rename of a domain moves only the domain it names.
-	mustExec(t, db, `CREATE DOMAIN kept AS text COLLATE "C"`)
-	mustExec(t, db, `DROP DOMAIN IF EXISTS other.kept`)
-	mustExec(t, db, `CREATE DOMAIN old AS text COLLATE "C"`)
-	mustExec(t, db, `ALTER DOMAIN old RENAME TO renamed`)
-	mustExec(t, db, `CREATE TABLE k (id int PRIMARY KEY, a kept, b renamed)`)
-	mustExec(t, db, `INSERT INTO k VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
-	for _, q := range []string{`SELECT id FROM k ORDER BY a`, `SELECT id FROM k ORDER BY b`} {
-		if got := rowsOf(t, db, q); !reflect.DeepEqual(got, []string{"2", "3", "1"}) {
-			t.Errorf("%s: got %v, want the domain's C order", q, got)
 		}
 	}
 	// IF NOT EXISTS skips a relation of any kind, a view among them.
@@ -283,32 +272,16 @@ func TestDomainCollations(t *testing.T) {
 	}
 }
 
-// A view's column takes a COLLATE in its query, which detest does not
-// carry, so ordering it is refused even on a database of the C collation.
-func TestViewCollation(t *testing.T) {
-	s := newSim(t)
-	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": foldCase{}})))
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B')`)
-	mustExec(t, db, `CREATE VIEW v AS SELECT name COLLATE "fold" AS name FROM t`)
-	if _, err := db.Exec(`SELECT name FROM v ORDER BY name`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("ordering a view column a COLLATE sets: got %v, want unsupported", err)
-	}
-}
-
-// A collation only a domain declares still orders text cast to the domain,
-// and is kept by CREATE TABLE AS, on a database of the C collation.
+// On a database of the C collation, a domain is the only thing that sets a
+// collation, and a cast to it is still refused rather than ordered as C.
 func TestDomainOnlyCollation(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": foldCase{}})))
 	mustExec(t, db, `CREATE DOMAIN tag AS text COLLATE "fold"`)
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
-	mustExec(t, db, `CREATE TABLE c AS SELECT id, name::tag AS name FROM t`)
-	for _, q := range []string{`SELECT id FROM t ORDER BY name::tag`, `SELECT id FROM c ORDER BY name`} {
-		if got := rowsOf(t, db, q); !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
-			t.Errorf("%s: got %v, want the domain's fold order", q, got)
-		}
+	if _, err := db.Exec(`SELECT id FROM t ORDER BY name::tag`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering text cast to a collated domain: got %v, want unsupported", err)
 	}
 }
 

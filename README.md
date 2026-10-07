@@ -234,6 +234,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 - `round` of a value ending in .5, and a cast of one to an integer, when the statement does not show whether it is a `numeric` or a float
 - Text and a number in the same column of a set operation, or among the branches of `CASE`, `COALESCE`, `GREATEST` or `LEAST`
 - Values written to a column that Postgres converts by rules detest does not model, namely a value shorter than its `char(n)` column, a cast to `char(n)` or `char`, which pads text with spaces it compares without, text written to a timestamp column in a form other than `YYYY-MM-DD[( |T)HH:MM[:SS[.ffffff]]][Z|±hh[:mm]]`, an integer written to a boolean column, and number text written as `0x10`, `0x1p2` or `1_000`
+- Ordering text of a domain that declares a collation, or is based on one that does, as a column of the domain or through a cast to it, as detest does not follow a domain's collation. `ddl.From` writes such a column's collation on the column itself, which detest does follow
 - Nondeterministic collations, whose equality is not byte equality. Ordering text by a collation that neither `postgres.Collation`, `postgres.Collations` nor detest (`"C"`, `"POSIX"`, `"default"`) declares, by two collations at once, and, where a column or a `COLLATE` sets a collation, ordering the text column of a subquery, a view or a CTE, whose collation detest does not carry
 
 *Locking*

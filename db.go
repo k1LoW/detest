@@ -151,18 +151,16 @@ type DB struct {
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
 	defs map[string]*tableDef
-	// domains are the collations domains declare, by the domain's name,
-	// which a column of the domain orders by, and domainSchemas the
-	// qualified name each was created as. A name two schemas give domains
-	// of has ambiguousCollation, which nothing orders by.
-	domains       map[string]string
-	domainSchemas map[string]string
-	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views         map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs       map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs          map[string]int64                    // sequence values of the run, for nextval
-	uuids         int64                               // gen_random_uuid values handed out in the run
-	ignored       map[string]bool                     // tables Ignore took out of the simulation
+	// collatedDomains are the names of the domains that declare a collation,
+	// or are based on one that does. detest does not follow a domain's
+	// collation, so text of such a domain is not ordered (domainCollation).
+	collatedDomains map[string]bool
+	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views           map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs            map[string]int64                    // sequence values of the run, for nextval
+	uuids           int64                               // gen_random_uuid values handed out in the run
+	ignored         map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -1172,47 +1170,22 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "domain" && ch.Drop:
-		// Only the domain of that schema goes; a same-named one of another
-		// schema, or none, leaves what detest keeps as it is.
-		name := ch.Table[strings.LastIndex(ch.Table, ".")+1:]
-		if db.domainSchemas[name] == db.qualifyDomain(ch.Table) {
-			delete(db.domains, name)
-			delete(db.domainSchemas, name)
-		}
+		// The name stays marked: a domain of it created again, or one of
+		// another schema, may still be collated, and refusing is safe.
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
-		name := ch.Table[strings.LastIndex(ch.Table, ".")+1:]
-		old := db.qualifyDomain(ch.Table)
-		if db.domainSchemas[name] != old {
-			return nil // not a domain detest keeps, or of another schema
+		if db.collatedDomains[ch.Table[strings.LastIndex(ch.Table, ".")+1:]] {
+			db.collatedDomains[ch.RenameTo] = true
 		}
-		c := db.domains[name]
-		delete(db.domains, name)
-		delete(db.domainSchemas, name)
-		nw := old[:strings.LastIndex(old, ".")+1] + ch.RenameTo
-		if q, ok := db.domainSchemas[ch.RenameTo]; ok && q != nw {
-			c = ambiguousCollation
-		}
-		db.domains[ch.RenameTo], db.domainSchemas[ch.RenameTo] = c, nw
 		return nil
 	case ch.Object == "domain":
-		// A domain without COLLATE takes its base type's, which another
-		// domain may set; "" is the database's.
 		col := ch.Columns[0]
-		c := cmp.Or(col.Collation, db.domains[col.Type])
-		if c == "default" {
-			c = ""
+		if c := col.Collation; (c != "" && c != "default") || db.collatedDomains[col.Type] {
+			if db.collatedDomains == nil {
+				db.collatedDomains = map[string]bool{}
+			}
+			db.collatedDomains[col.Name] = true
 		}
-		if db.domains == nil {
-			db.domains, db.domainSchemas = map[string]string{}, map[string]string{}
-		}
-		qualified := db.qualifyDomain(ch.Table)
-		if q, ok := db.domainSchemas[col.Name]; ok && q != qualified {
-			// detest resolves a column's type by its bare name, which
-			// cannot tell the two domains apart.
-			c = ambiguousCollation
-		}
-		db.domains[col.Name], db.domainSchemas[col.Name] = c, qualified
 		return nil
 	case ch.Object == "sequence" && ch.Drop:
 		name := db.seqName(ch.Table)
@@ -1335,7 +1308,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.types[col.Name] = col.Type
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
-			} else if c := cmp.Or(col.Collation, db.domains[col.Type]); c != "" && c != "default" {
+			} else if c := cmp.Or(col.Collation, db.domainCollation(col.Type)); c != "" && c != "default" {
 				if def.collations == nil {
 					def.collations = map[string]string{}
 				}
