@@ -1,6 +1,8 @@
 package detest
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -167,4 +169,43 @@ func TestStallKeepsThePreemptionBound(t *testing.T) {
 			return nil
 		})
 	}, MaxPreemptions(0), MaxStalls(1, time.Minute))
+}
+
+// A statement whose context ends during a stall at its yield point fails as
+// unsupported, as one whose context ends while it stands there unstalled,
+// and the run goes on with another process beside it.
+func TestStallPastTheStatementsDeadline(t *testing.T) {
+	seen := map[string]bool{}
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE marks (id text PRIMARY KEY)`)
+		s.Manual("writer", 1, func(p *Proc) error {
+			ctx, cancel := context.WithTimeout(p.Context(), 30*time.Second)
+			defer cancel()
+			_, err := db.ExecContext(ctx, `INSERT INTO marks VALUES ('m')`)
+			switch {
+			case err == nil:
+				seen["ok"] = true
+			case errors.As(err, new(*ErrUnsupportedSQL)):
+				seen["unsupported"] = true
+			default:
+				seen[err.Error()] = true
+			}
+			if _, err := db.ExecContext(p.Context(), `INSERT INTO marks VALUES ('n')`); err != nil {
+				return err
+			}
+			return nil
+		})
+		s.Manual("other", 1, func(p *Proc) error {
+			for _, id := range []string{"o1", "o2"} {
+				if _, err := db.ExecContext(p.Context(), `INSERT INTO marks VALUES ($1)`, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}, MaxStalls(1, time.Minute))
+	if len(seen) != 2 || !seen["ok"] || !seen["unsupported"] {
+		t.Fatalf("outcomes of the statement: %v, want ok and unsupported", seen)
+	}
 }

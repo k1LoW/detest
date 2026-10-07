@@ -1496,6 +1496,12 @@ func (p *Proc) syncOutside() {
 // rather than running on. Processes whose stalls end at the same instant
 // report back in the order the runtime wakes them, and running on there
 // would order their steps by it, which a replay does not repeat.
+//
+// A statement whose context ended during the stall needs no check here.
+// The scheduler takes the yield and then waits in synctest.Wait for the
+// process to block, so no resume is sent before the wait below sees the
+// closed stmtDone, and the statement is canceled as one standing at its
+// yield point is.
 func (p *Proc) sleepStall(d time.Duration) {
 	t := time.NewTimer(d)
 	select {
