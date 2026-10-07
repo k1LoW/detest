@@ -16,8 +16,11 @@ import "context"
 type Tx interface {
 	// Enter waits until the calling goroutine may use the transaction's
 	// connection, and takes it. release gives it back. It is a no-op outside
-	// a run, and for a transaction no process began.
-	Enter() (release func(), err error)
+	// a run, and for a transaction no process began. op, query and args
+	// describe the operation, which orders goroutines adopted at the same
+	// step, as the driver's statement does for a goroutine whose first call
+	// is a statement.
+	Enter(op, query string, args ...any) (release func(), err error)
 }
 
 // Slot receives the Tx of a transaction the driver begins with a context

@@ -10,13 +10,13 @@ type seamTx struct{ tx *Tx }
 // connection as a hand-written transaction's operation does, but gives the
 // engine mutex back before it returns, as the caller goes on into
 // database/sql and the driver, which takes the mutex itself.
-func (h seamTx) Enter() (release func(), err error) {
+func (h seamTx) Enter(op, query string, args ...any) (release func(), err error) {
 	tx := h.tx
 	s := tx.db.s
 	defer s.leave()
 	var caller *Proc
 	defer func() { absorbAbort(recover(), caller, &err) }()
-	caller = tx.caller(func() string { return canonical(tx.db.name, "use the transaction") })
+	caller = tx.caller(func() string { return canonical(tx.db.name, op, query, args) })
 	if caller == nil {
 		return func() {}, nil
 	}

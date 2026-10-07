@@ -86,7 +86,7 @@ type Tx struct {
 }
 
 func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	release, err := t.enter()
+	release, err := t.enter("prepare", query)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error
 }
 
 func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	release, err := t.enter()
+	release, err := t.enter("exec", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Re
 // QueryContext gives the connection back when it returns, but the driver
 // keeps it until the rows are closed.
 func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	release, err := t.enter()
+	release, err := t.enter("query", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.
 // error of the pool's, so when the run is over it calls the *sql.Tx all the
 // same, and the driver returns the end of the run.
 func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	release, err := t.enter()
+	release, err := t.enter("query", query, args...)
 	if err == nil {
 		defer release()
 	}
@@ -126,7 +126,7 @@ func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sq
 }
 
 func (t *Tx) Commit() error {
-	release, err := t.enter()
+	release, err := t.enter("commit", "")
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (t *Tx) Commit() error {
 }
 
 func (t *Tx) Rollback() error {
-	release, err := t.enter()
+	release, err := t.enter("rollback", "")
 	if err != nil {
 		return err
 	}
@@ -147,9 +147,9 @@ func (t *Tx) Rollback() error {
 // reads.
 func (t *Tx) GetDBConn() (*sql.DB, error) { return t.db, nil }
 
-func (t *Tx) enter() (func(), error) {
+func (t *Tx) enter(op, query string, args ...any) (func(), error) {
 	if t.seam == nil {
 		return func() {}, nil
 	}
-	return t.seam.Enter()
+	return t.seam.Enter(op, query, args...)
 }
