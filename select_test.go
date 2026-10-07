@@ -921,6 +921,9 @@ func TestRowComparison(t *testing.T) {
 		{`SELECT count(*) FROM p WHERE (a, name) NOT IN (SELECT 9, NULL)`, "2"},
 		{`SELECT count(*) FROM p WHERE a NOT IN (SELECT NULL::int)`, "0"},
 		{`SELECT count(*) FROM p WHERE NULL::int NOT IN (SELECT a FROM p WHERE a < 0)`, "4"},
+		// HAVING compares a row pair by pair too, not as the text of the row.
+		{`SELECT count(*) FROM p HAVING (count(*), 1) > (3, 1)`, "4"},
+		{`SELECT count(*) FROM p HAVING (count(*), 1) < (10, 1)`, "4"},
 	} {
 		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
@@ -928,7 +931,6 @@ func TestRowComparison(t *testing.T) {
 	}
 	for _, q := range []string{
 		`SELECT count(*) FROM p WHERE 1 IN ((1, 2))`,
-		`SELECT count(*) FROM p HAVING (count(*), 1) > (3, 1)`,
 		`SELECT count(*) FROM p WHERE CASE (a, b) WHEN (9, 1) THEN true ELSE false END`,
 		`SELECT count(*) FROM p WHERE NULLIF((a, b), (9, 1)) IS NULL`,
 		`SELECT count(*) FROM p WHERE a IN (SELECT a, b FROM p)`,
