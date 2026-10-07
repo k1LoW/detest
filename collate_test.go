@@ -296,6 +296,22 @@ func TestViewCollation(t *testing.T) {
 	}
 }
 
+// A collation only a domain declares still orders text cast to the domain,
+// and is kept by CREATE TABLE AS, on a database of the C collation.
+func TestDomainOnlyCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"fold": foldCase{}})))
+	mustExec(t, db, `CREATE DOMAIN tag AS text COLLATE "fold"`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
+	mustExec(t, db, `CREATE TABLE c AS SELECT id, name::tag AS name FROM t`)
+	for _, q := range []string{`SELECT id FROM t ORDER BY name::tag`, `SELECT id FROM c ORDER BY name`} {
+		if got := rowsOf(t, db, q); !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
+			t.Errorf("%s: got %v, want the domain's fold order", q, got)
+		}
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

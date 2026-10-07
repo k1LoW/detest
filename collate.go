@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -356,9 +357,9 @@ func hasCollate(n any) bool {
 	return found
 }
 
-// declaresCollations reports whether a column of the database declares a
-// collation other than the database's, or a view's query a COLLATE, which
-// the view's columns take. "default" is the database's, and so
+// declaresCollations reports whether a column or a domain of the database
+// declares a collation other than the database's, or a view's query a
+// COLLATE, which the view's columns take. "default" is the database's, and so
 // are C and POSIX on a database of the C collation.
 func (db *DB) declaresCollations() bool {
 	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
@@ -367,20 +368,25 @@ func (db *DB) declaresCollations() bool {
 			return true
 		}
 	}
+	other := func(name string) bool {
+		if name == "" || name == "default" {
+			return false
+		}
+		if c, ok := db.kind.NamedCollation(name); ok && bytes {
+			if _, same := c.(sqlir.ByteOrder); same {
+				return false
+			}
+		}
+		return true
+	}
 	for _, def := range db.defs {
-		for _, name := range def.collations {
-			if name == "default" {
-				continue
-			}
-			if c, ok := db.kind.NamedCollation(name); ok && bytes {
-				if _, same := c.(sqlir.ByteOrder); same {
-					continue
-				}
-			}
+		if slices.ContainsFunc(slices.Collect(maps.Values(def.collations)), other) {
 			return true
 		}
 	}
-	return false
+	// A domain's collation reaches text through a cast to the domain even
+	// when no column is of it.
+	return slices.ContainsFunc(slices.Collect(maps.Values(db.domains)), other)
 }
 
 // compareOrdered is compareValues with text ordered by c, and two strings c
