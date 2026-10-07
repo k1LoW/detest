@@ -1810,9 +1810,10 @@ func (v RowView) Clone() Row { return publicRow(v.r.clone()) }
 // Queue returns the messages currently in a queue.
 func (st *State) Queue(q *Queue) []Msg { return st.queues[q.name] }
 
-// Dropped returns the messages q has dropped so far in the run, because their
-// handler returned an error on the delivery after MaxRedeliveries
-// redeliveries, in the order they were dropped. A broker would go on
+// Dropped returns the messages q has dropped so far in the run, in the order
+// they were dropped. A message is dropped when the delivery after
+// MaxRedeliveries redeliveries fails too, its handler returning an error or
+// its consumer crashing under MaxCrashes. A broker would go on
 // redelivering them, so a run with a drop has not settled where production
 // would, and an invariant that the work completes can skip it. Each copy of a
 // duplicated message is listed when it is dropped, whatever became of the
