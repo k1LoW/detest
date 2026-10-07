@@ -97,8 +97,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 		v = v.Elem()
 	}
 	if v.Kind() == reflect.Struct {
-		for i := range v.NumField() {
-			f := v.Field(i)
+		for _, f := range v.Fields() {
 			if !f.CanInterface() {
 				continue
 			}
