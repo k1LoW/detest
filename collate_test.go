@@ -98,6 +98,48 @@ func TestNamedCollations(t *testing.T) {
 	}
 }
 
+// A collation qualified by a schema other than pg_catalog keeps the schema,
+// as two schemas may have collations of the same name.
+func TestSchemaQualifiedCollations(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"app.fold": foldCase{}})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE app.fold, code text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
+	if got := rowsOf(t, db, `SELECT id FROM t ORDER BY name`); !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
+		t.Errorf("ORDER BY a column of app.fold: got %v", got)
+	}
+	for _, q := range []string{
+		`SELECT id FROM t ORDER BY code COLLATE fold`,
+		`SELECT id FROM t ORDER BY code COLLATE other.fold`,
+		`SELECT id FROM t ORDER BY code COLLATE app."C"`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
+// A COLLATE inside a subquery is not carried to its column, so ordering the
+// column's text is refused, and the aggregates that do not order their
+// argument do not ask for its collation.
+func TestDerivedTextCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B')`)
+	if _, err := db.Exec(`SELECT s.name FROM (SELECT name COLLATE "C" AS name FROM t) s ORDER BY s.name`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a COLLATE inside a subquery: got %v, want unsupported", err)
+	}
+	for _, q := range []string{
+		`SELECT count(s.name), count(DISTINCT s.name) FROM (SELECT name COLLATE "C" AS name FROM t) s`,
+		`SELECT count(s.name) OVER () FROM (SELECT name COLLATE "C" AS name FROM t) s`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

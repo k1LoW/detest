@@ -70,8 +70,9 @@ func Collation(c sqlir.Collation) Option {
 }
 
 // Collations declares the collations COLLATE and a column may name, besides
-// "C", "POSIX" and "default", which detest knows. A statement that orders
-// text by a collation neither names is refused.
+// "C", "POSIX" and "default", which detest knows. A name qualified by a
+// schema other than pg_catalog is declared with it, as "app.name". A
+// statement that orders text by a collation neither names is refused.
 func Collations(named map[string]sqlir.Collation) Option {
 	return func(cf *config) { cf.collations = named }
 }
@@ -631,14 +632,19 @@ func unqualify(e sqlir.Expr) {
 	}
 }
 
-// collationName is the name a COLLATE clause gives, without the schema
-// pg_dump qualifies it with (pg_catalog."C"); empty without one.
+// collationName is the name a COLLATE clause gives, without pg_catalog,
+// which pg_dump qualifies the built-in ones with (pg_catalog."C"), and with
+// any other schema, as "app.name", since two schemas may have collations of
+// the same name; empty without one.
 func collationName(cc *pg.CollateClause) string {
-	names := cc.GetCollname()
-	if len(names) == 0 {
-		return ""
+	var parts []string
+	for _, n := range cc.GetCollname() {
+		parts = append(parts, n.GetString_().GetSval())
 	}
-	return names[len(names)-1].GetString_().GetSval()
+	if len(parts) > 1 && parts[0] == "pg_catalog" {
+		parts = parts[1:]
+	}
+	return strings.Join(parts, ".")
 }
 
 // columnDef converts a column with the constraints written on it.
