@@ -51,7 +51,7 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	}
 	out := make([]string, n)
 	for i, t := range sel.Targets {
-		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) {
+		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !isDomain(db, typ) {
 			continue // a number or a boolean has no collation to keep
 		}
 		u, err := x.collationOf(t.Expr)
@@ -64,6 +64,12 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 		out[i] = u.name
 	}
 	return out, nil
+}
+
+// isDomain reports whether typ is a domain the schema declares.
+func isDomain(db *DB, typ string) bool {
+	_, ok := db.domains[typ]
+	return ok
 }
 
 // collatableType reports whether a value of typ has a collation.
@@ -149,6 +155,10 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return collationUse{}, nil
 		}
 	case *sqlir.Cast:
+		if c, ok := x.tx.db.domains[e.Type]; ok {
+			// A cast to a domain takes the domain's collation.
+			return collationUse{name: c}, nil
+		}
 		if !collatableType(e.Type) {
 			return collationUse{}, nil
 		}

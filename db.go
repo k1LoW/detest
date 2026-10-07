@@ -150,10 +150,10 @@ type DB struct {
 
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
-	defs     map[string]*tableDef
+	defs map[string]*tableDef
 	// domains are the collations domains declare, by the domain's name,
 	// which a column of the domain orders by.
-	domains map[string]string
+	domains  map[string]string
 	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views    map[string]*sqlir.SchemaChange      // the query of each view
 	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
@@ -1168,13 +1168,21 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "domain" && ch.Drop:
+		delete(db.domains, ch.Table)
+		return nil
 	case ch.Object == "domain":
-		if c := ch.Columns[0].Collation; c != "" && c != "default" {
-			if db.domains == nil {
-				db.domains = map[string]string{}
-			}
-			db.domains[ch.Table] = c
+		// A domain without COLLATE takes its base type's, which another
+		// domain may set; "" is the database's.
+		col := ch.Columns[0]
+		c := cmp.Or(col.Collation, db.domains[col.Type])
+		if c == "default" {
+			c = ""
 		}
+		if db.domains == nil {
+			db.domains = map[string]string{}
+		}
+		db.domains[ch.Table] = c
 		return nil
 	case ch.Object == "sequence" && ch.Drop:
 		name := db.seqName(ch.Table)

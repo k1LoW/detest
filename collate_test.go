@@ -226,6 +226,36 @@ func TestCollationsAcrossStatements(t *testing.T) {
 	}
 }
 
+// A domain's collation follows the domain: through a cast to it, into a
+// domain based on it, and out of the schema when it is dropped; and CREATE
+// TABLE IF NOT EXISTS ... AS on a table that exists does nothing.
+func TestDomainCollations(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE DOMAIN tag AS text COLLATE "C"`)
+	mustExec(t, db, `CREATE DOMAIN nested AS tag`)
+	mustExec(t, db, `CREATE DOMAIN gone AS text COLLATE "C"`)
+	mustExec(t, db, `DROP DOMAIN gone`)
+	mustExec(t, db, `CREATE DOMAIN gone AS text`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, n nested, g gone)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b', 'b'), (2, 'B', 'B', 'B'), (3, 'a', 'a', 'a')`)
+	mustExec(t, db, `CREATE TABLE c AS SELECT id, name::tag AS name FROM t`)
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS c AS SELECT id + 100 AS id, name FROM t`)
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT id FROM t ORDER BY name::tag`, []string{"2", "3", "1"}},
+		{`SELECT id FROM t ORDER BY n`, []string{"2", "3", "1"}},
+		{`SELECT id FROM t ORDER BY g`, []string{"3", "2", "1"}},
+		{`SELECT id FROM c ORDER BY name`, []string{"2", "3", "1"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
+	}
+}
+
 func TestCheckSQLCollate(t *testing.T) {
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "C"`); err != nil {
 		t.Errorf("COLLATE \"C\": got %v", err)

@@ -61,9 +61,11 @@ func TimeZone(name string) Option {
 
 // Collation sets the database's collation, which orders text that declares
 // none: ORDER BY, <, min and max over it (default C, which orders text byte
-// by byte). It must be the collation the real database has, which
-// pg_database.datcollate shows, or the statements that order text read and
-// lock other rows than they do in production. Equality does not depend on
+// by byte). It must be the collation the real database has, or the
+// statements that order text read and lock other rows than they do in
+// production. pg_database shows it by its provider, datlocprovider:
+// datcollate for libc, and datlocale for ICU and the builtin provider,
+// whose C and C.UTF-8 order as C does. Equality does not depend on
 // it, as Postgres tells two strings equal only when their bytes are.
 func Collation(c sqlir.Collation) Option {
 	return func(cf *config) { cf.collation = c }
@@ -451,6 +453,12 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
+		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_DOMAIN {
+			for _, obj := range s.DropStmt.Objects {
+				changes = append(changes, sqlir.SchemaChange{Table: typeName(obj.GetTypeName()), Object: "domain", Drop: true})
+			}
+			return changes, true, nil
+		}
 		object, ok := map[pg.ObjectType]string{pg.ObjectType_OBJECT_TABLE: "", pg.ObjectType_OBJECT_VIEW: "view",
 			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index", pg.ObjectType_OBJECT_SEQUENCE: "sequence"}[s.DropStmt.RemoveType]
 		if !ok {
@@ -514,7 +522,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		}
 		name := names[len(names)-1].GetString_().GetSval()
 		return []sqlir.SchemaChange{{Table: name, Object: "domain", Create: true,
-			Columns: []sqlir.ColumnDef{{Name: name, Collation: collationName(s.CreateDomainStmt.CollClause)}}}}, true, nil
+			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause)}}}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,

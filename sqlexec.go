@@ -544,6 +544,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 // execCreateTableAs declares the table, without keys, and fills it with the
 // query's rows.
 func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, error) {
+	if _, exists := x.tx.db.defs[x.tx.db.resolve(st.Table)]; exists && st.IfNotExists {
+		// Postgres leaves the table as it is, without running the query.
+		return &sqlResult{}, nil
+	}
 	selCols, rows, err := x.evalSelect(st.Select, nil)
 	if err != nil {
 		return nil, err
@@ -560,12 +564,11 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	if err != nil {
 		return nil, err
 	}
-	_, existed := x.tx.db.defs[x.tx.db.resolve(st.Table)]
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err
 	}
 	table := x.tx.db.resolve(st.Table)
-	if def := x.tx.db.defs[table]; def != nil && !existed {
+	if def := x.tx.db.defs[table]; def != nil {
 		for i, name := range colls {
 			if name != "" && name != "default" {
 				if def.collations == nil {
