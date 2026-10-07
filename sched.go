@@ -1492,16 +1492,16 @@ func (p *Proc) syncOutside() {
 	}
 }
 
-// sleepStall sleeps through a stall and then stands at a yield point again,
-// rather than running on. Processes whose stalls end at the same instant
+// sleepStall sleeps through a stall and then reports a yield point again,
+// at which wait parks the process, rather than running on. Processes whose stalls end at the same instant
 // report back in the order the runtime wakes them, and running on there
 // would order their steps by it, which a replay does not repeat.
 //
 // A statement whose context ended during the stall needs no check here.
 // The scheduler takes the yield and then waits in synctest.Wait for the
-// process to block, so no resume is sent before the wait below sees the
-// closed stmtDone, and the statement is canceled as one standing at its
-// yield point is.
+// process to block, so no resume is sent before wait sees the closed
+// stmtDone, and the statement is canceled as one standing at its yield
+// point is.
 func (p *Proc) sleepStall(d time.Duration) {
 	t := time.NewTimer(d)
 	select {
@@ -1511,7 +1511,6 @@ func (p *Proc) sleepStall(d time.Duration) {
 		panic(abortSentinel{})
 	}
 	p.send(procEvent{kind: evYield})
-	p.wait()
 }
 
 // send reports ev to the scheduler. Once the run is over nobody reads, and a
@@ -1530,11 +1529,15 @@ func (p *Proc) wait() {
 		p.r.s.emHolder.Store(nil)
 		p.r.s.em.Unlock()
 	}
+wait:
 	select {
 	case <-p.resume:
 		if d := p.stall; d > 0 {
+			// Waiting again in this frame keeps held, which a statement
+			// canceled after the stall needs to take the mutex back.
 			p.stall = 0
 			p.sleepStall(d)
+			goto wait
 		}
 	case <-p.r.abort:
 		panic(abortSentinel{})
