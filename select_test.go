@@ -938,10 +938,25 @@ func TestRowComparison(t *testing.T) {
 		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
 		`SELECT count(*) FROM p WHERE (SELECT a, b FROM p LIMIT 1) = (a, b)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (SELECT a, b, name FROM p LIMIT 1)`,
+		`SELECT count(*) FROM p WHERE (a, b) = (SELECT * FROM p LIMIT 1)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
+	}
+}
+
+// A row compared with a subquery of another width is refused before either
+// side runs, as Postgres refuses it when it analyzes the statement.
+func TestRowSubqueryWidthRefusedBeforeEvaluation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	if _, err := db.Exec(`SELECT 1 WHERE (nextval('sq'), 1) = (SELECT 1, 2, 3)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("got %v", err)
+	}
+	if got := rowsOf(t, db, `SELECT nextval('sq')`); len(got) != 1 || got[0] != "1" {
+		t.Errorf("sequence advanced before the refusal: %v", got)
 	}
 }
 

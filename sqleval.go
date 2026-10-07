@@ -582,6 +582,16 @@ func (x *sqlExec) compareRowSubquery(v *sqlir.BinaryExpr, en *env) (_ any, ok bo
 	if !rok || !sok {
 		return nil, false, nil
 	}
+	// Postgres refuses a subquery of another width when it analyzes the
+	// statement, so the width is checked before either side runs, which
+	// may lock rows or advance a sequence.
+	width, ok := selectWidth(sub.Select)
+	if !ok {
+		return nil, true, x.unsupported("a row compared with a subquery whose select list has a *")
+	}
+	if width != len(row.Items) {
+		return nil, true, x.unsupported("a row compared with a subquery of another number of columns")
+	}
 	rowVals, err := x.evalRaw(row, en)
 	if err != nil {
 		return nil, true, err
@@ -589,9 +599,6 @@ func (x *sqlExec) compareRowSubquery(v *sqlir.BinaryExpr, en *env) (_ any, ok bo
 	cols, rows, err := x.evalSelect(sub.Select, en)
 	if err != nil {
 		return nil, true, err
-	}
-	if len(cols) != len(row.Items) {
-		return nil, true, x.unsupported("a row compared with a subquery of another number of columns")
 	}
 	if len(rows) > 1 {
 		return nil, true, x.tx.db.kind.Error(sqlir.CardinalityViolation, "more than one row returned by a subquery used as an expression", "", "", "")
