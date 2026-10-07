@@ -328,7 +328,7 @@ func decide(c sqlir.Collation, vals ...any) (sqlir.Collation, error) {
 		return c, nil
 	}
 	for _, v := range vals {
-		if _, text := derefValue(v).(string); text {
+		if _, text := textValue(v); text {
 			return nil, u.err
 		}
 	}
@@ -420,13 +420,25 @@ func (db *DB) declaresCollations() bool {
 	return len(db.collatedDomains) > 0
 }
 
+// textValue is v as text, a string or the []byte database/sql may pass a
+// string argument as, which detest takes as text elsewhere too.
+func textValue(v any) (string, bool) {
+	switch t := derefValue(v).(type) {
+	case string:
+		return t, true
+	case []byte:
+		return string(t), true
+	}
+	return "", false
+}
+
 // compareOrdered is compareValues with text ordered by c, and two strings c
 // does not tell apart ordered byte by byte, as Postgres orders them under a
 // deterministic collation. A nil c is byte order.
 func compareOrdered(c sqlir.Collation, a, b any) (int, bool) {
 	if c != nil {
-		sa, aok := derefValue(a).(string)
-		sb, bok := derefValue(b).(string)
+		sa, aok := textValue(a)
+		sb, bok := textValue(b)
 		if aok && bok {
 			if r := c.Compare(sa, sb); r != 0 {
 				return r, true
@@ -539,10 +551,10 @@ func orderedBinary(op string, c sqlir.Collation, l, r any) (any, bool) {
 	default:
 		return nil, false
 	}
-	if _, ok := derefValue(l).(string); !ok {
+	if _, ok := textValue(l); !ok {
 		return nil, false
 	}
-	if _, ok := derefValue(r).(string); !ok {
+	if _, ok := textValue(r); !ok {
 		return nil, false
 	}
 	n, _ := compareOrdered(c, l, r)

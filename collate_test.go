@@ -183,6 +183,14 @@ func TestCollationOfResults(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE w AS SELECT * FROM t WHERE name COLLATE "C" > ''`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("CREATE TABLE AS of a * with a COLLATE: got %v, want unsupported", err)
 	}
+	// A text CASE may give a []byte argument as it is, which orders by the
+	// collation as a string does.
+	if got := rowsOf(t, db, `SELECT id FROM t ORDER BY CASE WHEN id > 0 THEN $1 ELSE name END, id`, []byte("x")); !reflect.DeepEqual(got, []string{"1", "2", "3"}) {
+		t.Errorf("ORDER BY a []byte CASE: got %v", got)
+	}
+	if got := rowsOf(t, db, `SELECT CASE WHEN true THEN $1 ELSE name END < 'a' FROM t WHERE id = 2`, []byte("B")); !reflect.DeepEqual(got, []string{"false"}) {
+		t.Errorf("[]byte B < 'a' under a case-folding collation: got %v", got)
+	}
 	// A string argument that database/sql passes as []byte is text to
 	// greatest and least, as to the other functions.
 	if got := rowsOf(t, db, `SELECT greatest($1::text, $2::text)`, []byte("a"), []byte("B")); !reflect.DeepEqual(got, []string{"B"}) {
