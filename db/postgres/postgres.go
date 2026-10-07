@@ -505,11 +505,21 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, err
 		}
 		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
+	case *pg.Node_CreateDomainStmt:
+		// Only the collation is kept: a column of the domain orders by it.
+		// detest checks neither the domain's base type nor its constraints.
+		names := s.CreateDomainStmt.Domainname
+		if len(names) == 0 {
+			return nil, true, nil
+		}
+		name := names[len(names)-1].GetString_().GetSval()
+		return []sqlir.SchemaChange{{Table: name, Object: "domain", Create: true,
+			Columns: []sqlir.ColumnDef{{Name: name, Collation: collationName(s.CreateDomainStmt.CollClause)}}}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
 		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
-		*pg.Node_CompositeTypeStmt, *pg.Node_CreateDomainStmt, *pg.Node_DefineStmt,
+		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
 		*pg.Node_AlterEnumStmt, *pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
 		*pg.Node_CreateStatsStmt, *pg.Node_AlterObjectSchemaStmt:
 		return nil, true, nil

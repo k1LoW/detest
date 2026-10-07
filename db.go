@@ -151,6 +151,9 @@ type DB struct {
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
 	defs     map[string]*tableDef
+	// domains are the collations domains declare, by the domain's name,
+	// which a column of the domain orders by.
+	domains map[string]string
 	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views    map[string]*sqlir.SchemaChange      // the query of each view
 	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
@@ -1165,6 +1168,14 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "domain":
+		if c := ch.Columns[0].Collation; c != "" && c != "default" {
+			if db.domains == nil {
+				db.domains = map[string]string{}
+			}
+			db.domains[ch.Table] = c
+		}
+		return nil
 	case ch.Object == "sequence" && ch.Drop:
 		name := db.seqName(ch.Table)
 		if db.isRelation(name) {
@@ -1286,11 +1297,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.types[col.Name] = col.Type
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
-			} else if col.Collation != "" && col.Collation != "default" {
+			} else if c := cmp.Or(col.Collation, db.domains[col.Type]); c != "" && c != "default" {
 				if def.collations == nil {
 					def.collations = map[string]string{}
 				}
-				def.collations[col.Name] = col.Collation
+				def.collations[col.Name] = c
 			} else {
 				// A type changed without COLLATE takes the database's.
 				delete(def.collations, col.Name)

@@ -324,6 +324,8 @@ func isValue(e sqlir.Expr) bool {
 		return true
 	case *sqlir.Cast:
 		return isValue(e.X)
+	case *sqlir.Collate:
+		return isValue(e.X)
 	}
 	return false
 }

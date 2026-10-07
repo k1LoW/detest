@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/k1LoW/detest/db/postgres"
+	"github.com/k1LoW/detest/internal/sqlir"
 )
 
 // foldCase orders text ignoring case, and tells apart nothing else, so that
@@ -186,6 +187,42 @@ func TestCollationOfResults(t *testing.T) {
 	// greatest and least, as to the other functions.
 	if got := rowsOf(t, db, `SELECT greatest($1::text, $2::text)`, []byte("a"), []byte("B")); !reflect.DeepEqual(got, []string{"B"}) {
 		t.Errorf("greatest of []byte arguments: got %v", got)
+	}
+}
+
+// A column of a domain orders by the domain's collation, a table CREATE
+// TABLE IF NOT EXISTS ... AS finds is left as it is, a number keeps no
+// collation, and each statement of a script sees the collations the ones
+// before it declared.
+func TestCollationsAcrossStatements(t *testing.T) {
+	s := newSim(t)
+	db, store := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE DOMAIN public.tag AS text COLLATE "C"`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, v tag)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b'), (2, 'B', 'B'), (3, 'a', 'a')`)
+	mustExec(t, db, `CREATE TABLE u AS SELECT id, name FROM t`)
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS u AS SELECT id, name COLLATE "C" AS name FROM t`)
+	mustExec(t, db, `CREATE TABLE n AS SELECT id, name, length(name COLLATE "C") AS n FROM t`)
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT id FROM t ORDER BY v`, []string{"2", "3", "1"}},
+		{`SELECT id FROM u ORDER BY name`, []string{"3", "2", "1"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
+	}
+	if c, ok := store.defs[store.resolve("n")].collations["n"]; ok {
+		t.Errorf("the integer column n of CREATE TABLE AS keeps collation %q", c)
+	}
+	_, err := db.Exec(`SELECT id FROM t ORDER BY name; CREATE TABLE d (name text COLLATE "C"); INSERT INTO d VALUES ('b'), ('B'); SELECT s.name FROM (SELECT name FROM d) s ORDER BY s.name`)
+	if !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a script ordering a subquery's text after declaring a collation: got %v, want unsupported", err)
+	}
+	if !isValue(&sqlir.Collate{X: &sqlir.Param{Index: 1}, Name: "C"}) {
+		t.Error("a parameter under COLLATE is not a value to sharedtx")
 	}
 }
 

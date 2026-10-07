@@ -51,6 +51,9 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	}
 	out := make([]string, n)
 	for i, t := range sel.Targets {
+		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) {
+			continue // a number or a boolean has no collation to keep
+		}
 		u, err := x.collationOf(t.Expr)
 		if err != nil {
 			return nil, err
@@ -61,6 +64,15 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 		out[i] = u.name
 	}
 	return out, nil
+}
+
+// collatableType reports whether a value of typ has a collation.
+func collatableType(typ string) bool {
+	switch typ {
+	case "text", "varchar", "bpchar", "char", "character varying", "character", "name":
+		return true
+	}
+	return false
 }
 
 // noteOutput records that the ORDER BY key k names or numbers the select
@@ -137,9 +149,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return collationUse{}, nil
 		}
 	case *sqlir.Cast:
-		switch e.Type {
-		case "text", "varchar", "bpchar", "char", "character varying", "character", "name":
-		default:
+		if !collatableType(e.Type) {
 			return collationUse{}, nil
 		}
 	case *sqlir.CaseExpr:
@@ -385,6 +395,10 @@ func (x *sqlExec) keyCollations(keys []sqlir.OrderKey, vals [][]any) ([]sqlir.Co
 		col := make([]any, len(vals))
 		for r := range vals {
 			col[r] = vals[r][i]
+			if _, row := derefValue(col[r]).([]any); row {
+				// A key that names or numbers a row of the select list.
+				return nil, x.unsupported("a row as an ORDER BY key")
+			}
 		}
 		if out[i], err = decide(c, col...); err != nil {
 			return nil, err

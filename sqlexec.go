@@ -328,6 +328,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
+			// What the column check noted, and whether a column declares a
+			// collation, belong to the statement before, whose DDL may
+			// have changed the latter.
+			x.colls, x.outputs, x.collates, x.declared = nil, nil, false, nil
 			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			r, err := x.execStatement(sub)
@@ -556,11 +560,12 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	if err != nil {
 		return nil, err
 	}
+	_, existed := x.tx.db.defs[x.tx.db.resolve(st.Table)]
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err
 	}
 	table := x.tx.db.resolve(st.Table)
-	if def := x.tx.db.defs[table]; def != nil {
+	if def := x.tx.db.defs[table]; def != nil && !existed {
 		for i, name := range colls {
 			if name != "" && name != "default" {
 				if def.collations == nil {
