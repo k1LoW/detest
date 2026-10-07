@@ -169,10 +169,11 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if u.unknown && *x.declared {
-		// The item's query may take the column of a collation of its own,
-		// which matters only when the values are text.
-		return undecided{x.unsupported("text of a subquery, view or CTE ordered on a database whose columns declare collations")}, nil
+	if u.unknown && (*x.declared || x.collates) {
+		// The item's query may take the collation of a column or of a
+		// COLLATE of its own, which detest does not carry, and which matters
+		// only when the values are text.
+		return undecided{x.unsupported("text of a subquery, view or CTE ordered where a column or COLLATE sets a collation")}, nil
 	}
 	name := u.name
 	if name == "" {
