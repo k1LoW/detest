@@ -26,8 +26,10 @@ type prioritized struct {
 	lowered  uint64 // the priority the next switch gives: one per switch at first, one less after each
 	crashAt  []int
 	loseAt   []int
+	stallAt  []int
 	crashDue int
 	loseDue  int
+	stallDue int
 	starts   map[startKey]uint64
 	delivers map[deliverKey]uint64
 	inherit  uint64 // the priority of the option picked, for the process it creates
@@ -47,7 +49,7 @@ type deliverKey struct {
 // are at most depth-1.
 const drawnBase = 1 << 40
 
-func newPrioritized(rng *rand.Rand, depth, k, crashes, losses int) *prioritized {
+func newPrioritized(rng *rand.Rand, depth, k, crashes, losses, stalls int) *prioritized {
 	p := &prioritized{rng: rng, starts: map[startKey]uint64{}, delivers: map[deliverKey]uint64{}}
 	k = max(k, 1)
 	p.switches = distinctSteps(rng, min(depth-1, k), k)
@@ -62,8 +64,12 @@ func newPrioritized(rng *rand.Rand, depth, k, crashes, losses int) *prioritized 
 	for range losses {
 		p.loseAt = append(p.loseAt, 1+rng.IntN(k))
 	}
+	for range stalls {
+		p.stallAt = append(p.stallAt, 1+rng.IntN(k))
+	}
 	slices.Sort(p.crashAt)
 	slices.Sort(p.loseAt)
+	slices.Sort(p.stallAt)
 	return p
 }
 
@@ -100,6 +106,9 @@ func (p *prioritized) pick(r *run, opts []option) int {
 	for len(p.loseAt) > 0 && p.loseAt[0] == p.step {
 		p.loseAt, p.loseDue = p.loseAt[1:], p.loseDue+1
 	}
+	for len(p.stallAt) > 0 && p.stallAt[0] == p.step {
+		p.stallAt, p.stallDue = p.stallAt[1:], p.stallDue+1
+	}
 	if p.crashDue > 0 {
 		if i, ok := p.drawOf(opts, optCrash); ok {
 			p.crashDue--
@@ -112,9 +121,15 @@ func (p *prioritized) pick(r *run, opts []option) int {
 			return i
 		}
 	}
+	if p.stallDue > 0 {
+		if i, ok := p.drawOf(opts, optStall); ok {
+			p.stallDue--
+			return i
+		}
+	}
 	best, bestPrio := -1, uint64(0)
 	for i, o := range opts {
-		if o.kind == optCrash || o.kind == optLose {
+		if o.kind.fault() {
 			continue
 		}
 		if pr := p.prioOf(r, o); best < 0 || pr > bestPrio {

@@ -161,6 +161,7 @@ type run struct {
 	trace    []step
 	failures int
 	crashes  int
+	stalls   int
 	runs     map[*procType]int
 	abort    chan struct{}
 	ctx      context.Context // Proc.Context; canceled when the run ends
@@ -241,6 +242,12 @@ type Proc struct {
 	waitRow  *rowWait // the row lock we wait for
 	waitLock waitable // Mutex or RWMutex we wait for
 	waitAt   int64
+	// stall is how long the process sleeps on the bubble's clock when it is
+	// next resumed, set by the scheduler before it resumes the process.
+	// stalling is the scheduler's own record of it, which the process does
+	// not touch.
+	stall    time.Duration
+	stalling bool
 	tx       *Tx   // transaction opened by a hand-written model through DB.Tx
 	txs      []*Tx // transactions opened through the database/sql driver
 	msg      *qmsg
@@ -419,6 +426,7 @@ const (
 	optStart
 	optCrash
 	optLose
+	optStall
 )
 
 // apply does o. preempt reports whether it takes the CPU from the current
@@ -439,6 +447,8 @@ func (r *run) apply(o option, preempt bool) {
 		r.crash(o.p)
 	case optLose:
 		r.lose(o.q, o.i)
+	case optStall:
+		r.stallProc(o.p)
 	}
 }
 
@@ -522,7 +532,7 @@ func (r *run) execute() (v *violation) {
 		gaveWay, before := r.spinner(), r.version
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
-		r.apply(o, o.kind != optCrash && o.kind != optLose && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
+		r.apply(o, !o.kind.fault() && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
 		r.countSpin(o, before)
 		if gaveWay != nil {
 			r.handoff(gaveWay, before)
@@ -556,7 +566,7 @@ func (r *run) execute() (v *violation) {
 
 func onlyFaults(opts []option) bool {
 	for _, o := range opts {
-		if o.kind != optCrash && o.kind != optLose {
+		if !o.kind.fault() {
 			return false
 		}
 	}
@@ -739,6 +749,15 @@ func (r *run) enabled() []option {
 			// running, such as a worker tick that handed its job to one.
 			if p.state == stateReady || p.state == stateBlockedLock || r.familyAtStep(p) {
 				opts = append(opts, option{kind: optCrash, p: p})
+			}
+		}
+	}
+	if r.stalls < r.s.maxStalls {
+		// A stall takes no step of the process, which sleeps instead, so it
+		// is offered whether or not the preemption budget is spent.
+		for _, p := range r.procs {
+			if p.state == stateReady && !r.keptOut(p) {
+				opts = append(opts, option{kind: optStall, p: p})
 			}
 		}
 	}
@@ -993,10 +1012,13 @@ func (r *run) parkOutside(p *Proc) {
 		// and one that returned would keep the count up for the rest of the run.
 		r.outside.Add(1)
 	}
-	r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+	if !p.stalling {
+		r.note(p, "blocks outside detest (channel, timer or WaitGroup); parked until it reaches a yield point")
+	}
 }
 
 func (r *run) leaveOutside(p *Proc) {
+	p.stalling = false
 	p.away.Store(0)
 	if !p.adopted {
 		r.outside.Add(-1)
@@ -1047,6 +1069,25 @@ func (r *run) waitOutside() bool {
 	ev, _ := reflect.TypeAssert[procEvent](v) // p.ev carries only procEvent
 	r.takeOutside(waiting[chosen], ev)
 	return true
+}
+
+// fault reports whether the option is a fault the explorer injects rather
+// than a step a process or the environment takes.
+func (k optionKind) fault() bool {
+	return k == optCrash || k == optLose || k == optStall
+}
+
+// stallProc makes p sleep for the stall duration on the bubble's clock
+// before its next step, as a process does in a long GC pause or a slow call
+// it makes without detest seeing it. The other processes go on meanwhile at
+// the time the stall began, and the clock moves only once none of them can,
+// so a lease or a TTL that runs out under the stalled process expires before
+// it wakes.
+func (r *run) stallProc(p *Proc) {
+	r.stalls++
+	r.note(p, "stalls for %s", r.s.stallFor)
+	p.stall, p.stalling = r.s.stallFor, true
+	r.resume(p)
 }
 
 // crash kills p where it stands, at a yield point or waiting for a lock, with
@@ -1445,6 +1486,22 @@ func (p *Proc) syncOutside() {
 	}
 }
 
+// sleepStall sleeps through a stall and then stands at a yield point again,
+// rather than running on. Processes whose stalls end at the same instant
+// report back in the order the runtime wakes them, and running on there
+// would order their steps by it, which a replay does not repeat.
+func (p *Proc) sleepStall(d time.Duration) {
+	t := time.NewTimer(d)
+	select {
+	case <-t.C:
+	case <-p.r.abort:
+		t.Stop()
+		panic(abortSentinel{})
+	}
+	p.send(procEvent{kind: evYield})
+	p.wait()
+}
+
 // send reports ev to the scheduler. Once the run is over nobody reads, and a
 // process unwinding then must not block on its full channel.
 func (p *Proc) send(ev procEvent) {
@@ -1463,6 +1520,10 @@ func (p *Proc) wait() {
 	}
 	select {
 	case <-p.resume:
+		if d := p.stall; d > 0 {
+			p.stall = 0
+			p.sleepStall(d)
+		}
 	case <-p.r.abort:
 		panic(abortSentinel{})
 	case <-p.stmtDone:

@@ -99,7 +99,7 @@ Present 2 to 5 candidates, ranked by how likely and how costly the bug would be,
 - the function and where it is (`path/file.go:line`), and the statements or calls whose order matters ("`SELECT count(*)` at `booking.go:43`, then `INSERT` at `booking.go:51`, with no lock between")
 - what could go wrong, as a story ("two customers buy the last item at the same moment, both succeed")
 - the rule that would be broken (this becomes the invariant)
-- what detest would vary (interleavings only, or also crashes, duplicate deliveries, lost responses)
+- what detest would vary (interleavings only, or also crashes, stalls past a TTL, duplicate deliveries, lost responses)
 
 Then agree on the details with the user. Propose an answer to each question from what the code says, and let them correct it. Present the proposal in the shape below, which is the scenario the test will run, told from the code up.
 
@@ -270,7 +270,7 @@ Always end with a report the user can act on without knowing detest. It answers 
 ### What was run
 - Code under test: <functions/handlers, with file:line>, real code, unchanged
 - Scenario: <who runs concurrently, how many times, with which seeded data>
-- Faults injected: <none | worker crash at any step (up to N) | duplicate delivery | lost response after effect | ...>
+- Faults injected: <none | worker crash at any step (up to N) | stall of D at any step (up to N) | duplicate delivery | lost response after effect | ...>
 - Database: <PostgreSQL Read Committed | MySQL InnoDB Repeatable Read>, schema from <migrations/dump>
 - Exploration: <N> runs, <complete: every interleaving within the bounds | stopped at MaxRuns/MaxDuration | sampled from seed S (random, or prioritized at depth D) | stopped at run K, where the violation was found>, bounds: <preemptions, crashes, failures, ...>
 - Invariants checked: <each rule in plain words, and whether after every step or at the end>
@@ -288,7 +288,7 @@ Always end with a report the user can act on without knowing detest. It answers 
 
 ### What this guarantees, and what it does not
 - Guaranteed: <for every interleaving of the listed operations, with the listed faults, within the bounds, the listed invariants hold (or: this schedule breaks them, reproducibly)>
-- Not covered: <bounds not explored (more actors, more crashes, preemptions beyond N), faults not injected, invariants not written, code outside the scenario, data races on Go memory between DB calls (use `go test -race`), statements detest refused, behavior that depends on the real server's planner or settings beyond the defaults>
+- Not covered: <bounds not explored (more actors, more crashes or stalls, preemptions beyond N), faults not injected, invariants not written, code outside the scenario, data races on Go memory between DB calls (use `go test -race`), statements detest refused, behavior that depends on the real server's planner or settings beyond the defaults>
 
 ### Next steps
 <the recommended fix as a diff with why it works and what it costs, the offer to apply it and verify it with a complete exploration, the pinned regression test and how to run it, the remaining candidates from step 2, offered as the next round>

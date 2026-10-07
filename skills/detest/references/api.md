@@ -51,6 +51,7 @@ msgs := st.Queue(q)
 | Option | Default | Effect |
 | --- | --- | --- |
 | `MaxCrashes(n)` | 0 | Any process may die at any step: its transactions roll back, mutexes free, message redelivered |
+| `MaxStalls(n, d)` | 0 | Any process may sleep for `d` on the fake clock at any step while the others go on, so a TTL or lease shorter than `d` expires under it |
 | `MaxFailures(n)` | 1 | External-call failures per run |
 | `MaxRedeliveries(n)` | 1 | Redeliveries of a failed message |
 | `MaxSpins(n)` | 100 | Steps of one process with no commit or enqueue in between, counted across the steps of others, while another could run; past it the process waits for another to step, so a busy-wait lets its setter run. With nothing else able to run it is a progress violation, and so are processes that give way to each other that many times with no change in between, once nothing else can run; raise it only for code that does that much work without committing |
