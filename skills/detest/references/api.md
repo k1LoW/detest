@@ -86,6 +86,15 @@ sqlDB, store := s.DB("app", postgres.New())
 gdb, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: gormpool.New(sqlDB)}), &gorm.Config{}) // github.com/k1LoW/detest/db/seam/gormpool
 ```
 
+sqlc and sqlx code that begins its transactions through an interface or a function it is given gets the same by beginning them on a seam package in the test. sqlc's queries must then be built with `New(tx)`, not `WithTx(tx)`.
+
+```go
+pool := sqlcdbtx.New(sqlDB)                           // github.com/k1LoW/detest/db/seam/sqlcdbtx
+tx, err := pool.BeginTx(ctx, nil)                     // *sqlcdbtx.Tx: sqlc's DBTX, Commit, Rollback
+xdb := sqlxext.New(sqlx.NewDb(sqlDB, "postgres"))     // github.com/k1LoW/detest/db/seam/sqlxext
+xtx, err := xdb.BeginTxx(ctx, nil)                    // *sqlxext.Tx: sqlx.ExtContext, GetContext, SelectContext, NamedExecContext, Commit, Rollback
+```
+
 Without `Errors`, the app sees `*detest.DBError`, which matches `detest.ErrUniqueViolation`, `detest.ErrDeadlock`, `detest.ErrLockNotAvailable` and the other sentinels with `errors.Is`.
 
 `detest.CheckSQL(postgres.New(), query)` tells whether detest can run a statement without a schema, and refuses a function or an operator detest does not know, or a call with the wrong arguments, wherever it stands in a `SELECT`, `INSERT`, `UPDATE` or `DELETE`. A case decided by the schema or the values passes it and fails in the run, as does an expression in a `CHECK` or a generated column, which the write that evaluates it refuses. A default detest cannot evaluate passes both: a write that leaves the column out stores the `Unknown` marker, and is refused only when the table's own schema reads the column. `ddl.From(ctx, liveDB, postgres.New())` (package `github.com/k1LoW/detest/db/ddl`) writes the tables of a live database as DDL detest accepts.
