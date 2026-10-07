@@ -91,7 +91,7 @@ sqlc and sqlx code that begins its transactions through an interface or a functi
 ```go
 pool := sqlcdbtx.New(sqlDB)                           // github.com/k1LoW/detest/db/seam/sqlcdbtx
 tx, err := pool.BeginTx(ctx, nil)                     // *sqlcdbtx.Tx: sqlc's DBTX, Commit, Rollback
-xdb := sqlxext.New(sqlDB, "postgres")                 // github.com/k1LoW/detest/db/seam/sqlxext; MapperFunc and Unsafe panic
+xdb := sqlxext.New(sqlDB, "postgres")                 // github.com/k1LoW/detest/db/seam/sqlxext; default mapper, safe mode
 xtx, err := xdb.BeginTxx(ctx, nil)                    // *sqlxext.Tx: sqlx.ExtContext, GetContext, SelectContext, NamedExecContext, Commit, Rollback
 ```
 

@@ -176,22 +176,3 @@ func TestGoroutineSharingTxWaitsAndDeadlocks(t *testing.T) {
 		t.Error("no run detected the deadlock through the goroutine")
 	}
 }
-
-// A mapper other than sqlx's default and unsafe mode are refused rather than
-// lost on the way to sqlx's named functions.
-func TestMapperAndUnsafeRefused(t *testing.T) {
-	db := sqlxext.New(nil, "postgres")
-	for name, f := range map[string]func(){
-		"MapperFunc": func() { db.MapperFunc(strings.ToUpper) },
-		"Unsafe":     func() { db.Unsafe() },
-	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("%s did not panic", name)
-				}
-			}()
-			f()
-		}()
-	}
-}

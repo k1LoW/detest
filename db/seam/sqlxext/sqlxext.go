@@ -38,10 +38,11 @@
 // transaction is still refused. A statement prepared on the transaction
 // runs without the package.
 //
-// A mapper other than sqlx's default and unsafe mode are refused, as the
-// functions sqlx.NamedExecContext, sqlx.NamedQueryContext and
-// sqlx.PreparexContext read them only from sqlx's own types, and would run
-// a Tx of the package with the defaults instead.
+// The transactions run with sqlx's default mapper and in safe mode, which
+// DB offers no way to change. The functions sqlx.NamedExecContext,
+// sqlx.NamedQueryContext and sqlx.PreparexContext read the mapper and the
+// mode only from sqlx's own types, and would run a Tx of the package with
+// the defaults whatever the *sqlx.DB was set to.
 package sqlxext
 
 import (
@@ -53,31 +54,21 @@ import (
 	"github.com/k1LoW/detest/internal/seam"
 )
 
-// DB is a *sqlx.DB whose BeginTxx begins transactions whose operations go
-// through the package.
-type DB struct{ *sqlx.DB }
+// DB begins transactions whose operations go through the package. It
+// keeps its *sqlx.DB to itself, so that nothing sets a mapper or unsafe
+// mode on it.
+type DB struct{ db *sqlx.DB }
 
-// New returns the DB to begin the code's transactions on, as sqlx.NewDb
-// returns one for the driver named driverName, with sqlx's default mapper.
-// It takes the *sql.DB rather than a *sqlx.DB, as sqlx's default mapper
-// cannot be told from another one on a *sqlx.DB.
-func New(db *sql.DB, driverName string) *DB { return &DB{DB: sqlx.NewDb(db, driverName)} }
-
-// MapperFunc panics, as a mapper other than sqlx's default is refused (see
-// the package doc).
-func (d *DB) MapperFunc(func(string) string) {
-	panic("sqlxext: a mapper other than sqlx's default is unsupported, as sqlx's named functions would not see it on a Tx of the package")
-}
-
-// Unsafe panics, as unsafe mode is refused (see the package doc).
-func (d *DB) Unsafe() *DB {
-	panic("sqlxext: unsafe mode is unsupported, as sqlx.PreparexContext would not see it on a Tx of the package")
-}
+// New returns the DB to begin the code's transactions on, on a *sqlx.DB
+// that sqlx.NewDb returns for the driver named driverName. It takes the
+// *sql.DB rather than a *sqlx.DB, as sqlx's default mapper cannot be told
+// from another one on a *sqlx.DB.
+func New(db *sql.DB, driverName string) *DB { return &DB{db: sqlx.NewDb(db, driverName)} }
 
 // BeginTxx begins a transaction on the *sqlx.DB.
 func (d *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	ctx, slot := seam.WithSlot(ctx)
-	tx, err := d.DB.BeginTxx(ctx, opts)
+	tx, err := d.db.BeginTxx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
