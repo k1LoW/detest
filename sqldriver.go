@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k1LoW/detest/internal/seam"
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
@@ -148,6 +149,9 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	// process or not.
 	tx.block, tx.iso, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = true, iso, c.lockTimeout, c.noAutoZero, c.noFKChecks
 	tx.timeZone = c.timeZone
+	if slot := seam.SlotOf(ctx); slot != nil {
+		slot.Tx = seamTx{tx: tx}
+	}
 	if p == nil {
 		tx.atomic = true
 		c.tx = tx
@@ -325,9 +329,15 @@ func (p *Proc) forgetTx(tx *Tx) {
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
 	defer c.db.s.leave()
 	defer recoverRunOver(&err)
+	tx := c.tx
 	rows, _, err := c.run(ctx, query, args)
 	if err != nil {
 		return nil, c.db.kind.Convert(err)
+	}
+	if tx != nil {
+		if p := tx.seamCaller(); p != nil {
+			rows.release = tx.holdConn(p)
+		}
 	}
 	return rows, nil
 }
@@ -402,7 +412,10 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	for i, nv := range named {
 		args[i] = nv.Value
 	}
-	if tx := c.tx; tx != nil && tx.p != nil && !tx.p.r.over() && !tx.p.isCaller() {
+	// A goroutine that came through a seam package (see seamTx) holds the
+	// transaction's connection, so none of its siblings is in database/sql,
+	// and it may park here as itself.
+	if tx := c.tx; tx != nil && tx.p != nil && !tx.p.r.over() && !tx.p.isCaller() && tx.seamCaller() == nil {
 		return c.runShared(ctx, tx, query, args)
 	}
 	// A statement whose context ended before it reached the driver, such as
@@ -690,6 +703,9 @@ type sqlRows struct {
 	// lastID is the AUTO_INCREMENT value the statement generated first, 0
 	// when it generated none.
 	lastID int64
+	// release gives back the connection a query through a seam package
+	// holds while its rows are open (see Tx.holdConn).
+	release func()
 }
 
 // innodbResult is the result of a statement on MySQL, which reports the
@@ -707,7 +723,12 @@ func (r *sqlRows) Columns() []string {
 	}
 	return cols
 }
-func (r *sqlRows) Close() error { return nil }
+func (r *sqlRows) Close() error {
+	if r.release != nil {
+		r.release()
+	}
+	return nil
+}
 func (r *sqlRows) Next(dest []driver.Value) error {
 	if r.i >= len(r.rows) {
 		return io.EOF
