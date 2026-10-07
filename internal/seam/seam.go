@@ -20,8 +20,10 @@ type Hook interface {
 	// a run, and for a transaction no process began. op, query and args
 	// describe the operation, which orders goroutines adopted at the same
 	// step, as the driver's statement does for a goroutine whose first call
-	// is a statement.
-	Enter(op, query string, args ...any) (release func(), err error)
+	// is a statement. An operation whose ctx has ended returns its error
+	// without waiting, as database/sql does before it takes the
+	// transaction's locks.
+	Enter(ctx context.Context, op, query string, args ...any) (release func(), err error)
 }
 
 // Slot receives the Hook of a transaction the driver begins with a context
@@ -44,9 +46,9 @@ func SlotOf(ctx context.Context) *Slot {
 }
 
 // Enter is the Hook's Enter, and a no-op when the slot stayed empty.
-func (s *Slot) Enter(op, query string, args ...any) (release func(), err error) {
+func (s *Slot) Enter(ctx context.Context, op, query string, args ...any) (release func(), err error) {
 	if s == nil || s.Hook == nil {
 		return func() {}, nil
 	}
-	return s.Hook.Enter(op, query, args...)
+	return s.Hook.Enter(ctx, op, query, args...)
 }

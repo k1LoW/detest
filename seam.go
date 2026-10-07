@@ -1,6 +1,9 @@
 package detest
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // seamTx is the seam.Hook of a transaction a package under db/seam began (see
 // internal/seam).
@@ -10,7 +13,7 @@ type seamTx struct{ tx *Tx }
 // connection as a hand-written transaction's operation does, but gives the
 // engine mutex back before it returns, as the caller goes on into
 // database/sql and the driver, which takes the mutex itself.
-func (h seamTx) Enter(op, query string, args ...any) (release func(), err error) {
+func (h seamTx) Enter(ctx context.Context, op, query string, args ...any) (release func(), err error) {
 	tx := h.tx
 	s := tx.db.s
 	defer s.leave()
@@ -22,6 +25,11 @@ func (h seamTx) Enter(op, query string, args ...any) (release func(), err error)
 	}
 	if caller.stale() || tx.p.r.over() {
 		return func() {}, errRunOver
+	}
+	// Checked once the caller is resolved rather than before, when the
+	// goroutine may run alongside a sibling that cancels the context.
+	if err := ctx.Err(); err != nil {
+		return func() {}, err
 	}
 	exit := s.enter(caller)
 	defer exit()

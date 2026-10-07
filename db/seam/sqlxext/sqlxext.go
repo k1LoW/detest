@@ -87,7 +87,7 @@ func (t *Tx) BindNamed(query string, arg any) (string, []any, error) {
 }
 
 func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	release, err := t.seam.Enter("exec", query, args...)
+	release, err := t.seam.Enter(ctx, "exec", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (t *Tx) NamedExecContext(ctx context.Context, query string, arg any) (sql.R
 }
 
 func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	release, err := t.seam.Enter("prepare", query)
+	release, err := t.seam.Enter(ctx, "prepare", query)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error
 // QueryContext gives the connection back when it returns, but the driver
 // keeps it until the rows are closed.
 func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	release, err := t.seam.Enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.
 
 // QueryxContext is QueryContext for *sqlx.Rows.
 func (t *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*sqlx.Rows, error) {
-	release, err := t.seam.Enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func (t *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*sql
 // an error of the package's, so when the run is over it calls the
 // *sqlx.Tx all the same, and the driver returns the end of the run.
 func (t *Tx) QueryRowxContext(ctx context.Context, query string, args ...any) *sqlx.Row {
-	release, err := t.seam.Enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err == nil {
 		defer release()
 	}
@@ -149,7 +149,7 @@ func (t *Tx) QueryRowxContext(ctx context.Context, query string, args ...any) *s
 
 // GetContext reads one row into dest.
 func (t *Tx) GetContext(ctx context.Context, dest any, query string, args ...any) error {
-	release, err := t.seam.Enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func (t *Tx) GetContext(ctx context.Context, dest any, query string, args ...any
 
 // SelectContext reads every row into dest.
 func (t *Tx) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
-	release, err := t.seam.Enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (t *Tx) SelectContext(ctx context.Context, dest any, query string, args ...
 }
 
 func (t *Tx) Commit() error {
-	release, err := t.seam.Enter("commit", "")
+	release, err := t.seam.Enter(context.Background(), "commit", "")
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (t *Tx) Commit() error {
 }
 
 func (t *Tx) Rollback() error {
-	release, err := t.seam.Enter("rollback", "")
+	release, err := t.seam.Enter(context.Background(), "rollback", "")
 	if err != nil {
 		return err
 	}

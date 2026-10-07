@@ -192,3 +192,47 @@ func TestGoroutineSharingTxWaitsAndDeadlocks(t *testing.T) {
 		t.Error("no run detected the deadlock through the goroutine")
 	}
 }
+
+// An operation whose context has ended returns the context's error at once,
+// as database/sql does before it takes the transaction's locks, rather than
+// wait for the connection, which the process's open rows hold here while it
+// waits for that error.
+func TestCanceledOperationDoesNotWait(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		sqlDB, store := s.DB("app", postgres.New())
+		if _, err := sqlDB.Exec(`CREATE TABLE counters (id text PRIMARY KEY, n int NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		pool := sqlcdbtx.New(sqlDB)
+		s.Seed(func() { store.SeedRow("counters", detest.Row{"id": "c", "n": int64(0)}) })
+		s.Manual("pod", 1, func(p *detest.Proc) error {
+			ctx := p.Context()
+			return fails.check(func() error {
+				tx, err := pool.BeginTx(ctx, nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				rows, err := tx.QueryContext(ctx, `SELECT n FROM counters`)
+				if err != nil {
+					return err
+				}
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				var childErr error
+				var wg sync.WaitGroup
+				wg.Go(func() { childErr = New(tx).SetCounter(canceled, "c", 1) })
+				wg.Wait()
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				if !errors.Is(childErr, context.Canceled) {
+					return fmt.Errorf("the canceled update returned %w, want context.Canceled", childErr)
+				}
+				return tx.Commit()
+			}())
+		})
+	})
+}
