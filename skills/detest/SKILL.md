@@ -52,7 +52,7 @@ Check these without asking the user.
 Stop before changing anything when the codebase, or the part the user cares about, cannot be simulated, and tell the user why. A pass from a harness that bypassed the real concurrency would look like evidence and be none, so do not force it. These are the typical blockers.
 
 - not Go, or a Go module that cannot move to Go 1.26 (the user declined the bump, or a dependency pins an older toolchain);
-- the shared state lives where detest has no simulation, such as a database other than PostgreSQL or MySQL (SQLite, MongoDB, DynamoDB, Spanner), Redis or another cache used for locks or counters, object storage, or a message broker the code talks to through a client that cannot be replaced at a seam;
+- the shared state lives where detest has no simulation, such as a database other than PostgreSQL or MySQL (SQLite, MongoDB, DynamoDB, Spanner), Redis or another cache used for locks or counters through scripts, transactions or data structures (plain GET, SET, SET NX and DEL behind an interface can be faked, see `references/wiring.md`), object storage, or a message broker the code talks to through a client that cannot be replaced at a seam;
 - the database is reached without `database/sql`, such as through `pgxpool`/`pgx.Conn` or a vendor SDK;
 - the race is on Go memory between goroutines rather than through shared resources, which `go test -race` covers and detest does not;
 - the flow depends on SQL or settings detest refuses (see the README's unsupported list), such as an isolation level detest does not implement for that server, and it cannot be worked around without changing semantics;

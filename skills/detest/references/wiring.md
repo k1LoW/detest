@@ -149,6 +149,10 @@ svc := checkout.New(db, checkout.WithHTTPClient(client))
 
 The explorer tries success, failure before the handler runs, and the response lost after it ran (`detest.ErrUnavailable` to the caller). An invariant such as `charged <= 1` then checks idempotency of retries. For SDK clients that are not HTTP-shaped, wrap the call site with `ext.Do(s.Current(), "charge", func() error {...})` in a fake that implements the app's interface. Use `detest.ReadOnly()` for reads.
 
+## Key-value stores
+
+Redis, memcached and similar stores have no simulation, but code that reaches one through an interface of its own (`Get`, `Set`, `SetNX`, `Del` with a TTL) can take a fake whose every command is one `ext.Do` on a map, with expiry read from `time.Now()`, which is the fake clock. [examples/kvlock](../../../examples/kvlock/kvlock_test.go) has one to copy. Clear the map in a `Seed`. Code that uses Lua scripts, `MULTI`/`EXEC`, `WATCH` or data structures beyond strings needs more than this fake, so treat it as a blocker unless the user accepts a fake of those commands.
+
 ## Queues and event publishing
 
 Replace the app's publisher with a fake that enqueues into a detest queue, and drive its consumer with `OnMessage`:
