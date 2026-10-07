@@ -164,6 +164,26 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "COLLATE and column collations on a C database",
+		Schema: []string{
+			`CREATE TABLE w (id int PRIMARY KEY, name text, code text COLLATE "C")`,
+		},
+		Seed:  []string{`INSERT INTO w VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, '_c', '_c'), (4, 'A-1', 'A-1'), (5, 'a1', 'a1'), (6, 'b', 'b')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM w ORDER BY name`),
+			difftest.Q(0, `SELECT id FROM w ORDER BY code DESC`),
+			difftest.Q(0, `SELECT id FROM w ORDER BY name COLLATE "C"`),
+			difftest.Q(0, `SELECT id FROM w ORDER BY name COLLATE "POSIX" DESC`),
+			difftest.Q(0, `SELECT id FROM w ORDER BY name COLLATE pg_catalog."C"`),
+			difftest.Q(0, `SELECT id FROM w ORDER BY name COLLATE "default"`),
+			difftest.Q(0, `SELECT id FROM w WHERE name COLLATE "C" < 'a' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM w WHERE code > name ORDER BY id`),
+			difftest.Q(0, `SELECT min(code) = 'A-1', max(name COLLATE "C") = 'b' FROM w`),
+			difftest.Q(0, `SELECT greatest(name, code) = name FROM w WHERE id = 3`),
+		},
+	},
+	{
 		Name: "IN and NOT IN over a subquery with NULLs",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,

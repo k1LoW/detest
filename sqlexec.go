@@ -89,6 +89,17 @@ type sqlExec struct {
 	// GREATEST and LEAST resolve a timestamp and a timestamptz to, and the
 	// source of date_trunc.
 	exprTypes map[sqlir.Expr]string
+	// colls are the collations the column check found the columns of the
+	// statement's column references to declare, and collates whether the
+	// statement has a COLLATE clause.
+	colls    map[*sqlir.ColumnRef]colNote
+	collates bool
+	// outputs are the ORDER BY keys that name an output column, with the
+	// select list's expression they name.
+	outputs map[sqlir.Expr]sqlir.Expr
+	// declared caches whether a column of the database declares a
+	// collation other than the database's, which DML does not change.
+	declared *bool
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -1075,11 +1086,15 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 			vals[i][j] = v
 		}
 	}
+	colls, err := x.keyCollations(keys, vals)
+	if err != nil {
+		return err
+	}
 	idx := make([]int, len(rows))
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, vals[idx[a]], vals[idx[b]]) })
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, colls, vals[idx[a]], vals[idx[b]]) })
 	sorted := make([]jrow, len(rows))
 	for i, j := range idx {
 		sorted[i] = rows[j]
@@ -1204,6 +1219,8 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.Cast:
 		return hasAggregate(v.X)
+	case *sqlir.Collate:
+		return hasAggregate(v.X)
 	case *sqlir.IsNull:
 		return hasAggregate(v.X)
 	case *sqlir.InExpr:
@@ -1280,7 +1297,14 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				}
 				vals = append(vals, x.aggOperand(v.Name, val))
 			}
-			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]))
+			coll, err := x.orderCollation(v.Args[0])
+			if err == nil {
+				coll, err = decide(coll, vals...)
+			}
+			if err != nil {
+				return nil, err
+			}
+			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]), coll)
 		}
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
@@ -1313,7 +1337,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				return out, err
 			}
 		}
-		out, err := x.callFunc(v.Name, args)
+		out, err := x.callOrdered(v, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
@@ -1374,6 +1398,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if v.Op == "||" {
 			l, r = paramText(v.L, l), paramText(v.R, r)
 		}
+		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
+			return out, err
+		}
 		res, err := x.binary(v.Op, l, r)
 		if err != nil {
 			return nil, err
@@ -1389,6 +1416,8 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 			vals[i] = val
 		}
 		return vals, nil
+	case *sqlir.Collate:
+		return x.evalAggRaw(v.X, g)
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {

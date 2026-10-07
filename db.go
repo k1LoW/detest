@@ -221,17 +221,20 @@ func (c tableCheck) columns() []string {
 
 // tableDef is what the schema declares about a table.
 type tableDef struct {
-	pk       []string // primary key columns; nil without a primary key
-	pkName   string
-	uniques  []sqlir.UniqueDef // unique constraints and indexes other than the primary key
-	fks      []sqlir.ForeignKey
-	columns  []string          // in declaration order, for applying defaults deterministically
-	types    map[string]string // column types, for the checks Postgres makes on write
-	notNull  map[string]bool   // NOT NULL columns besides the primary key's
-	checks   []tableCheck
-	indexes  []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
-	autoInc  map[string]bool       // MySQL's AUTO_INCREMENT columns
-	onUpdate map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
+	pk      []string // primary key columns; nil without a primary key
+	pkName  string
+	uniques []sqlir.UniqueDef // unique constraints and indexes other than the primary key
+	fks     []sqlir.ForeignKey
+	columns []string          // in declaration order, for applying defaults deterministically
+	types   map[string]string // column types, for the checks Postgres makes on write
+	// collations are the collations Postgres text columns declare, which
+	// order them instead of the database's.
+	collations map[string]string
+	notNull    map[string]bool // NOT NULL columns besides the primary key's
+	checks     []tableCheck
+	indexes    []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
+	autoInc    map[string]bool       // MySQL's AUTO_INCREMENT columns
+	onUpdate   map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
 	// strs are the limits on what a string column holds: CHAR(n) and
 	// VARCHAR(n) lengths, and MySQL's ENUM and SET members.
 	strs map[string]strLimit
@@ -631,6 +634,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.generated, col)
 	delete(def.identityAlways, col)
 	delete(def.types, col)
+	delete(def.collations, col)
 	delete(def.notNull, col)
 	delete(def.autoInc, col)
 	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return slices.Contains(ix.Columns, col) || ix.Prefix == col })
@@ -683,6 +687,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if t, ok := def.types[old]; ok {
 		delete(def.types, old)
 		def.types[nw] = t
+	}
+	if c, ok := def.collations[old]; ok {
+		delete(def.collations, old)
+		def.collations[nw] = c
 	}
 	if def.notNull[old] {
 		delete(def.notNull, old)
@@ -1278,6 +1286,14 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			def.types[col.Name] = col.Type
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
+			} else if col.Collation != "" && col.Collation != "default" {
+				if def.collations == nil {
+					def.collations = map[string]string{}
+				}
+				def.collations[col.Name] = col.Collation
+			} else {
+				// A type changed without COLLATE takes the database's.
+				delete(def.collations, col.Name)
 			}
 		}
 		switch {

@@ -27,6 +27,8 @@ type config struct {
 	convert    func(*sqlir.DBError) error
 	timeZone   *time.Location
 	zoneErr    error
+	collation  sqlir.Collation
+	collations map[string]sqlir.Collation
 }
 
 // Isolation sets the level transactions run at when they do not ask for one,
@@ -57,6 +59,23 @@ func TimeZone(name string) Option {
 	}
 }
 
+// Collation sets the database's collation, which orders text that declares
+// none: ORDER BY, <, min and max over it (default C, which orders text byte
+// by byte). It must be the collation the real database has, which
+// pg_database.datcollate shows, or the statements that order text read and
+// lock other rows than they do in production. Equality does not depend on
+// it, as Postgres tells two strings equal only when their bytes are.
+func Collation(c sqlir.Collation) Option {
+	return func(cf *config) { cf.collation = c }
+}
+
+// Collations declares the collations COLLATE and a column may name, besides
+// "C", "POSIX" and "default", which detest knows. A statement that orders
+// text by a collation neither names is refused.
+func Collations(named map[string]sqlir.Collation) Option {
+	return func(cf *config) { cf.collations = named }
+}
+
 // Errors sets how the database errors detest raises reach the code under
 // test. Production code branches on its driver's error type, such as pgx's
 // *pgconn.PgError; convert builds that type from the SQLSTATE and the details
@@ -73,15 +92,17 @@ func New(opts ...Option) sqlir.Server {
 		o(c)
 	}
 	return sqlir.NewServer(sqlir.ServerSpec{
-		Name:        "postgres",
-		Parser:      parser{},
-		Isolation:   c.isolation,
-		Supported:   []sqlir.IsolationLevel{sqlir.ReadCommitted},
-		SearchPath:  c.searchPath,
-		Codes:       codes,
-		Convert:     c.convert,
-		TimeZone:    c.timeZone,
-		TimeZoneErr: c.zoneErr,
+		Name:          "postgres",
+		Parser:        parser{},
+		Isolation:     c.isolation,
+		Supported:     []sqlir.IsolationLevel{sqlir.ReadCommitted},
+		SearchPath:    c.searchPath,
+		Codes:         codes,
+		Convert:       c.convert,
+		TimeZone:      c.timeZone,
+		TimeZoneErr:   c.zoneErr,
+		TextCollation: c.collation,
+		Collations:    c.collations,
 	})
 }
 
@@ -610,9 +631,19 @@ func unqualify(e sqlir.Expr) {
 	}
 }
 
+// collationName is the name a COLLATE clause gives, without the schema
+// pg_dump qualifies it with (pg_catalog."C"); empty without one.
+func collationName(cc *pg.CollateClause) string {
+	names := cc.GetCollname()
+	if len(names) == 0 {
+		return ""
+	}
+	return names[len(names)-1].GetString_().GetSval()
+}
+
 // columnDef converts a column with the constraints written on it.
 func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
-	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
+	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName), Collation: collationName(d.CollClause)}
 	if err := c.columnLimits(&col, d.TypeName); err != nil {
 		return col, nil, nil, err
 	}
@@ -1119,7 +1150,7 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
-				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true, Using: cd.RawDefault != nil}
+				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true, Using: cd.RawDefault != nil, Collation: collationName(cd.CollClause)}
 				if err := c.columnLimits(&col, cd.TypeName); err != nil {
 					return nil, err
 				}
@@ -1767,6 +1798,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			return &sqlir.Const{Value: v.Boolval.Boolval}, nil
 		}
 		return nil, c.unsupported("constant")
+	case *pg.Node_CollateClause:
+		x, err := c.expr(e.CollateClause.Arg)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlir.Collate{X: x, Name: collationName(e.CollateClause)}, nil
 	case *pg.Node_TypeCast:
 		if len(e.TypeCast.TypeName.GetArrayBounds()) > 0 {
 			// Dropping array bounds would run scalar casts and operators

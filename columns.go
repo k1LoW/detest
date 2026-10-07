@@ -29,6 +29,10 @@ func (s colSet) has(name string) (found, once bool) {
 type colScope struct {
 	items map[string]colSet
 	types map[string]map[string]string
+	// colls are the collations the columns of the base tables in scope
+	// declare, by alias. A derived item has no entry, as detest does not
+	// carry the collation of its query's columns.
+	colls map[string]map[string]string
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
 	outputs colSet
@@ -40,6 +44,11 @@ type colScope struct {
 	// same expression a * gives.
 	star  bool
 	plain colSet
+	// outputExprs are the select list's expressions by output name, and
+	// outputList in order unless a * stands in it, which an ORDER BY of the
+	// name or the position orders by the collation of.
+	outputExprs map[string]sqlir.Expr
+	outputList  []sqlir.Expr
 	// hidden is the target of an UPDATE or a DELETE, which its FROM or
 	// USING items may not refer to.
 	hidden string
@@ -376,6 +385,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
+			sc.noteCollations(alias, def)
 		}
 	}
 	return nil
@@ -692,6 +702,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		sc.outputs = outputColumns(sel) // column1, column2, ...
 	}
 	for _, t := range sel.Targets {
+		if !t.Star {
+			sc.outputList = append(sc.outputList, t.Expr)
+		}
 		sc.star = sc.star || t.Star
 		if r, ok := t.Expr.(*sqlir.ColumnRef); ok && !t.Star && targetName(t) == r.Column {
 			sc.plain[r.Column] = true
@@ -700,6 +713,10 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			n := targetName(t)
 			_, seen := sc.outputs[n]
 			sc.outputs[n] = !seen
+			if sc.outputExprs == nil {
+				sc.outputExprs = map[string]sqlir.Expr{}
+			}
+			sc.outputExprs[n] = t.Expr
 		}
 	}
 	for _, e := range sel.GroupBy {
@@ -894,6 +911,17 @@ func starWidth(sel *sqlir.SelectStmt, sc *colScope) (int, bool) {
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name
 // an output column of the select list.
 func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
+	if k, ok := e.(*sqlir.Const); ok {
+		if n, ok := k.Value.(int64); ok {
+			// A position past a * or in a set operation names a column
+			// whose collation detest does not know, noted as nil.
+			var out sqlir.Expr
+			if !sc.star && n >= 1 && int(n) <= len(sc.outputList) {
+				out = sc.outputList[n-1]
+			}
+			c.x.noteOutput(k, out)
+		}
+	}
 	r, ok := e.(*sqlir.ColumnRef)
 	if !ok || r.Table != "" {
 		return c.exprs(e, sc)
@@ -911,6 +939,7 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 		// fails as ambiguous unless the two are the same expression.
 		return c.x.unsupported(fmt.Sprintf("output name %q, which a * may give too", r.Column))
 	case found:
+		c.x.noteOutput(r, sc.outputExprs[r.Column])
 		return nil
 	}
 	return c.exprs(e, sc)
@@ -1123,11 +1152,21 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// arguments of COALESCE do.
 					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
 				}
+			case *sqlir.Collate:
+				// Postgres fails a collation that does not exist when it
+				// parses the statement (42704).
+				if _, ok := c.x.tx.db.kind.NamedCollation(e.Name); !ok && !c.x.tx.db.kind.InnoDB() {
+					err = c.x.unsupported(fmt.Sprintf("collation %q, which postgres.Collations does not declare", e.Name))
+					return
+				}
+				c.x.collates = true
 			case *sqlir.Cast:
 				c.castInput(e)
 				c.timeParams(e.Type, e.X)
 			case *sqlir.ColumnRef:
-				err = c.resolve(e, sc)
+				if err = c.resolve(e, sc); err == nil {
+					c.x.noteCollation(e, sc)
+				}
 				return
 			case *sqlir.SelectStmt:
 				_, err = c.query(e, sc)
@@ -1312,8 +1351,36 @@ func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
 	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
 		sc.types[targetAlias(table, alias)] = def.types
+		sc.noteCollations(targetAlias(table, alias), def)
 	}
 	return sc, cols
+}
+
+// noteCollations records the collations the columns of the base table def,
+// in scope as alias, declare.
+func (sc *colScope) noteCollations(alias string, def *tableDef) {
+	if sc.colls == nil {
+		sc.colls = map[string]map[string]string{}
+	}
+	sc.colls[alias] = def.collations
+}
+
+// columnCollation is the collation the column r refers to declares, empty
+// for the database's, and false when r is the column of a derived item,
+// whose collation detest does not know.
+func (sc *colScope) columnCollation(r *sqlir.ColumnRef) (string, bool) {
+	for s := sc; s != nil; s = s.outer {
+		for alias, cols := range s.items {
+			if r.Table != "" && alias != r.Table {
+				continue
+			}
+			if has, _ := cols.has(r.Column); has {
+				colls, ok := s.colls[alias]
+				return colls[r.Column], ok
+			}
+		}
+	}
+	return "", false
 }
 
 func targetAlias(table, alias string) string {
@@ -1481,6 +1548,12 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 		}
 		sc.items[alias] = cols
 		sc.types[alias] = own.types[alias]
+		if colls, ok := own.colls[alias]; ok {
+			if sc.colls == nil {
+				sc.colls = map[string]map[string]string{}
+			}
+			sc.colls[alias] = colls
+		}
 	}
 	return nil
 }

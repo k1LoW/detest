@@ -103,6 +103,8 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		return nil, nil
 	case *sqlir.Unconverted:
 		return nil, errUnknownExpr{"an expression detest could not convert"}
+	case *sqlir.Collate:
+		return x.eval(v.X, en)
 	case *sqlir.Cast:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -205,6 +207,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		if v.Op == "||" {
 			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
+		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
+			return out, err
 		}
 		res, err := x.binary(v.Op, l, r)
 		if err != nil {
@@ -474,7 +479,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				return out, err
 			}
 		}
-		out, err := x.callFunc(v.Name, args)
+		out, err := x.callOrdered(v, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
@@ -653,6 +658,16 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 		}
 		if eq {
 			return op != "=", nil
+		}
+		c, err := x.orderCollation(le[i], re[i])
+		if err == nil {
+			c, err = decide(c, li, ri)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if out, ok := orderedBinary(op, c, li, ri); ok {
+			return out, nil
 		}
 		return x.binary(op, li, ri)
 	}
@@ -1864,6 +1879,8 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 		return x.exprString(v.X) + op + "(" + x.exprString(v.Array) + ")"
 	case *sqlir.Cast:
 		return x.exprString(v.X)
+	case *sqlir.Collate:
+		return x.exprString(v.X) + " collate " + v.Name
 	case *sqlir.FuncCall:
 		return v.Name + "(...)"
 	case *sqlir.Exists:

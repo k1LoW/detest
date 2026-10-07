@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -325,6 +326,8 @@ type ColumnDef struct {
 	FSP int
 	// Collation is a MySQL text column's collation as declared, or the
 	// default one of the character set it declares; empty for the table's.
+	// On Postgres it is the collation a column declares with COLLATE, empty
+	// for the database's.
 	Collation string
 }
 
@@ -530,6 +533,12 @@ type Cast struct {
 	Len int
 }
 
+// Collate is x COLLATE "name", which orders x by the named collation.
+type Collate struct {
+	X    Expr
+	Name string
+}
+
 // CaseExpr is CASE [x] WHEN ... THEN ... ELSE ... END.
 type CaseExpr struct {
 	Arg   Expr
@@ -550,6 +559,7 @@ type Default struct{}
 type Unconverted struct{}
 
 func (*ColumnRef) isExpr()   {}
+func (*Collate) isExpr()     {}
 func (*Param) isExpr()       {}
 func (*Const) isExpr()       {}
 func (*Unconverted) isExpr() {}
@@ -634,7 +644,24 @@ type Impl struct {
 	collation  string
 	timeZone   *time.Location
 	zoneErr    error
+	text       Collation
+	collations map[string]Collation
 }
+
+// Collation orders text, as a Postgres collation does. Compare returns a
+// negative number when a sorts before b, a positive one when after, and 0
+// when the collation does not tell them apart, which detest then orders
+// byte by byte, as Postgres does for a deterministic collation. It must be a
+// total order and give the same answer for the same strings every time.
+type Collation interface {
+	Compare(a, b string) int
+}
+
+// ByteOrder is the C collation, which orders text byte by byte.
+type ByteOrder struct{}
+
+// Compare compares a and b byte by byte.
+func (ByteOrder) Compare(a, b string) int { return strings.Compare(a, b) }
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
 // detest about the server.
@@ -664,6 +691,11 @@ type ServerSpec struct {
 	// loaded, which declaring a database on the server reports.
 	TimeZone    *time.Location
 	TimeZoneErr error
+	// TextCollation is Postgres's database collation, which text that
+	// declares none is ordered by; nil is C. Collations are the other
+	// collations COLLATE and a column may name.
+	TextCollation Collation
+	Collations    map[string]Collation
 }
 
 // Server is a kind of database server as the code using detest holds it,
@@ -675,7 +707,7 @@ type Server struct{ impl *Impl }
 func NewServer(spec ServerSpec) Server {
 	return Server{impl: &Impl{name: spec.Name, parser: spec.Parser, isolation: spec.Isolation, supported: spec.Supported,
 		searchPath: spec.SearchPath, codes: spec.Codes, convert: spec.Convert, innodb: spec.InnoDB, collation: spec.Collation,
-		timeZone: spec.TimeZone, zoneErr: spec.TimeZoneErr}}
+		timeZone: spec.TimeZone, zoneErr: spec.TimeZoneErr, text: spec.TextCollation, collations: spec.Collations}}
 }
 
 // ImplOf returns the description behind s, nil for the zero Server.
@@ -831,6 +863,28 @@ func (s *Impl) Name() string { return s.name }
 
 // InnoDB reports whether the server has InnoDB's semantics.
 func (s *Impl) InnoDB() bool { return s.innodb }
+
+// TextCollation is the database collation of a Postgres server.
+func (s *Impl) TextCollation() Collation {
+	if s.text == nil {
+		return ByteOrder{}
+	}
+	return s.text
+}
+
+// NamedCollation is the collation COLLATE or a column names: C and POSIX,
+// which are byte order whatever the database's, default, which is the
+// database's, and the ones the server declares.
+func (s *Impl) NamedCollation(name string) (Collation, bool) {
+	switch name {
+	case "C", "POSIX":
+		return ByteOrder{}, true
+	case "default":
+		return s.TextCollation(), true
+	}
+	c, ok := s.collations[name]
+	return c, ok
+}
 
 // Collation is the server's default collation, for MySQL.
 func (s *Impl) Collation() string { return s.collation }

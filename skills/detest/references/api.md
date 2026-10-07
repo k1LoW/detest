@@ -76,6 +76,7 @@ The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST
 postgres.New(postgres.Errors(pgxerr.Convert))   // github.com/k1LoW/detest/db/postgres/pgxerr: *pgconn.PgError (pgx stdlib, GORM postgres)
 postgres.New(postgres.Errors(pqerr.Convert))    // .../postgres/pqerr: *pq.Error (lib/pq)
 postgres.New(postgres.SearchPath("app", "public"))
+postgres.New(postgres.Collation(c))              // the database's collation when it is not C; c comes from a package of its own (detest has C only)
 mysql.New(mysql.Errors(mysqlerr.Convert))       // .../mysql/mysqlerr: *mysql.MySQLError (go-sql-driver, GORM mysql)
 mysql.New(mysql.Isolation(detest.ReadCommitted), mysql.Database("app"), mysql.Collation("utf8mb4_bin"))
 ```

@@ -16,6 +16,11 @@ type Server = sqlir.Server
 // IsolationLevel is a transaction isolation level.
 type IsolationLevel = sqlir.IsolationLevel
 
+// Collation orders text for a Postgres database, as postgres.Collation and
+// postgres.Collations declare it. detest has the C collation only; another,
+// such as the one glibc gives en_US.utf8, comes from a package of its own.
+type Collation = sqlir.Collation
+
 // The isolation levels. The semantics of a level depend on the kind of
 // server, and detest implements a level only for the kinds it lists.
 const (
