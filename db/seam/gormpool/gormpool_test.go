@@ -1,6 +1,7 @@
 package gormpool_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -414,5 +415,39 @@ func TestRowsHoldConnection(t *testing.T) {
 			}
 			return nil
 		})
+	})
+}
+
+// An operation whose context has ended returns the context's error at once,
+// as database/sql does before it takes the transaction's locks, rather than
+// wait for the connection, which the process's open rows hold here while it
+// waits for that error.
+func TestCanceledOperationDoesNotWait(t *testing.T) {
+	fails := &failures{}
+	defer fails.report(t)
+	detest.Explore(t, func(t *testing.T, s *detest.Sim) {
+		gdb, store := open(t, s, counters)
+		s.Seed(func() { store.SeedRow("counters", detest.Row{"id": "c", "n": int64(0)}) })
+		s.Manual("pod", 1, fails.wrap(func(p *detest.Proc) error {
+			return gdb.WithContext(p.Context()).Transaction(func(tx *gorm.DB) error {
+				rows, err := tx.Raw(`SELECT n FROM counters`).Rows()
+				if err != nil {
+					return err
+				}
+				canceled, cancel := context.WithCancel(p.Context())
+				cancel()
+				var childErr error
+				var wg sync.WaitGroup
+				wg.Go(func() { childErr = tx.WithContext(canceled).Exec(`UPDATE counters SET n = 1 WHERE id = 'c'`).Error })
+				wg.Wait()
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				if !errors.Is(childErr, context.Canceled) {
+					return fmt.Errorf("the canceled update returned %w, want context.Canceled", childErr)
+				}
+				return nil
+			})
+		}))
 	})
 }

@@ -74,7 +74,7 @@ func (p *Pool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool,
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{tx: tx, db: p.db, seam: slot.Tx}, nil
+	return &Tx{tx: tx, db: p.db, seam: slot}, nil
 }
 
 // Tx is a transaction BeginTx began. Each of its operations waits for the
@@ -82,11 +82,11 @@ func (p *Pool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool,
 type Tx struct {
 	tx   *sql.Tx
 	db   *sql.DB
-	seam seam.Tx // nil when the database is not detest's
+	seam *seam.Slot
 }
 
 func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	release, err := t.enter("prepare", query)
+	release, err := t.seam.Enter(ctx, "prepare", query)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (t *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error
 }
 
 func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	release, err := t.enter("exec", query, args...)
+	release, err := t.seam.Enter(ctx, "exec", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Re
 // QueryContext gives the connection back when it returns, but the driver
 // keeps it until the rows are closed.
 func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	release, err := t.enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.
 // error of the pool's, so when the run is over it calls the *sql.Tx all the
 // same, and the driver returns the end of the run.
 func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	release, err := t.enter("query", query, args...)
+	release, err := t.seam.Enter(ctx, "query", query, args...)
 	if err == nil {
 		defer release()
 	}
@@ -126,7 +126,7 @@ func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sq
 }
 
 func (t *Tx) Commit() error {
-	release, err := t.enter("commit", "")
+	release, err := t.seam.Enter(context.Background(), "commit", "")
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (t *Tx) Commit() error {
 }
 
 func (t *Tx) Rollback() error {
-	release, err := t.enter("rollback", "")
+	release, err := t.seam.Enter(context.Background(), "rollback", "")
 	if err != nil {
 		return err
 	}
@@ -146,10 +146,3 @@ func (t *Tx) Rollback() error {
 // GetDBConn returns the *sql.DB the transaction began on, which gorm.DB.DB
 // reads.
 func (t *Tx) GetDBConn() (*sql.DB, error) { return t.db, nil }
-
-func (t *Tx) enter(op, query string, args ...any) (func(), error) {
-	if t.seam == nil {
-		return func() {}, nil
-	}
-	return t.seam.Enter(op, query, args...)
-}

@@ -6,6 +6,7 @@ require (
 	connectrpc.com/connect v1.21.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.12.3
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20261001035437-93a01d31f6da

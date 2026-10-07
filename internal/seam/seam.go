@@ -1,6 +1,7 @@
 // Package seam carries what passes between detest's driver and the packages
-// under db/seam, which take the place of the connection a library such as
-// GORM is given, so that they need not import detest itself.
+// under db/seam, which take the place of the connection or the transaction
+// a library such as GORM, sqlc or sqlx is given, so that they need not
+// import detest itself.
 //
 // database/sql holds a transaction's locks while the driver runs, and a
 // goroutine parked there blocks its siblings on a sync.Mutex, which synctest
@@ -12,20 +13,22 @@ package seam
 
 import "context"
 
-// Tx is a transaction a seam package began.
-type Tx interface {
+// Hook is detest's side of a transaction a seam package began.
+type Hook interface {
 	// Enter waits until the calling goroutine may use the transaction's
 	// connection, and takes it. release gives it back. It is a no-op outside
 	// a run, and for a transaction no process began. op, query and args
 	// describe the operation, which orders goroutines adopted at the same
 	// step, as the driver's statement does for a goroutine whose first call
-	// is a statement.
-	Enter(op, query string, args ...any) (release func(), err error)
+	// is a statement. An operation whose ctx has ended returns its error
+	// without waiting, as database/sql does before it takes the
+	// transaction's locks.
+	Enter(ctx context.Context, op, query string, args ...any) (release func(), err error)
 }
 
-// Slot receives the Tx of a transaction the driver begins with a context
+// Slot receives the Hook of a transaction the driver begins with a context
 // WithSlot returned. It stays empty when the database is not detest's.
-type Slot struct{ Tx Tx }
+type Slot struct{ Hook Hook }
 
 type slotKey struct{}
 
@@ -40,4 +43,12 @@ func WithSlot(ctx context.Context) (context.Context, *Slot) {
 func SlotOf(ctx context.Context) *Slot {
 	s, _ := ctx.Value(slotKey{}).(*Slot)
 	return s
+}
+
+// Enter is the Hook's Enter, and a no-op when the slot stayed empty.
+func (s *Slot) Enter(ctx context.Context, op, query string, args ...any) (release func(), err error) {
+	if s == nil || s.Hook == nil {
+		return func() {}, nil
+	}
+	return s.Hook.Enter(ctx, op, query, args...)
 }
