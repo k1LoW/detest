@@ -170,6 +170,43 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name: "skip locked in a subquery compared with a column",
+		Schema: []string{
+			`CREATE TABLE q (id int PRIMARY KEY, ws int NOT NULL, dom int NOT NULL, at int NOT NULL)`,
+		},
+		Seed:  []string{`INSERT INTO q VALUES (1, 1, 1, 10), (2, 1, 1, 20), (3, 2, 1, 15), (4, 1, 1, 30)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(1, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM q WHERE id = (SELECT id FROM q ORDER BY at LIMIT 1 FOR UPDATE SKIP LOCKED) FOR UPDATE SKIP LOCKED`),
+			difftest.Q(1, `SELECT id FROM q WHERE id = (SELECT id FROM q ORDER BY at LIMIT 1 FOR UPDATE SKIP LOCKED) FOR UPDATE SKIP LOCKED`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
+		Name: "skip locked in a subquery compared with a row",
+		Schema: []string{
+			`CREATE TABLE q (id int PRIMARY KEY, ws int NOT NULL, dom int NOT NULL, at int NOT NULL)`,
+		},
+		Seed:  []string{`INSERT INTO q VALUES (1, 1, 1, 10), (2, 1, 1, 20), (3, 2, 1, 15), (4, 1, 1, 30), (5, 3, 1, 40)`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(1, `BEGIN`),
+			difftest.S(2, `BEGIN`),
+			difftest.Q(2, `SELECT id FROM q WHERE id = 2 FOR UPDATE`),
+			difftest.Q(0, `SELECT id FROM q WHERE (ws, dom) = (SELECT ws, dom FROM q ORDER BY at LIMIT 1 FOR UPDATE SKIP LOCKED) ORDER BY id FOR UPDATE SKIP LOCKED`),
+			difftest.Q(1, `SELECT id FROM q WHERE (ws, dom) = (SELECT ws, dom FROM q ORDER BY at LIMIT 1 FOR UPDATE SKIP LOCKED) ORDER BY id FOR UPDATE SKIP LOCKED`),
+			difftest.S(2, `COMMIT`),
+			difftest.Q(1, `SELECT id FROM q WHERE (ws, dom) = (SELECT ws, dom FROM q WHERE id > 4 ORDER BY at LIMIT 1 FOR UPDATE SKIP LOCKED) FOR UPDATE SKIP LOCKED`),
+			difftest.Q(1, `SELECT count(*) FROM q WHERE (ws, dom) = (SELECT ws, dom FROM q WHERE id > 9)`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		Name:   "lock strengths: key share vs no key update",
 		Schema: stockSchema, Seed: stockSeed, Conns: 2,
 		Steps: []difftest.Step{

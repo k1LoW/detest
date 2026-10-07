@@ -136,6 +136,11 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT a, b FROM p WHERE (a * 1000000, b) > (9000000.0, 2) ORDER BY a, b`),
 			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, name) > (0, 'x')`),
 			difftest.Q(0, `SELECT a, b FROM p WHERE (a, name) < (9, 'y') ORDER BY a, b`),
+			difftest.Q(0, `SELECT a, b FROM p WHERE (a, b) = (SELECT a, b FROM p WHERE name = 'y')`),
+			difftest.Q(0, `SELECT a, b FROM p WHERE (a, b) >= (SELECT 9, 2) ORDER BY a, b`),
+			difftest.Q(0, `SELECT a, b FROM p WHERE (a, name) = (SELECT a, name FROM p WHERE b = 3)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) <> (SELECT a, b FROM p WHERE a = 0)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) = (SELECT a, b FROM p WHERE a = 9)`),
 		},
 	},
 	{
