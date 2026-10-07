@@ -150,7 +150,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 	tx.block, tx.iso, tx.lockTimeout, tx.noAutoZero, tx.noFKChecks = true, iso, c.lockTimeout, c.noAutoZero, c.noFKChecks
 	tx.timeZone = c.timeZone
 	if slot := seam.SlotOf(ctx); slot != nil {
-		slot.Tx = seamTx{tx: tx}
+		slot.Hook = seamTx{tx: tx}
 	}
 	if p == nil {
 		tx.atomic = true

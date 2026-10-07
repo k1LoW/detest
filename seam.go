@@ -2,7 +2,7 @@ package detest
 
 import "sync"
 
-// seamTx is the seam.Tx of a transaction a package under db/seam began (see
+// seamTx is the seam.Hook of a transaction a package under db/seam began (see
 // internal/seam).
 type seamTx struct{ tx *Tx }
 
