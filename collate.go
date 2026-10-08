@@ -335,11 +335,12 @@ func decide(c sqlir.Collation, vals ...any) (sqlir.Collation, error) {
 	return nil, nil
 }
 
-// hasCollate reports whether a COLLATE stands anywhere under n, which may
+// hasCollate reports whether a COLLATE, or a cast to a type of a collation
+// of its own such as name, stands anywhere under n, which may
 // be a table definition with unexported fields: it reads types only, never
 // the values behind them.
 func hasCollate(n any) bool {
-	collate := reflect.TypeFor[*sqlir.Collate]()
+	collate, cast := reflect.TypeFor[*sqlir.Collate](), reflect.TypeFor[*sqlir.Cast]()
 	found := false
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
@@ -352,6 +353,10 @@ func hasCollate(n any) bool {
 				return
 			}
 			if v.Type() == collate {
+				found = true
+				return
+			}
+			if v.Type() == cast && typeCollation(v.Elem().FieldByName("Type").String()) != "" {
 				found = true
 				return
 			}
@@ -449,13 +454,6 @@ func compareOrdered(c sqlir.Collation, a, b any) (int, bool) {
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
 	if v.Name != "greatest" && v.Name != "least" {
 		return x.callFunc(v.Name, args)
-	}
-	// database/sql lets a string argument come as []byte, which callFunc
-	// takes as the string.
-	for i, a := range args {
-		if b, ok := derefValue(a).([]byte); ok {
-			args[i] = string(b)
-		}
 	}
 	c, err := x.orderCollation(v.Args...)
 	if err == nil {

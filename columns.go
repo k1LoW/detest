@@ -1167,6 +1167,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			case *sqlir.Cast:
 				c.castInput(e)
 				c.timeParams(e.Type, e.X)
+				if typeCollation(e.Type) != "" {
+					// A cast to name brings name's C collation in, as a
+					// COLLATE does.
+					c.x.collates = true
+				}
 			case *sqlir.ColumnRef:
 				if err = c.resolve(e, sc); err == nil {
 					c.x.noteCollation(e, sc)

@@ -189,6 +189,11 @@ func TestCollationOfResults(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT id FROM b ORDER BY payload`); !reflect.DeepEqual(got, []string{"3", "4", "2", "1"}) {
 		t.Errorf("ORDER BY a bytea column: got %v", got)
 	}
+	// a over B by bytes, B over a under the case-folding collation.
+	mustExec(t, db, `INSERT INTO b VALUES (5, $1)`, []byte("a"))
+	if got := rowsOf(t, db, `SELECT greatest(x.payload, y.payload) = x.payload FROM b x, b y WHERE x.id = 5 AND y.id = 2`); !reflect.DeepEqual(got, []string{"true"}) {
+		t.Errorf("greatest of bytea: got %v, want a, the greater by bytes", got)
+	}
 	// A string argument that database/sql passes as []byte is text to
 	// greatest and least, as to the other functions.
 	if got := rowsOf(t, db, `SELECT greatest($1::text, $2::text)`, []byte("a"), []byte("B")); !reflect.DeepEqual(got, []string{"B"}) {
@@ -288,6 +293,23 @@ func TestDomainOnlyCollation(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
 	if _, err := db.Exec(`SELECT id FROM t ORDER BY name::tag`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("ordering text cast to a collated domain: got %v, want unsupported", err)
+	}
+}
+
+// A cast to name brings name's C collation into a statement where nothing
+// else sets one: a derived column of it, which detest does not carry, is
+// refused, and a CREATE TABLE AS column of it keeps C.
+func TestNameCastCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
+	if _, err := db.Exec(`SELECT x.n FROM (SELECT name::name AS n FROM t) x ORDER BY x.n`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering a derived column cast to name: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `CREATE TABLE nm AS SELECT id, name::name AS n FROM t`)
+	if got := rowsOf(t, db, `SELECT id FROM nm ORDER BY n`); !reflect.DeepEqual(got, []string{"2", "3", "1"}) {
+		t.Errorf("a CREATE TABLE AS column cast to name: got %v, want C order", got)
 	}
 }
 
