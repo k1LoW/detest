@@ -826,7 +826,7 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
-		cols.byPos[i] = db.branchKind(t)
+		cols.byPos[i] = db.branchKind(resolvedType(t, setOpColumnExprs(sel, i)))
 	}
 	first := sel
 	for first.SetOp != "" && first.Larg != nil {
@@ -844,6 +844,32 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 		c.x.setOpColumns = map[*sqlir.SelectStmt]setOpColumns{}
 	}
 	c.x.setOpColumns[sel] = cols
+}
+
+// setOpColumnExprs are the expressions of the i-th column of every query
+// of the set operation sel, nil when one of them is a * or has no i-th.
+func setOpColumnExprs(sel *sqlir.SelectStmt, i int) []sqlir.Expr {
+	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
+		l, r := setOpColumnExprs(sel.Larg, i), setOpColumnExprs(sel.Rarg, i)
+		if l == nil || r == nil {
+			return nil
+		}
+		return append(l, r...)
+	}
+	var out []sqlir.Expr
+	for _, row := range sel.Values {
+		if i >= len(row) {
+			return nil
+		}
+		out = append(out, row[i])
+	}
+	if len(sel.Values) > 0 {
+		return out
+	}
+	if i >= len(sel.Targets) || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		return nil
+	}
+	return []sqlir.Expr{sel.Targets[i].Expr}
 }
 
 // setOpColumns are the kinds of type, by branchKind, the columns of a set
@@ -1235,7 +1261,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				typ := expressionType(e, sc.columnType)
 				c.timeParams(typ, caseBranches(e)...)
 				c.x.noteType(e, typ)
-				c.x.noteBranchType(e, typ)
+				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
@@ -1262,7 +1288,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
-					c.x.noteBranchType(e, typ)
+					c.x.noteBranchType(e, resolvedType(typ, e.Args))
 				case "date_trunc":
 					if len(e.Args) == 2 {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))

@@ -549,6 +549,10 @@ func TestBytesAsText(t *testing.T) {
 		// A []byte parameter among text branches is text, which orders by
 		// the collation.
 		{`SELECT greatest(name, $1) FROM t WHERE id = 2`, []any{[]byte("a")}, []string{"B"}},
+		// Branches that are all parameters or literals of no type are
+		// text.
+		{`SELECT greatest($1, $2)`, []any{[]byte("a"), []byte("B")}, []string{"B"}},
+		{`SELECT least(CASE WHEN true THEN $1 END, 'b')`, []any{[]byte("B")}, []string{"B"}},
 		{`SELECT id FROM t ORDER BY CASE WHEN id = 1 THEN name ELSE $1 END`, []any{[]byte("B")}, []string{"1", "2"}},
 		{`SELECT count(*) FROM (SELECT name FROM t UNION SELECT $1) s`, []any{[]byte("a")}, []string{"2"}},
 		// A set operation whose first query is VALUES or a * still takes

@@ -585,13 +585,13 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 			for _, f := range sqlir.FuncCalls(e) {
 				switch f.Name {
 				case "coalesce", "greatest", "least", "nullif":
-					if k := db.branchKind(commonType(f.Args, column, nil)); k != "" {
+					if k := db.branchKind(resolvedType(commonType(f.Args, column, nil), f.Args)); k != "" {
 						m[f] = k
 					}
 				}
 			}
 			for _, c := range sqlir.CaseExprs(e) {
-				if k := db.branchKind(expressionType(c, column)); k != "" {
+				if k := db.branchKind(resolvedType(expressionType(c, column), caseBranches(c))); k != "" {
 					m[c] = k
 				}
 			}
@@ -627,6 +627,27 @@ func (db *DB) branchKind(typ string) string {
 		return "text"
 	}
 	return ""
+}
+
+// resolvedType is typ, the type the branches exprs resolve to, or text when
+// every branch is a literal or a parameter of no type, as Postgres
+// resolves them.
+func resolvedType(typ string, exprs []sqlir.Expr) string {
+	if typ != "" || len(exprs) == 0 {
+		return typ
+	}
+	for _, e := range exprs {
+		switch e := e.(type) {
+		case *sqlir.Param:
+		case *sqlir.Const:
+			if _, ok := e.Value.(string); !ok && e.Value != nil {
+				return typ
+			}
+		default:
+			return typ
+		}
+	}
+	return "text"
 }
 
 // noteBranchType records the kind of type the column check resolved the
