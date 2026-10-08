@@ -200,6 +200,9 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM bb ORDER BY payload`),
 			difftest.Q(0, `SELECT id FROM bb WHERE payload < '\x0a01' ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM bb ORDER BY payload DESC LIMIT 2`),
+			difftest.Q(0, `SELECT id FROM bb WHERE greatest(payload, '\x42') = '\x42'::bytea ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM bb WHERE least(payload, '\x0a') = payload ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM bb WHERE coalesce(nullif(payload, '\x62'), '\x43') = 'C'::bytea ORDER BY id`),
 		},
 	},
 	{

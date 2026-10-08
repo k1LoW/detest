@@ -477,6 +477,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.timeArgs(v, args); err != nil {
 			return nil, err
 		}
+		if err := x.byteaArgs(v, args); err != nil {
+			return nil, err
+		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
 				return out, err
@@ -793,6 +796,23 @@ func isNumber(v any) bool {
 	v = derefValue(v)
 	_, ok := toFloat(v)
 	return ok
+}
+
+// byteaArgs reads the literals and string parameters among the arguments
+// of a COALESCE, GREATEST or LEAST that resolves to bytea as bytea input, as
+// Postgres does before it compares or returns them.
+func (x *sqlExec) byteaArgs(f *sqlir.FuncCall, args []any) error {
+	if !x.byteaCalls[f] {
+		return nil
+	}
+	for i, a := range f.Args {
+		v, err := x.untyped(a, args[i], []byte{})
+		if err != nil {
+			return err
+		}
+		args[i] = v
+	}
+	return nil
 }
 
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {

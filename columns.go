@@ -1208,6 +1208,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
+					if c.x.tx.db.baseType(typ) == "bytea" && !c.x.tx.db.kind.InnoDB() {
+						if c.x.byteaCalls == nil {
+							c.x.byteaCalls = map[*sqlir.FuncCall]bool{}
+						}
+						c.x.byteaCalls[e] = true
+					}
 				case "date_trunc":
 					if len(e.Args) == 2 {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
