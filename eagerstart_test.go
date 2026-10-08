@@ -377,3 +377,70 @@ func TestEagerStartDroppedWhenAStartWaitsOutside(t *testing.T) {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
+
+// A call that returns without yielding reads or changes a resource where the
+// start is, so the exploration starts over without eager starts.
+func TestEagerStartDroppedOnACallThatDoesNotYield(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		model func(t *testing.T, s *Sim)
+	}{
+		{"peek", func(t *testing.T, s *Sim) {
+			db, store := s.DB("app", postgres.New())
+			if _, err := db.Exec(`CREATE TABLE flags (id text PRIMARY KEY)`); err != nil {
+				t.Fatal(err)
+			}
+			seen := false
+			s.Seed(func() { seen = false })
+			s.Manual("setter", 1, func(p *Proc) error {
+				_, err := db.ExecContext(p.Context(), `INSERT INTO flags VALUES ('set')`)
+				return err
+			})
+			s.Manual("watcher", 1, func(p *Proc) error {
+				seen = len(store.Peek("flags")) > 0
+				p.Step("after peeking")
+				return nil
+			})
+			s.Sometimes("the watcher sees the flag", func(*State) bool { return seen })
+		}},
+		{"unlock", func(t *testing.T, s *Sim) {
+			mu := s.Mutex("m")
+			s.Seed(func() { mu.Lock() })
+			s.Manual("releaser", 1, func(p *Proc) error {
+				mu.Unlock()
+				p.Step("after unlocking")
+				return nil
+			})
+			s.Manual("taker", 1, func(p *Proc) error {
+				mu.Lock()
+				defer mu.Unlock()
+				return nil
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, _ := explore(t, tc.model, nil)
+			if res.Fatal != nil || !strings.Contains(res.lazy, "without reaching a yield point") {
+				t.Fatalf("got %v, %s", res.Fatal, res.report())
+			}
+		})
+	}
+}
+
+// Asking the scheduler for a choice touches no resource, so a start that
+// does keeps eager starts.
+func TestEagerStartKeptOnAChoice(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		lastItemModel(true)(t, s)
+		s.Manual("chooser", 1, func(p *Proc) error {
+			p.Choose("which", 2)
+			p.Step("after choosing")
+			return nil
+		})
+	}
+	with, _ := explore(t, model, nil)
+	without, _ := explore(t, model, []Option{EagerStart(false)})
+	if with.Fatal != nil || with.lazy != "" || with.Runs >= without.Runs {
+		t.Fatalf("with %s\nwithout %s", with.report(), without.report())
+	}
+}

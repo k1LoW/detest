@@ -841,6 +841,7 @@ func (r *run) startEager() (bool, *violation) {
 		return false, nil
 	}
 	before := r.startEffects()
+	calls := r.s.calls.Load()
 	first := len(r.procs)
 	cur := r.current
 	r.runs[pt]++
@@ -863,6 +864,12 @@ func (r *run) startEager() (bool, *violation) {
 	// matters.
 	if !maps.Equal(before, r.startEffects()) {
 		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "moved a sequence, AUTO_INCREMENT or generated uuid counter or took a lock"}}
+	}
+	// A call that returned without yielding, such as DB.Peek or
+	// Mutex.Unlock, read or changed a resource at the start, where another
+	// process may have been at another point.
+	if r.s.calls.Load() != calls {
+		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "called into detest without reaching a yield point"}}
 	}
 	for _, q := range r.procs[first:] {
 		// Blocked outside detest before its first yield point, such as on
@@ -1473,7 +1480,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // WaitUntil blocks until the simulated clock reaches t. The clock advances only when
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
-	defer p.r.s.leave()
+	defer p.r.s.leaveSched()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return canonical("wait until", t) })
 	goneStale(p)
@@ -1489,7 +1496,7 @@ func (p *Proc) WaitUntil(t int64) {
 
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
-	defer p.r.s.leave()
+	defer p.r.s.leaveSched()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "choose " + label })
 	goneStale(p)
@@ -1499,7 +1506,7 @@ func (p *Proc) Choose(label string, n int) int {
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
-	defer p.r.s.leave()
+	defer p.r.s.leaveSched()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow

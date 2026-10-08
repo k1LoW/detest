@@ -167,7 +167,8 @@ func MaxPreemptions(n int) Option {
 // result that depends on where it starts. So does one that stops short of
 // its first yield point outside detest, such as waiting for the connection of
 // a database/sql pool another process holds or for goroutines of its own,
-// which detest cannot tell apart. Explore then starts the
+// which detest cannot tell apart, and one that makes a call into detest that
+// returns without yielding, such as DB.Peek or Mutex.Unlock. Explore then starts the
 // exploration over without EagerStart, calling the declaration function once
 // more per worker, and says so in its report, and the
 // schedules it prints replay without it. The clock needs no such check, since
@@ -309,6 +310,9 @@ type Sim struct {
 	staleN atomic.Int32
 	// hb carries happens-before from processes to the scheduler (see leave).
 	hb atomic.Uint64
+	// calls counts the calls into detest that returned to the code under
+	// test, which an eager start must not make (see startEager).
+	calls atomic.Uint64
 	// lingerN counts the processes detest started among stale, whose
 	// goroutines would otherwise take Current's fast path in a later run.
 	lingerN atomic.Int32

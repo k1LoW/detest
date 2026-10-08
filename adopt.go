@@ -729,7 +729,14 @@ func (p *Proc) resolve(first func() string) *Proc {
 // goroutine parks, but sync.WaitGroup.Wait turns race annotations off while it
 // parks, so a process that waits for its goroutines with a WaitGroup, as
 // errgroup does, right after a call into detest would be reported racing.
-func (s *Sim) leave() { s.hb.Add(1) }
+func (s *Sim) leave() {
+	s.hb.Add(1)
+	s.calls.Add(1)
+}
+
+// leaveSched is leave for a call that only asks the scheduler something and
+// touches no simulated resource, which an eager start may make.
+func (s *Sim) leaveSched() { s.hb.Add(1) }
 
 func (s *Sim) settled() {
 	s.publish()

@@ -429,6 +429,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
 func (db *DB) Peek(table string) []Row {
+	defer db.s.leave()
 	defer db.s.enterAny()()
 	return publicRows(db.selectCommitted(table, nil))
 }
@@ -823,6 +824,7 @@ func (def *tableDef) reads(col string) bool {
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
 func (db *DB) SeedRowNow(table string, row Row) {
+	defer db.s.leave()
 	defer db.s.enterAny()()
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
