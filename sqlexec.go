@@ -93,6 +93,12 @@ type sqlExec struct {
 	// arguments the column check resolved to bytea, which a literal or a
 	// string parameter among them is bytea input of.
 	byteaCalls map[*sqlir.FuncCall]bool
+	// byteaCases are the CASE expressions whose branches, and byteaSetOps
+	// the positions of the set operations whose columns, the column check
+	// resolved to bytea, which a literal or a string parameter there is
+	// bytea input of.
+	byteaCases  map[*sqlir.CaseExpr]bool
+	byteaSetOps map[*sqlir.SelectStmt][]bool
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
 	// statement has a COLLATE clause.
@@ -604,8 +610,9 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 
 // ctasType is the type the i-th column of a CREATE TABLE AS, col in rows,
 // is created with: bytea when it is, by the type the column check found by
-// position or by name or, where it could not tell, by its values, and ""
-// for any other type, which detest leaves unchecked. A column of no type
+// position or by name or, where it could not tell, by its values, a text
+// type the check found, and "" for any other type, which detest leaves
+// unchecked. A column of no type
 // the check tells and no value is untypedCTAS.
 func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 	typ := ""
@@ -616,11 +623,15 @@ func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 		typ = x.ctasNamed[col]
 	}
 	if typ != "" {
-		switch x.tx.db.baseType(typ) {
-		case "bytea":
+		switch base := x.tx.db.baseType(typ); {
+		case base == "bytea":
 			return "bytea"
-		case ambiguousDomain, constrainedDomain:
-			return x.tx.db.baseType(typ)
+		case base == ambiguousDomain || base == constrainedDomain:
+			return base
+		case collatableType(base):
+			// Text, so that bytes written to it later are the text they
+			// hold, which orders by the collation.
+			return base
 		}
 		return ""
 	}

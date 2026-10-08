@@ -205,6 +205,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM bb WHERE coalesce(nullif(payload, '\x62'), '\x43') = 'C'::bytea ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM bb WHERE nullif(payload, '\x00') < '\x0a01'::bytea ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM bb ORDER BY greatest(payload, '\x0a'), id`),
+			difftest.Q(0, `SELECT id FROM bb WHERE CASE WHEN id = 1 THEN '\x62' ELSE payload END = payload ORDER BY id`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT payload FROM bb UNION SELECT '\x62') s`),
 		},
 	},
 	{

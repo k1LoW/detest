@@ -436,6 +436,13 @@ func TestBytesAsText(t *testing.T) {
 		}
 	}
 	mustExec(t, db, `INSERT INTO untold VALUES (NULL)`)
+	// A text column of a CREATE TABLE AS stays text, so bytes written to it
+	// later are text, which orders by the collation.
+	mustExec(t, db, `CREATE TABLE ctext AS SELECT name FROM t WHERE false`)
+	mustExec(t, db, `INSERT INTO ctext VALUES ($1), ($2)`, []byte("a"), []byte("B"))
+	if got := rowsOf(t, db, `SELECT name FROM ctext ORDER BY name`); !reflect.DeepEqual(got, []string{"a", "B"}) {
+		t.Errorf("bytes written to a text column of a CREATE TABLE AS: got %v", got)
+	}
 	// A cast to a domain over bytea types the column as bytea.
 	mustExec(t, db, `CREATE DOMAIN blob3 AS bytea`)
 	mustExec(t, db, `CREATE TABLE viadomain AS SELECT payload::blob3 AS payload FROM lit WHERE false`)

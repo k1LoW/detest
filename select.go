@@ -547,6 +547,22 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		}
 		rrows[i] = m
 	}
+	// A column the queries resolve to bytea reads the text of a literal or
+	// a string parameter under it as bytea input, as Postgres does.
+	for j, bytea := range x.byteaSetOps[sel] {
+		if !bytea || j >= len(lcols) {
+			continue
+		}
+		for _, r := range slices.Concat(lrows, rrows) {
+			if s, ok := derefValue(r[lcols[j]]).(string); ok {
+				b, berr := parseBytea(s)
+				if berr != nil {
+					return nil, nil, x.tx.db.kind.Error(berr.kind, berr.msg, "", "", "")
+				}
+				r[lcols[j]] = b
+			}
+		}
+	}
 	// Postgres gives each column of a set operation one type, so '1' under
 	// an integer column is the integer 1, and text or a boolean under it is
 	// an error. detest keeps values, which compare as they are here, so a

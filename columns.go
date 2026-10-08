@@ -645,6 +645,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if _, err := c.query(sel.Rarg, outer); err != nil {
 			return nil, err
 		}
+		c.noteByteaSetOp(sel)
 		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
@@ -812,6 +813,27 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
+}
+
+// noteByteaSetOp records the columns of the set operation sel its queries
+// resolve to bytea.
+func (c *columnChecker) noteByteaSetOp(sel *sqlir.SelectStmt) {
+	db := c.x.tx.db
+	if db.kind.InnoDB() {
+		return
+	}
+	types := c.setOpTypes(sel)
+	cols := make([]bool, len(types))
+	for i, t := range types {
+		cols[i] = db.baseType(t) == "bytea"
+	}
+	if !slices.Contains(cols, true) {
+		return
+	}
+	if c.x.byteaSetOps == nil {
+		c.x.byteaSetOps = map[*sqlir.SelectStmt][]bool{}
+	}
+	c.x.byteaSetOps[sel] = cols
 }
 
 // setOpTypes are the types of the output columns of sel by position, over
@@ -1182,6 +1204,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				typ := expressionType(e, sc.columnType)
 				c.timeParams(typ, caseBranches(e)...)
 				c.x.noteType(e, typ)
+				if c.x.tx.db.baseType(typ) == "bytea" && !c.x.tx.db.kind.InnoDB() {
+					if c.x.byteaCases == nil {
+						c.x.byteaCases = map[*sqlir.CaseExpr]bool{}
+					}
+					c.x.byteaCases[e] = true
+				}
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
