@@ -718,6 +718,14 @@ func TestConstrainedDomains(t *testing.T) {
 			}
 		}
 	}
+	// A domain named as a built-in type would shadow it by its bare name,
+	// which Postgres resolves to the built-in type first.
+	mustExec(t, db, `CREATE DOMAIN plainbytes AS bytea`)
+	for _, q := range []string{`CREATE DOMAIN public.text AS bytea`, `ALTER DOMAIN plainbytes RENAME TO text`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
 	mustExec(t, db, `CREATE TABLE t_nullable (id int PRIMARY KEY, v nullable)`)
 	mustExec(t, db, `INSERT INTO t_nullable VALUES (1, NULL), (2, 'a')`)
 	if got := rowsOf(t, db, `SELECT count(*) FROM t_nullable WHERE v::nullable = 'a'`); !reflect.DeepEqual(got, []string{"1"}) {

@@ -527,6 +527,9 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			if len(parts) == 0 {
 				return nil, true, nil
 			}
+			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && builtinTypes[r.Newname] {
+				return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", r.Newname))
+			}
 			// Columns[0].Name is the bare name, which a dot in a quoted
 			// identifier would make Table's last part misread.
 			return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", RenameTo: r.Newname,
@@ -559,6 +562,11 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := names[len(names)-1].GetString_().GetSval()
+		if builtinTypes[name] {
+			// Postgres finds the built-in type first by its bare name,
+			// which is all a column of the domain keeps in detest.
+			return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", name))
+		}
 		var parts []string
 		for _, n := range names {
 			parts = append(parts, n.GetString_().GetSval())
@@ -2462,4 +2470,15 @@ func constrainedDomain(d *pg.CreateDomainStmt) bool {
 		}
 	}
 	return len(d.GetTypeName().GetTypmods()) > 0
+}
+
+// builtinTypes are the names of pg_catalog's types a column is commonly
+// declared with, as typeName gives them, which a domain of the name would
+// shadow by its bare name in detest but not in Postgres.
+var builtinTypes = map[string]bool{
+	"bool": true, "boolean": true, "int2": true, "int4": true, "int8": true, "smallint": true, "integer": true, "int": true, "bigint": true,
+	"float4": true, "float8": true, "real": true, "numeric": true, "decimal": true, "money": true,
+	"text": true, "varchar": true, "bpchar": true, "char": true, "name": true, "bytea": true, "uuid": true,
+	"date": true, "time": true, "timetz": true, "timestamp": true, "timestamptz": true, "interval": true,
+	"json": true, "jsonb": true, "xml": true, "inet": true, "cidr": true, "macaddr": true, "oid": true,
 }
