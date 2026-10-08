@@ -237,3 +237,37 @@ func TestEagerStartDroppedOnARunWithoutChoices(t *testing.T) {
 		t.Fatalf("replaying %q got %v, %s", res.Schedule, replayed.Fatal, replayed.report())
 	}
 }
+
+// A process's name is numbered within its type, so which name it gets does
+// not depend on where the processes of other types started, which EagerStart
+// fixes and branching on starts varies.
+func TestProcessNamesDoNotDependOnStartOrder(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprint(on), func(t *testing.T) {
+			res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+				db, store := s.DB("app", postgres.New())
+				if _, err := db.Exec(`CREATE TABLE owners (name text PRIMARY KEY)`); err != nil {
+					t.Fatal(err)
+				}
+				for _, typ := range []string{"alice", "bob"} {
+					s.Manual(typ, 1, func(p *Proc) error {
+						p.Step("before reading its name")
+						_, err := db.ExecContext(p.Context(), `INSERT INTO owners VALUES ($1)`, p.Name())
+						return err
+					})
+				}
+				s.AtQuiescence(func(st *State) error {
+					for _, want := range []string{"alice#1", "bob#1"} {
+						if _, ok := st.Row(store, "owners", want); !ok {
+							return fmt.Errorf("no owner %s", want)
+						}
+					}
+					return nil
+				})
+			}, []Option{EagerStart(on)}, nil, 0)
+			if res.Fatal != nil || res.Violated || !res.Complete {
+				t.Fatalf("got %s", res.report())
+			}
+		})
+	}
+}

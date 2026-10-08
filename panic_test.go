@@ -29,7 +29,7 @@ func racyPanic(s *Sim) {
 func TestPanicIsAViolation(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		racyPanic(s)
-		s.ExpectViolation("panic in b#2: boom")
+		s.ExpectViolation("panic in b#1: boom")
 	})
 }
 
@@ -48,7 +48,7 @@ func TestPanicReportsItsSchedule(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%v: expected the child to fail:\n%s", env, out)
 		}
-		if !regexp.MustCompile(`panic in b#2: boom`).Match(out) || regexp.MustCompile(`(?m)^panic: `).Match(out) {
+		if !regexp.MustCompile(`panic in b#1: boom`).Match(out) || regexp.MustCompile(`(?m)^panic: `).Match(out) {
 			t.Fatalf("%v: expected a test failure naming the panic, not a crash:\n%s", env, out)
 		}
 		if !regexp.MustCompile(`detest\.racyPanic`).Match(out) {

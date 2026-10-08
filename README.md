@@ -94,17 +94,17 @@ func TestReserve(t *testing.T) {
 ```
 --- FAIL: TestReserve (0.67s)
     stock_test.go:34: detest: quiescence invariant violated: 2 reservations of 1 item (stock now 0)
-        run 4, schedule (8 choices): DETEST_REPLAY=0,0,0,0,1,1,1,0
+        run 3, schedule (6 choices): DETEST_REPLAY=0,0,0,1,1,0
             1  alice#1  shop: begin   (stock_test.go:15)
             2  alice#1  shop: select stock where sku = apple   (stock_test.go:21)
             3  alice#1  shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            4  bob#2    shop: begin   (stock_test.go:15)
-            5  bob#2    shop: select stock where sku = apple   (stock_test.go:21)
+            4  bob#1    shop: begin   (stock_test.go:15)
+            5  bob#1    shop: select stock where sku = apple   (stock_test.go:21)
             6  alice#1  shop: commit   (stock_test.go:30)
             7  alice#1  done
-            8  bob#2    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            9  bob#2    shop: commit   (stock_test.go:30)
-           10  bob#2    done
+            8  bob#1    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
+            9  bob#1    shop: commit   (stock_test.go:30)
+           10  bob#1    done
 ```
 
 The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `s.Seed`. Run the test again with the printed `DETEST_REPLAY` to replay exactly that run, or pass it to `detest.Replay` to pin the counterexample in a regression test.
