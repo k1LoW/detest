@@ -313,6 +313,29 @@ func TestNameCastCollation(t *testing.T) {
 	}
 }
 
+// Text written or compared as []byte, as database/sql may pass a string,
+// orders by the collation as text does, while bytea keeps byte order.
+func TestBytesAsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, payload bytea)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $1), (2, $2, $2)`, []byte("a"), []byte("B"))
+	for _, tc := range []struct {
+		q    string
+		args []any
+		want []string
+	}{
+		{`SELECT id FROM t ORDER BY name`, nil, []string{"1", "2"}},
+		{`SELECT id FROM t ORDER BY payload`, nil, []string{"2", "1"}},
+		{`SELECT id FROM t WHERE name < $1`, []any{[]byte("B")}, []string{"1"}},
+		{`SELECT min(name) FROM t`, nil, []string{"a"}},
+	} {
+		if got := rowsOf(t, db, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
+	}
+}
+
 // A collation declared with a nil comparator is not declared.
 func TestNilNamedCollation(t *testing.T) {
 	s := newSim(t)
