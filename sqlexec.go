@@ -1500,7 +1500,8 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
-		if v.Op == "||" {
+		if v.Op == "||" || strings.HasSuffix(v.Op, "LIKE") {
+			// A []byte parameter is text a driver sent as bytes.
 			l, r = paramText(v.L, l), paramText(v.R, r)
 		}
 		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {

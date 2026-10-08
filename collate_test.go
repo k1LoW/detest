@@ -662,6 +662,8 @@ func TestCaseMappingCollations(t *testing.T) {
 		{`SELECT upper(plain) FROM t`, nil, []string{"ÄI"}},
 		{`SELECT lower($1)`, []any{[]byte("ÄI")}, []string{"Äi"}},
 		{`SELECT count(*) FROM t WHERE plain ILIKE $1`, []any{[]byte("äI")}, []string{"0"}},
+		{`SELECT count(*) FROM t WHERE plain ILIKE $1`, []any{[]byte("ÄI")}, []string{"1"}},
+		{`SELECT count(*) FROM t WHERE plain LIKE $1`, []any{[]byte("Ä%")}, []string{"1"}},
 	} {
 		if got := rowsOf(t, cdb, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s on a database of C: got %v, want %v", tc.q, got, tc.want)
