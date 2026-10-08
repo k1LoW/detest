@@ -55,8 +55,8 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 }
 
 // explore runs the exploration Explore reports on, starting it over without
-// EagerStart when a start drew a generated value, and saves or ends the
-// checkpoint.
+// EagerStart when a start moved a counter of generated values, and saves or
+// ends the checkpoint.
 func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*result, *string) {
 	t.Helper()
 	start := time.Now()
@@ -87,8 +87,8 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		f      *frontier
 		res    *result
 		expect *string
-		// lazy says why EagerStart was dropped, once a start drew a
-		// generated value. The exploration then starts over without it,
+		// lazy says why EagerStart was dropped, once a start moved a
+		// counter of generated values. The exploration then starts over without it,
 		// since switching inside one would leave the frontier, a checkpoint
 		// and the other workers holding subtrees of another tree.
 		lazy string

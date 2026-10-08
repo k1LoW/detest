@@ -142,7 +142,7 @@ func TestEagerStartDroppedWhenAStartDrawsAValue(t *testing.T) {
 	if !res.Violated || res.lazy == "" || !strings.HasPrefix(res.Schedule, lazyPrefix) {
 		t.Fatalf("got %s", res.report())
 	}
-	if !strings.Contains(res.report(), "explored without EagerStart, as alice#1 drew a sequence") {
+	if !strings.Contains(res.report(), "explored without EagerStart, as alice#1 moved a sequence") {
 		t.Errorf("the report does not say why EagerStart was dropped:\n%s", res.report())
 	}
 	replayed, _ := explore(t, firstIDModel, []Option{Replay(res.Schedule)})

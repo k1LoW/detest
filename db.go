@@ -155,7 +155,7 @@ type DB struct {
 	views    map[string]*sqlir.SchemaChange      // the query of each view
 	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs     map[string]int64                    // sequence values of the run, for nextval
-	uuids    int64                               // gen_random_uuid values handed out in the run
+	uuids    int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
 	ignored  map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions

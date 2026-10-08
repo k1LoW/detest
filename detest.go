@@ -160,7 +160,7 @@ func MaxPreemptions(n int) Option {
 // in a variable should record it after a yield point, such as a Proc.Step,
 // so that it reads the time the schedule picks.
 //
-// A process that draws a sequence, AUTO_INCREMENT or gen_random_uuid value
+// A process that moves a sequence, AUTO_INCREMENT or generated uuid counter
 // before its first yield point, as an INSERT into a table with a generated
 // key does when it is the first statement and runs outside a transaction,
 // gets a value that depends on where it starts. Explore then starts the
@@ -170,21 +170,23 @@ func MaxPreemptions(n int) Option {
 // not move.
 func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 
-// withoutEagerStart is EagerStart(false) after a start drew a generated
-// value, which the report and the schedules it prints carry.
+// withoutEagerStart is EagerStart(false) after a start moved a counter of
+// generated values, which the report and the schedules it prints carry.
 func withoutEagerStart(why string) Option {
 	return func(s *Sim) { s.eagerStart, s.lazy = false, why }
 }
 
-// eagerDrawError is a start that drew a generated value under EagerStart.
+// eagerDrawError is a start that moved a counter of generated values under
+// EagerStart, by drawing a value or by setting the counter.
 type eagerDrawError struct{ proc string }
 
 func (e *eagerDrawError) Error() string {
-	return e.proc + " drew a sequence, AUTO_INCREMENT or gen_random_uuid value before its first yield point, so the value depends on where it starts"
+	return e.proc + " moved a sequence, AUTO_INCREMENT or generated uuid counter before its first yield point, so what it got depends on where it starts"
 }
 
-// lazyPrefix marks a schedule explored without EagerStart after a start drew
-// a generated value, so that it replays without it in a test that leaves it on.
+// lazyPrefix marks a schedule explored without EagerStart after a start moved
+// a counter of generated values, so that it replays without it in a test that
+// leaves it on.
 const lazyPrefix = "lazy:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
