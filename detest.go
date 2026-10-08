@@ -164,7 +164,8 @@ func MaxPreemptions(n int) Option {
 // before its first yield point, as an INSERT into a table with a generated
 // key does when it is the first statement and runs outside a transaction,
 // gets a value that depends on where it starts. Explore then starts the
-// exploration over without EagerStart and says so in its report, and the
+// exploration over without EagerStart, calling the declaration function once
+// more per worker, and says so in its report, and the
 // schedules it prints replay without it. The clock needs no such check, since
 // while a start is left the scheduler has a step to take and the clock does
 // not move.
@@ -221,7 +222,9 @@ func Shard(index, total, depth int) Option {
 // not enter, and idle workers take them, so each run is executed once. Explore
 // calls the declaration function once per worker: state the function shares
 // across runs through captured variables is shared across workers too and
-// needs synchronization. DETEST_WORKERS overrides n.
+// needs synchronization. When Explore starts the exploration over without
+// EagerStart (see there), it calls the function once more per worker, in a
+// bubble of its own as for another worker. DETEST_WORKERS overrides n.
 func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 
 // Replay makes Explore run the one schedule a violation was reported with

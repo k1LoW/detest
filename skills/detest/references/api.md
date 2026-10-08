@@ -8,7 +8,7 @@ The parts of the API a simulation uses most. `go doc -all github.com/k1LoW/detes
 detest.Explore(t, func(t *testing.T, s *detest.Sim) { ...declare... }, opts...)
 ```
 
-The function declares the simulation and returns; the exploration runs after it, once per schedule. With `Workers(n)` the function runs once per worker, so variables it captures are per worker.
+The function declares the simulation and returns; the exploration runs after it, once per schedule. With `Workers(n)` the function runs once per worker, so variables it captures are per worker. An exploration that starts over without `EagerStart` runs it once more per worker.
 
 ## Declaring (`s *detest.Sim`)
 

@@ -31,7 +31,7 @@ Explore(t, fn, opts...)
              └─ choices: which process, which outcome, which fault
 ```
 
-`Explore` is the only entry point. Everything a test declares goes through the function passed to it, which runs once per worker. A narrow entry point keeps the rules about determinism (below) enforceable, and a public API can be widened later but not narrowed.
+`Explore` is the only entry point. Everything a test declares goes through the function passed to it, which runs once per worker, and once more per worker when the exploration starts over without eager starts (below), as for another worker. A narrow entry point keeps the rules about determinism (below) enforceable, and a public API can be widened later but not narrowed.
 
 ### Processes and yield points
 

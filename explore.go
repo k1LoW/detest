@@ -93,14 +93,22 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		// and the other workers holding subtrees of another tree.
 		lazy string
 	)
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		f = newFrontier(n, maxRuns)
 		f.random = st.random
 		if maxDuration != 0 {
 			// The clock inside the bubbles is fake, so the deadline is kept
 			// by a timer outside them, from the start of Explore.
-			timer := time.AfterFunc(max(maxDuration-time.Since(start), 0), f.expire)
-			defer timer.Stop()
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(max(maxDuration-time.Since(start), 0), f.expire)
 		}
 		if ckpt != "" && lazy == "" {
 			if err := f.load(ckpt); err != nil {
@@ -188,7 +196,14 @@ func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, 
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Go(func() {
-			t.Run(fmt.Sprintf("worker%d", i), func(t *testing.T) {
+			// A pass that starts over without EagerStart runs its workers
+			// under names of their own, so that they do not take the first
+			// pass's names with a suffix.
+			name := fmt.Sprintf("worker%d", i)
+			if f.lazy != "" {
+				name = "lazy_" + name
+			}
+			t.Run(name, func(t *testing.T) {
 				results[i], expects[i] = exploreBubble(t, fn, opts, f, i)
 			})
 		})
