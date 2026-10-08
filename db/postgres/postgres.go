@@ -476,7 +476,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 					continue
 				}
 				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "domain", Drop: true,
-					Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
+					Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE, Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
 			}
 			return changes, true, nil
 		}

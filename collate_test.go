@@ -449,6 +449,13 @@ func TestBytesAsText(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT id FROM kept WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a bytea domain after a drop of another schema's: got %v", got)
 	}
+	// DROP DOMAIN CASCADE would drop the columns of the domain too, which
+	// detest does not record; one of a domain that does not exist runs.
+	mustExec(t, db, `CREATE DOMAIN dropped AS bytea`)
+	if _, err := db.Exec(`DROP DOMAIN dropped CASCADE`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("DROP DOMAIN CASCADE: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `DROP DOMAIN IF EXISTS b.dropped CASCADE`)
 	// Two schemas' domains of one name and base type stay typed until
 	// both are dropped.
 	mustExec(t, db, `CREATE DOMAIN a.blob2 AS bytea`)

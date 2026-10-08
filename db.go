@@ -1220,8 +1220,14 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		// safe. A column already of the domain keeps the base type it was
 		// recorded with, as Postgres refuses the drop while one is.
 		name := ch.Columns[0].Name
+		q := db.qualifyDomain(ch.Table, name)
+		if ch.Cascade && slices.Contains(db.domainSchemas[name], q) {
+			// Postgres drops the columns and the domains of the domain
+			// with it, which detest does not record.
+			return unsupported(fmt.Sprintf("DROP DOMAIN %s CASCADE", name), "")
+		}
 		if db.domainBases[name] != ambiguousDomain {
-			db.forgetDomain(name, db.qualifyDomain(ch.Table, name))
+			db.forgetDomain(name, q)
 		}
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
