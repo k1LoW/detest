@@ -310,6 +310,7 @@ func (tx *Tx) gapAround(table string, key func(Row) ixKey, row Row, through bool
 		hi = k
 	}
 	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
+	tx.db.effects++
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, key: key, ranges: []valRange{gap}})
 }
 
@@ -328,11 +329,13 @@ func (x *sqlExec) autoIncrement(table string, row Row) (int64, bool) {
 		v, present := row[col]
 		n, isInt := autoIncValue(derefValue(v))
 		if !present || derefValue(v) == nil || isInt && n == 0 && !x.tx.noAutoZero {
+			x.tx.db.effects++
 			seqs[key]++
 			row[col] = seqs[key]
 			return seqs[key], true
 		}
 		if isInt && n > seqs[key] {
+			x.tx.db.effects++
 			seqs[key] = n
 		}
 	}

@@ -175,8 +175,12 @@ type DB struct {
 	views           map[string]*sqlir.SchemaChange      // the query of each view
 	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs            map[string]int64                    // sequence values of the run, for nextval
-	uuids           int64                               // gen_random_uuid values handed out in the run
-	ignored         map[string]bool                     // tables Ignore took out of the simulation
+	uuids           int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
+	// effects counts the changes to the counters of generated values and to
+	// the locks, which an eager start must make none of, even ones that a
+	// later change in the same start undoes (see startEffects).
+	effects uint64
+	ignored map[string]bool // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -429,6 +433,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 // completes an execution only after its tracking row exists), never for model
 // code, which must read through transactions.
 func (db *DB) Peek(table string) []Row {
+	defer db.s.leave()
 	defer db.s.enterAny()()
 	return publicRows(db.selectCommitted(table, nil))
 }
@@ -823,6 +828,7 @@ func (def *tableDef) reads(col string) bool {
 // SeedRowNow inserts a committed row from a fake during a run, without a
 // transaction or a yield: the fake's own step is the yield point.
 func (db *DB) SeedRowNow(table string, row Row) {
+	defer db.s.leave()
 	defer db.s.enterAny()()
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
@@ -1145,6 +1151,7 @@ func (db *DB) nextval(seq string) (int64, string) {
 		v = d.first
 	}
 	db.seqs[seq] = v
+	db.effects++
 	return v, ""
 }
 
@@ -1156,12 +1163,14 @@ func (db *DB) setval(seq string, v int64, called bool) {
 		v -= db.seqOptions(seq).inc
 	}
 	db.seqs[seq] = v
+	db.effects++
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
 // random bits, so a schedule replays with the same ids.
 func (db *DB) newUUID() string {
 	db.uuids++
+	db.effects++
 	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
 }
 
@@ -2264,6 +2273,9 @@ func (tx *Tx) insert(table string, row Row) error {
 		return err
 	}
 	row = row.clone()
+	// Before the defaults are drawn, as the SQL INSERT does (see
+	// sqlExec.execInsert).
+	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
@@ -2275,7 +2287,6 @@ func (tx *Tx) insert(table string, row Row) error {
 		return err
 	}
 	lk := lockKey{table, row.Key()}
-	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	tx.noteTableLock(table, lockUpdate)
 	// A row there already is checked under a shared lock, as InnoDB's
 	// duplicate check takes, which another failing insert shares.

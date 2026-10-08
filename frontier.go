@@ -24,6 +24,7 @@ import (
 // sync.Cond would not do: synctest counts a goroutine in Cond.Wait as durably
 // blocked and, with nothing else running in its bubble, reports a deadlock.
 type frontier struct {
+	lazy       string // why EagerStart was dropped, if it was (see Explore)
 	mu         sync.Mutex
 	wake       []chan struct{} // per worker, buffered so a wakeup is never lost
 	waiting    []bool
@@ -434,6 +435,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
 		merged.strategy = r.strategy
+		merged.eager, merged.lazy = r.eager, r.lazy
 		if r.Replay {
 			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule
@@ -454,7 +456,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy
 		return &v
 	}
 	return merged
@@ -462,6 +464,11 @@ func (f *frontier) merge(results []*result, workers int) *result {
 
 // checkpoint is the rest of an exploration MaxRuns or MaxDuration cut short: the subtrees
 // not explored yet, each as the choices that lead to it.
+// checkpointVersion is the version of the checkpoint format. 2 is the tree
+// of eager starts and of INSERT yielding first, whose prefixes a checkpoint
+// of version 1 does not name.
+const checkpointVersion = 2
+
 type checkpoint struct {
 	Version  int             `json:"version"`
 	Runs     int             `json:"runs"`           // explored before, in all the explorations so far
@@ -469,6 +476,9 @@ type checkpoint struct {
 	Subtrees [][]savedChoice `json:"subtrees"`
 	Reached  []string        `json:"reached,omitempty"` // Sometimes conditions met so far
 	Refused  []string        `json:"refused,omitempty"` // statements refused as unsupported so far
+	// Lazy is why EagerStart was dropped, so that a resumed exploration
+	// goes on in the tree its subtrees belong to.
+	Lazy string `json:"lazy,omitempty"`
 }
 
 type savedChoice struct {
@@ -491,7 +501,7 @@ func (f *frontier) load(path string) error {
 	if err := json.Unmarshal(b, &ck); err != nil {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %w", path, err)
 	}
-	if ck.Version != 1 {
+	if ck.Version != checkpointVersion {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
 	}
 	f.stack = f.stack[:0]
@@ -502,7 +512,7 @@ func (f *frontier) load(path string) error {
 		}
 		f.stack = append(f.stack, p)
 	}
-	f.prior, f.cuts = ck.Runs, ck.Cuts
+	f.prior, f.cuts, f.lazy = ck.Runs, ck.Cuts, ck.Lazy
 	for _, n := range ck.Reached {
 		f.reach(n)
 	}
@@ -514,7 +524,7 @@ func (f *frontier) load(path string) error {
 
 // save writes the subtrees left to path.
 func (f *frontier) save(path string) error {
-	ck := checkpoint{Version: 1, Runs: f.prior + f.runs, Cuts: f.cutRuns()}
+	ck := checkpoint{Version: checkpointVersion, Runs: f.prior + f.runs, Cuts: f.cutRuns(), Lazy: f.lazy}
 	for n := range f.reached {
 		ck.Reached = append(ck.Reached, n)
 	}

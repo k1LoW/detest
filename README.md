@@ -94,17 +94,17 @@ func TestReserve(t *testing.T) {
 ```
 --- FAIL: TestReserve (0.67s)
     stock_test.go:34: detest: quiescence invariant violated: 2 reservations of 1 item (stock now 0)
-        run 4, schedule (8 choices): DETEST_REPLAY=0,0,0,0,1,1,1,0
+        run 3, schedule (6 choices): DETEST_REPLAY=0,0,0,1,1,0
             1  alice#1  shop: begin   (stock_test.go:15)
             2  alice#1  shop: select stock where sku = apple   (stock_test.go:21)
             3  alice#1  shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            4  bob#2    shop: begin   (stock_test.go:15)
-            5  bob#2    shop: select stock where sku = apple   (stock_test.go:21)
+            4  bob#1    shop: begin   (stock_test.go:15)
+            5  bob#1    shop: select stock where sku = apple   (stock_test.go:21)
             6  alice#1  shop: commit   (stock_test.go:30)
             7  alice#1  done
-            8  bob#2    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
-            9  bob#2    shop: commit   (stock_test.go:30)
-           10  bob#2    done
+            8  bob#1    shop: update stock set {n=0} where sku = apple   (stock_test.go:27)
+            9  bob#1    shop: commit   (stock_test.go:30)
+           10  bob#1    done
 ```
 
 The function passed to `detest.Explore` declares the simulation. It runs once per explored schedule, so state that the processes change has to be reset in `s.Seed`. Run the test again with the printed `DETEST_REPLAY` to replay exactly that run, or pass it to `detest.Replay` to pin the counterexample in a regression test.
@@ -340,6 +340,7 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.MaxRedeliveries(n)` | Bounds how many times a queue redelivers a message whose handler returned an error (default 1) |
 | `detest.MaxIdleTicks(n)` | Bounds a loop's idle ticks in a row with no progress in between. A run whose loop goes idle once more is cut, without the checks at quiescence (default 3) |
 | `detest.MaxSpins(n)` | Bounds the steps one process takes without a commit or an enqueue in between, counted across the steps of others, while another could run. Past it, the process waits for another to take a step, as a busy-wait would let a real scheduler run the process it waits for. With nothing else able to run, it is a progress violation. Processes that give way to each other that many times with no change in between are kept out while any other process can run, and a progress violation once none can (default 100) |
+| `detest.EagerStart(on)` | Starts a `Manual` process without `After` or `When` as soon as it may start, instead of exploring every step at which it could start. When its first operation runs is still explored, so only runs that differ in where a process started are left out, which in large scenarios are most of them. It assumes that the code before a process's first yield point reads or writes no state outside detest, such as a package variable, in an order that matters, so a test that records when a process began should do it after a yield point such as `p.Step`. A process that blocks before its first yield point outside detest, such as on the connection of a `database/sql` pool or on goroutines of its own, or that calls into detest without yielding, such as `Peek` or a mutex's `Unlock`, makes the exploration start over without it. So does a run that sets a session setting on a connection (`SET` outside `SET LOCAL`), reads `LAST_INSERT_ID()` or waits for a connection of a capped pool, since a pooled connection carries them from one process to the next. The summary line then says so, and the schedules it prints start with `lazy:` and replay without it. It does not apply under `Shard` or `DETEST_SHARD`, whose machines could not agree on starting over (on by default) |
 | `detest.MaxRuns(n)` | Caps the runs of an exploration (default 200000) |
 | `detest.MaxDuration(d)` | Stops starting runs once `d` has passed (unbounded by default) |
 | `detest.Workers(n)` | Explores with n workers in parallel (default 1) |

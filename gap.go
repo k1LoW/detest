@@ -217,6 +217,7 @@ func (tx *Tx) releaseGaps() {
 	tables := map[string]bool{}
 	db.gaps = slices.DeleteFunc(db.gaps, func(g *gapLock) bool {
 		if g.tx == tx {
+			db.effects++
 			tables[g.table] = true
 			return true
 		}
@@ -625,6 +626,7 @@ scan:
 			}
 		}
 	}
+	tx.db.effects++
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: cols, ranges: []valRange{gap}})
 	return true, nil
 }
@@ -809,6 +811,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 			return err
 		}
 		tx.noteLockStruct(table, "PRIMARY", mode, "next-key") // the supremum's, also of an empty table
+		tx.db.effects++
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table})
 		return nil
 	}
@@ -904,6 +907,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		g.ranges = append(g.ranges, gap)
 	}
 	if len(g.ranges) > 0 {
+		tx.db.effects++
 		tx.db.gaps = append(tx.db.gaps, g)
 	}
 	return nil

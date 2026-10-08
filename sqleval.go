@@ -1566,6 +1566,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 			if x.tx.lastInsertID == nil {
 				return int64(0), nil
 			}
+			// The value is the connection's, which the process that used
+			// it last left there.
+			x.tx.db.s.breakEager(x.tx.p, "read LAST_INSERT_ID() of its connection")
 			return *x.tx.lastInsertID, nil
 		}
 	}

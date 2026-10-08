@@ -92,7 +92,7 @@ func TestInjectedMutexAndRowLockInOppositeOrder(t *testing.T) {
 		{name: "explore", want: "cycle of waits"},
 		// row_first takes the row lock and waits for the mutex; mutex_first,
 		// holding the mutex, then closes the cycle by waiting for the row.
-		{name: "closed by the row lock wait", schedule: "1,1,0,0,1", want: "database cannot detect"},
+		{name: "closed by the row lock wait", schedule: "0,1,1,1", want: "database cannot detect"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.schedule != "" {

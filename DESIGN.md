@@ -31,7 +31,7 @@ Explore(t, fn, opts...)
              └─ choices: which process, which outcome, which fault
 ```
 
-`Explore` is the only entry point. Everything a test declares goes through the function passed to it, which runs once per worker. A narrow entry point keeps the rules about determinism (below) enforceable, and a public API can be widened later but not narrowed.
+`Explore` is the only entry point. Everything a test declares goes through the function passed to it, which runs once per worker, and once more per worker when the exploration starts over without eager starts (below), as for another worker. A narrow entry point keeps the rules about determinism (below) enforceable, and a public API can be widened later but not narrowed.
 
 ### Processes and yield points
 
@@ -80,6 +80,18 @@ A goroutine blocked on a `sync.Mutex` is not durably blocked in synctest's sense
 The explorer does not store states. It re-executes the simulation from the beginning for every run, following a prefix of picks and then taking the first option at every new choice. When a run ends, the alternatives it did not take at each choice past its prefix become new prefixes to explore. Re-executing is simpler and cheaper in memory than snapshotting the state of arbitrary Go code, which is impossible in general.
 
 Each run starts from a reset. Databases, queues and mutexes return to their state after the declaration, and seeds run again.
+
+### Starting processes eagerly
+
+Starting a `Manual` process is a choice like any other, so without more a run branches at every step where one could start. Starting a process runs it up to its first yield point and touches no simulated resource, so runs that differ only in where a process started reach the same outcomes, and in the existing tests they were most of the runs. By default (`EagerStart`) the start is taken without a choice, as soon as the process may start, and when its first operation runs is left to the schedule. The start spends no preemption and does not change which process a switch is counted from, so every schedule within `MaxPreemptions` still has a run that orders the processes' operations the same way.
+
+Two things the code before a yield point can reach are left. The first is the state detest owns. A statement reads, draws and locks nothing before its yield point, as Postgres does all of it when it runs the statement, so the first statement of a process does not tie the outcome to where it started. What can is a process that blocks outside detest before its first yield point, such as on the one connection of a pool another process holds, and goes on when that process lets go, or one that makes a call into detest that returns without yielding, such as `Peek` or a mutex's `Unlock`, which reads or changes a resource at the start. detest checks that the processes a start set going stand at a yield point or are done, and counts the calls that return, all of them but `Choose` and `WaitUntil`, which only ask the scheduler. `Spawn` is counted, as it takes the next number of a name another process may take first. It also counts the changes to counters of generated values and to locks, which no statement makes before its yield point.
+
+A process also takes a `database/sql` connection before its first yield point, and a connection keeps its session settings and `LAST_INSERT_ID` across the processes the pool hands it to, so with eager starts every process takes one before any ran. A run that sets a session setting on a connection, reads `LAST_INSERT_ID()` or waits for a connection of a capped pool depends on where processes started too. Taking a connection alone does not, as the connections of a pool are alike until one of those happens.
+
+When any of these happens, `Explore` starts the exploration over without eager starts. It starts over rather than switching for the runs left, since the frontier, a checkpoint and the other workers hold subtrees of the tree with eager starts. The report says so, the checkpoint keeps it, and the schedules printed start with `lazy:`, which makes them replay without eager starts in a test that leaves them on. The fake clock needs no check, as it moves only when no step is left, and a start that may be taken is one. Shards explore with eager starts off, since each machine would decide on its own whether to start over, and the shards of the tree with eager starts and of the one without would not add up to either.
+
+The second is state outside detest, such as a package variable the process reads before its first call. detest cannot see it, as it explores no race through such state anywhere else, and the yield points themselves assume that it changes only between them. What it does change is how a test observes itself. A test that records in a variable when a process began reads the time of the eager start, so it should record it after a yield point.
 
 ### Parallel workers
 
@@ -178,7 +190,7 @@ Determinism is a precondition of the search, so detest asks a few things of a te
 ## Decisions not taken
 
 - **Random search as the default.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need. `Prioritized(seed, depth)`, after PCT, and `Random(seed)` are there for trees too large for a depth-first search to get past the first choices within `MaxRuns`, and their results are never reported as complete.
-- **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code.
+- **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code. Eager starts are the one exception. A start touches no resource, detest checks the counters it owns across it, and what is left to assume is the code before a process's first yield point, which reaches state outside detest only as the code between any two yield points does.
 - **A store for shared variables.** Replacing in-memory variables of production code with detest types would make their accesses yield points, at the cost of changing the code under test more than injecting a mutex does.
 - **Static analysis of read and write sets.** With real code running through the driver, the explorer needs no declared read and write sets.
 - **A faithful database.** Reproducing the server in full, or running a real one, would remove every difference, including the ones that cannot change what the application observes. detest implements exactly what can change an outcome under concurrency, refuses what it does not implement, and approximates the rest as simply as it can, so that the engine stays small enough to be exact where it counts.

@@ -268,9 +268,11 @@ func (t *sqlTx) Commit() (err error) {
 	tx.commit()
 	if tx.pendingLockTimeout != nil {
 		t.c.lockTimeout = *tx.pendingLockTimeout
+		t.c.db.s.breakEager(tx.p, sessionSet)
 	}
 	if tx.pendingTimeZone != nil {
 		t.c.timeZone = tx.pendingTimeZone.loc
+		t.c.db.s.breakEager(tx.p, sessionSet)
 	}
 	return nil
 }
@@ -622,13 +624,16 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
 		// MySQL session settings take effect immediately, even in a transaction.
 		c.lockTimeout = tx.lockTimeout
+		c.db.s.breakEager(tx.p, sessionSet)
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
 		switch set.Name {
 		case "no_auto_value_on_zero":
 			c.noAutoZero = tx.noAutoZero
+			c.db.s.breakEager(tx.p, sessionSet)
 		case "foreign_key_checks":
 			c.noFKChecks = tx.noFKChecks
+			c.db.s.breakEager(tx.p, sessionSet)
 		}
 	}
 	switch {
@@ -654,9 +659,11 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 			tx.commit()
 			if tx.pendingLockTimeout != nil {
 				c.lockTimeout = *tx.pendingLockTimeout
+				c.db.s.breakEager(tx.p, sessionSet)
 			}
 			if tx.pendingTimeZone != nil {
 				c.timeZone = tx.pendingTimeZone.loc
+				c.db.s.breakEager(tx.p, sessionSet)
 			}
 		}
 	case err != nil:
@@ -764,3 +771,7 @@ func (r *sqlRows) Next(dest []driver.Value) error {
 	r.i++
 	return nil
 }
+
+// sessionSet is what breakEager says of a session setting set on a
+// connection.
+const sessionSet = "set a session setting on its connection, which the pool hands to the process that takes it next"

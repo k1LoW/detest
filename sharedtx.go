@@ -28,8 +28,8 @@ import (
 // A statement of the process itself is not compared. Before it enters the
 // engine, the process lets every goroutine running alongside it get to where
 // it blocks (see Proc.drain), so the goroutines' statements in flight come
-// first, whatever the runtime does, and its own pre-yield work, such as an
-// insert taking a sequence's value, comes after them. Comparing it instead
+// first, whatever the runtime does, and its own work before its yield point,
+// such as the checks against the schema, comes after them. Comparing it instead
 // would stop the common case of a process that runs a statement after its
 // goroutines finished, which a WaitGroup orders but which looks the same.
 

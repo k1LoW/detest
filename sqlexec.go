@@ -1558,12 +1558,43 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 
 // --- INSERT ---
 
+// insertPreview renders an INSERT for the trace before it ran: the first
+// row's values as UPDATE's preview does, or the query it copies from.
+func (x *sqlExec) insertPreview(ins *sqlir.InsertStmt, cols []string) string {
+	if ins.Select != nil {
+		return "from " + x.summarize(ins.Select)
+	}
+	if len(ins.Rows) == 0 {
+		return "{}"
+	}
+	row := Row{}
+	for i, e := range ins.Rows[0] {
+		if i >= len(cols) {
+			break
+		}
+		if _, isDefault := e.(*sqlir.Default); isDefault {
+			continue
+		}
+		// A value with effects, such as nextval's or a subquery's locks,
+		// must not happen for the trace, so it shows as written.
+		if len(sqlir.ColumnRefs(e)) > 0 || hasEffects(e) {
+			row[cols[i]] = x.exprString(e)
+			continue
+		}
+		v, err := x.eval(e, &env{})
+		if err != nil {
+			v = sqlir.Unknown
+		}
+		row[cols[i]] = v
+	}
+	return row.String()
+}
+
 func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	table := x.tx.db.resolve(ins.Table)
 	if err := x.tx.db.checkTable(table); err != nil {
 		return nil, err
 	}
-	x.freeze(ins)
 	if ins.OnConflict != nil && x.tx.db.defs[table] != nil {
 		// Postgres settles the arbiters when it plans the statement, so a
 		// target that names none fails before any row or default is made.
@@ -1591,6 +1622,18 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	if err := x.writesDeferrableKey(table, nil); err != nil {
 		return nil, err
 	}
+	// The statement yields before it reads, draws or locks anything, as the
+	// other statements do: Postgres takes its snapshot and evaluates its
+	// values, nextval and advisory locks included, when it runs the
+	// statement, and evaluating them before the scheduling point would do so
+	// at the end of the process's previous step. What is checked above
+	// depends on the schema alone. An insert into an ignored table yields
+	// nowhere, as a delete from one does.
+	ignored := x.tx.db.ignored[table]
+	if !ignored {
+		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, lazyString(func() string { return x.insertPreview(ins, cols) }))
+	}
+	x.freeze(ins)
 	var rows []Row
 	switch {
 	case ins.Select != nil:
@@ -1699,7 +1742,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if err := x.tx.db.assignKey(table, row); err != nil {
 			return nil, err
 		}
-		if x.tx.db.ignored[table] {
+		if ignored {
 			out.affected++
 			inserted()
 			if err := x.appendReturning(out, ins.Returning, row); err != nil {
@@ -1707,7 +1750,10 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			}
 			continue
 		}
-		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
+		if i > 0 {
+			// The first row's is the statement's, above.
+			x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
+		}
 		var existing, cur Row
 		var lk lockKey
 		for ins.OnConflict != nil {
@@ -2135,13 +2181,6 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 	}
 	if err := x.writesGenerated(table, assignedColumns(up.Set), assignedValues(up.Set), false); err != nil {
 		return nil, err // before WHERE is evaluated, which may have effects
-	}
-	// A WHERE that reads the CTEs cannot be tried before they run, which is
-	// after the statement's scheduling point.
-	if len(up.With) == 0 {
-		if _, err := x.writeCandidates(up.Table, up.Alias, nil, up.Where); err != nil && len(up.From) == 0 {
-			return nil, err
-		}
 	}
 	preview := lazyString(func() string {
 		row := Row{}

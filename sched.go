@@ -118,7 +118,7 @@ func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, 
 		o(pt)
 	}
 	q.consumers = append(q.consumers, pt)
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 // Loop registers a periodic process type that the scheduler may start at any
@@ -129,7 +129,7 @@ func (s *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...Pro
 	for _, o := range opts {
 		o(pt)
 	}
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 // Manual registers a process type started at an arbitrary point, such as a
@@ -140,37 +140,43 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 	for _, o := range opts {
 		o(pt)
 	}
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 type run struct {
-	s        *Sim
-	rng      *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
-	seen     seenChoices  // under Random, the worker's earlier runs' shallow choices
-	path     uint64       // under Random, a hash of the picks so far, which keys seen
-	prio     *prioritized // under Prioritized, how the steps are picked
-	want     int          // under Prioritized, the option the next step choice takes
-	steps    int          // the steps taken, which Prioritized measures a run in
-	prefix   []choice
-	choices  []choice
-	pos      int
-	procs    []*Proc
-	opts     []option // reused by enabled, whose result lives for one step
-	nextID   int
-	clock    int64
-	trace    []step
-	failures int
-	crashes  int
-	stalls   int
-	runs     map[*procType]int
-	abort    chan struct{}
-	ctx      context.Context // Proc.Context; canceled when the run ends
-	cancel   context.CancelFunc
-	current  *Proc
-	preempts int
-	prev     *State
-	version  int
-	idleAt   map[*procType]int
+	s       *Sim
+	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
+	seen    seenChoices  // under Random, the worker's earlier runs' shallow choices
+	path    uint64       // under Random, a hash of the picks so far, which keys seen
+	prio    *prioritized // under Prioritized, how the steps are picked
+	want    int          // under Prioritized, the option the next step choice takes
+	steps   int          // the steps taken, which Prioritized measures a run in
+	prefix  []choice
+	choices []choice
+	pos     int
+	procs   []*Proc
+	opts    []option       // reused by enabled, whose result lives for one step
+	ids     map[string]int // processes started so far, by name, which number them
+	// eagerBreak is why eager starts left out schedules of this run that
+	// matter, found after the starts (see breakEager), and poolWaits the
+	// waits for a pool connection before the run, which a wait in it adds
+	// to.
+	eagerBreak atomic.Pointer[eagerStartError]
+	poolWaits  int64
+	clock      int64
+	trace      []step
+	failures   int
+	crashes    int
+	stalls     int
+	runs       map[*procType]int
+	abort      chan struct{}
+	ctx        context.Context // Proc.Context; canceled when the run ends
+	cancel     context.CancelFunc
+	current    *Proc
+	preempts   int
+	prev       *State
+	version    int
+	idleAt     map[*procType]int
 	// progress counts the changes made by processes other than loops and
 	// the processes they spawned, and the loop ticks that did work. idleRun
 	// counts a loop's idle ticks since progress last moved, at idleSeen.
@@ -316,7 +322,10 @@ type Proc struct {
 	dead atomic.Bool
 }
 
-// Name returns the instance name, such as "sweeper#2".
+// Name returns the instance name, the name it was declared or spawned with
+// and its number among the processes of that name, such as "sweeper#2".
+// Process types are declared under names of their own, and a spawn does not
+// take the name of one.
 func (p *Proc) Name() string { return p.name }
 
 // Current returns the process whose goroutine is calling. Production code
@@ -481,6 +490,20 @@ func (r *run) execute() (v *violation) {
 			// at quiescence are skipped.
 			return r.checkAlways()
 		}
+		if v := r.eagerUnsound(); v != nil {
+			return v
+		}
+		if r.s.eagerStart {
+			started, v := r.startEager()
+			if v != nil {
+				return v
+			}
+			if started {
+				// Check what the start left as after a step, and look for
+				// another start that may be taken now.
+				continue
+			}
+		}
 		opts := r.enabled()
 		// With a spinner kept out, crashes and losses left alone are no step
 		// another process takes, and taking one would stand in for the
@@ -509,6 +532,9 @@ func (r *run) execute() (v *violation) {
 				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
 			}
 			if len(opts) == 0 {
+				if v := r.eagerUnsound(); v != nil {
+					return v
+				}
 				break
 			}
 		}
@@ -788,7 +814,7 @@ func (r *run) enabled() []option {
 		if pt.kind != trigLoop && pt.kind != trigManual {
 			continue
 		}
-		if r.runs[pt] >= pt.maxRuns || r.active(pt) >= pt.instances {
+		if r.runs[pt] >= pt.maxRuns || r.active(pt) >= pt.instances || r.s.startsEagerly(pt) {
 			continue
 		}
 		// A loop that went idle keeps ticking only once something changed.
@@ -804,6 +830,132 @@ func (r *run) enabled() []option {
 		opts = append(opts, option{kind: optStart, pt: pt})
 	}
 	return opts
+}
+
+// startsEagerly reports whether EagerStart starts processes of pt without a
+// choice. After and When read state, so when such a process starts can
+// change what it does, and a loop's ticks depend on whether the others made
+// progress.
+func (s *Sim) startsEagerly(pt *procType) bool {
+	return s.eagerStart && pt.kind == trigManual && pt.after == nil && pt.when == nil
+}
+
+// startEager starts a process EagerStart applies to that may start now (see
+// EagerStart), up to its first yield point, and reports whether it started
+// one.
+func (r *run) startEager() (bool, *violation) {
+	var pt *procType
+	for _, t := range r.s.types {
+		if r.s.startsEagerly(t) && r.runs[t] < t.maxRuns && r.active(t) < t.instances {
+			pt = t
+			break
+		}
+	}
+	if pt == nil {
+		return false, nil
+	}
+	before := r.startEffects()
+	calls := r.s.calls.Load()
+	first := len(r.procs)
+	cur := r.current
+	r.runs[pt]++
+	p := r.spawn(pt, nil)
+	r.resume(p)
+	// What the start set going, such as a goroutine to adopt, runs to its
+	// first yield point too, as it would within the start's step, and what
+	// it does counts as the start's.
+	r.settle()
+	// The schedule picks no step here, so the process that ran last stays
+	// the one a switch is counted from. The start spends no preemption, and
+	// a resume of the new process is counted as a switch is now.
+	r.current = cur
+	r.endSpin() // as a start that is picked ends a spin
+	if r.pending != nil {
+		return true, r.pending
+	}
+	// Explore starts over without EagerStart (see there) when the start did
+	// something another process could see, so that where it started
+	// matters.
+	if before != r.startEffects() {
+		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "moved a sequence, AUTO_INCREMENT or generated uuid counter or took a lock"}}
+	}
+	// A call that returned without yielding, such as DB.Peek or
+	// Mutex.Unlock, read or changed a resource at the start, where another
+	// process may have been at another point.
+	if r.s.calls.Load() != calls {
+		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "called into detest without reaching a yield point"}}
+	}
+	for _, q := range r.procs[first:] {
+		// Blocked outside detest before its first yield point, such as on
+		// the connection of a database/sql pool another process holds, it
+		// goes on once that process lets go, which depends on where it
+		// started.
+		// WaitUntil waits for an instant of the clock, which does not move
+		// while a start is left, so where the process started does not
+		// change when it wakes.
+		if q.state != stateReady && q.state != stateDone && q.state != stateBlockedTime {
+			return true, &violation{kind: "fatal", err: &eagerStartError{proc: q.name, what: "stopped short of its first yield point"}}
+		}
+	}
+	return true, r.checkAlways()
+}
+
+// startEffects counts the changes the databases made to their counters of
+// generated values and their locks, which an eager start must make none
+// of. No statement makes one before its yield point, so the count only
+// guards against a path that would.
+func (r *run) startEffects() uint64 {
+	var n uint64
+	for _, db := range r.s.dbs {
+		n += db.effects
+	}
+	return n
+}
+
+// breakEager records that the run did something whose outcome depends on
+// where processes started beyond what startEager checks, such as setting a
+// session setting on a connection the pool hands to whichever process takes
+// it next. It is called under the engine mutex by the processes.
+func (s *Sim) breakEager(p *Proc, what string) {
+	r := s.run
+	if r == nil || !s.eagerStart {
+		return
+	}
+	name := "a seed"
+	if p != nil {
+		name = p.name
+	}
+	r.eagerBreak.CompareAndSwap(nil, &eagerStartError{proc: name, what: what, after: true})
+}
+
+// poolWaits sums the waits for a connection of the simulation's pools.
+func (s *Sim) poolWaits() int64 {
+	var n int64
+	for _, db := range s.sqlDBs {
+		n += db.Stats().WaitCount
+	}
+	return n
+}
+
+// eagerUnsound returns the stop that makes Explore start over without
+// EagerStart (see there), once the run did something that ties its outcome
+// to where processes started after the starts themselves. A connection
+// keeps its session settings and LAST_INSERT_ID from one process to the
+// next, and the pool hands a process the connection the last one returned,
+// which an eager start takes before any process ran. A process waiting for
+// a connection of a capped pool waits for one an eagerly started process
+// holds from its start.
+func (r *run) eagerUnsound() *violation {
+	if !r.s.eagerStart || !slices.ContainsFunc(r.s.types, r.s.startsEagerly) {
+		return nil
+	}
+	if e := r.eagerBreak.Load(); e != nil {
+		return &violation{kind: "fatal", err: e}
+	}
+	if r.s.poolWaits() != r.poolWaits {
+		return &violation{kind: "fatal", err: &eagerStartError{what: "waited for a connection of a pool"}}
+	}
+	return nil
 }
 
 func (r *run) advanceClock() bool {
@@ -828,8 +980,12 @@ func (r *run) advanceClock() bool {
 }
 
 func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
-	r.nextID++
-	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.nextID), pt: pt, r: r,
+	// Numbered among the processes of the name, so that which instance gets
+	// which name does not depend on the order processes of other names
+	// started in, which EagerStart fixes. By name rather than by type, as
+	// Proc.Spawn makes a type for every process it spawns.
+	r.ids[pt.name]++
+	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.ids[pt.name]), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
@@ -1374,7 +1530,7 @@ func (p *Proc) Now() int64 { return p.r.clock }
 // WaitUntil blocks until the simulated clock reaches t. The clock advances only when
 // nothing else can run, as in testing/synctest.
 func (p *Proc) WaitUntil(t int64) {
-	defer p.r.s.leave()
+	defer p.r.s.leaveSched()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return canonical("wait until", t) })
 	goneStale(p)
@@ -1390,20 +1546,42 @@ func (p *Proc) WaitUntil(t int64) {
 
 // Choose picks one of n alternatives; the explorer tries them all.
 func (p *Proc) Choose(label string, n int) int {
-	defer p.r.s.leave()
+	defer p.r.s.leaveSched()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "choose " + label })
 	goneStale(p)
 	return p.r.choose(label, n)
 }
 
+// addType declares a process type. A process is told apart from the others
+// by its name, in Proc.Name and in traces, and processes are numbered among
+// the ones of their name, so two types of one name would share the numbers
+// and which one got #1 would depend on which started first.
+func (s *Sim) addType(pt *procType) {
+	for _, t := range s.types {
+		if t.name == pt.name {
+			panic(fmt.Sprintf("detest: a process type named %q is declared twice; give each a name of its own", pt.name))
+		}
+	}
+	s.types = append(s.types, pt)
+}
+
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
+	// Counted as a call, since the spawn takes the next number of the name,
+	// which a spawn of another process may take first.
 	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow
+	for _, t := range p.r.s.types {
+		if t.name == name {
+			// As for two declared types of one name (see addType).
+			p.r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: Spawn(%q) takes the name of a declared process type; give the spawned process a name of its own", name)}
+			return
+		}
+	}
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
@@ -1418,9 +1596,9 @@ func (p *Proc) Context() context.Context { return p.r.ctx }
 // that runs a statement on a transaction it shares with p, get to where it
 // blocks before p goes on into the engine. It is no yield point: the
 // scheduler runs p on at once, without a choice. Without it, what p does in
-// the engine before its yield point, such as an insert taking a sequence's
-// value, would race those goroutines for the engine mutex, and the Go
-// runtime would decide the order.
+// the engine before its yield point, such as the checks a statement makes
+// against the schema, would race those goroutines for the engine mutex, and
+// the Go runtime would decide the order.
 func (p *Proc) drain() {
 	if p.r.over() {
 		return
@@ -1875,7 +2053,7 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.
@@ -1884,6 +2062,7 @@ func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
 	}
 	s.run = r
 	s.live.Store(r)
+	r.poolWaits = s.poolWaits()
 	for _, db := range s.dbs {
 		db.reset()
 	}

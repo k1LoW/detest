@@ -3075,6 +3075,9 @@ func TestMySQLInsertIgnoreWaitsForADelete(t *testing.T) {
 			return tx.Commit()
 		})
 		s.Manual("inserter", 1, func(p *Proc) error {
+			// Read after a yield point, so that it sees where the schedule
+			// put the insert rather than where EagerStart started it.
+			p.Step("about to insert")
 			started = deleting
 			_, err := db.ExecContext(p.Context(), "INSERT IGNORE INTO t VALUES (1, 'new')")
 			return err

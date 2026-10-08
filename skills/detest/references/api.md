@@ -8,7 +8,7 @@ The parts of the API a simulation uses most. `go doc -all github.com/k1LoW/detes
 detest.Explore(t, func(t *testing.T, s *detest.Sim) { ...declare... }, opts...)
 ```
 
-The function declares the simulation and returns; the exploration runs after it, once per schedule. With `Workers(n)` the function runs once per worker, so variables it captures are per worker.
+The function declares the simulation and returns; the exploration runs after it, once per schedule. With `Workers(n)` the function runs once per worker, so variables it captures are per worker. An exploration that starts over without `EagerStart` runs it once more per worker.
 
 ## Declaring (`s *detest.Sim`)
 
@@ -58,6 +58,7 @@ dropped := st.Dropped(q)                    // dropped after MaxRedeliveries; no
 | `MaxSpins(n)` | 100 | Steps of one process with no commit or enqueue in between, counted across the steps of others, while another could run; past it the process waits for another to step, so a busy-wait lets its setter run. With nothing else able to run it is a progress violation, and so are processes that give way to each other that many times with no change in between, once nothing else can run; raise it only for code that does that much work without committing |
 | `MaxIdleTicks(n)` | 3 | Idle ticks of a loop in a row that leave its budget unspent, counted again from zero after progress: a change by a manual process, a message handler or the scheduler, or a tick of any loop, this one included, that did work; a run past it is cut, not checked at quiescence, and counted as `N runs cut at MaxIdleTicks`. Loops waking each other is the usual cause, rarely a need to raise it |
 | `MaxPreemptions(n)` | unbounded | Context switches away from a runnable process per run. 2 or 3 keeps large scenarios tractable and still finds most races |
+| `EagerStart(on)` | on | Starts a `Manual` without `After` or `When` at once instead of at every possible step, which leaves out the runs that differ only in where it started. Assumes the code before its first statement or call touches no package variable or other state outside detest in an order that matters, so record when a process began after a `p.Step`. A process that blocks or calls into detest without yielding before its first statement, a `SET` of a session setting, a `LAST_INSERT_ID()` read or a wait for a pool connection makes the exploration start over without it, which the summary line states; its schedules start with `lazy:`. Off under `Shard` |
 | `MaxRuns(n)` | 200000 | Cap on runs; the exploration is then incomplete |
 | `MaxDuration(d)` | none | Wall-clock cap |
 | `Workers(n)` | 1 | Parallel workers |
