@@ -113,15 +113,26 @@ ORDER BY c.relname`, schema)
 	var b strings.Builder
 	for _, t := range tables {
 		var defs []string
+		// A column of a domain is written as the domain's base type, with
+		// the NOT NULL and the default the domain and the domains under it
+		// declare, as no domain is written: its CHECK constraints are left
+		// out with the table's.
 		cols, err := db.QueryContext(ctx, `
-SELECT quote_ident(a.attname), format_type(a.atttypid, a.atttypmod),
-       coalesce(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity, a.attgenerated, a.attnotnull,
+WITH RECURSIVE dom(oid, base, typmod, nonnull, def) AS (
+	SELECT t.oid, t.typbasetype, t.typtypmod, t.typnotnull, t.typdefault FROM pg_type t WHERE t.typtype = 'd'
+	UNION ALL
+	SELECT dom.oid, t.typbasetype, t.typtypmod, dom.nonnull OR t.typnotnull, coalesce(dom.def, t.typdefault)
+	FROM dom JOIN pg_type t ON t.oid = dom.base AND t.typtype = 'd'
+)
+SELECT quote_ident(a.attname), coalesce(format_type(dom.base, dom.typmod), format_type(a.atttypid, a.atttypmod)),
+       coalesce(pg_get_expr(d.adbin, d.adrelid), dom.def, ''), a.attidentity, a.attgenerated, a.attnotnull OR coalesce(dom.nonnull, false),
        CASE WHEN a.attcollation <> 0 AND NOT (cn.nspname = 'pg_catalog' AND co.collname = 'default')
             THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) ELSE '' END
 FROM pg_attribute a
 LEFT JOIN pg_collation co ON co.oid = a.attcollation
 LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN dom ON dom.oid = a.atttypid AND NOT EXISTS (SELECT 1 FROM pg_type b WHERE b.oid = dom.base AND b.typtype = 'd')
 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`, t.oid)
 		if err != nil {
@@ -138,7 +149,7 @@ ORDER BY a.attnum`, t.oid)
 			if collation != "" {
 				// A collation other than the database's orders the column's
 				// text, which detest has to know to order it. It is written
-				// whether the column or its type declares it, as a domain's
+				// whether the column or its domain declares it, as a domain's
 				// definition is not.
 				col += " COLLATE " + collation
 			}

@@ -43,6 +43,10 @@ func TestFromPostgres(t *testing.T) {
 		`CREATE TABLE public.codes (code text COLLATE "C" PRIMARY KEY, label text)`,
 		`CREATE DOMAIN public.tag AS text COLLATE "C"`,
 		`CREATE TABLE public.tagged (id int PRIMARY KEY, t public.tag)`,
+		`CREATE DOMAIN public.blob AS bytea`,
+		`CREATE DOMAIN public.code5 AS varchar(5) NOT NULL DEFAULT 'x'`,
+		`CREATE DOMAIN public.code5b AS public.code5`,
+		`CREATE TABLE public.blobs (id int PRIMARY KEY, b public.blob, c public.code5b)`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -59,7 +63,7 @@ func TestFromPostgres(t *testing.T) {
 	}
 	// A column's own collation is written, and one that is the database's is
 	// not.
-	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t tag COLLATE pg_catalog."C"`} {
+	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t text COLLATE pg_catalog."C"`, "b bytea", "c character varying(5) DEFAULT 'x'::character varying NOT NULL"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("DDL lacks %q", want)
 		}
@@ -96,6 +100,18 @@ func TestFromPostgres(t *testing.T) {
 		}
 		if err := exec(`INSERT INTO orders (tenant_id, ref) VALUES ('t2', 'r1')`); err != nil {
 			t.Errorf("another tenant: %v", err)
+		}
+		// A column of a domain loads as the domain's base type, with the
+		// domain's NOT NULL and default.
+		if err := exec(`INSERT INTO blobs (id, b) VALUES (1, '\x41')`); err != nil {
+			t.Fatalf("a column of a bytea domain: %v", err)
+		}
+		var c string
+		if err := db.QueryRow(`SELECT c FROM blobs WHERE b = 'A'::bytea`).Scan(&c); err != nil || c != "x" {
+			t.Errorf("a column of a domain over a domain: %q %v", c, err)
+		}
+		if err := exec(`INSERT INTO blobs (id, c) VALUES (2, NULL)`); !errors.Is(err, detest.ErrNotNullViolation) {
+			t.Errorf("a domain's NOT NULL: %v", err)
 		}
 		var doubled int64
 		if err := db.QueryRow(`INSERT INTO billing.invoices (total) VALUES (10) RETURNING id, doubled`).Scan(&id, &doubled); err != nil || id != 1 || doubled != 20 {
