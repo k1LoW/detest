@@ -865,8 +865,9 @@ func (r *run) draws() map[string]int64 {
 	m := map[string]int64{}
 	for _, db := range r.s.dbs {
 		for k, v := range db.seqs {
-			m[db.name+"\x00"+k] = v
+			m[db.name+"\x00seq\x00"+k] = v
 		}
+		// A key of its own, which no sequence name can take.
 		m[db.name+"\x00uuid"] = db.uuids
 	}
 	return m

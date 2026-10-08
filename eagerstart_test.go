@@ -193,3 +193,23 @@ func TestEagerStartLeavesAfterToTheSchedule(t *testing.T) {
 		}, After(func(st *State) bool { return len(st.Rows(store, "flags")) > 0 }))
 	})
 }
+
+// A sequence may be named uuid, and its draw is no less a draw.
+func TestEagerStartTellsASequenceNamedUUIDFromUUIDs(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE SEQUENCE uuid`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE orders (id bigint PRIMARY KEY DEFAULT nextval('uuid'), buyer text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("alice", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ('alice')`)
+			return err
+		})
+	}, nil)
+	if res.Fatal != nil || res.lazy == "" {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
