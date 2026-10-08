@@ -161,9 +161,13 @@ func MaxPreemptions(n int) Option {
 // so that it reads the time the schedule picks.
 //
 // A process that moves a sequence, AUTO_INCREMENT or generated uuid counter
-// before its first yield point, as an INSERT into a table with a generated
-// key does when it is the first statement and runs outside a transaction,
-// gets a value that depends on where it starts. Explore then starts the
+// or takes a lock before its first yield point, as an INSERT into a table
+// with a generated key or with pg_try_advisory_xact_lock in its values does
+// when it is the first statement and runs outside a transaction, gets a
+// result that depends on where it starts. So does one that stops short of
+// its first yield point outside detest, such as waiting for the connection of
+// a database/sql pool another process holds or for goroutines of its own,
+// which detest cannot tell apart. Explore then starts the
 // exploration over without EagerStart, calling the declaration function once
 // more per worker, and says so in its report, and the
 // schedules it prints replay without it. The clock needs no such check, since
@@ -177,12 +181,12 @@ func withoutEagerStart(why string) Option {
 	return func(s *Sim) { s.eagerStart, s.lazy = false, why }
 }
 
-// eagerDrawError is a start that moved a counter of generated values under
-// EagerStart, by drawing a value or by setting the counter.
-type eagerDrawError struct{ proc string }
+// eagerStartError is a start under EagerStart that did something another
+// process could see before its first yield point.
+type eagerStartError struct{ proc, what string }
 
-func (e *eagerDrawError) Error() string {
-	return e.proc + " moved a sequence, AUTO_INCREMENT or generated uuid counter before its first yield point, so what it got depends on where it starts"
+func (e *eagerStartError) Error() string {
+	return e.proc + " " + e.what + " before its first yield point, so what happens depends on where it starts"
 }
 
 // lazyPrefix marks a schedule explored without EagerStart after a start moved

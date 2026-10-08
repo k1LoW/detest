@@ -75,7 +75,7 @@ func TestAdoptedGoroutinesInterleave(t *testing.T) {
 }
 
 func TestAdoptedGoroutinesNamedAfterParent(t *testing.T) {
-	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) { counterSim(s, 2, false) }, nil, nil, 0)
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) { counterSim(s, 2, false) }, []Option{EagerStart(false)}, nil, 0)
 	if !res.Violated {
 		t.Fatal("expected a violation")
 	}
@@ -464,7 +464,7 @@ func TestAdoptedGoroutineStartsOneBeforeItsFirstCall(t *testing.T) {
 		s.AtQuiescence(func(st *State) error {
 			return errors.New("done")
 		})
-	}, nil, nil, 0)
+	}, []Option{EagerStart(false)}, nil, 0)
 	if !res.Violated {
 		t.Fatal("expected the run to reach quiescence")
 	}
@@ -1198,7 +1198,7 @@ func TestGoroutineOfHelperBelongsToHelpersProcess(t *testing.T) {
 			return nil
 		})
 		s.AtQuiescence(func(st *State) error { return errors.New("done") })
-	}, nil, nil, 0)
+	}, []Option{EagerStart(false)}, nil, 0)
 	if !res.Violated {
 		t.Fatal("expected the run to reach quiescence")
 	}
@@ -1512,7 +1512,7 @@ func TestFakeWithParentsProcCalledFromGoroutine(t *testing.T) {
 			return err
 		})
 		s.AtQuiescence(func(st *State) error { return errors.New("done") })
-	}, []Option{MaxFailures(0)}, nil, 0)
+	}, []Option{MaxFailures(0), EagerStart(false)}, nil, 0)
 	if !res.Violated || !strings.Contains(fmt.Sprint(res.Err), "done") {
 		t.Fatalf("expected the run to reach quiescence, got %v\n%s", res.Err, res.Trace)
 	}

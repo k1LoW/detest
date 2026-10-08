@@ -322,3 +322,58 @@ func TestSpawnedProcessesOfOneNameGetNumbersOfTheirOwn(t *testing.T) {
 		})
 	})
 }
+
+// A lock taken in the values of a first INSERT goes to whichever process
+// started first, so both orders are explored.
+func TestEagerStartDroppedWhenAStartTakesALock(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE tries (buyer text PRIMARY KEY, got boolean NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		for _, buyer := range []string{"alice", "bob"} {
+			s.Manual(buyer, 1, func(p *Proc) error {
+				_, err := db.ExecContext(p.Context(), `INSERT INTO tries VALUES ($1, pg_try_advisory_xact_lock(1))`, buyer)
+				return err
+			})
+		}
+		s.AtQuiescence(func(st *State) error {
+			if row, ok := st.Row(store, "tries", "bob"); ok && row.Bool("got") {
+				return errors.New("bob got the lock")
+			}
+			return nil
+		})
+	}, nil)
+	if !res.Violated || !strings.Contains(res.lazy, "took a lock") {
+		t.Fatalf("got %s", res.report())
+	}
+}
+
+// A process waiting for the one connection of a pool before its first yield
+// point gets it when the process holding it lets go, which depends on where
+// each started, so both orders are explored.
+func TestEagerStartDroppedWhenAStartWaitsOutside(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`CREATE TABLE firsts (buyer text PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		for _, buyer := range []string{"alice", "bob"} {
+			s.Manual(buyer, 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.ExecContext(p.Context(), `INSERT INTO firsts VALUES ($1)`, buyer); err != nil {
+					return err
+				}
+				return tx.Commit()
+			})
+		}
+	}, nil)
+	if res.Fatal != nil || !strings.Contains(res.lazy, "stopped short of its first yield point") {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}

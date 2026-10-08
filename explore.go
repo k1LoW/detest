@@ -134,7 +134,7 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		if res == nil {
 			return nil, nil // fn stopped the test
 		}
-		var draw *eagerDrawError
+		var draw *eagerStartError
 		if lazy == "" && errors.As(res.Fatal, &draw) {
 			lazy = draw.Error()
 			continue

@@ -840,14 +840,15 @@ func (r *run) startEager() (bool, *violation) {
 	if pt == nil {
 		return false, nil
 	}
-	draws := r.draws()
+	before := r.startEffects()
+	first := len(r.procs)
 	cur := r.current
 	r.runs[pt]++
 	p := r.spawn(pt, nil)
 	r.resume(p)
 	// What the start set going, such as a goroutine to adopt, runs to its
-	// first yield point too, as it would within the start's step, and its
-	// draws count as the start's.
+	// first yield point too, as it would within the start's step, and what
+	// it does counts as the start's.
 	r.settle()
 	// The schedule picks no step here, so the process that ran last stays
 	// the one a switch is counted from. The start spends no preemption, and
@@ -857,16 +858,30 @@ func (r *run) startEager() (bool, *violation) {
 	if r.pending != nil {
 		return true, r.pending
 	}
-	if !maps.Equal(draws, r.draws()) {
-		// Explore starts over without EagerStart (see there).
-		return true, &violation{kind: "fatal", err: &eagerDrawError{proc: p.name}}
+	// Explore starts over without EagerStart (see there) when the start did
+	// something another process could see, so that where it started
+	// matters.
+	if !maps.Equal(before, r.startEffects()) {
+		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "moved a sequence, AUTO_INCREMENT or generated uuid counter or took a lock"}}
+	}
+	for _, q := range r.procs[first:] {
+		// Blocked outside detest before its first yield point, such as on
+		// the connection of a database/sql pool another process holds, it
+		// goes on once that process lets go, which depends on where it
+		// started.
+		if q.state != stateReady && q.state != stateDone {
+			return true, &violation{kind: "fatal", err: &eagerStartError{proc: q.name, what: "stopped short of its first yield point"}}
+		}
 	}
 	return true, r.checkAlways()
 }
 
-// draws records the generated values the databases handed out, which code
-// before a yield point can draw.
-func (r *run) draws() map[string]int64 {
+// startEffects records the state of the databases that code before a yield
+// point can change, which an eager start must leave as it was: the counters
+// of generated values, which an INSERT draws from as it fills its defaults,
+// and the locks, which a function such as pg_try_advisory_xact_lock in its
+// values takes.
+func (r *run) startEffects() map[string]int64 {
 	m := map[string]int64{}
 	for _, db := range r.s.dbs {
 		for k, v := range db.seqs {
@@ -874,6 +889,14 @@ func (r *run) draws() map[string]int64 {
 		}
 		// A key of its own, which no sequence name can take.
 		m[db.name+"\x00uuid"] = db.uuids
+		for lk, holders := range db.locks {
+			for tx, mode := range holders {
+				m[fmt.Sprintf("%s\x00lock\x00%s\x00%s\x00%p", db.name, lk.table, lk.key, tx)] = int64(mode)
+			}
+		}
+		for _, g := range db.gaps {
+			m[fmt.Sprintf("%s\x00gap\x00%p", db.name, g)] = 1
+		}
 	}
 	return m
 }

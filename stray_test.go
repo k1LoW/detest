@@ -14,7 +14,7 @@ import (
 // run and act on its simulated resources.
 func TestCutRunLeavesNoProcessForTheNext(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := newSim(t)
+		s := newSim(t, EagerStart(false))
 		db, store := s.DB("app", postgres.New())
 		defer s.closeSQL()
 		mustExec(t, db, `CREATE TABLE marks (id text PRIMARY KEY)`)
