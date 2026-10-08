@@ -97,6 +97,7 @@ type sqlExec struct {
 	// ctasTypes are the types the column check found for the columns of a
 	// CREATE TABLE AS, "" where it could not tell.
 	ctasTypes []string
+	ctasNamed map[string]string
 	// outputs are the ORDER BY keys that name an output column, with the
 	// select list's expression they name.
 	outputs map[sqlir.Expr]sqlir.Expr
@@ -568,10 +569,10 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 		return nil, err
 	}
 	for i := range ch.Columns {
-		if i < len(selCols) && x.ctasBytea(i, selCols[i], rows) {
-			// Created as bytea, so that a later write of bytea text to it
-			// is read as bytea input.
-			ch.Columns[i].Type = "bytea"
+		if i < len(selCols) && !db.kind.InnoDB() {
+			// A bytea column is created as bytea, so that a later write of
+			// bytea text to it is read as bytea input.
+			ch.Columns[i].Type = x.ctasType(i, selCols[i], rows)
 		}
 	}
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
@@ -597,25 +598,47 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	return x.fill(table, st, selCols, rows)
 }
 
-// ctasBytea reports whether the i-th column of a CREATE TABLE AS, col in
-// rows, is bytea: by the type the column check found, or, where it could
-// not tell, as of a *, by its values, when every one of them is bytes.
-func (x *sqlExec) ctasBytea(i int, col string, rows []Row) bool {
-	if i < len(x.ctasTypes) && x.ctasTypes[i] != "" {
-		return x.ctasTypes[i] == "bytea"
+// ctasType is the type the i-th column of a CREATE TABLE AS, col in rows,
+// is created with: bytea when it is, by the type the column check found by
+// position or by name or, where it could not tell, by its values, and ""
+// for any other type, which detest leaves unchecked. A column of no type
+// the check tells and no value is untypedCTAS.
+func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
+	typ := ""
+	if i < len(x.ctasTypes) {
+		typ = x.ctasTypes[i]
+	}
+	if typ == "" {
+		typ = x.ctasNamed[col]
+	}
+	if typ != "" {
+		if typ == "bytea" {
+			return "bytea"
+		}
+		return ""
 	}
 	seen := false
 	for _, r := range rows {
 		switch derefValue(r[col]).(type) {
 		case nil:
 		case []byte:
+			// A text column turns a []byte written to it into a string, so
+			// a value held as bytes is bytea.
 			seen = true
 		default:
-			return false
+			return ""
 		}
 	}
-	return seen
+	if seen {
+		return "bytea"
+	}
+	return untypedCTAS
 }
+
+// untypedCTAS is the type of a CREATE TABLE AS column whose type neither the
+// query nor its values tell, which a string written to it refuses: Postgres
+// reads it as bytea input when the column is bytea.
+const untypedCTAS = "a CREATE TABLE AS column of a type detest could not tell"
 
 // execRefresh replaces a materialized view's rows with its query's.
 func (x *sqlExec) execRefresh(st *sqlir.RefreshStmt) (*sqlResult, error) {

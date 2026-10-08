@@ -74,6 +74,10 @@ type columnChecker struct {
 	// where expressionType does not know one, for a FROM item, a CTE, a
 	// view or a scalar subquery made of it.
 	outTypes map[*sqlir.SelectStmt][]string
+	// outNamed are the types of a query's output columns by name, which a
+	// select list with a * has where outTypes has none; "" for a name two
+	// columns give or of a type expressionType does not know.
+	outNamed map[*sqlir.SelectStmt]map[string]string
 	params   paramUses
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
@@ -108,7 +112,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 			for first.SetOp != "" && first.Larg != nil {
 				first = first.Larg
 			}
-			x.ctasTypes = c.outTypes[first]
+			x.ctasTypes, x.ctasNamed = c.setOpTypes(st.Select), c.outNamed[first]
 		}
 	}
 	if err != nil {
@@ -761,24 +765,75 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 }
 
 // noteOutputTypes records the types of a query's select list items that
-// expressionType knows, by position. A set operation's and a *'s are not
-// recorded, so their columns stay of unresolved type.
+// expressionType knows, by position, and by name. A *'s are recorded by
+// name only, as the order of the columns it gives is not kept, and a set
+// operation's not at all, so their columns stay of unresolved type.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	var types []string
+	named := map[string]string{}
+	seen := map[string]bool{}
+	note := func(name, typ string) {
+		if seen[name] {
+			typ = ""
+		}
+		seen[name] = true
+		named[name] = typ
+	}
+	star := false
 	for _, t := range sel.Targets {
 		if t.Star {
-			return
+			star = true
+			for alias, cols := range sc.items {
+				if t.Table != "" && alias != t.Table {
+					continue
+				}
+				for name, once := range cols {
+					typ := sc.types[alias][name]
+					if !once || typ == "unresolved column type" {
+						typ = ""
+					}
+					note(name, typ)
+				}
+			}
+			continue
 		}
 		typ := expressionType(t.Expr, sc.columnType)
 		if typ == "unresolved column type" {
 			typ = ""
 		}
 		types = append(types, typ)
+		note(targetName(t), typ)
 	}
 	if c.outTypes == nil {
 		c.outTypes = map[*sqlir.SelectStmt][]string{}
+		c.outNamed = map[*sqlir.SelectStmt]map[string]string{}
 	}
-	c.outTypes[sel] = types
+	if !star {
+		c.outTypes[sel] = types
+	}
+	c.outNamed[sel] = named
+}
+
+// setOpTypes are the types of the output columns of sel by position, over
+// the queries of a set operation: bytea where one of them gives bytea, as
+// Postgres resolves the others to it or fails, and the first type one
+// gives otherwise.
+func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
+	if sel.SetOp == "" || sel.Larg == nil || sel.Rarg == nil {
+		return c.outTypes[sel]
+	}
+	l, r := c.setOpTypes(sel.Larg), c.setOpTypes(sel.Rarg)
+	out := slices.Clone(l)
+	for i, t := range r {
+		switch {
+		case i >= len(out):
+		case out[i] == "" || t == "bytea":
+			if t != "" {
+				out[i] = t
+			}
+		}
+	}
+	return out
 }
 
 // namedTypes are the output types of sel by the names its columns have,

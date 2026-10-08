@@ -365,6 +365,26 @@ func TestBytesAsText(t *testing.T) {
 			t.Errorf("bytea literal written to the CREATE TABLE AS table %s: got %q, %v", tbl, back, err)
 		}
 	}
+	// Without rows, a * and a set operation still tell a bytea column by
+	// the query's types, and a column neither they nor its values tell
+	// takes no text.
+	mustExec(t, db, `CREATE TABLE empty1 AS SELECT * FROM lit WHERE false`)
+	mustExec(t, db, `CREATE TABLE empty2 AS SELECT NULL AS payload UNION SELECT payload FROM lit WHERE false`)
+	mustExec(t, db, `CREATE TABLE empty3 AS SELECT l.* FROM lit l WHERE false`)
+	for _, tbl := range []string{"empty1", "empty2", "empty3"} {
+		mustExec(t, db, `INSERT INTO `+tbl+` (payload) VALUES ('\x41')`)
+		if got := rowsOf(t, db, `SELECT count(*) FROM `+tbl+` WHERE payload = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+			t.Errorf("bytea literal written to the empty CREATE TABLE AS table %s: got %v", tbl, got)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE untold AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload FROM lit) s WHERE false`)
+	if _, err := db.Exec(`INSERT INTO untold VALUES ('\x41')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("text written to a CREATE TABLE AS column of untold type: got %v, want unsupported", err)
+	}
+	mustExec(t, db, `INSERT INTO untold VALUES ($1), (NULL)`, []byte("A"))
+	if got := rowsOf(t, db, `SELECT count(*) FROM untold WHERE payload IS NULL`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a CREATE TABLE AS column of untold type read: got %v", got)
+	}
 	// Two schemas' domains of one name with different base types leave a
 	// column of the name untyped, so a write to it is refused.
 	mustExec(t, db, `CREATE SCHEMA a`)
