@@ -481,6 +481,17 @@ func (r *run) execute() (v *violation) {
 			// at quiescence are skipped.
 			return r.checkAlways()
 		}
+		if r.s.eagerStart {
+			started, v := r.startEager()
+			if v != nil {
+				return v
+			}
+			if started {
+				// Settle first what the start set going, such as a goroutine
+				// to adopt, as after a step.
+				continue
+			}
+		}
 		opts := r.enabled()
 		// With a spinner kept out, crashes and losses left alone are no step
 		// another process takes, and taking one would stand in for the
@@ -788,7 +799,7 @@ func (r *run) enabled() []option {
 		if pt.kind != trigLoop && pt.kind != trigManual {
 			continue
 		}
-		if r.runs[pt] >= pt.maxRuns || r.active(pt) >= pt.instances {
+		if r.runs[pt] >= pt.maxRuns || r.active(pt) >= pt.instances || r.s.startsEagerly(pt) {
 			continue
 		}
 		// A loop that went idle keeps ticking only once something changed.
@@ -804,6 +815,60 @@ func (r *run) enabled() []option {
 		opts = append(opts, option{kind: optStart, pt: pt})
 	}
 	return opts
+}
+
+// startsEagerly reports whether EagerStart starts processes of pt without a
+// choice. After and When read state, so when such a process starts can
+// change what it does, and a loop's ticks depend on whether the others made
+// progress.
+func (s *Sim) startsEagerly(pt *procType) bool {
+	return s.eagerStart && pt.kind == trigManual && pt.after == nil && pt.when == nil
+}
+
+// startEager starts a process EagerStart applies to that may start now (see
+// EagerStart), up to its first yield point, and reports whether it started
+// one.
+func (r *run) startEager() (bool, *violation) {
+	var pt *procType
+	for _, t := range r.s.types {
+		if r.s.startsEagerly(t) && r.runs[t] < t.maxRuns && r.active(t) < t.instances {
+			pt = t
+			break
+		}
+	}
+	if pt == nil {
+		return false, nil
+	}
+	draws := r.draws()
+	cur := r.current
+	r.runs[pt]++
+	p := r.spawn(pt, nil)
+	r.resume(p)
+	// The schedule picks no step here, so the process that ran last stays
+	// the one a switch is counted from. The start spends no preemption, and
+	// a resume of the new process is counted as a switch is now.
+	r.current = cur
+	r.endSpin() // as a start that is picked ends a spin
+	if r.pending != nil {
+		return true, r.pending
+	}
+	if !maps.Equal(draws, r.draws()) {
+		return true, &violation{kind: "fatal", err: fmt.Errorf("detest: %s drew a sequence, AUTO_INCREMENT or gen_random_uuid value before its first yield point, such as with an INSERT into a table with a generated key run outside a transaction, so under EagerStart the value it gets depends on where it starts; explore it without EagerStart", p.name)}
+	}
+	return true, r.checkAlways()
+}
+
+// draws records the generated values the databases handed out, which code
+// before a yield point can draw.
+func (r *run) draws() map[string]int64 {
+	m := map[string]int64{}
+	for _, db := range r.s.dbs {
+		for k, v := range db.seqs {
+			m[db.name+"\x00"+k] = v
+		}
+		m[db.name+"\x00uuid"] = db.uuids
+	}
+	return m
 }
 
 func (r *run) advanceClock() bool {

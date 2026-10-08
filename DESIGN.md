@@ -81,6 +81,12 @@ The explorer does not store states. It re-executes the simulation from the begin
 
 Each run starts from a reset. Databases, queues and mutexes return to their state after the declaration, and seeds run again.
 
+### Starting processes eagerly
+
+Starting a `Manual` process is a choice like any other, so a run branches at every step where one could start. Starting a process runs it up to its first yield point and touches no simulated resource, so runs that differ only in where a process started reach the same outcomes, and in the existing tests they were most of the runs. `EagerStart` takes the start without a choice instead, as soon as the process may start, and leaves when its first operation runs to the schedule. The start spends no preemption and does not change which process a switch is counted from, so every schedule within `MaxPreemptions` still has a run that orders the processes' operations the same way.
+
+Two things the code before a yield point can reach are left. The first is the state detest owns. Code before a yield point can draw a sequence, `AUTO_INCREMENT` or uuid value, as an `INSERT` does when it fills a generated key before its yield point, and which value a process gets then depends on where it started. detest compares those counters across each eager start and stops the exploration when one moved. The fake clock is not among them, as the clock moves only when no step is left, and a start that may be taken is one. The second is state outside detest, such as a package variable the process reads before its first call. detest cannot see it, so the option is off by default and states that assumption, as the yield points themselves assume that such state changes only between them.
+
 ### Parallel workers
 
 `Workers(n)` explores with n workers, each in its own bubble with its own `Sim`, because `synctest.Wait` waits for every goroutine of a bubble. They share a frontier, a stack of unexplored prefixes. A worker takes a prefix, runs it, and pushes the subtrees its run revealed. Every run is executed exactly once, and the load balances itself, unlike a split decided in advance.
@@ -178,7 +184,7 @@ Determinism is a precondition of the search, so detest asks a few things of a te
 ## Decisions not taken
 
 - **Random search as the default.** Seeded random scheduling scales to large state spaces but gives no statement about the schedules it did not try. Bounded exhaustive search does, and preemption bounding keeps it tractable for the small number of interacting operations that concurrency bugs need. `Prioritized(seed, depth)`, after PCT, and `Random(seed)` are there for trees too large for a depth-first search to get past the first choices within `MaxRuns`, and their results are never reported as complete.
-- **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code.
+- **Partial order reduction.** Skipping reorderings of independent operations would shrink the search, but deciding independence requires that the code shares no state outside detest's resources, which detest cannot verify for real code. `EagerStart` is the one exception, and an opt-in one. A start touches no resource, detest checks the counters it owns across it, and what is left to assume is only the code before a process's first yield point.
 - **A store for shared variables.** Replacing in-memory variables of production code with detest types would make their accesses yield points, at the cost of changing the code under test more than injecting a mutex does.
 - **Static analysis of read and write sets.** With real code running through the driver, the explorer needs no declared read and write sets.
 - **A faithful database.** Reproducing the server in full, or running a real one, would remove every difference, including the ones that cannot change what the application observes. detest implements exactly what can change an outcome under concurrency, refuses what it does not implement, and approximates the rest as simply as it can, so that the engine stays small enough to be exact where it counts.

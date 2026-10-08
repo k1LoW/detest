@@ -217,6 +217,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 			res.Shard = fmt.Sprintf("%d/%d", s.shardIndex, s.shardTotal)
 		}
 		res.strategy = s.strategy
+		res.eager = s.eagerStart
 		expect = s.expect
 	})
 	return res, expect
