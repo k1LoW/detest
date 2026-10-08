@@ -51,7 +51,7 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	}
 	names := make([]string, n)
 	if sel.SetOp != "" || len(sel.Values) > 0 || len(sel.Targets) != n || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
-		if !textlessOutputs(sel, n) {
+		if !db.textlessOutputs(sel, n) {
 			for i := range names {
 				names[i] = derivedCollation
 			}
@@ -59,7 +59,7 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 		return names, nil
 	}
 	for i, t := range sel.Targets {
-		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] {
+		if typ := expressionType(t.Expr, nil); typ != "" && !db.collatable(typ) {
 			continue // a number or a boolean has no collation to keep
 		}
 		u, err := x.collationOf(t.Expr)
@@ -127,6 +127,14 @@ func collatableType(typ string) bool {
 		return true
 	}
 	return false
+}
+
+// collatable reports whether a value of typ has a collation: a type that
+// does, or a domain over one, which passes on its input's collation when it
+// declares none of its own.
+func (db *DB) collatable(typ string) bool {
+	base := db.baseType(typ)
+	return collatableType(base) || base == ambiguousDomain || db.collatedDomains[typ]
 }
 
 // noteOutput records that the ORDER BY key k names or numbers the select
@@ -212,7 +220,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			// A cast to a domain takes the domain's collation.
 			return collationUse{name: c}, nil
 		}
-		if !collatableType(e.Type) {
+		if !x.tx.db.collatable(e.Type) {
 			return collationUse{}, nil
 		}
 		if c := typeCollation(e.Type); c != "" {
@@ -234,7 +242,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 	}
 	// A result of a type that has no collation, such as length's integer,
 	// ends what its arguments carry, whatever wraps it after.
-	if typ := expressionType(e, nil); typ != "" && !collatableType(typ) && !x.tx.db.collatedDomains[typ] {
+	if typ := expressionType(e, nil); typ != "" && !x.tx.db.collatable(typ) {
 		return collationUse{}, nil
 	}
 	var uses []collationUse
@@ -454,7 +462,7 @@ func (db *DB) isIndex(name string) bool {
 // textlessOutputs reports whether every one of the n columns sel gives has
 // a type the statement shows to be other than text, as in SELECT 1 UNION
 // SELECT 2, which needs no collation kept.
-func textlessOutputs(sel *sqlir.SelectStmt, n int) bool {
+func (db *DB) textlessOutputs(sel *sqlir.SelectStmt, n int) bool {
 	for sel.SetOp != "" {
 		sel = sel.Larg
 	}
@@ -473,7 +481,7 @@ func textlessOutputs(sel *sqlir.SelectStmt, n int) bool {
 		return false
 	}
 	for _, e := range exprs {
-		if typ := expressionType(e, nil); typ == "" || collatableType(typ) {
+		if typ := expressionType(e, nil); typ == "" || db.collatable(typ) {
 			return false
 		}
 	}

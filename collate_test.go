@@ -262,6 +262,7 @@ func TestDomainCollations(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (1, 'b', 'b', 'b', 'b', 'b'), (2, 'B', 'B', 'B', 'B', 'B'), (3, 'a', 'a', 'a', 'a', 'a')`)
 	mustExec(t, db, `CREATE TABLE c AS SELECT id, name::tag AS name FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS c AS SELECT id + 100 AS id, name FROM t`)
+	mustExec(t, db, `CREATE TABLE pc AS SELECT id, (name COLLATE "C")::plain AS n FROM t`)
 	for _, q := range []string{
 		`SELECT id FROM t ORDER BY a`,
 		`SELECT id FROM t ORDER BY n`,
@@ -279,6 +280,10 @@ func TestDomainCollations(t *testing.T) {
 		want []string
 	}{
 		{`SELECT id FROM t ORDER BY p`, []string{"3", "2", "1"}},
+		// A cast to a domain that declares no collation passes on its
+		// input's, in a query and in a CREATE TABLE AS column.
+		{`SELECT id FROM t ORDER BY (name COLLATE "C")::plain`, []string{"2", "3", "1"}},
+		{`SELECT id FROM pc ORDER BY n`, []string{"2", "3", "1"}},
 		{`SELECT id FROM t WHERE a = 'B'`, []string{"2"}},
 		{`SELECT count(*) FROM c`, []string{"3"}},
 	} {
