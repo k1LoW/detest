@@ -452,6 +452,9 @@ func TestBytesAsText(t *testing.T) {
 	if got := rowsOf(t, db, `SELECT count(*) FROM viadomain WHERE payload = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("bytea literal written to a CREATE TABLE AS column of a bytea domain: got %v", got)
 	}
+	if got := rowsOf(t, db, `SELECT count(*) FROM lit WHERE payload::blob3 = 'a'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a bytea value cast to a domain over bytea: got %v", got)
+	}
 	if got := rowsOf(t, db, `SELECT count(*) FROM untold WHERE payload IS NULL`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a CREATE TABLE AS column of untold type read: got %v", got)
 	}

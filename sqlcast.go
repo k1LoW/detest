@@ -77,7 +77,7 @@ func numeric(v float64) any {
 // while detest would read its bytes as text. A parameter's bytes are text
 // the driver sent, which Postgres reads as the target type.
 func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
-	if _, ok := derefValue(v).([]byte); !ok || c.Type == "bytea" {
+	if _, ok := derefValue(v).([]byte); !ok || x.tx.db.baseType(c.Type) == "bytea" {
 		return nil
 	}
 	if _, ok := c.X.(*sqlir.Param); ok {
