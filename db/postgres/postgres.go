@@ -64,8 +64,10 @@ func TimeZone(name string) Option {
 // by byte). It must be the collation the real database has, or the
 // statements that order text read and lock other rows than they do in
 // production. pg_database shows it by its provider, datlocprovider:
-// datcollate for libc, and datlocale for ICU and the builtin provider,
-// whose C and C.UTF-8 order as C does. Equality does not depend on
+// datcollate for libc, and for ICU and the builtin provider, whose C and
+// C.UTF-8 order as C does, datlocale on Postgres 17 and later and
+// daticulocale on 15 and 16. Before 15 there is libc only, and datcollate.
+// Equality does not depend on
 // it, as Postgres tells two strings equal only when their bytes are.
 func Collation(c sqlir.Collation) Option {
 	return func(cf *config) { cf.collation = c }
