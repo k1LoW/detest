@@ -160,9 +160,9 @@ type DB struct {
 	// writes, checks and ordering are its base type's.
 	domainBases map[string]string
 	// domainSchemas are the qualified names the domains of domainBases were
-	// created as, so that a drop of another schema's domain of the name
-	// leaves them.
-	domainSchemas map[string]string
+	// created as, one for each schema with a domain of the name, so that a
+	// drop or a rename of one of them leaves the others.
+	domainSchemas map[string][]string
 	// declaredCache is declaresCollations, dropped by every schema change.
 	declaredCache *bool
 	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
@@ -1178,6 +1178,37 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 	return nil
 }
 
+// noteDomain records the domain of the qualified name q, by its bare name.
+func (db *DB) noteDomain(name, q, base string) {
+	if db.domainBases == nil {
+		db.domainBases, db.domainSchemas = map[string]string{}, map[string][]string{}
+	}
+	if prev, ok := db.domainBases[name]; ok && prev != base {
+		// detest records a column's domain by its bare name, which
+		// cannot tell two schemas' domains of the name apart.
+		base = ambiguousDomain
+	}
+	db.domainBases[name] = base
+	if !slices.Contains(db.domainSchemas[name], q) {
+		db.domainSchemas[name] = append(db.domainSchemas[name], q)
+	}
+}
+
+// forgetDomain removes the domain of the qualified name q, and the base
+// type of the bare name with the last one of it.
+func (db *DB) forgetDomain(name, q string) {
+	qs := slices.DeleteFunc(slices.Clone(db.domainSchemas[name]), func(s string) bool { return s == q })
+	if len(qs) == len(db.domainSchemas[name]) {
+		return
+	}
+	if len(qs) == 0 {
+		delete(db.domainBases, name)
+		delete(db.domainSchemas, name)
+		return
+	}
+	db.domainSchemas[name] = qs
+}
+
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
@@ -1187,9 +1218,8 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		// safe. A column already of the domain keeps the base type it was
 		// recorded with, as Postgres refuses the drop while one is.
 		name := ch.Columns[0].Name
-		if db.domainBases[name] != ambiguousDomain && db.domainSchemas[name] == db.qualifyDomain(ch.Table, name) {
-			delete(db.domainBases, name)
-			delete(db.domainSchemas, name)
+		if db.domainBases[name] != ambiguousDomain {
+			db.forgetDomain(name, db.qualifyDomain(ch.Table, name))
 		}
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
@@ -1197,28 +1227,17 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.collatedDomains[old] {
 			db.collatedDomains[ch.RenameTo] = true
 		}
-		if base, ok := db.domainBases[old]; ok && db.domainSchemas[old] == db.qualifyDomain(ch.Table, old) {
-			q := db.domainSchemas[old]
-			delete(db.domainBases, old)
-			delete(db.domainSchemas, old)
-			db.domainBases[ch.RenameTo], db.domainSchemas[ch.RenameTo] = base, q[:len(q)-len(old)]+ch.RenameTo
+		q := db.qualifyDomain(ch.Table, old)
+		if base, ok := db.domainBases[old]; ok && slices.Contains(db.domainSchemas[old], q) {
+			if base != ambiguousDomain {
+				db.forgetDomain(old, q)
+			}
+			db.noteDomain(ch.RenameTo, q[:len(q)-len(old)]+ch.RenameTo, base)
 		}
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
-		if db.domainBases == nil {
-			db.domainBases = map[string]string{}
-		}
-		base := db.baseType(col.Type)
-		if prev, ok := db.domainBases[col.Name]; ok && prev != base {
-			// detest records a column's domain by its bare name, which
-			// cannot tell two schemas' domains of the name apart.
-			base = ambiguousDomain
-		}
-		if db.domainSchemas == nil {
-			db.domainSchemas = map[string]string{}
-		}
-		db.domainBases[col.Name], db.domainSchemas[col.Name] = base, db.qualifyDomain(ch.Table, col.Name)
+		db.noteDomain(col.Name, db.qualifyDomain(ch.Table, col.Name), db.baseType(col.Type))
 		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}

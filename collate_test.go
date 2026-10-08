@@ -293,6 +293,10 @@ func TestDomainCollations(t *testing.T) {
 	if _, ok := store.defs[store.resolve("uix")]; ok {
 		t.Error("CREATE TABLE IF NOT EXISTS ... AS made a table of a unique index's name")
 	}
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS t_pkey AS SELECT id FROM t`)
+	if _, ok := store.defs[store.resolve("t_pkey")]; ok {
+		t.Error("CREATE TABLE IF NOT EXISTS ... AS made a table of a primary key index's name")
+	}
 	mustExec(t, db, `CREATE VIEW vw AS SELECT id FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS vw AS SELECT id, name FROM t`)
 	if _, ok := store.defs[store.resolve("vw")]; ok {
@@ -381,6 +385,16 @@ func TestBytesAsText(t *testing.T) {
 	mustExec(t, db, `INSERT INTO kept VALUES (1, '\x41')`)
 	if got := rowsOf(t, db, `SELECT id FROM kept WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a bytea domain after a drop of another schema's: got %v", got)
+	}
+	// Two schemas' domains of one name and base type stay typed until
+	// both are dropped.
+	mustExec(t, db, `CREATE DOMAIN a.blob2 AS bytea`)
+	mustExec(t, db, `CREATE DOMAIN b.blob2 AS bytea`)
+	mustExec(t, db, `DROP DOMAIN b.blob2`)
+	mustExec(t, db, `CREATE TABLE kept2 (id int PRIMARY KEY, v a.blob2)`)
+	mustExec(t, db, `INSERT INTO kept2 VALUES (1, '\x41')`)
+	if got := rowsOf(t, db, `SELECT id FROM kept2 WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a bytea domain after a drop of another schema's of the same base: got %v", got)
 	}
 	mustExec(t, db, `CREATE DOMAIN bytes AS bytea`)
 	mustExec(t, db, `CREATE TABLE dom (id int PRIMARY KEY, payload bytes)`)

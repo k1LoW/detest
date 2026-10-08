@@ -429,6 +429,9 @@ func (db *DB) isIndex(name string) bool {
 		if !strings.HasPrefix(table, schema+".") {
 			continue
 		}
+		if def.pkName == rel {
+			return true
+		}
 		for _, u := range def.uniques {
 			if u.Name == rel {
 				return true
