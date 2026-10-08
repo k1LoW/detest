@@ -118,7 +118,7 @@ func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, 
 		o(pt)
 	}
 	q.consumers = append(q.consumers, pt)
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 // Loop registers a periodic process type that the scheduler may start at any
@@ -129,7 +129,7 @@ func (s *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...Pro
 	for _, o := range opts {
 		o(pt)
 	}
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 // Manual registers a process type started at an arbitrary point, such as a
@@ -140,7 +140,7 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 	for _, o := range opts {
 		o(pt)
 	}
-	s.types = append(s.types, pt)
+	s.addType(pt)
 }
 
 type run struct {
@@ -318,6 +318,8 @@ type Proc struct {
 
 // Name returns the instance name, the name it was declared or spawned with
 // and its number among the processes of that name, such as "sweeper#2".
+// Process types are declared under names of their own, and a spawn does not
+// take the name of one.
 func (p *Proc) Name() string { return p.name }
 
 // Current returns the process whose goroutine is calling. Production code
@@ -1505,6 +1507,19 @@ func (p *Proc) Choose(label string, n int) int {
 
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
+// addType declares a process type. A process is told apart from the others
+// by its name, in Proc.Name and in traces, and processes are numbered among
+// the ones of their name, so two types of one name would share the numbers
+// and which one got #1 would depend on which started first.
+func (s *Sim) addType(pt *procType) {
+	for _, t := range s.types {
+		if t.name == pt.name {
+			panic(fmt.Sprintf("detest: a process type named %q is declared twice; give each a name of its own", pt.name))
+		}
+	}
+	s.types = append(s.types, pt)
+}
+
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 	// Counted as a call, since the spawn takes the next number of the name,
 	// which a spawn of another process may take first.
@@ -1512,6 +1527,13 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow
+	for _, t := range p.r.s.types {
+		if t.name == name {
+			// As for two declared types of one name (see addType).
+			p.r.pending = &violation{kind: "fatal", err: fmt.Errorf("detest: Spawn(%q) takes the name of a declared process type; give the spawned process a name of its own", name)}
+			return
+		}
+	}
 	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)

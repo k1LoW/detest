@@ -475,3 +475,30 @@ func TestEagerStartDroppedOnASpawn(t *testing.T) {
 		t.Fatalf("got %s", res.report())
 	}
 }
+
+// Two types of one name would share its numbers, so which got #1 would
+// depend on which started first.
+func TestProcessTypesOfOneNameAreRefused(t *testing.T) {
+	s := newSim(t)
+	s.Manual("worker", 1, func(*Proc) error { return nil })
+	defer func() {
+		if rec := recover(); rec == nil || !strings.Contains(fmt.Sprint(rec), `"worker" is declared twice`) {
+			t.Fatalf("got %v, want a refusal of the second worker", rec)
+		}
+	}()
+	s.Loop("worker", 1, func(*Proc) error { return nil })
+}
+
+func TestSpawnUnderADeclaredNameIsRefused(t *testing.T) {
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		s.Manual("worker", 1, func(*Proc) error { return nil })
+		s.Manual("parent", 1, func(p *Proc) error {
+			p.Step("before spawning")
+			p.Spawn("worker", func(*Proc) error { return nil })
+			return nil
+		})
+	}, nil, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), `Spawn("worker") takes the name of a declared process type`) {
+		t.Fatalf("got %v", res.Fatal)
+	}
+}
