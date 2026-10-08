@@ -1238,9 +1238,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		q := db.existingDomain(ch.Table, old)
 		if base, ok := db.domainBases[old]; ok && slices.Contains(db.domainSchemas[old], q) {
-			if base != ambiguousDomain {
-				db.forgetDomain(old, q)
-			}
+			// The old name keeps its base type, as the collated mark does:
+			// a cast to it in a CHECK, a default or a view, which Postgres
+			// follows to the new name, still names it, and rewriting the
+			// stored expression would change the statement the parse cache
+			// shares with every other database.
 			db.noteDomain(ch.RenameTo, q[:len(q)-len(old)]+ch.RenameTo, base)
 		}
 		return nil

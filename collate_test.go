@@ -494,6 +494,12 @@ func TestBytesAsText(t *testing.T) {
 	if got := rowsOf(t, pdb, `SELECT id FROM a.rp WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a domain of a later schema of the search path renamed: got %v", got)
 	}
+	// A cast to a domain a CHECK keeps still casts to its base type after
+	// the domain is renamed, as Postgres follows it to the new name.
+	mustExec(t, db, `CREATE DOMAIN dren AS bytea`)
+	mustExec(t, db, `CREATE TABLE renamedcheck (id int PRIMARY KEY, v bytea CHECK (v = '\x41'::dren))`)
+	mustExec(t, db, `ALTER DOMAIN dren RENAME TO dren2`)
+	mustExec(t, db, `INSERT INTO renamedcheck VALUES (1, '\x41')`)
 	// Two schemas' domains of one name and base type stay typed until
 	// both are dropped.
 	mustExec(t, db, `CREATE DOMAIN a.blob2 AS bytea`)
