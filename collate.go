@@ -88,6 +88,11 @@ func (db *DB) domainCollation(typ string) string {
 	return ""
 }
 
+// ambiguousDomain is the base type of a domain name two schemas declare
+// domains of with different base types, which a write to a column of it
+// refuses.
+const ambiguousDomain = "a domain of a name two schemas declare with different base types"
+
 // baseType is typ, or the base type of the domain typ names.
 func (db *DB) baseType(typ string) string {
 	if base, ok := db.domainBases[typ]; ok {

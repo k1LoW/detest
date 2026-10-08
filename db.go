@@ -1182,7 +1182,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		// one of another schema, may still be collated, and refusing is
 		// safe. A column already of the domain keeps the base type it was
 		// recorded with, as Postgres refuses the drop while one is.
-		delete(db.domainBases, ch.Columns[0].Name)
+		if db.domainBases[ch.Columns[0].Name] != ambiguousDomain {
+			delete(db.domainBases, ch.Columns[0].Name)
+		}
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
 		old := ch.Columns[0].Name
@@ -1199,7 +1201,13 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.domainBases == nil {
 			db.domainBases = map[string]string{}
 		}
-		db.domainBases[col.Name] = db.baseType(col.Type)
+		base := db.baseType(col.Type)
+		if prev, ok := db.domainBases[col.Name]; ok && prev != base {
+			// detest records a column's domain by its bare name, which
+			// cannot tell two schemas' domains of the name apart.
+			base = ambiguousDomain
+		}
+		db.domainBases[col.Name] = base
 		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}

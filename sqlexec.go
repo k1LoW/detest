@@ -94,6 +94,9 @@ type sqlExec struct {
 	// statement has a COLLATE clause.
 	colls    map[*sqlir.ColumnRef]colNote
 	collates bool
+	// ctasTypes are the types the column check found for the columns of a
+	// CREATE TABLE AS, "" where it could not tell.
+	ctasTypes []string
 	// outputs are the ORDER BY keys that name an output column, with the
 	// select list's expression they name.
 	outputs map[sqlir.Expr]sqlir.Expr
@@ -564,6 +567,13 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	if err != nil {
 		return nil, err
 	}
+	for i := range ch.Columns {
+		if i < len(selCols) && x.ctasBytea(i, selCols[i], rows) {
+			// Created as bytea, so that a later write of bytea text to it
+			// is read as bytea input.
+			ch.Columns[i].Type = "bytea"
+		}
+	}
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err
 	}
@@ -585,6 +595,26 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	// after applySchema dropped the cache.
 	x.tx.db.declaredCache = nil
 	return x.fill(table, st, selCols, rows)
+}
+
+// ctasBytea reports whether the i-th column of a CREATE TABLE AS, col in
+// rows, is bytea: by the type the column check found, or, where it could
+// not tell, as of a *, by its values, when every one of them is bytes.
+func (x *sqlExec) ctasBytea(i int, col string, rows []Row) bool {
+	if i < len(x.ctasTypes) && x.ctasTypes[i] != "" {
+		return x.ctasTypes[i] == "bytea"
+	}
+	seen := false
+	for _, r := range rows {
+		switch derefValue(r[col]).(type) {
+		case nil:
+		case []byte:
+			seen = true
+		default:
+			return false
+		}
+	}
+	return seen
 }
 
 // execRefresh replaces a materialized view's rows with its query's.

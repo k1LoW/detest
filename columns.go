@@ -102,8 +102,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		err = c.delete(st)
 	case *sqlir.CreateTableAsStmt:
 		// Checked as Postgres plans the query, and so that the collations
-		// of its columns are known to the table it creates.
-		_, err = c.query(st.Select, nil)
+		// and the types of its columns are known to the table it creates.
+		if _, err = c.query(st.Select, nil); err == nil {
+			first := st.Select
+			for first.SetOp != "" && first.Larg != nil {
+				first = first.Larg
+			}
+			x.ctasTypes = c.outTypes[first]
+		}
 	}
 	if err != nil {
 		return err

@@ -349,6 +349,28 @@ func TestBytesAsText(t *testing.T) {
 	if err := db.QueryRow(`SELECT payload FROM lit WHERE id = 1`).Scan(&raw); err != nil || string(raw) != "a" {
 		t.Errorf("a bytea literal read back: got %q, %v", raw, err)
 	}
+	// A CREATE TABLE AS column of bytea is bytea, by the query's type or,
+	// for a *, by its values, so a later bytea literal written to it is
+	// read as bytea input.
+	mustExec(t, db, `CREATE TABLE copied2 AS SELECT payload FROM lit`)
+	mustExec(t, db, `CREATE TABLE starred AS SELECT * FROM lit`)
+	for _, tbl := range []string{"copied2", "starred"} {
+		mustExec(t, db, `INSERT INTO `+tbl+` (payload) VALUES ('\x41')`)
+		var back []byte
+		if err := db.QueryRow(`SELECT payload FROM ` + tbl + ` WHERE payload = 'A'::bytea`).Scan(&back); err != nil || string(back) != "A" {
+			t.Errorf("bytea literal written to the CREATE TABLE AS table %s: got %q, %v", tbl, back, err)
+		}
+	}
+	// Two schemas' domains of one name with different base types leave a
+	// column of the name untyped, so a write to it is refused.
+	mustExec(t, db, `CREATE SCHEMA a`)
+	mustExec(t, db, `CREATE SCHEMA b`)
+	mustExec(t, db, `CREATE DOMAIN a.twice AS bytea`)
+	mustExec(t, db, `CREATE DOMAIN b.twice AS text`)
+	mustExec(t, db, `CREATE TABLE amb (id int PRIMARY KEY, v a.twice)`)
+	if _, err := db.Exec(`INSERT INTO amb VALUES (1, 'x')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a write to a column of a domain two schemas declare: got %v, want unsupported", err)
+	}
 	mustExec(t, db, `CREATE DOMAIN bytes AS bytea`)
 	mustExec(t, db, `CREATE TABLE dom (id int PRIMARY KEY, payload bytes)`)
 	mustExec(t, db, `INSERT INTO dom VALUES (1, 'a'), (2, 'B')`)
