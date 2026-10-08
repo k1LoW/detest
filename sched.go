@@ -902,8 +902,8 @@ func (r *run) startEager() (bool, *violation) {
 
 // startEffects counts the changes the databases made to their counters of
 // generated values and their locks, which an eager start must make none
-// of. A statement makes none before its yield point, but UPDATE and DELETE
-// try their WHERE before it, which a locking subquery in it can lock from.
+// of. No statement makes one before its yield point, so the count only
+// guards against a path that would.
 func (r *run) startEffects() uint64 {
 	var n uint64
 	for _, db := range r.s.dbs {

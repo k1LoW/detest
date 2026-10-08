@@ -464,6 +464,11 @@ func (f *frontier) merge(results []*result, workers int) *result {
 
 // checkpoint is the rest of an exploration MaxRuns or MaxDuration cut short: the subtrees
 // not explored yet, each as the choices that lead to it.
+// checkpointVersion is the version of the checkpoint format. 2 is the tree
+// of eager starts and of INSERT yielding first, whose prefixes a checkpoint
+// of version 1 does not name.
+const checkpointVersion = 2
+
 type checkpoint struct {
 	Version  int             `json:"version"`
 	Runs     int             `json:"runs"`           // explored before, in all the explorations so far
@@ -496,7 +501,7 @@ func (f *frontier) load(path string) error {
 	if err := json.Unmarshal(b, &ck); err != nil {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %w", path, err)
 	}
-	if ck.Version != 1 {
+	if ck.Version != checkpointVersion {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
 	}
 	f.stack = f.stack[:0]
@@ -519,7 +524,7 @@ func (f *frontier) load(path string) error {
 
 // save writes the subtrees left to path.
 func (f *frontier) save(path string) error {
-	ck := checkpoint{Version: 1, Runs: f.prior + f.runs, Cuts: f.cutRuns(), Lazy: f.lazy}
+	ck := checkpoint{Version: checkpointVersion, Runs: f.prior + f.runs, Cuts: f.cutRuns(), Lazy: f.lazy}
 	for n := range f.reached {
 		ck.Reached = append(ck.Reached, n)
 	}

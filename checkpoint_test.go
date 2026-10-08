@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,7 +107,7 @@ func TestStaleCheckpointFailsTheTest(t *testing.T) {
 		return
 	}
 	stale := filepath.Join(t.TempDir(), "ckpt")
-	if err := os.WriteFile(stale, []byte(`{"version":1,"runs":10,"subtrees":[[{"label":"step","n":99,"picked":1}]]}`), 0o600); err != nil {
+	if err := os.WriteFile(stale, fmt.Appendf(nil, `{"version":%d,"runs":10,"subtrees":[[{"label":"step","n":99,"picked":1}]]}`, checkpointVersion), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, env := range [][]string{
@@ -140,5 +141,17 @@ func TestCheckpointKeepsRefusedStatements(t *testing.T) {
 	}
 	if got, want := g.refusals(), []string{"detest: unsupported SQL (x): SELECT 1"}; !slices.Equal(got, want) {
 		t.Fatalf("refusals %q, want %q", got, want)
+	}
+}
+
+// A checkpoint of an earlier format names prefixes of another tree, so it is
+// refused rather than resumed.
+func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ckpt.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"runs":0,"subtrees":[[]]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := newFrontier(1, 10).load(path); err == nil || !strings.Contains(err.Error(), "version 1") {
+		t.Fatalf("got %v, want a refusal of version 1", err)
 	}
 }

@@ -106,9 +106,9 @@ func TestEagerStartSpendsNoPreemption(t *testing.T) {
 	}
 }
 
-// firstIDModel declares two buyers whose orders take generated ids before
-// their first yield point, and the rule that bob never gets the first one,
-// which only the order of their starts breaks.
+// firstIDModel declares two buyers whose first statements insert orders with
+// generated ids, and the rule that bob never gets the first one, which only
+// the order of their inserts breaks.
 func firstIDModel(t *testing.T, s *Sim) {
 	db, _ := s.DB("app", postgres.New())
 	if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
@@ -276,9 +276,9 @@ func TestProcessNamesDoNotDependOnStartOrder(t *testing.T) {
 	}
 }
 
-// A goroutine a start sets going reaches its first call within the start, so
-// a generated key it draws there counts as the start's.
-func TestEagerStartCountsADrawOfAGoroutineItStarted(t *testing.T) {
+// A goroutine a start sets going reaches its first call within the start,
+// and a start that then waits for it stops short of its own yield point.
+func TestEagerStartDroppedWhenAStartWaitsForItsGoroutine(t *testing.T) {
 	res, _ := explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
 		if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
@@ -295,7 +295,7 @@ func TestEagerStartCountsADrawOfAGoroutineItStarted(t *testing.T) {
 			})
 		}
 	}, nil)
-	if res.Fatal != nil || res.lazy == "" {
+	if res.Fatal != nil || !strings.Contains(res.lazy, "stopped short of its first yield point") {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
