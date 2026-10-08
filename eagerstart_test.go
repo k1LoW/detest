@@ -502,3 +502,134 @@ func TestSpawnUnderADeclaredNameIsRefused(t *testing.T) {
 		t.Fatalf("got %v", res.Fatal)
 	}
 }
+
+// A session setting stays on the connection, which the pool hands to the
+// process that takes one next, so a process starting after the setter
+// returned it may run under the setting, which eager starts leave out.
+func TestEagerStartDroppedOnASessionSetting(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counters VALUES ('c', 0)`) })
+		timedOut := false
+		s.Seed(func() { timedOut = false })
+		s.Manual("holder", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `UPDATE counters SET n = n + 1 WHERE id = 'c'`); err != nil {
+				return err
+			}
+			p.Step("holds the row")
+			return tx.Commit()
+		})
+		s.Manual("setter", 1, func(p *Proc) error {
+			p.Step("before setting")
+			_, err := db.ExecContext(p.Context(), `SET lock_timeout = '1s'`)
+			return err
+		})
+		s.Manual("waiter", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE counters SET n = n + 1 WHERE id = 'c'`)
+			if errors.Is(err, ErrLockNotAvailable) {
+				timedOut = true
+				return nil
+			}
+			return err
+		})
+		s.Sometimes("the waiter times out under the setter's setting", func(*State) bool { return timedOut })
+	}, nil)
+	if res.Fatal != nil || !strings.Contains(res.lazy, "session setting") || len(res.Unreached) > 0 {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
+
+// LAST_INSERT_ID() reads the connection's, which the process that used it
+// last left there.
+func TestEagerStartDroppedOnLastInsertID(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", mysqlBin())
+		mustExec(t, db, `CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)`)
+		var seen int64
+		s.Seed(func() { seen = 0 })
+		s.Manual("inserter", 1, func(p *Proc) error {
+			p.Step("before inserting")
+			_, err := db.ExecContext(p.Context(), `INSERT INTO t (v) VALUES (1)`)
+			return err
+		})
+		s.Manual("reader", 1, func(p *Proc) error {
+			return db.QueryRowContext(p.Context(), `SELECT LAST_INSERT_ID()`).Scan(&seen)
+		})
+		s.Sometimes("the reader sees the inserter's id", func(*State) bool { return seen != 0 })
+	}, nil)
+	if res.Fatal != nil || !strings.Contains(res.lazy, "LAST_INSERT_ID") || len(res.Unreached) > 0 {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
+
+// A process waiting for the one connection of a pool that an eagerly
+// started process holds from its start could have run first.
+func TestEagerStartDroppedOnAPoolWait(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		db.SetMaxOpenConns(1)
+		mustExec(t, db, `CREATE TABLE commits (seq serial PRIMARY KEY, buyer text NOT NULL)`)
+		first := ""
+		s.Seed(func() { first = "" })
+		s.Manual("alice", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			p.Step("in the transaction")
+			if first == "" {
+				first = "alice"
+			}
+			return tx.Commit()
+		})
+		s.Manual("bob", 1, func(p *Proc) error {
+			if _, err := db.ExecContext(p.Context(), `SELECT 1`); err != nil {
+				return err
+			}
+			if first == "" {
+				first = "bob"
+			}
+			return nil
+		}, After(func(*State) bool { return true }))
+		s.Sometimes("bob goes first", func(*State) bool { return first == "bob" })
+	}, nil)
+	if res.Fatal != nil || !strings.Contains(res.lazy, "waited for a connection of a pool") || len(res.Unreached) > 0 {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
+
+// SET LOCAL ends with its transaction and leaves the connection as it was,
+// so eager starts stay.
+func TestEagerStartKeptOnSetLocal(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE counters (id text PRIMARY KEY, n int)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counters VALUES ('c', 0)`) })
+		for _, name := range []string{"a", "b"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				tx, err := db.BeginTx(p.Context(), nil)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				if _, err := tx.ExecContext(p.Context(), `SET LOCAL lock_timeout = '1s'`); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(p.Context(), `UPDATE counters SET n = n + 1 WHERE id = 'c'`); err != nil && !errors.Is(err, ErrLockNotAvailable) {
+					return err
+				}
+				return tx.Commit()
+			})
+		}
+	}, nil)
+	if res.Fatal != nil || res.lazy != "" {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}

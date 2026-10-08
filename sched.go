@@ -144,33 +144,39 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 }
 
 type run struct {
-	s        *Sim
-	rng      *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
-	seen     seenChoices  // under Random, the worker's earlier runs' shallow choices
-	path     uint64       // under Random, a hash of the picks so far, which keys seen
-	prio     *prioritized // under Prioritized, how the steps are picked
-	want     int          // under Prioritized, the option the next step choice takes
-	steps    int          // the steps taken, which Prioritized measures a run in
-	prefix   []choice
-	choices  []choice
-	pos      int
-	procs    []*Proc
-	opts     []option       // reused by enabled, whose result lives for one step
-	ids      map[string]int // processes started so far, by name, which number them
-	clock    int64
-	trace    []step
-	failures int
-	crashes  int
-	stalls   int
-	runs     map[*procType]int
-	abort    chan struct{}
-	ctx      context.Context // Proc.Context; canceled when the run ends
-	cancel   context.CancelFunc
-	current  *Proc
-	preempts int
-	prev     *State
-	version  int
-	idleAt   map[*procType]int
+	s       *Sim
+	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
+	seen    seenChoices  // under Random, the worker's earlier runs' shallow choices
+	path    uint64       // under Random, a hash of the picks so far, which keys seen
+	prio    *prioritized // under Prioritized, how the steps are picked
+	want    int          // under Prioritized, the option the next step choice takes
+	steps   int          // the steps taken, which Prioritized measures a run in
+	prefix  []choice
+	choices []choice
+	pos     int
+	procs   []*Proc
+	opts    []option       // reused by enabled, whose result lives for one step
+	ids     map[string]int // processes started so far, by name, which number them
+	// eagerBreak is why eager starts left out schedules of this run that
+	// matter, found after the starts (see breakEager), and poolWaits the
+	// waits for a pool connection before the run, which a wait in it adds
+	// to.
+	eagerBreak atomic.Pointer[eagerStartError]
+	poolWaits  int64
+	clock      int64
+	trace      []step
+	failures   int
+	crashes    int
+	stalls     int
+	runs       map[*procType]int
+	abort      chan struct{}
+	ctx        context.Context // Proc.Context; canceled when the run ends
+	cancel     context.CancelFunc
+	current    *Proc
+	preempts   int
+	prev       *State
+	version    int
+	idleAt     map[*procType]int
 	// progress counts the changes made by processes other than loops and
 	// the processes they spawned, and the loop ticks that did work. idleRun
 	// counts a loop's idle ticks since progress last moved, at idleSeen.
@@ -484,6 +490,9 @@ func (r *run) execute() (v *violation) {
 			// at quiescence are skipped.
 			return r.checkAlways()
 		}
+		if v := r.eagerUnsound(); v != nil {
+			return v
+		}
 		if r.s.eagerStart {
 			started, v := r.startEager()
 			if v != nil {
@@ -523,6 +532,9 @@ func (r *run) execute() (v *violation) {
 				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
 			}
 			if len(opts) == 0 {
+				if v := r.eagerUnsound(); v != nil {
+					return v
+				}
 				break
 			}
 		}
@@ -908,6 +920,52 @@ func (r *run) startEffects() map[string]int64 {
 		}
 	}
 	return m
+}
+
+// breakEager records that the run did something whose outcome depends on
+// where processes started beyond what startEager checks, such as setting a
+// session setting on a connection the pool hands to whichever process takes
+// it next. It is called under the engine mutex by the processes.
+func (s *Sim) breakEager(p *Proc, what string) {
+	r := s.run
+	if r == nil || !s.eagerStart {
+		return
+	}
+	name := "a seed"
+	if p != nil {
+		name = p.name
+	}
+	r.eagerBreak.CompareAndSwap(nil, &eagerStartError{proc: name, what: what, after: true})
+}
+
+// poolWaits sums the waits for a connection of the simulation's pools.
+func (s *Sim) poolWaits() int64 {
+	var n int64
+	for _, db := range s.sqlDBs {
+		n += db.Stats().WaitCount
+	}
+	return n
+}
+
+// eagerUnsound returns the stop that makes Explore start over without
+// EagerStart (see there), once the run did something that ties its outcome
+// to where processes started after the starts themselves. A connection
+// keeps its session settings and LAST_INSERT_ID from one process to the
+// next, and the pool hands a process the connection the last one returned,
+// which an eager start takes before any process ran. A process waiting for
+// a connection of a capped pool waits for one an eagerly started process
+// holds from its start.
+func (r *run) eagerUnsound() *violation {
+	if !r.s.eagerStart || !slices.ContainsFunc(r.s.types, r.s.startsEagerly) {
+		return nil
+	}
+	if e := r.eagerBreak.Load(); e != nil {
+		return &violation{kind: "fatal", err: e}
+	}
+	if r.s.poolWaits() != r.poolWaits {
+		return &violation{kind: "fatal", err: &eagerStartError{what: "waited for a connection of a pool"}}
+	}
+	return nil
 }
 
 func (r *run) advanceClock() bool {
@@ -2014,6 +2072,7 @@ func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
 	}
 	s.run = r
 	s.live.Store(r)
+	r.poolWaits = s.poolWaits()
 	for _, db := range s.dbs {
 		db.reset()
 	}

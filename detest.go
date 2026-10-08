@@ -168,7 +168,12 @@ func MaxPreemptions(n int) Option {
 // its first yield point outside detest, such as waiting for the connection of
 // a database/sql pool another process holds or for goroutines of its own,
 // which detest cannot tell apart, and one that makes a call into detest that
-// returns without yielding, such as DB.Peek or Mutex.Unlock. Explore then starts the
+// returns without yielding, such as DB.Peek or Mutex.Unlock. A database/sql
+// connection is taken from the pool before the first yield point as well,
+// and it keeps its session settings and LAST_INSERT_ID from one process to
+// the next, so a run that sets a session setting on a connection, reads
+// LAST_INSERT_ID() or waits for a connection of a capped pool starts the
+// exploration over too. Explore then starts the
 // exploration over without EagerStart, calling the declaration function once
 // more per worker, and says so in its report, and the
 // schedules it prints replay without it. The clock needs no such check, since
@@ -184,9 +189,18 @@ func withoutEagerStart(why string) Option {
 
 // eagerStartError is a start under EagerStart that did something another
 // process could see before its first yield point.
-type eagerStartError struct{ proc, what string }
+type eagerStartError struct {
+	proc, what string
+	after      bool // found after the start, not within it
+}
 
 func (e *eagerStartError) Error() string {
+	if e.proc == "" {
+		return "a process " + e.what + ", which depends on where the processes started"
+	}
+	if e.after {
+		return e.proc + " " + e.what + ", which depends on where the processes started"
+	}
 	return e.proc + " " + e.what + " before its first yield point, so what happens depends on where it starts"
 }
 
