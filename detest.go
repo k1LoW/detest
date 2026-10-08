@@ -538,8 +538,8 @@ func (r *result) outcome() string {
 		what = r.Err.Error()
 	}
 	choices := 0
-	if r.Schedule != "" {
-		choices = len(strings.Split(r.Schedule, ","))
+	if picks := strings.TrimPrefix(r.Schedule, lazyPrefix); picks != "" {
+		choices = len(strings.Split(picks, ","))
 	}
 	seed := ""
 	if r.strategy.random && !r.Replay { // a replay draws nothing from the seed
@@ -578,6 +578,9 @@ func (s *Sim) check() *result {
 		}
 		var prefix []choice
 		for f := range strings.SplitSeq(sched, ",") {
+			if sched == "" {
+				break // "lazy:" alone, a run that made no choice
+			}
 			v, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil {
 				s.t.Fatalf("detest: bad schedule %q: %v", sched, err)

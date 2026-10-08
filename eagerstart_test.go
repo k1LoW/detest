@@ -213,3 +213,27 @@ func TestEagerStartTellsASequenceNamedUUIDFromUUIDs(t *testing.T) {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
+
+// A run that made no choice prints "lazy:" alone once EagerStart was
+// dropped, which counts no choice and replays.
+func TestEagerStartDroppedOnARunWithoutChoices(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("alice", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ('alice')`)
+			return err
+		})
+		s.AtQuiescence(func(*State) error { return errors.New("always broken") })
+	}
+	res, _ := explore(t, model, nil)
+	if !res.Violated || res.Schedule != lazyPrefix || !strings.Contains(res.report(), "(0 choices)") {
+		t.Fatalf("got %s", res.report())
+	}
+	replayed, _ := explore(t, model, []Option{Replay(res.Schedule)})
+	if replayed.Fatal != nil || !replayed.Violated {
+		t.Fatalf("replaying %q got %v, %s", res.Schedule, replayed.Fatal, replayed.report())
+	}
+}
