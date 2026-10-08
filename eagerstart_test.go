@@ -675,3 +675,20 @@ func TestEagerStartExploresADrawAfterAnotherProcess(t *testing.T) {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
+
+// WaitUntil waits for an instant of the clock, which does not move while a
+// start is left, so a process that waits first keeps eager starts.
+func TestEagerStartKeptOnAWaitForAnInstant(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		lastItemModel(true)(t, s)
+		s.Manual("sleeper", 1, func(p *Proc) error {
+			p.WaitUntil(10)
+			return nil
+		})
+	}
+	with, _ := explore(t, model, nil)
+	without, _ := explore(t, model, []Option{EagerStart(false)})
+	if with.Fatal != nil || with.lazy != "" || with.Runs >= without.Runs {
+		t.Fatalf("with %s\nwithout %s", with.report(), without.report())
+	}
+}

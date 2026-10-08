@@ -890,7 +890,10 @@ func (r *run) startEager() (bool, *violation) {
 		// the connection of a database/sql pool another process holds, it
 		// goes on once that process lets go, which depends on where it
 		// started.
-		if q.state != stateReady && q.state != stateDone {
+		// WaitUntil waits for an instant of the clock, which does not move
+		// while a start is left, so where the process started does not
+		// change when it wakes.
+		if q.state != stateReady && q.state != stateDone && q.state != stateBlockedTime {
 			return true, &violation{kind: "fatal", err: &eagerStartError{proc: q.name, what: "stopped short of its first yield point"}}
 		}
 	}
@@ -1550,8 +1553,6 @@ func (p *Proc) Choose(label string, n int) int {
 	return p.r.choose(label, n)
 }
 
-// Spawn starts another process instance from this one, such as a scheduler
-// starting a runner.
 // addType declares a process type. A process is told apart from the others
 // by its name, in Proc.Name and in traces, and processes are numbered among
 // the ones of their name, so two types of one name would share the numbers
@@ -1565,6 +1566,8 @@ func (s *Sim) addType(pt *procType) {
 	s.types = append(s.types, pt)
 }
 
+// Spawn starts another process instance from this one, such as a scheduler
+// starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 	// Counted as a call, since the spawn takes the next number of the name,
 	// which a spawn of another process may take first.
