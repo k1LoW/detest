@@ -1452,7 +1452,8 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		return vals, nil
 	case *sqlir.Collate:
-		return x.evalAggRaw(v.X, g)
+		val, err := x.evalAggRaw(v.X, g)
+		return paramText(v.X, val), err
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {

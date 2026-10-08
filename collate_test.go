@@ -342,6 +342,9 @@ func TestBytesAsText(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE lit (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `INSERT INTO lit VALUES (1, 'a'), (2, 'B')`)
 	mustExec(t, db, `CREATE TABLE copied AS SELECT id, payload FROM lit`)
+	mustExec(t, db, `CREATE DOMAIN bytes AS bytea`)
+	mustExec(t, db, `CREATE TABLE dom (id int PRIMARY KEY, payload bytes)`)
+	mustExec(t, db, `INSERT INTO dom VALUES (1, 'a'), (2, 'B')`)
 	for _, tc := range []struct {
 		q    string
 		args []any
@@ -357,6 +360,9 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT 'B'::bytea < 'a'::bytea`, nil, []string{"true"}},
 		{`SELECT id FROM lit ORDER BY payload`, nil, []string{"2", "1"}},
 		{`SELECT id FROM copied ORDER BY payload`, nil, []string{"2", "1"}},
+		{`SELECT id FROM dom ORDER BY payload`, nil, []string{"2", "1"}},
+		{`SELECT id FROM t WHERE name < $1 COLLATE "default"`, []any{[]byte("B")}, []string{"1"}},
+		{`SELECT min(name COLLATE "default") < $1 COLLATE "default" FROM t`, []any{[]byte("B")}, []string{"true"}},
 	} {
 		if got := rowsOf(t, db, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)

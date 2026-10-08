@@ -28,7 +28,7 @@ func (x *sqlExec) noteCollation(r *sqlir.ColumnRef, sc *colScope) {
 	if x.colls == nil {
 		x.colls = map[*sqlir.ColumnRef]colNote{}
 	}
-	x.colls[r] = colNote{name: name, known: known, binary: sc.columnType(r) == "bytea"}
+	x.colls[r] = colNote{name: name, known: known, binary: x.tx.db.isBinaryType(sc.columnType(r))}
 }
 
 // derivedCollation stands for the collation of a CREATE TABLE AS column
@@ -61,7 +61,7 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, []bo
 		return names, binary, nil
 	}
 	for i, t := range sel.Targets {
-		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] && typ != "bytea" {
+		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] && !db.isBinaryType(typ) {
 			continue // a number or a boolean has no collation to keep
 		}
 		u, err := x.collationOf(t.Expr)
@@ -91,6 +91,12 @@ func (db *DB) domainCollation(typ string) string {
 		return domainCollation
 	}
 	return ""
+}
+
+// isBinaryType reports whether typ is bytea or a domain over it, which
+// orders byte by byte whatever the collation.
+func (db *DB) isBinaryType(typ string) bool {
+	return typ == "bytea" || db.binaryDomains[typ]
 }
 
 // typeCollation is the collation a built-in type declares instead of the
@@ -195,7 +201,7 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			// A cast to a domain takes the domain's collation.
 			return collationUse{name: c}, nil
 		}
-		if e.Type == "bytea" {
+		if x.tx.db.isBinaryType(e.Type) {
 			return collationUse{binary: true}, nil
 		}
 		if !collatableType(e.Type) {

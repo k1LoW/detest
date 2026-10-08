@@ -104,7 +104,10 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 	case *sqlir.Unconverted:
 		return nil, errUnknownExpr{"an expression detest could not convert"}
 	case *sqlir.Collate:
-		return x.eval(v.X, en)
+		// A parameter under COLLATE is text, as a []byte database/sql
+		// passes it as is under ||.
+		val, err := x.eval(v.X, en)
+		return paramText(v.X, val), err
 	case *sqlir.Cast:
 		val, err := x.eval(v.X, en)
 		if err != nil {

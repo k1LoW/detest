@@ -155,6 +155,9 @@ type DB struct {
 	// or are based on one that does. detest does not follow a domain's
 	// collation, so text of such a domain is not ordered (domainCollation).
 	collatedDomains map[string]bool
+	// binaryDomains are the names of the domains over bytea, which order
+	// byte by byte as bytea does.
+	binaryDomains map[string]bool
 	// declaredCache is declaresCollations, dropped by every schema change.
 	declaredCache *bool
 	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
@@ -1181,9 +1184,18 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		if db.collatedDomains[ch.Columns[0].Name] {
 			db.collatedDomains[ch.RenameTo] = true
 		}
+		if db.binaryDomains[ch.Columns[0].Name] {
+			db.binaryDomains[ch.RenameTo] = true
+		}
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
+		if db.isBinaryType(col.Type) {
+			if db.binaryDomains == nil {
+				db.binaryDomains = map[string]bool{}
+			}
+			db.binaryDomains[col.Name] = true
+		}
 		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}
