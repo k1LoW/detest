@@ -393,6 +393,8 @@ func TestBytesAsText(t *testing.T) {
 	// when it is refreshed.
 	mustExec(t, db, `CREATE TABLE keptb (id int PRIMARY KEY, payload bytea CHECK (greatest(payload, '\x42') = '\x42'::bytea))`)
 	mustExec(t, db, `INSERT INTO keptb VALUES (1, '\x41')`)
+	mustExec(t, db, `CREATE TABLE keptc (id int PRIMARY KEY, payload bytea CHECK (CASE WHEN id < 0 THEN payload ELSE '\x42' END = '\x42'::bytea))`)
+	mustExec(t, db, `INSERT INTO keptc VALUES (1, '\x41')`)
 	mustExec(t, db, `CREATE MATERIALIZED VIEW mv AS SELECT id FROM keptb WHERE greatest(payload, '\x42') = '\x42'::bytea`)
 	mustExec(t, db, `REFRESH MATERIALIZED VIEW mv`)
 	if got := rowsOf(t, db, `SELECT count(*) FROM mv`); !reflect.DeepEqual(got, []string{"1"}) {
@@ -531,6 +533,11 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT id FROM lit ORDER BY coalesce(payload, '\x00')`, nil, []string{"2", "1"}},
 		{`SELECT id FROM lit ORDER BY nullif(payload, '\x00')`, nil, []string{"2", "1"}},
 		{`SELECT id FROM lit ORDER BY greatest(payload, '\x00')`, nil, []string{"2", "1"}},
+		// A []byte parameter among text branches is text, which orders by
+		// the collation.
+		{`SELECT greatest(name, $1) FROM t WHERE id = 2`, []any{[]byte("a")}, []string{"B"}},
+		{`SELECT id FROM t ORDER BY CASE WHEN id = 1 THEN name ELSE $1 END`, []any{[]byte("B")}, []string{"1", "2"}},
+		{`SELECT count(*) FROM (SELECT name FROM t UNION SELECT $1) s`, []any{[]byte("a")}, []string{"2"}},
 		{`SELECT id FROM t WHERE name < $1 COLLATE "default"`, []any{[]byte("B")}, []string{"1"}},
 		{`SELECT min(name COLLATE "default") < $1 COLLATE "default" FROM t`, []any{[]byte("B")}, []string{"true"}},
 	} {

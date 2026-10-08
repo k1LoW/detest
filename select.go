@@ -548,18 +548,28 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		rrows[i] = m
 	}
 	// A column the queries resolve to bytea reads the text of a literal or
-	// a string parameter under it as bytea input, as Postgres does.
-	for j, bytea := range x.byteaSetOps[sel] {
-		if !bytea || j >= len(lcols) {
+	// a string parameter under it as bytea input, and one they resolve to
+	// text reads bytes a driver sent as the text they hold, as Postgres
+	// types them.
+	for j, kind := range x.setOpColumns[sel] {
+		if kind == "" || j >= len(lcols) {
 			continue
 		}
 		for _, r := range slices.Concat(lrows, rrows) {
-			if s, ok := derefValue(r[lcols[j]]).(string); ok {
-				b, berr := parseBytea(s)
+			switch v := derefValue(r[lcols[j]]).(type) {
+			case string:
+				if kind != "bytea" {
+					continue
+				}
+				b, berr := parseBytea(v)
 				if berr != nil {
 					return nil, nil, x.tx.db.kind.Error(berr.kind, berr.msg, "", "", "")
 				}
 				r[lcols[j]] = b
+			case []byte:
+				if kind == "text" {
+					r[lcols[j]] = string(v)
+				}
 			}
 		}
 	}

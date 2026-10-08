@@ -89,16 +89,13 @@ type sqlExec struct {
 	// GREATEST and LEAST resolve a timestamp and a timestamptz to, and the
 	// source of date_trunc.
 	exprTypes map[sqlir.Expr]string
-	// byteaCalls are the COALESCE, GREATEST, LEAST and NULLIF calls whose
-	// arguments the column check resolved to bytea, which a literal or a
-	// string parameter among them is bytea input of.
-	byteaCalls map[*sqlir.FuncCall]bool
-	// byteaCases are the CASE expressions whose branches, and byteaSetOps
-	// the positions of the set operations whose columns, the column check
-	// resolved to bytea, which a literal or a string parameter there is
-	// bytea input of.
-	byteaCases  map[*sqlir.CaseExpr]bool
-	byteaSetOps map[*sqlir.SelectStmt][]bool
+	// branchTypes are the COALESCE, GREATEST, LEAST, NULLIF and CASE
+	// expressions, and setOpColumns the columns of the set operations, the
+	// column check resolved to bytea or to text (branchKind), which a
+	// literal or a string parameter among them is bytea input of, or a
+	// []byte parameter the text of.
+	branchTypes  map[sqlir.Expr]string
+	setOpColumns map[*sqlir.SelectStmt][]string
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
 	// statement has a COLLATE clause.
@@ -1445,7 +1442,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.timeArgs(v, args); err != nil {
 			return nil, err
 		}
-		if err := x.byteaArgs(v, args); err != nil {
+		if err := x.branchArgs(v, args); err != nil {
 			return nil, err
 		}
 		if v.Name == "round" && len(args) == 1 {

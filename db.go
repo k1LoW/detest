@@ -164,16 +164,16 @@ type DB struct {
 	// drop or a rename of one of them leaves the others.
 	domainSchemas map[string][]string
 	// declaredCache is declaresCollations, keptCache keptCollations and
-	// keptByteaCache keptByteaCalls, dropped by every schema change.
-	declaredCache  *bool
-	keptCache      map[*sqlir.ColumnRef]string
-	keptByteaCache map[*sqlir.FuncCall]bool
-	matviews       map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views          map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs        map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs           map[string]int64                    // sequence values of the run, for nextval
-	uuids          int64                               // gen_random_uuid values handed out in the run
-	ignored        map[string]bool                     // tables Ignore took out of the simulation
+	// keptBranchCache keptBranchTypes, dropped by every schema change.
+	declaredCache   *bool
+	keptCache       map[*sqlir.ColumnRef]string
+	keptBranchCache map[sqlir.Expr]string
+	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views           map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs            map[string]int64                    // sequence values of the run, for nextval
+	uuids           int64                               // gen_random_uuid values handed out in the run
+	ignored         map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.

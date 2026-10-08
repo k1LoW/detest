@@ -556,14 +556,14 @@ func (db *DB) keptCollations() map[*sqlir.ColumnRef]string {
 	return m
 }
 
-// keptByteaCalls are the COALESCE, GREATEST, LEAST and NULLIF calls of the
-// expressions tables keep whose arguments resolve to bytea, as byteaCalls
-// are for a statement's.
-func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
-	if db.keptByteaCache != nil {
-		return db.keptByteaCache
+// keptBranchTypes are branchTypes for the COALESCE, GREATEST, LEAST,
+// NULLIF and CASE expressions of the expressions tables keep, which no
+// column check sees.
+func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
+	if db.keptBranchCache != nil {
+		return db.keptBranchCache
 	}
-	m := map[*sqlir.FuncCall]bool{}
+	m := map[sqlir.Expr]string{}
 	for _, def := range db.defs {
 		add := func(e sqlir.Expr, alias map[string]string) {
 			column := func(r *sqlir.ColumnRef) string {
@@ -576,9 +576,14 @@ func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
 			for _, f := range sqlir.FuncCalls(e) {
 				switch f.Name {
 				case "coalesce", "greatest", "least", "nullif":
-					if db.baseType(commonType(f.Args, column, nil)) == "bytea" {
-						m[f] = true
+					if k := db.branchKind(commonType(f.Args, column, nil)); k != "" {
+						m[f] = k
 					}
+				}
+			}
+			for _, c := range sqlir.CaseExprs(e) {
+				if k := db.branchKind(expressionType(c, column)); k != "" {
+					m[c] = k
 				}
 			}
 		}
@@ -598,13 +603,48 @@ func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
 			add(u.Where, nil)
 		}
 	}
-	db.keptByteaCache = m
+	db.keptBranchCache = m
 	return m
+}
+
+// branchKind is "bytea" for a type whose base is bytea, "text" for a text
+// type, and "" for any other: what the branches of an expression of the
+// type are converted by.
+func (db *DB) branchKind(typ string) string {
+	switch base := db.baseType(typ); {
+	case base == "bytea":
+		return "bytea"
+	case collatableType(base):
+		return "text"
+	}
+	return ""
+}
+
+// noteBranchType records the kind of type the column check resolved the
+// branches of e to.
+func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string) {
+	k := x.tx.db.branchKind(typ)
+	if k == "" || x.tx.db.kind.InnoDB() {
+		return
+	}
+	if x.branchTypes == nil {
+		x.branchTypes = map[sqlir.Expr]string{}
+	}
+	x.branchTypes[e] = k
+}
+
+// branchType is the kind of type the branches of e resolve to, in the
+// statement or in an expression a table keeps.
+func (x *sqlExec) branchType(e sqlir.Expr) string {
+	if k, ok := x.branchTypes[e]; ok || x.tx.db.kind.InnoDB() {
+		return k
+	}
+	return x.tx.db.keptBranchTypes()[e]
 }
 
 // dropSchemaCaches drops what is kept until the schema changes.
 func (db *DB) dropSchemaCaches() {
-	db.declaredCache, db.keptCache, db.keptByteaCache = nil, nil, nil
+	db.declaredCache, db.keptCache, db.keptBranchCache = nil, nil, nil
 }
 
 // declared is declaresCollations, kept until the schema changes, as the
@@ -740,12 +780,6 @@ func textBytes(v any) any {
 	return v
 }
 
-// byteaCall reports whether f is a COALESCE, GREATEST, LEAST or NULLIF
-// whose arguments resolve to bytea, which returns one of them as bytea.
-func (x *sqlExec) byteaCall(f *sqlir.FuncCall) bool {
-	return x.byteaCalls[f] || !x.tx.db.kind.InnoDB() && x.tx.db.keptByteaCalls()[f]
-}
-
 // byteaCall is the bytea one of args f returns, kept as bytes where
 // callFunc would take them for text a driver sent.
 func byteaCall(name string, args []any) any {
@@ -782,7 +816,7 @@ func byteaCall(name string, args []any) any {
 // callOrdered is callFunc, with greatest and least of text ordered by the
 // collation of their arguments, and lower and upper folding by it.
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
-	if x.byteaCall(v) {
+	if x.branchType(v) == "bytea" {
 		return byteaCall(v.Name, args), nil
 	}
 	if (v.Name == "lower" || v.Name == "upper") && len(args) == 1 {

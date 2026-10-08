@@ -432,7 +432,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
 					return nil, err
 				}
-				if out, err = x.byteaBranch(v, w.Then, out); err != nil {
+				if out, err = x.caseBranch(v, w.Then, out); err != nil {
 					return nil, err
 				}
 				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
@@ -446,7 +446,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
 				return nil, err
 			}
-			if out, err = x.byteaBranch(v, v.Else, out); err != nil {
+			if out, err = x.caseBranch(v, v.Else, out); err != nil {
 				return nil, err
 			}
 			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
@@ -484,7 +484,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.timeArgs(v, args); err != nil {
 			return nil, err
 		}
-		if err := x.byteaArgs(v, args); err != nil {
+		if err := x.branchArgs(v, args); err != nil {
 			return nil, err
 		}
 		if v.Name == "round" && len(args) == 1 {
@@ -805,16 +805,13 @@ func isNumber(v any) bool {
 	return ok
 }
 
-// byteaArgs reads the literals and string parameters among the arguments
-// of a COALESCE, GREATEST, LEAST or NULLIF that resolves to bytea, in the statement
-// or in an expression a table keeps, as bytea input, as Postgres does
-// before it compares or returns them.
-func (x *sqlExec) byteaArgs(f *sqlir.FuncCall, args []any) error {
-	if !x.byteaCall(f) {
-		return nil
-	}
+// branchArgs converts the arguments of a COALESCE, GREATEST, LEAST or
+// NULLIF to the type they resolve to, in the statement or in an expression
+// a table keeps, as Postgres does before it compares or returns them.
+func (x *sqlExec) branchArgs(f *sqlir.FuncCall, args []any) error {
+	kind := x.branchType(f)
 	for i, a := range f.Args {
-		v, err := x.untyped(a, args[i], []byte{})
+		v, err := x.asBranchType(kind, a, args[i])
 		if err != nil {
 			return err
 		}
@@ -823,13 +820,23 @@ func (x *sqlExec) byteaArgs(f *sqlir.FuncCall, args []any) error {
 	return nil
 }
 
-// byteaBranch reads the literal or string parameter a CASE resolved to
-// bytea takes as bytea input, as Postgres does.
-func (x *sqlExec) byteaBranch(c *sqlir.CaseExpr, branch sqlir.Expr, v any) (any, error) {
-	if !x.byteaCases[c] {
-		return v, nil
+// caseBranch converts the branch a CASE takes to the type its branches
+// resolve to.
+func (x *sqlExec) caseBranch(c *sqlir.CaseExpr, branch sqlir.Expr, v any) (any, error) {
+	return x.asBranchType(x.branchType(c), branch, v)
+}
+
+// asBranchType is v of e under branches of the kind branchKind gives: a
+// literal or a string parameter read as bytea input under bytea, and a
+// []byte parameter read as the text it holds under text.
+func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
+	switch kind {
+	case "bytea":
+		return x.untyped(e, v, []byte{})
+	case "text":
+		return paramText(e, v), nil
 	}
-	return x.untyped(branch, v, []byte{})
+	return v, nil
 }
 
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
