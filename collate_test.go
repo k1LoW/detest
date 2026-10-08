@@ -341,6 +341,18 @@ func TestBytesAsText(t *testing.T) {
 	}
 }
 
+// A collation ends at a result that has none: length's integer drops the C
+// of its argument, so its text orders by the database's collation.
+func TestCollationEndsAtNonText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'b'), (2, 'B'), (3, 'a')`)
+	if got := rowsOf(t, db, `SELECT id FROM t ORDER BY length(name COLLATE "C")::text || name`); !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
+		t.Errorf("text made from length of a C operand: got %v, want the database's order", got)
+	}
+}
+
 // A collation declared with a nil comparator is not declared.
 func TestNilNamedCollation(t *testing.T) {
 	s := newSim(t)

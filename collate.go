@@ -197,6 +197,11 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 		}
 		return x.combineAll(branches)
 	}
+	// A result of a type that has no collation, such as length's integer,
+	// ends what its arguments carry, whatever wraps it after.
+	if typ := expressionType(e, nil); typ != "" && !collatableType(typ) && !x.tx.db.collatedDomains[typ] {
+		return collationUse{}, nil
+	}
 	var uses []collationUse
 	var err error
 	v := reflect.ValueOf(e)
