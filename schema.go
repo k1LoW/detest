@@ -756,8 +756,8 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if t == ambiguousDomain {
 			return x.unsupported(fmt.Sprintf("a value written to column %q, of %s", col, ambiguousDomain))
 		}
-		if _, text := v.(string); text && t == untypedCTAS {
-			return x.unsupported(fmt.Sprintf("text written to column %q, %s", col, untypedCTAS))
+		if t == untypedCTAS {
+			return x.unsupported(fmt.Sprintf("a value written to column %q, %s", col, untypedCTAS))
 		}
 		if t == "bytea" && !x.tx.db.kind.InnoDB() {
 			// A bytea is held as its bytes, so that a literal and a []byte

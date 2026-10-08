@@ -412,10 +412,19 @@ func TestBytesAsText(t *testing.T) {
 		}
 	}
 	mustExec(t, db, `CREATE TABLE untold AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload FROM lit) s WHERE false`)
-	if _, err := db.Exec(`INSERT INTO untold VALUES ('\x41')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("text written to a CREATE TABLE AS column of untold type: got %v, want unsupported", err)
+	for _, arg := range []any{`\x41`, []byte("A"), 1} {
+		if _, err := db.Exec(`INSERT INTO untold VALUES ($1)`, arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%#v written to a CREATE TABLE AS column of untold type: got %v, want unsupported", arg, err)
+		}
 	}
-	mustExec(t, db, `INSERT INTO untold VALUES ($1), (NULL)`, []byte("A"))
+	mustExec(t, db, `INSERT INTO untold VALUES (NULL)`)
+	// A cast to a domain over bytea types the column as bytea.
+	mustExec(t, db, `CREATE DOMAIN blob3 AS bytea`)
+	mustExec(t, db, `CREATE TABLE viadomain AS SELECT payload::blob3 AS payload FROM lit WHERE false`)
+	mustExec(t, db, `INSERT INTO viadomain VALUES ('\x41')`)
+	if got := rowsOf(t, db, `SELECT count(*) FROM viadomain WHERE payload = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("bytea literal written to a CREATE TABLE AS column of a bytea domain: got %v", got)
+	}
 	if got := rowsOf(t, db, `SELECT count(*) FROM untold WHERE payload IS NULL`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a CREATE TABLE AS column of untold type read: got %v", got)
 	}

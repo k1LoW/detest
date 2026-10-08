@@ -612,8 +612,11 @@ func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 		typ = x.ctasNamed[col]
 	}
 	if typ != "" {
-		if typ == "bytea" {
+		switch x.tx.db.baseType(typ) {
+		case "bytea":
 			return "bytea"
+		case ambiguousDomain:
+			return ambiguousDomain
 		}
 		return ""
 	}
@@ -636,8 +639,9 @@ func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 }
 
 // untypedCTAS is the type of a CREATE TABLE AS column whose type neither the
-// query nor its values tell, which a string written to it refuses: Postgres
-// reads it as bytea input when the column is bytea.
+// query nor its values tell, which a value written to it refuses: Postgres
+// converts it to the column's type, which may be bytea or text, and either
+// decides how it compares and orders.
 const untypedCTAS = "a CREATE TABLE AS column of a type detest could not tell"
 
 // execRefresh replaces a materialized view's rows with its query's.
