@@ -129,8 +129,17 @@ const constrainedDomain = "a domain with a constraint, a default or a type modif
 
 // baseType is typ, or the base type of the domain typ names.
 func (db *DB) baseType(typ string) string {
-	if base, ok := db.domainBases[typ]; ok {
+	base, live := db.domainBases[typ]
+	alias, renamed := db.domainAliases[typ]
+	switch {
+	case live && renamed && base != alias:
+		// A stored cast may name the renamed domain or the new one of the
+		// name, which detest cannot tell apart.
+		return ambiguousDomain
+	case live:
 		return base
+	case renamed:
+		return alias
 	}
 	return typ
 }

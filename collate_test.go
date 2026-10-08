@@ -500,6 +500,13 @@ func TestBytesAsText(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE renamedcheck (id int PRIMARY KEY, v bytea CHECK (v = '\x41'::dren))`)
 	mustExec(t, db, `ALTER DOMAIN dren RENAME TO dren2`)
 	mustExec(t, db, `INSERT INTO renamedcheck VALUES (1, '\x41')`)
+	// The old name is no live domain: dropping it is a no-op, which leaves
+	// the stored cast as it was, and a new domain of the name of the same
+	// base type is no other.
+	mustExec(t, db, `DROP DOMAIN IF EXISTS dren`)
+	mustExec(t, db, `INSERT INTO renamedcheck VALUES (2, '\x41')`)
+	mustExec(t, db, `CREATE DOMAIN dren AS bytea`)
+	mustExec(t, db, `INSERT INTO renamedcheck VALUES (3, '\x41')`)
 	// Two schemas' domains of one name and base type stay typed until
 	// both are dropped.
 	mustExec(t, db, `CREATE DOMAIN a.blob2 AS bytea`)
