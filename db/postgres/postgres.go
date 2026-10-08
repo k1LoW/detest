@@ -549,8 +549,9 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		}
 		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
 	case *pg.Node_CreateDomainStmt:
-		// Only the collation is kept: a column of the domain orders by it.
-		// detest checks neither the domain's base type nor its constraints.
+		// The base type is kept, which a column of the domain and a cast
+		// to it take, and the collation, which orders it. detest does not
+		// check the domain's constraints.
 		names := s.CreateDomainStmt.Domainname
 		if len(names) == 0 {
 			return nil, true, nil

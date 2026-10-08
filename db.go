@@ -163,16 +163,17 @@ type DB struct {
 	// created as, one for each schema with a domain of the name, so that a
 	// drop or a rename of one of them leaves the others.
 	domainSchemas map[string][]string
-	// declaredCache is declaresCollations, and keptCache keptCollations,
-	// dropped by every schema change.
-	declaredCache *bool
-	keptCache     map[*sqlir.ColumnRef]string
-	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views         map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs       map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs          map[string]int64                    // sequence values of the run, for nextval
-	uuids         int64                               // gen_random_uuid values handed out in the run
-	ignored       map[string]bool                     // tables Ignore took out of the simulation
+	// declaredCache is declaresCollations, keptCache keptCollations and
+	// keptByteaCache keptByteaCalls, dropped by every schema change.
+	declaredCache  *bool
+	keptCache      map[*sqlir.ColumnRef]string
+	keptByteaCache map[*sqlir.FuncCall]bool
+	matviews       map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views          map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs        map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs           map[string]int64                    // sequence values of the run, for nextval
+	uuids          int64                               // gen_random_uuid values handed out in the run
+	ignored        map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -1165,8 +1166,8 @@ func (db *DB) newUUID() string {
 // in Postgres and sees the transaction's own writes, so renames and drops
 // carry tx's pending rows along.
 func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
-	db.declaredCache, db.keptCache = nil, nil
-	defer func() { db.declaredCache, db.keptCache = nil, nil }()
+	db.dropSchemaCaches()
+	defer db.dropSchemaCaches()
 	if db.defs == nil {
 		db.defs = map[string]*tableDef{}
 		db.matviews = map[string]*sqlir.CreateTableAsStmt{}

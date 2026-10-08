@@ -389,6 +389,15 @@ func TestBytesAsText(t *testing.T) {
 	}
 	// A []byte parameter is read when the statement runs, as a server reads
 	// it, so the caller reusing the buffer after changes nothing written.
+	// So do the expressions a table keeps, and a materialized view's query
+	// when it is refreshed.
+	mustExec(t, db, `CREATE TABLE keptb (id int PRIMARY KEY, payload bytea CHECK (greatest(payload, '\x42') = '\x42'::bytea))`)
+	mustExec(t, db, `INSERT INTO keptb VALUES (1, '\x41')`)
+	mustExec(t, db, `CREATE MATERIALIZED VIEW mv AS SELECT id FROM keptb WHERE greatest(payload, '\x42') = '\x42'::bytea`)
+	mustExec(t, db, `REFRESH MATERIALIZED VIEW mv`)
+	if got := rowsOf(t, db, `SELECT count(*) FROM mv`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a refreshed materialized view of greatest over bytea: got %v", got)
+	}
 	buf := []byte("q")
 	mustExec(t, db, `CREATE TABLE reused (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `INSERT INTO reused VALUES (1, $1)`, buf)

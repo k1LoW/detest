@@ -534,6 +534,57 @@ func (db *DB) keptCollations() map[*sqlir.ColumnRef]string {
 	return m
 }
 
+// keptByteaCalls are the COALESCE, GREATEST and LEAST calls of the
+// expressions tables keep whose arguments resolve to bytea, as byteaCalls
+// are for a statement's.
+func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
+	if db.keptByteaCache != nil {
+		return db.keptByteaCache
+	}
+	m := map[*sqlir.FuncCall]bool{}
+	for _, def := range db.defs {
+		add := func(e sqlir.Expr, alias map[string]string) {
+			column := func(r *sqlir.ColumnRef) string {
+				name := r.Column
+				if n, ok := alias[name]; ok {
+					name = n
+				}
+				return def.types[name]
+			}
+			for _, f := range sqlir.FuncCalls(e) {
+				switch f.Name {
+				case "coalesce", "greatest", "least":
+					if db.baseType(commonType(f.Args, column, nil)) == "bytea" {
+						m[f] = true
+					}
+				}
+			}
+		}
+		for _, c := range def.checks {
+			add(c.Expr, c.alias)
+		}
+		for _, g := range def.generated {
+			add(g.Expr, g.alias)
+		}
+		for _, d := range def.defaults {
+			add(d, nil)
+		}
+		for _, u := range def.uniques {
+			for _, e := range u.Elems {
+				add(e, nil)
+			}
+			add(u.Where, nil)
+		}
+	}
+	db.keptByteaCache = m
+	return m
+}
+
+// dropSchemaCaches drops what is kept until the schema changes.
+func (db *DB) dropSchemaCaches() {
+	db.declaredCache, db.keptCache, db.keptByteaCache = nil, nil, nil
+}
+
 // declared is declaresCollations, kept until the schema changes, as the
 // explorations run the same statements on one schema again and again.
 func (db *DB) declared() bool {

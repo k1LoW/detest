@@ -598,7 +598,7 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	}
 	// The collations and the materialized view above change the schema
 	// after applySchema dropped the cache.
-	x.tx.db.declaredCache, x.tx.db.keptCache = nil, nil
+	x.tx.db.dropSchemaCaches()
 	return x.fill(table, st, selCols, rows)
 }
 
@@ -666,11 +666,20 @@ func (x *sqlExec) execRefresh(st *sqlir.RefreshStmt) (*sqlResult, error) {
 	if st.NoData {
 		return &sqlResult{}, nil
 	}
+	// Checked as the statement that created it was, so that what the check
+	// notes for the run, such as collations and bytea arguments, is there.
+	if err := x.checkColumns(mv.Select); err != nil {
+		return nil, err
+	}
 	selCols, rows, err := x.evalSelect(mv.Select, nil)
 	if err != nil {
 		return nil, err
 	}
-	return x.fill(table, mv, selCols, rows)
+	if _, err := x.fill(table, mv, selCols, rows); err != nil {
+		return nil, err
+	}
+	// Postgres's command tag for REFRESH carries no row count.
+	return &sqlResult{}, nil
 }
 
 // fill inserts the rows of a CREATE TABLE AS or materialized view query.
@@ -697,6 +706,9 @@ func (x *sqlExec) fill(table string, st *sqlir.CreateTableAsStmt, selCols []stri
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
+		// A REFRESH deleted the rows before, whose keys the new rows may
+		// take again.
+		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		out.affected++
 	}

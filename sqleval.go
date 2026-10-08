@@ -799,10 +799,11 @@ func isNumber(v any) bool {
 }
 
 // byteaArgs reads the literals and string parameters among the arguments
-// of a COALESCE, GREATEST or LEAST that resolves to bytea as bytea input, as
-// Postgres does before it compares or returns them.
+// of a COALESCE, GREATEST or LEAST that resolves to bytea, in the statement
+// or in an expression a table keeps, as bytea input, as Postgres does
+// before it compares or returns them.
 func (x *sqlExec) byteaArgs(f *sqlir.FuncCall, args []any) error {
-	if !x.byteaCalls[f] {
+	if !x.byteaCalls[f] && (x.tx.db.kind.InnoDB() || !x.tx.db.keptByteaCalls()[f]) {
 		return nil
 	}
 	for i, a := range f.Args {

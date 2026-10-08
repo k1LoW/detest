@@ -251,6 +251,22 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "REFRESH MATERIALIZED VIEW",
+		Schema: []string{
+			`CREATE TABLE mt (id int PRIMARY KEY, payload bytea)`,
+			`CREATE MATERIALIZED VIEW mvt AS SELECT id FROM mt WHERE greatest(payload, '\x42') = '\x42'::bytea`,
+		},
+		Seed:  []string{`INSERT INTO mt VALUES (1, '\x41'), (2, '\x43')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(*) FROM mvt`),
+			difftest.S(0, `REFRESH MATERIALIZED VIEW mvt`),
+			difftest.Q(0, `SELECT id FROM mvt ORDER BY id`),
+			difftest.S(0, `REFRESH MATERIALIZED VIEW mvt`),
+			difftest.Q(0, `SELECT id FROM mvt ORDER BY id`),
+		},
+	},
+	{
 		Name: "IN and NOT IN over a subquery with NULLs",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,
