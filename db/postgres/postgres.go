@@ -75,10 +75,11 @@ var CUTF8 sqlir.Collation = sqlir.CUTF8{}
 // their provider, datlocprovider: datcollate and datctype for libc, and for
 // ICU and the builtin provider datlocale on Postgres 17 and later and
 // daticulocale on 15 and 16. Before 15 there is libc only. A database of
-// the C locale takes C; one that orders as C but maps case by Unicode, as
-// C.UTF-8 or a libc database of LC_COLLATE C and a UTF-8 LC_CTYPE does,
-// takes CUTF8. Equality does not depend on it, as Postgres tells two
-// strings equal only when their bytes are.
+// the C locale takes C, and one that orders as C and maps case by Unicode,
+// as C.UTF-8 does, CUTF8. A ctype with case rules of its own, such as
+// tr_TR.UTF-8, which maps I to a dotless ı, needs a Collation whose Lower
+// and Upper follow them. Equality does not depend on it, as Postgres tells
+// two strings equal only when their bytes are.
 func Collation(c sqlir.Collation) Option {
 	return func(cf *config) { cf.collation = c }
 }
