@@ -82,11 +82,20 @@ mysql.New(mysql.Errors(mysqlerr.Convert))       // .../mysql/mysqlerr: *mysql.My
 mysql.New(mysql.Isolation(detest.ReadCommitted), mysql.Database("app"), mysql.Collation("utf8mb4_bin"))
 ```
 
-A libc collation, such as glibc's `en_US.utf8`, comes from `github.com/k1LoW/glibctext`, one package per glibc version and locale. It implements `LC_COLLATE` only, so embed the ctype's case mapping.
+A libc collation, such as glibc's `en_US.utf8`, comes from `github.com/k1LoW/glibctext`, with one package per glibc version and locale for the collation (`collate`) and one for the ctype (`ctype`). Take each from the database's `datcollate` and `datctype`.
 
 ```go
-type enUS struct{ detest.UnicodeCase } // en_US.UTF-8 maps case by Unicode
-func (enUS) Compare(a, b string) int { return en_us_utf8.Collation.Compare(a, b) } // github.com/k1LoW/glibctext/collate/glibc2_41/en_us_utf8
+import (
+	collate "github.com/k1LoW/glibctext/collate/glibc2_41/en_us_utf8"
+	ctype "github.com/k1LoW/glibctext/ctype/glibc2_41/en_us_utf8"
+)
+
+type enUS struct{}
+
+func (enUS) Compare(a, b string) int { return collate.Collation.Compare(a, b) }
+func (enUS) Lower(s string) string   { return ctype.Ctype.Lower(s) }
+func (enUS) Upper(s string) string   { return ctype.Ctype.Upper(s) }
+
 postgres.New(postgres.Collation(enUS{}))
 ```
 
