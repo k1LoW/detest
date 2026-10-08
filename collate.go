@@ -88,6 +88,16 @@ func (db *DB) domainCollation(typ string) string {
 	return ""
 }
 
+// qualifyDomain is the qualified name of the domain named bare that table,
+// the name a statement gives it, refers to: as given when a schema
+// qualifies it, and in the first schema of the search path otherwise.
+func (db *DB) qualifyDomain(table, bare string) string {
+	if table != bare && strings.HasSuffix(table, "."+bare) {
+		return table
+	}
+	return db.searchPath()[0] + "." + bare
+}
+
 // ambiguousDomain is the base type of a domain name two schemas declare
 // domains of with different base types, which a write to a column of it
 // refuses.

@@ -371,6 +371,17 @@ func TestBytesAsText(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO amb VALUES (1, 'x')`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a write to a column of a domain two schemas declare: got %v, want unsupported", err)
 	}
+	if _, err := db.Exec(`SELECT '\x41'::a.twice`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a cast to a domain two schemas declare: got %v, want unsupported", err)
+	}
+	// A drop naming another schema's domain of the name leaves this one.
+	mustExec(t, db, `CREATE DOMAIN blob AS bytea`)
+	mustExec(t, db, `DROP DOMAIN IF EXISTS b.blob`)
+	mustExec(t, db, `CREATE TABLE kept (id int PRIMARY KEY, v blob)`)
+	mustExec(t, db, `INSERT INTO kept VALUES (1, '\x41')`)
+	if got := rowsOf(t, db, `SELECT id FROM kept WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a bytea domain after a drop of another schema's: got %v", got)
+	}
 	mustExec(t, db, `CREATE DOMAIN bytes AS bytea`)
 	mustExec(t, db, `CREATE TABLE dom (id int PRIMARY KEY, payload bytes)`)
 	mustExec(t, db, `INSERT INTO dom VALUES (1, 'a'), (2, 'B')`)
