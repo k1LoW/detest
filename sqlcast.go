@@ -77,7 +77,7 @@ func numeric(v float64) any {
 // while detest would read its bytes as text. A parameter's bytes are text
 // the driver sent, which Postgres reads as the target type.
 func (x *sqlExec) byteaCast(c *sqlir.Cast, v any) error {
-	if _, ok := derefValue(v).([]byte); !ok || c.Type == "bytea" {
+	if _, ok := derefValue(v).([]byte); !ok || x.tx.db.baseType(c.Type) == "bytea" {
 		return nil
 	}
 	if _, ok := c.X.(*sqlir.Param); ok {
@@ -177,7 +177,14 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 // castTo is x.cast of v for c, cut to the length of a varchar(n) cast, as
 // an explicit cast cuts longer text.
 func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
-	out, err := x.cast(v, c.Type)
+	// A cast to a domain casts to its base type, and one to a domain whose
+	// constraints, default or type modifier detest does not check is
+	// refused.
+	typ := x.tx.db.baseType(c.Type)
+	if typ == ambiguousDomain || typ == constrainedDomain {
+		return nil, x.unsupported("a cast to " + typ)
+	}
+	out, err := x.cast(v, typ)
 	if err != nil || c.Len == 0 {
 		return out, err
 	}
@@ -345,6 +352,20 @@ func castValue(v any, typ string) (any, error) {
 			return b != 0, nil
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to boolean", v)}
+	case "bytea":
+		// A bytea is held as its bytes, whatever text wrote it.
+		if b, ok := v.([]byte); ok {
+			return b, nil
+		}
+		s, ok := v.(string)
+		if !ok {
+			return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to bytea", v)}
+		}
+		b, berr := parseBytea(s)
+		if berr != nil {
+			return nil, kindError{berr.kind, berr.msg}
+		}
+		return b, nil
 	case "uuid":
 		// Read as a uuid column stores it, so it equals the column's value
 		// however it was written. Postgres has no cast to uuid from a type

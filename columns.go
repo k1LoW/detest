@@ -29,6 +29,10 @@ func (s colSet) has(name string) (found, once bool) {
 type colScope struct {
 	items map[string]colSet
 	types map[string]map[string]string
+	// colls are the collations the columns of the base tables in scope
+	// declare, by alias. A derived item has no entry, as detest does not
+	// carry the collation of its query's columns.
+	colls map[string]map[string]string
 	// outputs are the names the select list gives, which ORDER BY, GROUP BY
 	// and DISTINCT ON may refer to.
 	outputs colSet
@@ -40,6 +44,11 @@ type colScope struct {
 	// same expression a * gives.
 	star  bool
 	plain colSet
+	// outputExprs are the select list's expressions by output name, and
+	// outputList in order unless a * stands in it, which an ORDER BY of the
+	// name or the position orders by the collation of.
+	outputExprs map[string]sqlir.Expr
+	outputList  []sqlir.Expr
 	// hidden is the target of an UPDATE or a DELETE, which its FROM or
 	// USING items may not refer to.
 	hidden string
@@ -65,6 +74,10 @@ type columnChecker struct {
 	// where expressionType does not know one, for a FROM item, a CTE, a
 	// view or a scalar subquery made of it.
 	outTypes map[*sqlir.SelectStmt][]string
+	// outNamed are the types of a query's output columns by name, which a
+	// select list with a * has where outTypes has none; "" for a name two
+	// columns give or of a type expressionType does not know.
+	outNamed map[*sqlir.SelectStmt]map[string]string
 	params   paramUses
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
@@ -91,6 +104,16 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		err = c.update(st)
 	case *sqlir.DeleteStmt:
 		err = c.delete(st)
+	case *sqlir.CreateTableAsStmt:
+		// Checked as Postgres plans the query, and so that the collations
+		// and the types of its columns are known to the table it creates.
+		if _, err = c.query(st.Select, nil); err == nil {
+			first := st.Select
+			for first.SetOp != "" && first.Larg != nil {
+				first = first.Larg
+			}
+			x.ctasTypes, x.ctasNamed = c.setOpTypes(st.Select), c.outNamed[first]
+		}
 	}
 	if err != nil {
 		return err
@@ -376,6 +399,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
+			sc.noteCollations(alias, def)
 		}
 	}
 	return nil
@@ -621,6 +645,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if _, err := c.query(sel.Rarg, outer); err != nil {
 			return nil, err
 		}
+		c.noteSetOpColumns(sel)
 		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
@@ -692,6 +717,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		sc.outputs = outputColumns(sel) // column1, column2, ...
 	}
 	for _, t := range sel.Targets {
+		if !t.Star {
+			sc.outputList = append(sc.outputList, t.Expr)
+		}
 		sc.star = sc.star || t.Star
 		if r, ok := t.Expr.(*sqlir.ColumnRef); ok && !t.Star && targetName(t) == r.Column {
 			sc.plain[r.Column] = true
@@ -700,6 +728,10 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			n := targetName(t)
 			_, seen := sc.outputs[n]
 			sc.outputs[n] = !seen
+			if sc.outputExprs == nil {
+				sc.outputExprs = map[string]sqlir.Expr{}
+			}
+			sc.outputExprs[n] = t.Expr
 		}
 	}
 	for _, e := range sel.GroupBy {
@@ -734,24 +766,153 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 }
 
 // noteOutputTypes records the types of a query's select list items that
-// expressionType knows, by position. A set operation's and a *'s are not
-// recorded, so their columns stay of unresolved type.
+// expressionType knows, by position, and by name. A *'s are recorded by
+// name only, as the order of the columns it gives is not kept, and a set
+// operation's not at all, so their columns stay of unresolved type.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	var types []string
+	named := map[string]string{}
+	seen := map[string]bool{}
+	note := func(name, typ string) {
+		if seen[name] {
+			typ = ""
+		}
+		seen[name] = true
+		named[name] = typ
+	}
+	star := false
 	for _, t := range sel.Targets {
 		if t.Star {
-			return
+			star = true
+			for alias, cols := range sc.items {
+				if t.Table != "" && alias != t.Table {
+					continue
+				}
+				for name, once := range cols {
+					typ := sc.types[alias][name]
+					if !once || typ == "unresolved column type" {
+						typ = ""
+					}
+					note(name, typ)
+				}
+			}
+			continue
 		}
 		typ := expressionType(t.Expr, sc.columnType)
 		if typ == "unresolved column type" {
 			typ = ""
 		}
 		types = append(types, typ)
+		note(targetName(t), typ)
 	}
 	if c.outTypes == nil {
 		c.outTypes = map[*sqlir.SelectStmt][]string{}
+		c.outNamed = map[*sqlir.SelectStmt]map[string]string{}
 	}
-	c.outTypes[sel] = types
+	if !star {
+		c.outTypes[sel] = types
+	}
+	c.outNamed[sel] = named
+}
+
+// noteSetOpColumns records the columns of the set operation sel its
+// queries resolve to bytea or to text, by position and, for the columns of
+// a * in the first query, whose position the check does not know, by name.
+func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
+	db := c.x.tx.db
+	if db.kind.InnoDB() {
+		return
+	}
+	types := c.setOpTypes(sel)
+	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
+	for i, t := range types {
+		cols.byPos[i] = db.branchKind(resolvedType(t, setOpColumnExprs(sel, i)))
+	}
+	first := sel
+	for first.SetOp != "" && first.Larg != nil {
+		first = first.Larg
+	}
+	for name, t := range c.outNamed[first] {
+		if k := db.branchKind(t); k != "" {
+			cols.byName[name] = k
+		}
+	}
+	if !slices.ContainsFunc(cols.byPos, func(k string) bool { return k != "" }) && len(cols.byName) == 0 {
+		return
+	}
+	if c.x.setOpColumns == nil {
+		c.x.setOpColumns = map[*sqlir.SelectStmt]setOpColumns{}
+	}
+	c.x.setOpColumns[sel] = cols
+}
+
+// setOpColumnExprs are the expressions of the i-th column of every query
+// of the set operation sel, nil when one of them is a * or has no i-th.
+func setOpColumnExprs(sel *sqlir.SelectStmt, i int) []sqlir.Expr {
+	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
+		l, r := setOpColumnExprs(sel.Larg, i), setOpColumnExprs(sel.Rarg, i)
+		if l == nil || r == nil {
+			return nil
+		}
+		return append(l, r...)
+	}
+	var out []sqlir.Expr
+	for _, row := range sel.Values {
+		if i >= len(row) {
+			return nil
+		}
+		out = append(out, row[i])
+	}
+	if len(sel.Values) > 0 {
+		return out
+	}
+	if i >= len(sel.Targets) || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		return nil
+	}
+	return []sqlir.Expr{sel.Targets[i].Expr}
+}
+
+// setOpColumns are the kinds of type, by branchKind, the columns of a set
+// operation resolve to, by position and by the name of the first query's
+// column.
+type setOpColumns struct {
+	byPos  []string
+	byName map[string]string
+}
+
+// kind is the kind of type of the j-th column, named name.
+func (s setOpColumns) kind(j int, name string) string {
+	if j < len(s.byPos) && s.byPos[j] != "" {
+		return s.byPos[j]
+	}
+	return s.byName[name]
+}
+
+// setOpTypes are the types of the output columns of sel by position, over
+// the queries of a set operation: bytea where one of them gives bytea, as
+// Postgres resolves the others to it or fails, and the first type one
+// gives otherwise.
+func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
+	if sel.SetOp == "" || sel.Larg == nil || sel.Rarg == nil {
+		return c.outTypes[sel]
+	}
+	l, r := c.setOpTypes(sel.Larg), c.setOpTypes(sel.Rarg)
+	out := slices.Clone(l)
+	if len(out) < len(r) {
+		// The left query's types are unknown by position, as of a * or
+		// VALUES, which leaves the right one's.
+		out = append(out, make([]string, len(r)-len(out))...)
+	}
+	for i, t := range r {
+		switch {
+		case i >= len(out):
+		case out[i] == "" || t == "bytea":
+			if t != "" {
+				out[i] = t
+			}
+		}
+	}
+	return out
 }
 
 // namedTypes are the output types of sel by the names its columns have,
@@ -894,6 +1055,17 @@ func starWidth(sel *sqlir.SelectStmt, sc *colScope) (int, bool) {
 // orderExpr checks an ORDER BY, GROUP BY or DISTINCT ON item, which may name
 // an output column of the select list.
 func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
+	if k, ok := e.(*sqlir.Const); ok {
+		if n, ok := k.Value.(int64); ok {
+			// A position past a * or in a set operation names a column
+			// whose collation detest does not know, noted as nil.
+			var out sqlir.Expr
+			if !sc.star && n >= 1 && int(n) <= len(sc.outputList) {
+				out = sc.outputList[n-1]
+			}
+			c.x.noteOutput(k, out)
+		}
+	}
 	r, ok := e.(*sqlir.ColumnRef)
 	if !ok || r.Table != "" {
 		return c.exprs(e, sc)
@@ -911,6 +1083,7 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 		// fails as ambiguous unless the two are the same expression.
 		return c.x.unsupported(fmt.Sprintf("output name %q, which a * may give too", r.Column))
 	case found:
+		c.x.noteOutput(r, sc.outputExprs[r.Column])
 		return nil
 	}
 	return c.exprs(e, sc)
@@ -1088,6 +1261,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				typ := expressionType(e, sc.columnType)
 				c.timeParams(typ, caseBranches(e)...)
 				c.x.noteType(e, typ)
+				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
@@ -1114,6 +1288,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
+					c.x.noteBranchType(e, resolvedType(typ, e.Args))
 				case "date_trunc":
 					if len(e.Args) == 2 {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
@@ -1123,11 +1298,26 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// arguments of COALESCE do.
 					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
 				}
+			case *sqlir.Collate:
+				// Postgres fails a collation that does not exist when it
+				// parses the statement (42704).
+				if _, ok := c.x.tx.db.kind.NamedCollation(e.Name); !ok && !c.x.tx.db.kind.InnoDB() {
+					err = c.x.unsupported(fmt.Sprintf("collation %q, which postgres.Collations does not declare", e.Name))
+					return
+				}
+				c.x.collates = true
 			case *sqlir.Cast:
 				c.castInput(e)
 				c.timeParams(e.Type, e.X)
+				if typeCollation(e.Type) != "" {
+					// A cast to name brings name's C collation in, as a
+					// COLLATE does.
+					c.x.collates = true
+				}
 			case *sqlir.ColumnRef:
-				err = c.resolve(e, sc)
+				if err = c.resolve(e, sc); err == nil {
+					c.x.noteCollation(e, sc)
+				}
 				return
 			case *sqlir.SelectStmt:
 				_, err = c.query(e, sc)
@@ -1312,8 +1502,36 @@ func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
 	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
 		sc.types[targetAlias(table, alias)] = def.types
+		sc.noteCollations(targetAlias(table, alias), def)
 	}
 	return sc, cols
+}
+
+// noteCollations records the collations the columns of the base table def,
+// in scope as alias, declare.
+func (sc *colScope) noteCollations(alias string, def *tableDef) {
+	if sc.colls == nil {
+		sc.colls = map[string]map[string]string{}
+	}
+	sc.colls[alias] = def.collations
+}
+
+// columnCollation is the collation the column r refers to declares, empty
+// for the database's, and false when r is the column of a derived item,
+// whose collation detest does not know.
+func (sc *colScope) columnCollation(r *sqlir.ColumnRef) (string, bool) {
+	for s := sc; s != nil; s = s.outer {
+		for alias, cols := range s.items {
+			if r.Table != "" && alias != r.Table {
+				continue
+			}
+			if has, _ := cols.has(r.Column); has {
+				colls, ok := s.colls[alias]
+				return colls[r.Column], ok
+			}
+		}
+	}
+	return "", false
 }
 
 func targetAlias(table, alias string) string {
@@ -1481,6 +1699,12 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 		}
 		sc.items[alias] = cols
 		sc.types[alias] = own.types[alias]
+		if colls, ok := own.colls[alias]; ok {
+			if sc.colls == nil {
+				sc.colls = map[string]map[string]string{}
+			}
+			sc.colls[alias] = colls
+		}
 	}
 	return nil
 }

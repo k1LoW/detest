@@ -5,6 +5,9 @@ import "reflect"
 // ColumnRefs returns the column references in e, in the order they appear.
 func ColumnRefs(e Expr) []*ColumnRef { return find[*ColumnRef](e) }
 
+// CaseExprs returns the CASE expressions in e, in the order they appear.
+func CaseExprs(e Expr) []*CaseExpr { return find[*CaseExpr](e) }
+
 // FuncCalls returns the function calls in e, in the order they appear.
 func FuncCalls(e Expr) []*FuncCall { return find[*FuncCall](e) }
 

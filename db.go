@@ -150,13 +150,33 @@ type DB struct {
 
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
-	defs     map[string]*tableDef
-	matviews map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views    map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs  map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs     map[string]int64                    // sequence values of the run, for nextval
-	uuids    int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
-	ignored  map[string]bool                     // tables Ignore took out of the simulation
+	defs map[string]*tableDef
+	// collatedDomains are the names of the domains that declare a collation,
+	// or are based on one that does. detest does not follow a domain's
+	// collation, so text of such a domain is not ordered (domainCollation).
+	collatedDomains map[string]bool
+	// domainBases are the base types of the domains, through domains over
+	// domains, which a column of a domain is recorded with, so that its
+	// writes, checks and ordering are its base type's.
+	domainBases map[string]string
+	// domainSchemas are the qualified names the domains of domainBases were
+	// created as, one for each schema with a domain of the name, so that a
+	// drop or a rename of one of them leaves the others.
+	domainSchemas map[string][]string
+	// domainAliases are the base types of the names domains were renamed
+	// from, which the casts stored before the rename still name.
+	domainAliases map[string]string
+	// declaredCache is declaresCollations, keptCache keptCollations and
+	// keptBranchCache keptBranchTypes, dropped by every schema change.
+	declaredCache   *bool
+	keptCache       map[*sqlir.ColumnRef]string
+	keptBranchCache map[sqlir.Expr]string
+	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views           map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs            map[string]int64                    // sequence values of the run, for nextval
+	uuids           int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
+	ignored         map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -221,17 +241,20 @@ func (c tableCheck) columns() []string {
 
 // tableDef is what the schema declares about a table.
 type tableDef struct {
-	pk       []string // primary key columns; nil without a primary key
-	pkName   string
-	uniques  []sqlir.UniqueDef // unique constraints and indexes other than the primary key
-	fks      []sqlir.ForeignKey
-	columns  []string          // in declaration order, for applying defaults deterministically
-	types    map[string]string // column types, for the checks Postgres makes on write
-	notNull  map[string]bool   // NOT NULL columns besides the primary key's
-	checks   []tableCheck
-	indexes  []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
-	autoInc  map[string]bool       // MySQL's AUTO_INCREMENT columns
-	onUpdate map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
+	pk      []string // primary key columns; nil without a primary key
+	pkName  string
+	uniques []sqlir.UniqueDef // unique constraints and indexes other than the primary key
+	fks     []sqlir.ForeignKey
+	columns []string          // in declaration order, for applying defaults deterministically
+	types   map[string]string // column types, for the checks Postgres makes on write
+	// collations are the collations Postgres text columns declare, which
+	// order them instead of the database's.
+	collations map[string]string
+	notNull    map[string]bool // NOT NULL columns besides the primary key's
+	checks     []tableCheck
+	indexes    []sqlir.IndexDef      // indexes that are not unique, for InnoDB's gap locks
+	autoInc    map[string]bool       // MySQL's AUTO_INCREMENT columns
+	onUpdate   map[string]sqlir.Expr // MySQL's ON UPDATE CURRENT_TIMESTAMP columns
 	// strs are the limits on what a string column holds: CHAR(n) and
 	// VARCHAR(n) lengths, and MySQL's ENUM and SET members.
 	strs map[string]strLimit
@@ -631,6 +654,7 @@ func (def *tableDef) dropColumn(col string) {
 	delete(def.generated, col)
 	delete(def.identityAlways, col)
 	delete(def.types, col)
+	delete(def.collations, col)
 	delete(def.notNull, col)
 	delete(def.autoInc, col)
 	def.indexes = slices.DeleteFunc(def.indexes, func(ix sqlir.IndexDef) bool { return slices.Contains(ix.Columns, col) || ix.Prefix == col })
@@ -683,6 +707,10 @@ func (def *tableDef) renameColumn(old, nw string) {
 	if t, ok := def.types[old]; ok {
 		delete(def.types, old)
 		def.types[nw] = t
+	}
+	if c, ok := def.collations[old]; ok {
+		delete(def.collations, old)
+		def.collations[nw] = c
 	}
 	if def.notNull[old] {
 		delete(def.notNull, old)
@@ -1141,6 +1169,8 @@ func (db *DB) newUUID() string {
 // in Postgres and sees the transaction's own writes, so renames and drops
 // carry tx's pending rows along.
 func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
+	db.dropSchemaCaches()
+	defer db.dropSchemaCaches()
 	if db.defs == nil {
 		db.defs = map[string]*tableDef{}
 		db.matviews = map[string]*sqlir.CreateTableAsStmt{}
@@ -1154,9 +1184,96 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 	return nil
 }
 
+// noteDomain records the domain of the qualified name q, by its bare name.
+func (db *DB) noteDomain(name, q, base string) {
+	if db.domainBases == nil {
+		db.domainBases, db.domainSchemas = map[string]string{}, map[string][]string{}
+	}
+	if prev, ok := db.domainBases[name]; ok && prev != base {
+		// detest records a column's domain by its bare name, which
+		// cannot tell two schemas' domains of the name apart.
+		base = ambiguousDomain
+	}
+	db.domainBases[name] = base
+	if !slices.Contains(db.domainSchemas[name], q) {
+		db.domainSchemas[name] = append(db.domainSchemas[name], q)
+	}
+}
+
+// forgetDomain removes the domain of the qualified name q, and the base
+// type of the bare name with the last one of it.
+func (db *DB) forgetDomain(name, q string) {
+	qs := slices.DeleteFunc(slices.Clone(db.domainSchemas[name]), func(s string) bool { return s == q })
+	if len(qs) == len(db.domainSchemas[name]) {
+		return
+	}
+	if len(qs) == 0 {
+		delete(db.domainBases, name)
+		delete(db.domainSchemas, name)
+		return
+	}
+	db.domainSchemas[name] = qs
+}
+
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "domain" && ch.Drop:
+		// The collated mark stays: a domain of the name created again, or
+		// one of another schema, may still be collated, and refusing is
+		// safe. A column already of the domain keeps the base type it was
+		// recorded with, as Postgres refuses the drop while one is.
+		name := ch.Columns[0].Name
+		q := db.existingDomain(ch.Table, name)
+		if ch.Cascade && slices.Contains(db.domainSchemas[name], q) {
+			// Postgres drops the columns and the domains of the domain
+			// with it, which detest does not record.
+			return unsupported(fmt.Sprintf("DROP DOMAIN %s CASCADE", name), "")
+		}
+		if db.domainBases[name] != ambiguousDomain {
+			db.forgetDomain(name, q)
+		}
+		return nil
+	case ch.Object == "domain" && ch.RenameTo != "":
+		old := ch.Columns[0].Name
+		if db.collatedDomains[old] {
+			db.collatedDomains[ch.RenameTo] = true
+		}
+		q := db.existingDomain(ch.Table, old)
+		if base, ok := db.domainBases[old]; ok && slices.Contains(db.domainSchemas[old], q) {
+			if base != ambiguousDomain {
+				db.forgetDomain(old, q)
+			}
+			// The old name stays an alias of the base type, as the collated
+			// mark stays: a cast to it in a CHECK, a default or a view,
+			// which Postgres follows to the new name, still names it, and
+			// rewriting the stored expression would change the statement
+			// the parse cache shares with every other database.
+			alias := base
+			if prev, ok := db.domainAliases[old]; ok && prev != base {
+				alias = ambiguousDomain
+			}
+			if db.domainAliases == nil {
+				db.domainAliases = map[string]string{}
+			}
+			db.domainAliases[old] = alias
+			db.noteDomain(ch.RenameTo, q[:len(q)-len(old)]+ch.RenameTo, base)
+		}
+		return nil
+	case ch.Object == "domain":
+		col := ch.Columns[0]
+		base := db.baseType(col.Type)
+		if col.Constrained {
+			base = constrainedDomain
+		}
+		db.noteDomain(col.Name, db.qualifyDomain(ch.Table, col.Name), base)
+		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
+			if db.collatedDomains == nil {
+				db.collatedDomains = map[string]bool{}
+			}
+			db.collatedDomains[col.Name] = true
+		}
+		return nil
 	case ch.Object == "sequence" && ch.Drop:
 		name := db.seqName(ch.Table)
 		if db.isRelation(name) {
@@ -1275,9 +1392,17 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			if _, had := def.types[col.Name]; had && db.kind.InnoDB() {
 				redefined = true
 			}
-			def.types[col.Name] = col.Type
+			def.types[col.Name] = db.baseType(col.Type)
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
+			} else if c := cmp.Or(col.Collation, db.domainCollation(col.Type), typeCollation(col.Type)); c != "" && c != "default" {
+				if def.collations == nil {
+					def.collations = map[string]string{}
+				}
+				def.collations[col.Name] = c
+			} else {
+				// A type changed without COLLATE takes the database's.
+				delete(def.collations, col.Name)
 			}
 		}
 		switch {

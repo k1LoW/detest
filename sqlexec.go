@@ -89,6 +89,25 @@ type sqlExec struct {
 	// GREATEST and LEAST resolve a timestamp and a timestamptz to, and the
 	// source of date_trunc.
 	exprTypes map[sqlir.Expr]string
+	// branchTypes are the COALESCE, GREATEST, LEAST, NULLIF and CASE
+	// expressions, and setOpColumns the columns of the set operations, the
+	// column check resolved to bytea or to text (branchKind), which a
+	// literal or a string parameter among them is bytea input of, or a
+	// []byte parameter the text of.
+	branchTypes  map[sqlir.Expr]string
+	setOpColumns map[*sqlir.SelectStmt]setOpColumns
+	// colls are the collations the column check found the columns of the
+	// statement's column references to declare, and collates whether the
+	// statement has a COLLATE clause.
+	colls    map[*sqlir.ColumnRef]colNote
+	collates bool
+	// ctasTypes are the types the column check found for the columns of a
+	// CREATE TABLE AS, "" where it could not tell.
+	ctasTypes []string
+	ctasNamed map[string]string
+	// outputs are the ORDER BY keys that name an output column, with the
+	// select list's expression they name.
+	outputs map[sqlir.Expr]sqlir.Expr
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -317,6 +336,10 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	case *sqlir.Script:
 		res := &sqlResult{}
 		for _, sub := range st.Stmts {
+			// What the column check noted, and whether a column declares a
+			// collation, belong to the statement before, whose DDL may
+			// have changed the latter.
+			x.colls, x.outputs, x.collates = nil, nil, false
 			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			r, err := x.execStatement(sub)
@@ -529,6 +552,13 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 // execCreateTableAs declares the table, without keys, and fills it with the
 // query's rows.
 func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, error) {
+	db := x.tx.db
+	_, isView := db.views[db.resolve(st.Table)]
+	_, isSeq := db.seqDefs[sequenceName(db.resolve(st.Table))]
+	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq || db.isIndex(db.resolve(st.Table))) && st.IfNotExists {
+		// Postgres leaves the table as it is, without running the query.
+		return &sqlResult{}, nil
+	}
 	selCols, rows, err := x.evalSelect(st.Select, nil)
 	if err != nil {
 		return nil, err
@@ -541,15 +571,90 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	for _, c := range cols {
 		ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: c})
 	}
+	colls, err := x.outputCollations(st.Select, len(cols))
+	if err != nil {
+		return nil, err
+	}
+	for i := range ch.Columns {
+		if i < len(selCols) && !db.kind.InnoDB() {
+			// A bytea column is created as bytea, so that a later write of
+			// bytea text to it is read as bytea input.
+			ch.Columns[i].Type = x.ctasType(i, selCols[i], rows)
+		}
+	}
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err
 	}
 	table := x.tx.db.resolve(st.Table)
+	if def := x.tx.db.defs[table]; def != nil {
+		for i, name := range colls {
+			if name != "" && name != "default" {
+				if def.collations == nil {
+					def.collations = map[string]string{}
+				}
+				def.collations[cols[i]] = name
+			}
+		}
+	}
 	if st.Materialized {
 		x.tx.db.matviews[table] = st
 	}
+	// The collations and the materialized view above change the schema
+	// after applySchema dropped the cache.
+	x.tx.db.dropSchemaCaches()
 	return x.fill(table, st, selCols, rows)
 }
+
+// ctasType is the type the i-th column of a CREATE TABLE AS, col in rows,
+// is created with: bytea when it is, by the type the column check found by
+// position or by name or, where it could not tell, by its values, a text
+// type the check found, and "" for any other type, which detest leaves
+// unchecked. A column of no type
+// the check tells and no value is untypedCTAS.
+func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
+	typ := ""
+	if i < len(x.ctasTypes) {
+		typ = x.ctasTypes[i]
+	}
+	if typ == "" {
+		typ = x.ctasNamed[col]
+	}
+	if typ != "" {
+		switch base := x.tx.db.baseType(typ); {
+		case base == "bytea":
+			return "bytea"
+		case base == ambiguousDomain || base == constrainedDomain:
+			return base
+		case collatableType(base):
+			// Text, so that bytes written to it later are the text they
+			// hold, which orders by the collation.
+			return base
+		}
+		return ""
+	}
+	seen := false
+	for _, r := range rows {
+		switch derefValue(r[col]).(type) {
+		case nil:
+		case []byte:
+			// A text column turns a []byte written to it into a string, so
+			// a value held as bytes is bytea.
+			seen = true
+		default:
+			return ""
+		}
+	}
+	if seen {
+		return "bytea"
+	}
+	return untypedCTAS
+}
+
+// untypedCTAS is the type of a CREATE TABLE AS column whose type neither the
+// query nor its values tell, which a value written to it refuses: Postgres
+// converts it to the column's type, which may be bytea or text, and either
+// decides how it compares and orders.
+const untypedCTAS = "a CREATE TABLE AS column of a type detest could not tell"
 
 // execRefresh replaces a materialized view's rows with its query's.
 func (x *sqlExec) execRefresh(st *sqlir.RefreshStmt) (*sqlResult, error) {
@@ -569,11 +674,20 @@ func (x *sqlExec) execRefresh(st *sqlir.RefreshStmt) (*sqlResult, error) {
 	if st.NoData {
 		return &sqlResult{}, nil
 	}
+	// Checked as the statement that created it was, so that what the check
+	// notes for the run, such as collations and bytea arguments, is there.
+	if err := x.checkColumns(mv.Select); err != nil {
+		return nil, err
+	}
 	selCols, rows, err := x.evalSelect(mv.Select, nil)
 	if err != nil {
 		return nil, err
 	}
-	return x.fill(table, mv, selCols, rows)
+	if _, err := x.fill(table, mv, selCols, rows); err != nil {
+		return nil, err
+	}
+	// Postgres's command tag for REFRESH carries no row count.
+	return &sqlResult{}, nil
 }
 
 // fill inserts the rows of a CREATE TABLE AS or materialized view query.
@@ -600,6 +714,9 @@ func (x *sqlExec) fill(table string, st *sqlir.CreateTableAsStmt, selCols []stri
 		if err := x.tx.lock(lk); err != nil {
 			return nil, err
 		}
+		// A REFRESH deleted the rows before, whose keys the new rows may
+		// take again.
+		delete(x.tx.deleted, lk)
 		x.tx.writes[lk] = row
 		out.affected++
 	}
@@ -1075,11 +1192,15 @@ func (x *sqlExec) order(keys []sqlir.OrderKey, rows []jrow, outer *env) error {
 			vals[i][j] = v
 		}
 	}
+	colls, err := x.keyCollations(keys, vals)
+	if err != nil {
+		return err
+	}
 	idx := make([]int, len(rows))
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, vals[idx[a]], vals[idx[b]]) })
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, colls, vals[idx[a]], vals[idx[b]]) })
 	sorted := make([]jrow, len(rows))
 	for i, j := range idx {
 		sorted[i] = rows[j]
@@ -1204,6 +1325,8 @@ func hasAggregate(e sqlir.Expr) bool {
 		return hasAggregate(v.X)
 	case *sqlir.Cast:
 		return hasAggregate(v.X)
+	case *sqlir.Collate:
+		return hasAggregate(v.X)
 	case *sqlir.IsNull:
 		return hasAggregate(v.X)
 	case *sqlir.InExpr:
@@ -1280,7 +1403,18 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				}
 				vals = append(vals, x.aggOperand(v.Name, val))
 			}
-			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]))
+			// Only min and max order their argument.
+			var coll sqlir.Collation
+			if v.Name == "min" || v.Name == "max" {
+				var err error
+				if coll, err = x.orderCollation(v.Args[0]); err == nil {
+					coll, err = decide(coll, vals...)
+				}
+				if err != nil {
+					return nil, err
+				}
+			}
+			return x.foldAggregate(v.Name, false, vals, len(g.rows), exprNumberKind(v.Args[0]), coll)
 		}
 		if sqlir.OtherAggregates[v.Name] {
 			return nil, x.unsupported("aggregate " + v.Name)
@@ -1308,12 +1442,15 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.timeArgs(v, args); err != nil {
 			return nil, err
 		}
+		if err := x.branchArgs(v, args); err != nil {
+			return nil, err
+		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
 				return out, err
 			}
 		}
-		out, err := x.callFunc(v.Name, args)
+		out, err := x.callOrdered(v, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
@@ -1371,8 +1508,12 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				return nil, err
 			}
 		}
-		if v.Op == "||" {
+		if v.Op == "||" || strings.HasSuffix(v.Op, "LIKE") {
+			// A []byte parameter is text a driver sent as bytes.
 			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
+		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
+			return out, err
 		}
 		res, err := x.binary(v.Op, l, r)
 		if err != nil {
@@ -1389,6 +1530,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 			vals[i] = val
 		}
 		return vals, nil
+	case *sqlir.Collate:
+		val, err := x.evalAggRaw(v.X, g)
+		return paramText(v.X, val), err
 	case *sqlir.Cast:
 		val, err := x.evalAgg(v.X, g)
 		if err != nil {

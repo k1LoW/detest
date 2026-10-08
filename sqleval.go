@@ -103,6 +103,11 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		return nil, nil
 	case *sqlir.Unconverted:
 		return nil, errUnknownExpr{"an expression detest could not convert"}
+	case *sqlir.Collate:
+		// A parameter under COLLATE is text, as a []byte database/sql
+		// passes it as is under ||.
+		val, err := x.eval(v.X, en)
+		return paramText(v.X, val), err
 	case *sqlir.Cast:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -203,8 +208,12 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 		}
-		if v.Op == "||" {
+		if v.Op == "||" || strings.HasSuffix(v.Op, "LIKE") {
+			// A []byte parameter is text a driver sent as bytes.
 			l, r = paramText(v.L, l), paramText(v.R, r)
+		}
+		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
+			return out, err
 		}
 		res, err := x.binary(v.Op, l, r)
 		if err != nil {
@@ -423,6 +432,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
 					return nil, err
 				}
+				if out, err = x.caseBranch(v, w.Then, out); err != nil {
+					return nil, err
+				}
 				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 			}
 		}
@@ -432,6 +444,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				return nil, err
 			}
 			if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
+				return nil, err
+			}
+			if out, err = x.caseBranch(v, v.Else, out); err != nil {
 				return nil, err
 			}
 			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
@@ -469,12 +484,15 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.timeArgs(v, args); err != nil {
 			return nil, err
 		}
+		if err := x.branchArgs(v, args); err != nil {
+			return nil, err
+		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
 				return out, err
 			}
 		}
-		out, err := x.callFunc(v.Name, args)
+		out, err := x.callOrdered(v, args)
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
@@ -654,6 +672,16 @@ func (x *sqlExec) compareRows(op string, le []sqlir.Expr, lv any, re []sqlir.Exp
 		if eq {
 			return op != "=", nil
 		}
+		c, err := x.orderCollation(le[i], re[i])
+		if err == nil {
+			c, err = decide(c, li, ri)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if out, ok := orderedBinary(op, c, li, ri); ok {
+			return out, nil
+		}
 		return x.binary(op, li, ri)
 	}
 	if sawNull {
@@ -777,6 +805,40 @@ func isNumber(v any) bool {
 	return ok
 }
 
+// branchArgs converts the arguments of a COALESCE, GREATEST, LEAST or
+// NULLIF to the type they resolve to, in the statement or in an expression
+// a table keeps, as Postgres does before it compares or returns them.
+func (x *sqlExec) branchArgs(f *sqlir.FuncCall, args []any) error {
+	kind := x.branchType(f)
+	for i, a := range f.Args {
+		v, err := x.asBranchType(kind, a, args[i])
+		if err != nil {
+			return err
+		}
+		args[i] = v
+	}
+	return nil
+}
+
+// caseBranch converts the branch a CASE takes to the type its branches
+// resolve to.
+func (x *sqlExec) caseBranch(c *sqlir.CaseExpr, branch sqlir.Expr, v any) (any, error) {
+	return x.asBranchType(x.branchType(c), branch, v)
+}
+
+// asBranchType is v of e under branches of the kind branchKind gives: a
+// literal or a string parameter read as bytea input under bytea, and a
+// []byte parameter read as the text it holds under text.
+func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
+	switch kind {
+	case "bytea":
+		return x.untyped(e, v, []byte{})
+	case "text":
+		return paramText(e, v), nil
+	}
+	return v, nil
+}
+
 func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 	if x.tx.db.kind.InnoDB() {
 		return v, nil // MySQL compares a string with a number as the number (mysqlOperands)
@@ -816,6 +878,17 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		return v, nil
 	}
 	switch derefValue(other).(type) {
+	case []byte:
+		// A parameter bound as []byte is a bytea already; text, a
+		// literal or a string parameter, is bytea input.
+		if _, raw := derefValue(v).([]byte); raw {
+			return v, nil
+		}
+		b, berr := parseBytea(s)
+		if berr != nil {
+			return nil, x.tx.db.kind.Error(berr.kind, berr.msg, "", "", "")
+		}
+		return b, nil
 	case pgInterval:
 		iv, ierr := parseInterval(s)
 		switch {
@@ -1864,6 +1937,8 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 		return x.exprString(v.X) + op + "(" + x.exprString(v.Array) + ")"
 	case *sqlir.Cast:
 		return x.exprString(v.X)
+	case *sqlir.Collate:
+		return x.exprString(v.X) + " collate " + v.Name
 	case *sqlir.FuncCall:
 		return v.Name + "(...)"
 	case *sqlir.Exists:

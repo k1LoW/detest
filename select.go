@@ -325,7 +325,11 @@ func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []stri
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, vals[idx[a]], vals[idx[b]]) })
+	colls, err := x.keyCollations(keys, vals)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(keys, colls, vals[idx[a]], vals[idx[b]]) })
 	sorted := make([]*selItem, len(items))
 	for i, j := range idx {
 		sorted[i] = items[j]
@@ -335,8 +339,9 @@ func (x *sqlExec) sortItems(keys []sqlir.OrderKey, items []*selItem, cols []stri
 }
 
 // orderedBefore reports whether a sorts before b under keys, placing NULLs
-// last when ascending and first when descending unless NULLS says otherwise.
-func orderedBefore(keys []sqlir.OrderKey, a, b []any) bool {
+// last when ascending and first when descending unless NULLS says otherwise,
+// with the text of each key ordered by its collation in colls.
+func orderedBefore(keys []sqlir.OrderKey, colls []sqlir.Collation, a, b []any) bool {
 	for j, k := range keys {
 		va, vb := derefValue(a[j]), derefValue(b[j])
 		nullsFirst := k.Nulls == sqlir.NullsFirst || (k.Nulls == 0 && k.Desc)
@@ -348,7 +353,7 @@ func orderedBefore(keys []sqlir.OrderKey, a, b []any) bool {
 		case vb == nil:
 			return !nullsFirst
 		}
-		c, ok := compareValues(va, vb)
+		c, ok := compareOrdered(colls[j], va, vb)
 		if !ok || c == 0 {
 			continue
 		}
@@ -541,6 +546,34 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 			m[lcols[j]] = r[c]
 		}
 		rrows[i] = m
+	}
+	// A column the queries resolve to bytea reads the text of a literal or
+	// a string parameter under it as bytea input, and one they resolve to
+	// text reads bytes a driver sent as the text they hold, as Postgres
+	// types them.
+	cols, typed := x.setOpColumns[sel]
+	for j := range lcols {
+		kind := cols.kind(j, lcols[j])
+		if !typed || kind == "" {
+			continue
+		}
+		for _, r := range slices.Concat(lrows, rrows) {
+			switch v := derefValue(r[lcols[j]]).(type) {
+			case string:
+				if kind != "bytea" {
+					continue
+				}
+				b, berr := parseBytea(v)
+				if berr != nil {
+					return nil, nil, x.tx.db.kind.Error(berr.kind, berr.msg, "", "", "")
+				}
+				r[lcols[j]] = b
+			case []byte:
+				if kind == "text" {
+					r[lcols[j]] = string(v)
+				}
+			}
+		}
 	}
 	// Postgres gives each column of a set operation one type, so '1' under
 	// an integer column is the integer 1, and text or a boolean under it is
@@ -1072,6 +1105,8 @@ func windowsIn(e sqlir.Expr) []*sqlir.WindowFunc {
 			walk(v.X)
 		case *sqlir.Cast:
 			walk(v.X)
+		case *sqlir.Collate:
+			walk(v.X)
 		case *sqlir.IsNull:
 			walk(v.X)
 		case *sqlir.InExpr:
@@ -1160,14 +1195,18 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(w.Order, keys[idx[a]], keys[idx[b]]) })
+	colls, err := x.keyCollations(w.Order, keys)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return orderedBefore(w.Order, colls, keys[idx[a]], keys[idx[b]]) })
 	sorted := make([]*selItem, len(part))
 	skeys := make([][]any, len(part))
 	for i, j := range idx {
 		sorted[i], skeys[i] = part[j], keys[j]
 	}
 	peer := func(a, b int) bool {
-		return !orderedBefore(w.Order, skeys[a], skeys[b]) && !orderedBefore(w.Order, skeys[b], skeys[a])
+		return !orderedBefore(w.Order, colls, skeys[a], skeys[b]) && !orderedBefore(w.Order, colls, skeys[b], skeys[a])
 	}
 	// lastPeer[i] is the last row sharing row i's ORDER BY values: the end of
 	// the default frame.
@@ -1222,7 +1261,16 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				kind = exprNumberKind(w.Func.Args[0])
 			}
 			var err error
-			if v, err = x.foldAggregate(name, w.Func.Star, vals, n, kind); err != nil {
+			var coll sqlir.Collation
+			if len(w.Func.Args) > 0 && (name == "min" || name == "max") {
+				if coll, err = x.orderCollation(w.Func.Args[0]); err == nil {
+					coll, err = decide(coll, vals...)
+				}
+				if err != nil {
+					return err
+				}
+			}
+			if v, err = x.foldAggregate(name, w.Func.Star, vals, n, kind, coll); err != nil {
 				return err
 			}
 		case "first_value", "last_value":
@@ -1285,7 +1333,7 @@ func (x *sqlExec) aggOperand(name string, v any) any {
 // foldAggregate folds the non-NULL values of an aggregate's argument; n is
 // the row count, which count(*) returns, and kind the argument's number
 // kind, by which a sum or an average of floats is kept as it is computed.
-func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind numberKind) (any, error) {
+func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind numberKind, coll sqlir.Collation) (any, error) {
 	switch name {
 	case "count":
 		if star {
@@ -1355,7 +1403,7 @@ func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind 
 		}
 		best := vals[0]
 		for _, val := range vals[1:] {
-			c, _ := compareValues(val, best)
+			c, _ := compareOrdered(coll, val, best)
 			if (name == "min" && c < 0) || (name == "max" && c > 0) {
 				best = val
 			}

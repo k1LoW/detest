@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -431,6 +432,12 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		args[i] = nv.Value
+		if b, ok := nv.Value.([]byte); ok {
+			// database/sql hands the caller's slice over without a copy,
+			// and a server has read it by the time the call returns, so a
+			// caller reusing the buffer must not change what was written.
+			args[i] = bytes.Clone(b)
+		}
 	}
 	// A goroutine that came through a seam package (see seamTx) holds the
 	// transaction's connection, so none of its siblings is in database/sql,
