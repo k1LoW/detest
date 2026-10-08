@@ -474,6 +474,17 @@ func TestBytesAsText(t *testing.T) {
 		t.Errorf("DROP DOMAIN CASCADE: got %v, want unsupported", err)
 	}
 	mustExec(t, db, `DROP DOMAIN IF EXISTS b.dropped CASCADE`)
+	// An unqualified ALTER DOMAIN finds the domain along the search path.
+	pdb, _ := s.DB("path", postgres.New(postgres.SearchPath("a", "b")))
+	mustExec(t, pdb, `CREATE SCHEMA a`)
+	mustExec(t, pdb, `CREATE SCHEMA b`)
+	mustExec(t, pdb, `CREATE DOMAIN b.blobp AS bytea`)
+	mustExec(t, pdb, `ALTER DOMAIN blobp RENAME TO renamedp`)
+	mustExec(t, pdb, `CREATE TABLE a.rp (id int PRIMARY KEY, v b.renamedp)`)
+	mustExec(t, pdb, `INSERT INTO a.rp VALUES (1, '\x41')`)
+	if got := rowsOf(t, pdb, `SELECT id FROM a.rp WHERE v = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a domain of a later schema of the search path renamed: got %v", got)
+	}
 	// Two schemas' domains of one name and base type stay typed until
 	// both are dropped.
 	mustExec(t, db, `CREATE DOMAIN a.blob2 AS bytea`)
@@ -508,6 +519,11 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT id FROM lit WHERE payload = $1`, []any{[]byte("B")}, []string{"2"}},
 		{`SELECT id FROM lit WHERE payload = '\x42'`, nil, []string{"2"}},
 		{`SELECT id FROM mixed ORDER BY payload`, nil, []string{"2", "1", "3"}},
+		// COALESCE, GREATEST, LEAST and NULLIF of bytea give bytea, which
+		// orders by bytes, not text under the collation.
+		{`SELECT id FROM lit ORDER BY coalesce(payload, '\x00')`, nil, []string{"2", "1"}},
+		{`SELECT id FROM lit ORDER BY nullif(payload, '\x00')`, nil, []string{"2", "1"}},
+		{`SELECT id FROM lit ORDER BY greatest(payload, '\x00')`, nil, []string{"2", "1"}},
 		{`SELECT id FROM t WHERE name < $1 COLLATE "default"`, []any{[]byte("B")}, []string{"1"}},
 		{`SELECT min(name COLLATE "default") < $1 COLLATE "default" FROM t`, []any{[]byte("B")}, []string{"true"}},
 	} {
@@ -633,11 +649,22 @@ func TestCaseMappingCollations(t *testing.T) {
 	if _, err := db.Exec(`SELECT lower(s.code) FROM (SELECT code FROM t) s`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("lower of a subquery's text: got %v, want unsupported", err)
 	}
-	// A database of the C locale maps the case of ASCII letters only.
+	// A database of the C locale maps the case of ASCII letters only, of
+	// text a driver sends as bytes too.
 	cdb, _ := s.DB("c", postgres.New(postgres.Collation(postgres.C)))
 	mustExec(t, cdb, `CREATE TABLE t (id int PRIMARY KEY, plain text)`)
 	mustExec(t, cdb, `INSERT INTO t VALUES (1, 'Äi')`)
-	if got := rowsOf(t, cdb, `SELECT upper(plain) FROM t`); !reflect.DeepEqual(got, []string{"ÄI"}) {
-		t.Errorf("upper on a database of C: got %v", got)
+	for _, tc := range []struct {
+		q    string
+		args []any
+		want []string
+	}{
+		{`SELECT upper(plain) FROM t`, nil, []string{"ÄI"}},
+		{`SELECT lower($1)`, []any{[]byte("ÄI")}, []string{"Äi"}},
+		{`SELECT count(*) FROM t WHERE plain ILIKE $1`, []any{[]byte("äI")}, []string{"0"}},
+	} {
+		if got := rowsOf(t, cdb, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s on a database of C: got %v, want %v", tc.q, got, tc.want)
+		}
 	}
 }

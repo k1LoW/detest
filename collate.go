@@ -90,14 +90,31 @@ func (db *DB) domainCollation(typ string) string {
 	return ""
 }
 
-// qualifyDomain is the qualified name of the domain named bare that table,
-// the name a statement gives it, refers to: as given when a schema
-// qualifies it, and in the first schema of the search path otherwise.
+// qualifyDomain is the qualified name of the domain named bare that a
+// CREATE of table, the name a statement gives it, makes: as given when a
+// schema qualifies it, and in the first schema of the search path
+// otherwise.
 func (db *DB) qualifyDomain(table, bare string) string {
 	if table != bare && strings.HasSuffix(table, "."+bare) {
 		return table
 	}
 	return db.searchPath()[0] + "." + bare
+}
+
+// existingDomain is the qualified name of the domain named bare that a
+// DROP or an ALTER of table, the name a statement gives it, refers to: as
+// given when a schema qualifies it, and otherwise in the first schema of
+// the search path that has one, as Postgres looks an existing domain up.
+func (db *DB) existingDomain(table, bare string) string {
+	if table != bare && strings.HasSuffix(table, "."+bare) {
+		return table
+	}
+	for _, s := range db.searchPath() {
+		if slices.Contains(db.domainSchemas[bare], s+"."+bare) {
+			return s + "." + bare
+		}
+	}
+	return db.qualifyDomain(table, bare)
 }
 
 // ambiguousDomain is the base type of a domain name two schemas declare
@@ -534,7 +551,7 @@ func (db *DB) keptCollations() map[*sqlir.ColumnRef]string {
 	return m
 }
 
-// keptByteaCalls are the COALESCE, GREATEST and LEAST calls of the
+// keptByteaCalls are the COALESCE, GREATEST, LEAST and NULLIF calls of the
 // expressions tables keep whose arguments resolve to bytea, as byteaCalls
 // are for a statement's.
 func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
@@ -553,7 +570,7 @@ func (db *DB) keptByteaCalls() map[*sqlir.FuncCall]bool {
 			}
 			for _, f := range sqlir.FuncCalls(e) {
 				switch f.Name {
-				case "coalesce", "greatest", "least":
+				case "coalesce", "greatest", "least", "nullif":
 					if db.baseType(commonType(f.Args, column, nil)) == "bytea" {
 						m[f] = true
 					}
@@ -710,10 +727,63 @@ func (db *DB) collatesColumns() bool {
 	return len(db.collatedDomains) > 0
 }
 
+// textBytes is v as text when it is bytes, as a driver may send text.
+func textBytes(v any) any {
+	if b, ok := derefValue(v).([]byte); ok {
+		return string(b)
+	}
+	return v
+}
+
+// byteaCall reports whether f is a COALESCE, GREATEST, LEAST or NULLIF
+// whose arguments resolve to bytea, which returns one of them as bytea.
+func (x *sqlExec) byteaCall(f *sqlir.FuncCall) bool {
+	return x.byteaCalls[f] || !x.tx.db.kind.InnoDB() && x.tx.db.keptByteaCalls()[f]
+}
+
+// byteaCall is the bytea one of args f returns, kept as bytes where
+// callFunc would take them for text a driver sent.
+func byteaCall(name string, args []any) any {
+	switch name {
+	case "coalesce":
+		for _, a := range args {
+			if derefValue(a) != nil {
+				return a
+			}
+		}
+		return nil
+	case "nullif":
+		if derefValue(args[1]) != nil && derefValue(args[0]) != nil && equalValues(args[0], args[1]) {
+			return nil
+		}
+		return args[0]
+	}
+	var out any
+	for _, a := range args {
+		if derefValue(a) == nil {
+			continue
+		}
+		if out == nil {
+			out = a
+			continue
+		}
+		if n, _ := compareValues(a, out); name == "greatest" && n > 0 || name == "least" && n < 0 {
+			out = a
+		}
+	}
+	return out
+}
+
 // callOrdered is callFunc, with greatest and least of text ordered by the
 // collation of their arguments, and lower and upper folding by it.
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
+	if x.byteaCall(v) {
+		return byteaCall(v.Name, args), nil
+	}
 	if (v.Name == "lower" || v.Name == "upper") && len(args) == 1 {
+		// A []byte argument is text a driver sent as bytes, which the
+		// collation maps as any text.
+		args[0] = textBytes(args[0])
 		c, err := x.caseCollation(args, v.Args...)
 		if err != nil {
 			return nil, err

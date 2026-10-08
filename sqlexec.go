@@ -89,9 +89,9 @@ type sqlExec struct {
 	// GREATEST and LEAST resolve a timestamp and a timestamptz to, and the
 	// source of date_trunc.
 	exprTypes map[sqlir.Expr]string
-	// byteaCalls are the COALESCE, GREATEST and LEAST calls whose arguments
-	// the column check resolved to bytea, which a literal or a string
-	// parameter among them is bytea input of.
+	// byteaCalls are the COALESCE, GREATEST, LEAST and NULLIF calls whose
+	// arguments the column check resolved to bytea, which a literal or a
+	// string parameter among them is bytea input of.
 	byteaCalls map[*sqlir.FuncCall]bool
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
