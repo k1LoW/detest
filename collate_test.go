@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/k1LoW/detest/db/postgres"
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -12,16 +13,44 @@ import (
 
 // foldCase orders text ignoring case, and tells apart nothing else, so that
 // a test can tell its order from byte order and see detest break its ties.
-type foldCase struct{}
+type foldCase struct{ UnicodeCase }
 
 func (foldCase) Compare(a, b string) int {
 	return strings.Compare(strings.ToLower(a), strings.ToLower(b))
 }
 
 // reverse orders text against byte order.
-type reverse struct{}
+type reverse struct{ UnicodeCase }
 
 func (reverse) Compare(a, b string) int { return strings.Compare(b, a) }
+
+// turkish maps the case of I as Turkish does, dotted and dotless apart,
+// so that a test can tell its case mapping from Unicode's.
+type turkish struct{ ByteOrder }
+
+func (turkish) Lower(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 'I':
+			return 'ı'
+		case 'İ':
+			return 'i'
+		}
+		return unicode.ToLower(r)
+	}, s)
+}
+
+func (turkish) Upper(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 'i':
+			return 'İ'
+		case 'ı':
+			return 'I'
+		}
+		return unicode.ToUpper(r)
+	}, s)
+}
 
 // The database's collation orders the text that declares none, in every
 // place that orders it, and equality stays byte equality.
@@ -540,38 +569,41 @@ func TestCheckSQLCollate(t *testing.T) {
 	}
 }
 
-// lower, upper and ILIKE fold case by the ctype of their collation, which a
-// Collation does not tell, so text under a declared collation other than C
-// and POSIX, or of a subquery where a column declares one, is refused. The
-// database's and C's are checked against Postgres in internal/difftest.
-func TestCaseFoldingCollations(t *testing.T) {
+// lower, upper and ILIKE map case by the collation their operands derive:
+// a column's or a COLLATE's, C's for ASCII letters only, and the
+// database's, CUTF8 unless postgres.Collation says otherwise. Text of a
+// subquery, whose collation detest does not carry, is refused where a
+// column or a COLLATE sets one.
+func TestCaseMappingCollations(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"en_US.utf8": foldCase{}})))
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE "en_US.utf8", code text COLLATE "C", plain text)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, 'Äb', 'Äb', 'Äb')`)
-	for _, q := range []string{
-		`SELECT lower(name) FROM t`,
-		`SELECT upper(plain COLLATE "en_US.utf8") FROM t`,
-		`SELECT id FROM t WHERE name ILIKE 'äb'`,
-		`SELECT id FROM t WHERE plain NOT ILIKE 'x' COLLATE "en_US.utf8"`,
-		`SELECT lower(s.code) FROM (SELECT code FROM t) s`,
-	} {
-		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s: got %v, want unsupported", q, err)
-		}
-	}
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"tr_TR.utf8": turkish{}})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE "tr_TR.utf8", code text COLLATE "C", plain text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'Iİ', 'ÄI', 'Äi')`)
 	for _, tc := range []struct {
 		q    string
 		want []string
 	}{
-		{`SELECT lower(code) FROM t`, []string{"Äb"}},
-		{`SELECT lower(plain) FROM t`, []string{"äb"}},
-		{`SELECT lower(name) IS NULL FROM t WHERE false`, nil},
-		{`SELECT id FROM t WHERE code ILIKE 'ÄB'`, []string{"1"}},
-		{`SELECT count(*) FROM t WHERE code ILIKE 'äb'`, []string{"0"}},
+		{`SELECT lower(name) FROM t`, []string{"ıi"}},
+		{`SELECT upper(plain COLLATE "tr_TR.utf8") FROM t`, []string{"Äİ"}},
+		{`SELECT count(*) FROM t WHERE name ILIKE 'ıi'`, []string{"1"}},
+		{`SELECT count(*) FROM t WHERE name ILIKE 'ii'`, []string{"0"}},
+		{`SELECT lower(code) FROM t`, []string{"Äi"}},
+		{`SELECT lower(plain) FROM t`, []string{"äi"}},
+		{`SELECT count(*) FROM t WHERE code ILIKE 'äi'`, []string{"0"}},
+		{`SELECT count(*) FROM t WHERE plain ILIKE 'ÄI'`, []string{"1"}},
 	} {
 		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
 		}
+	}
+	if _, err := db.Exec(`SELECT lower(s.code) FROM (SELECT code FROM t) s`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("lower of a subquery's text: got %v, want unsupported", err)
+	}
+	// A database of the C locale maps the case of ASCII letters only.
+	cdb, _ := s.DB("c", postgres.New(postgres.Collation(postgres.C)))
+	mustExec(t, cdb, `CREATE TABLE t (id int PRIMARY KEY, plain text)`)
+	mustExec(t, cdb, `INSERT INTO t VALUES (1, 'Äi')`)
+	if got := rowsOf(t, cdb, `SELECT upper(plain) FROM t`); !reflect.DeepEqual(got, []string{"ÄI"}) {
+		t.Errorf("upper on a database of C: got %v", got)
 	}
 }

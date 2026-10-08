@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Parser parses a query string of one engine's SQL into detest's statement IR.
@@ -648,22 +649,82 @@ type Impl struct {
 	collations map[string]Collation
 }
 
-// Collation orders text, as a Postgres collation does. Compare returns a
-// negative number when a sorts before b, a positive one when after, and 0
-// when the collation does not tell them apart, which detest then orders
-// byte by byte, as Postgres does for a deterministic collation. It must be a
-// total preorder, consistent and transitive with strings it does not tell
-// apart as equivalents, and give the same answer for the same strings every
-// time.
+// Collation orders text and maps its case, as a Postgres collation does
+// with its LC_COLLATE and LC_CTYPE. Compare returns a negative number when
+// a sorts before b, a positive one when after, and 0 when the collation
+// does not tell them apart, which detest then orders byte by byte, as
+// Postgres does for a deterministic collation. It must be a total
+// preorder, consistent and transitive with strings it does not tell apart
+// as equivalents, and give the same answer for the same strings every
+// time. Lower and Upper are what lower and upper give, and Lower what
+// ILIKE compares, mapping each character to one character as Postgres's
+// towlower and towupper do.
 type Collation interface {
 	Compare(a, b string) int
+	Lower(s string) string
+	Upper(s string) string
 }
 
-// ByteOrder is the C collation, which orders text byte by byte.
+// ByteOrder orders text byte by byte, which is code point order in UTF-8.
 type ByteOrder struct{}
 
 // Compare compares a and b byte by byte.
 func (ByteOrder) Compare(a, b string) int { return strings.Compare(a, b) }
+
+// ASCIICase maps the case of the ASCII letters only, as the C ctype does.
+type ASCIICase struct{}
+
+// Lower maps A to Z to a to z.
+func (ASCIICase) Lower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r - 'A' + 'a'
+		}
+		return r
+	}, s)
+}
+
+// Upper maps a to z to A to Z.
+func (ASCIICase) Upper(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' {
+			return r - 'a' + 'A'
+		}
+		return r
+	}, s)
+}
+
+// UnicodeCase maps the case of each character by Unicode's simple case
+// mapping, as a UTF-8 ctype such as C.UTF-8 does.
+type UnicodeCase struct{}
+
+// Lower maps each character to its lower case.
+func (UnicodeCase) Lower(s string) string { return strings.Map(unicode.ToLower, s) }
+
+// Upper maps each character to its upper case.
+func (UnicodeCase) Upper(s string) string { return strings.Map(unicode.ToUpper, s) }
+
+// C is the C and POSIX collation: byte order, and the case of ASCII
+// letters only.
+type C struct {
+	ByteOrder
+	ASCIICase
+}
+
+// CUTF8 is C.UTF-8: byte order, and the case of every character by Unicode.
+type CUTF8 struct {
+	ByteOrder
+	UnicodeCase
+}
+
+// Bytewise reports whether c orders text byte by byte, as C and CUTF8 do.
+func Bytewise(c Collation) bool {
+	switch c.(type) {
+	case C, CUTF8:
+		return true
+	}
+	return false
+}
 
 // ServerSpec is what the package of a kind, such as postgres.New, tells
 // detest about the server.
@@ -694,8 +755,8 @@ type ServerSpec struct {
 	TimeZone    *time.Location
 	TimeZoneErr error
 	// TextCollation is Postgres's database collation, which text that
-	// declares none is ordered by; nil is C. Collations are the other
-	// collations COLLATE and a column may name.
+	// declares none is ordered and case mapped by; nil is CUTF8.
+	// Collations are the other collations COLLATE and a column may name.
 	TextCollation Collation
 	Collations    map[string]Collation
 }
@@ -869,18 +930,18 @@ func (s *Impl) InnoDB() bool { return s.innodb }
 // TextCollation is the database collation of a Postgres server.
 func (s *Impl) TextCollation() Collation {
 	if s.text == nil {
-		return ByteOrder{}
+		return CUTF8{}
 	}
 	return s.text
 }
 
 // NamedCollation is the collation COLLATE or a column names: C and POSIX,
-// which are byte order whatever the database's, default, which is the
-// database's, and the ones the server declares.
+// which are C whatever the database's, default, which is the database's,
+// and the ones the server declares.
 func (s *Impl) NamedCollation(name string) (Collation, bool) {
 	switch name {
 	case "C", "POSIX":
-		return ByteOrder{}, true
+		return C{}, true
 	case "default":
 		return s.TextCollation(), true
 	}

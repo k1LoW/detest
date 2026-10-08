@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"reflect"
@@ -45,8 +46,9 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	if db.kind.InnoDB() {
 		return nil, nil
 	}
-	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
-	if bytes && !db.declared() && !x.collates {
+	if sqlir.Bytewise(db.kind.TextCollation()) && !db.declared() && !x.collates && !db.collatesColumns() {
+		// A column of C still keeps its name, whose case mapping is not
+		// the database's.
 		return nil, nil
 	}
 	names := make([]string, n)
@@ -313,7 +315,7 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	if db.kind.InnoDB() {
 		return nil, nil
 	}
-	if _, bytes := db.kind.TextCollation().(sqlir.ByteOrder); bytes && !x.collates && !db.declared() {
+	if sqlir.Bytewise(db.kind.TextCollation()) && !x.collates && !db.declared() {
 		return nil, nil
 	}
 	u, err := x.combineAll(exprs)
@@ -340,7 +342,7 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	if !ok {
 		return nil, x.unsupported(fmt.Sprintf("collation %q, which postgres.Collations does not declare", name))
 	}
-	if _, bytes := c.(sqlir.ByteOrder); bytes {
+	if sqlir.Bytewise(c) {
 		return nil, nil
 	}
 	return c, nil
@@ -367,6 +369,12 @@ type undecided struct{ err error }
 func (undecided) Compare(a, b string) int {
 	panic("detest: an undecided collation ordered text without decide")
 }
+
+// Lower is never reached: only ordering takes an undecided collation.
+func (undecided) Lower(string) string { panic("detest: an undecided collation mapped case") }
+
+// Upper is never reached, as Lower.
+func (undecided) Upper(string) string { panic("detest: an undecided collation mapped case") }
 
 // decide is c for ordering vals, failing an undecided collation when one of
 // them is text and dropping it otherwise.
@@ -543,7 +551,7 @@ func (db *DB) declared() bool {
 // an index's predicate, which the column check of that write does not see. "default" is the database's, and so
 // are C and POSIX on a database of the C collation.
 func (db *DB) declaresCollations() bool {
-	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
+	bytes := sqlir.Bytewise(db.kind.TextCollation())
 	for _, v := range db.views {
 		if hasCollate(v.View) {
 			return true
@@ -562,7 +570,7 @@ func (db *DB) declaresCollations() bool {
 			return false
 		}
 		if c, ok := db.kind.NamedCollation(name); ok && bytes {
-			if _, same := c.(sqlir.ByteOrder); same {
+			if sqlir.Bytewise(c) {
 				return false
 			}
 		}
@@ -602,30 +610,39 @@ func compareOrdered(c sqlir.Collation, a, b any) (int, bool) {
 	return compareValues(a, b)
 }
 
-// asciiFold is whether lower, upper and ILIKE fold the text of exprs, which
-// vals hold, to one case by ASCII only, as Postgres does under C and POSIX,
-// rather than by Go's Unicode mapping, which detest takes the database's
-// ctype to give. Another collation fails when a value is text: Postgres
-// folds by its ctype, which a Collation does not tell.
-func (x *sqlExec) asciiFold(vals []any, exprs ...sqlir.Expr) (bool, error) {
+// caseCollation is the collation whose Lower and Upper lower, upper and
+// ILIKE map the text of exprs, which vals hold, by, as Postgres maps it by
+// the LC_CTYPE of the collation the operands derive; nil when no value is
+// text, or on MySQL.
+func (x *sqlExec) caseCollation(vals []any, exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	db := x.tx.db
 	if db.kind.InnoDB() || !slices.ContainsFunc(vals, func(v any) bool { _, ok := textValue(v); return ok }) {
-		return false, nil
+		return nil, nil
+	}
+	if !x.collates && !db.declared() && !db.collatesColumns() {
+		return db.kind.TextCollation(), nil
 	}
 	u, err := x.combineAll(exprs)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if u.unknown && (x.collates || db.declared() || db.collatesColumns()) {
-		return false, x.unsupported("case folding of text of a subquery, view or CTE where a column or COLLATE sets a collation")
+	if u.unknown {
+		// The item's query may take the collation of a column or of a
+		// COLLATE of its own, C's case mapping among them.
+		return nil, x.unsupported("case mapping of text of a subquery, view or CTE where a column or COLLATE sets a collation")
 	}
-	switch u.name {
-	case "", "default":
-		return false, nil
-	case "C", "POSIX":
-		return true, nil
+	name := cmp.Or(u.name, "default")
+	c, ok := db.kind.NamedCollation(name)
+	if !ok {
+		// A domain's or a derived column's collation, or a name
+		// postgres.Collations does not declare.
+		what := fmt.Sprintf("collation %q", name)
+		if name == domainCollation || name == derivedCollation {
+			what = name
+		}
+		return nil, x.unsupported(fmt.Sprintf("case mapping of text under %s, which detest does not know", what))
 	}
-	return false, x.unsupported(fmt.Sprintf("case folding of text under collation %q, whose character classes detest does not know", u.name))
+	return c, nil
 }
 
 // collatesColumns reports whether a column declares a collation of any name,
@@ -642,29 +659,19 @@ func (db *DB) collatesColumns() bool {
 	return len(db.collatedDomains) > 0
 }
 
-// foldASCII maps the ASCII letters of s to one case and leaves the others.
-func foldASCII(s string, upper bool) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case upper && r >= 'a' && r <= 'z':
-			return r - 'a' + 'A'
-		case !upper && r >= 'A' && r <= 'Z':
-			return r - 'A' + 'a'
-		}
-		return r
-	}, s)
-}
-
 // callOrdered is callFunc, with greatest and least of text ordered by the
 // collation of their arguments, and lower and upper folding by it.
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
 	if (v.Name == "lower" || v.Name == "upper") && len(args) == 1 {
-		ascii, err := x.asciiFold(args, v.Args...)
+		c, err := x.caseCollation(args, v.Args...)
 		if err != nil {
 			return nil, err
 		}
-		if t, ok := textValue(args[0]); ok && ascii {
-			return foldASCII(t, v.Name == "upper"), nil
+		if t, ok := textValue(args[0]); ok && c != nil {
+			if v.Name == "upper" {
+				return c.Upper(t), nil
+			}
+			return c.Lower(t), nil
 		}
 	}
 	if v.Name != "greatest" && v.Name != "least" {
@@ -737,8 +744,8 @@ func (x *sqlExec) orderedOperands(v *sqlir.BinaryExpr, l, r any) (any, bool, err
 	case "ILIKE", "NOT ILIKE":
 		// Postgres folds both sides by the collation's ctype and matches
 		// them as LIKE does.
-		ascii, err := x.asciiFold([]any{l, r}, v.L, v.R)
-		if err != nil || !ascii {
+		c, err := x.caseCollation([]any{l, r}, v.L, v.R)
+		if err != nil || c == nil {
 			return nil, false, err
 		}
 		lt, lok := textValue(l)
@@ -746,7 +753,7 @@ func (x *sqlExec) orderedOperands(v *sqlir.BinaryExpr, l, r any) (any, bool, err
 		if !lok || !rok {
 			return nil, false, nil
 		}
-		out, err := x.binary(strings.TrimSuffix(v.Op, "ILIKE")+"LIKE", foldASCII(lt, false), foldASCII(rt, false))
+		out, err := x.binary(strings.TrimSuffix(v.Op, "ILIKE")+"LIKE", c.Lower(lt), c.Lower(rt))
 		return out, true, err
 	case "<", "<=", ">", ">=":
 	default:
