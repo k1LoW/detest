@@ -134,20 +134,47 @@ func firstIDModel(t *testing.T, s *Sim) {
 	})
 }
 
-// Which id a start draws depends on where it starts, so the exploration
-// starts over without EagerStart, finds the order that breaks the rule, and
-// prints a schedule that replays without it in a test that leaves it on.
-func TestEagerStartDroppedWhenAStartDrawsAValue(t *testing.T) {
+// An INSERT draws its generated key once it runs, after its yield point, so
+// which of two starts draws first is a choice of the schedule, explored with
+// eager starts.
+func TestEagerStartExploresWhichInsertDrawsFirst(t *testing.T) {
 	res, _ := explore(t, firstIDModel, nil)
-	if !res.Violated || res.lazy == "" || !strings.HasPrefix(res.Schedule, lazyPrefix) {
+	if !res.Violated || res.lazy != "" || strings.HasPrefix(res.Schedule, lazyPrefix) {
 		t.Fatalf("got %s", res.report())
-	}
-	if !strings.Contains(res.report(), "explored without EagerStart, as alice#1 moved a sequence") {
-		t.Errorf("the report does not say why EagerStart was dropped:\n%s", res.report())
 	}
 	replayed, _ := explore(t, firstIDModel, []Option{Replay(res.Schedule)})
 	if !replayed.Violated || replayed.Schedule != res.Schedule {
 		t.Fatalf("replaying %s got %s", res.Schedule, replayed.report())
+	}
+}
+
+// peekModel declares a watcher that peeks at a flag before its first yield
+// point, which makes the exploration start over without eager starts, and a
+// setter of the flag. With broken, every run violates.
+func peekModel(broken bool) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE flags (id text PRIMARY KEY)`)
+		seen := false
+		s.Seed(func() { seen = false })
+		s.Manual("setter", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO flags VALUES ('set')`)
+			return err
+		})
+		s.Manual("watcher", 1, func(p *Proc) error {
+			seen = len(store.Peek("flags")) > 0
+			p.Step("after peeking")
+			return nil
+		})
+		s.AtQuiescence(func(*State) error {
+			if broken {
+				return errors.New("always broken")
+			}
+			if !seen {
+				return errors.New("the watcher missed the flag")
+			}
+			return nil
+		})
 	}
 }
 
@@ -156,8 +183,8 @@ func TestEagerStartDroppedAcrossACheckpoint(t *testing.T) {
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
 	t.Setenv("DETEST_CHECKPOINT", ckpt)
 	model := func(t *testing.T, s *Sim) {
-		firstIDModel(t, s)
-		s.ExpectViolation("bob took the first id")
+		peekModel(false)(t, s)
+		s.ExpectViolation("the watcher missed the flag")
 	}
 	first, _ := explore(t, model, []Option{MaxRuns(1)})
 	if first.Violated || first.Checkpoint == "" || first.lazy == "" {
@@ -194,37 +221,14 @@ func TestEagerStartLeavesAfterToTheSchedule(t *testing.T) {
 	})
 }
 
-// A sequence may be named uuid, and its draw is no less a draw.
-func TestEagerStartTellsASequenceNamedUUIDFromUUIDs(t *testing.T) {
-	res, _ := explore(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", postgres.New())
-		if _, err := db.Exec(`CREATE SEQUENCE uuid`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`CREATE TABLE orders (id bigint PRIMARY KEY DEFAULT nextval('uuid'), buyer text NOT NULL)`); err != nil {
-			t.Fatal(err)
-		}
-		s.Manual("alice", 1, func(p *Proc) error {
-			_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ('alice')`)
-			return err
-		})
-	}, nil)
-	if res.Fatal != nil || res.lazy == "" {
-		t.Fatalf("got %v, %s", res.Fatal, res.report())
-	}
-}
-
 // A run that made no choice prints "lazy:" alone once EagerStart was
 // dropped, which counts no choice and replays.
 func TestEagerStartDroppedOnARunWithoutChoices(t *testing.T) {
 	model := func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", postgres.New())
-		if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
-			t.Fatal(err)
-		}
-		s.Manual("alice", 1, func(p *Proc) error {
-			_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ('alice')`)
-			return err
+		_, store := s.DB("app", postgres.New())
+		s.Manual("watcher", 1, func(p *Proc) error {
+			_ = store.Peek("flags")
+			return nil
 		})
 		s.AtQuiescence(func(*State) error { return errors.New("always broken") })
 	}
@@ -323,9 +327,9 @@ func TestSpawnedProcessesOfOneNameGetNumbersOfTheirOwn(t *testing.T) {
 	})
 }
 
-// A lock taken in the values of a first INSERT goes to whichever process
-// started first, so both orders are explored.
-func TestEagerStartDroppedWhenAStartTakesALock(t *testing.T) {
+// A lock taken in the values of an INSERT is taken once it runs, after its
+// yield point, so who takes it first is explored with eager starts.
+func TestEagerStartExploresWhoTakesALockFirst(t *testing.T) {
 	res, _ := explore(t, func(t *testing.T, s *Sim) {
 		db, store := s.DB("app", postgres.New())
 		if _, err := db.Exec(`CREATE TABLE tries (buyer text PRIMARY KEY, got boolean NOT NULL)`); err != nil {
@@ -344,7 +348,7 @@ func TestEagerStartDroppedWhenAStartTakesALock(t *testing.T) {
 			return nil
 		})
 	}, nil)
-	if !res.Violated || !strings.Contains(res.lazy, "took a lock") {
+	if !res.Violated || res.lazy != "" {
 		t.Fatalf("got %s", res.report())
 	}
 }
@@ -644,9 +648,10 @@ func TestEagerStartOffUnderShard(t *testing.T) {
 	}
 }
 
-// A start that moves a counter and moves it back leaves it as it found it,
-// but the value it drew still depends on where it started.
-func TestEagerStartDroppedWhenAStartRestoresACounter(t *testing.T) {
+// An INSERT evaluates nextval and setval in its values once it runs, so a
+// draw after another process advanced the sequence is explored with eager
+// starts.
+func TestEagerStartExploresADrawAfterAnotherProcess(t *testing.T) {
 	res, _ := explore(t, func(t *testing.T, s *Sim) {
 		db, _ := s.DB("app", postgres.New())
 		mustExec(t, db, `CREATE SEQUENCE s`)
@@ -666,7 +671,7 @@ func TestEagerStartDroppedWhenAStartRestoresACounter(t *testing.T) {
 		})
 		s.Sometimes("the drawer draws after the advancer", func(*State) bool { return got == 12 })
 	}, nil)
-	if res.Fatal != nil || !strings.Contains(res.lazy, "moved a sequence") || len(res.Unreached) > 0 {
+	if res.Fatal != nil || res.lazy != "" || len(res.Unreached) > 0 {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }

@@ -2273,6 +2273,9 @@ func (tx *Tx) insert(table string, row Row) error {
 		return err
 	}
 	row = row.clone()
+	// Before the defaults are drawn, as the SQL INSERT does (see
+	// sqlExec.execInsert).
+	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
@@ -2284,7 +2287,6 @@ func (tx *Tx) insert(table string, row Row) error {
 		return err
 	}
 	lk := lockKey{table, row.Key()}
-	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	tx.noteTableLock(table, lockUpdate)
 	// A row there already is checked under a shared lock, as InnoDB's
 	// duplicate check takes, which another failing insert shares.

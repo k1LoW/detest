@@ -145,9 +145,9 @@ func MaxPreemptions(n int) Option {
 // EagerStart sets whether a Manual process without After or When starts as
 // soon as it may start, without a choice, instead of at every step at which
 // it could start. It is on by default. Starting a process runs it up to its
-// first yield point, which reaches no simulated resource but the generated
-// values below, so where among the other processes' steps it starts changes
-// nothing they observe. When its first operation then runs is still
+// first yield point, which reaches no simulated resource, as a statement
+// reads, draws and locks nothing before its yield point, so where among the
+// other processes' steps it starts changes nothing they observe. When its first operation then runs is still
 // explored, so every interleaving of the processes' operations within the
 // bounds is still tried, and the runs that differ only in where a process
 // started are left out. Started this way, a process spends no preemption and
@@ -160,15 +160,13 @@ func MaxPreemptions(n int) Option {
 // in a variable should record it after a yield point, such as a Proc.Step,
 // so that it reads the time the schedule picks.
 //
-// A process that moves a sequence, AUTO_INCREMENT or generated uuid counter
-// or takes a lock before its first yield point, as an INSERT into a table
-// with a generated key or with pg_try_advisory_xact_lock in its values does
-// when it is the first statement and runs outside a transaction, gets a
-// result that depends on where it starts. So does one that stops short of
-// its first yield point outside detest, such as waiting for the connection of
+// A process that stops short of its first yield point outside detest gets a
+// result that depends on where it starts, such as waiting for the connection of
 // a database/sql pool another process holds or for goroutines of its own,
-// which detest cannot tell apart, and one that makes a call into detest that
-// returns without yielding, such as DB.Peek or Mutex.Unlock. A database/sql
+// which detest cannot tell apart. So does one that makes a call into detest
+// that returns without yielding, such as DB.Peek or Mutex.Unlock, and one
+// that moves a counter of generated values or takes a lock before its first
+// yield point, which detest checks for though no statement does it. A database/sql
 // connection is taken from the pool before the first yield point as well,
 // and it keeps its session settings and LAST_INSERT_ID from one process to
 // the next, so a run that sets a session setting on a connection, reads

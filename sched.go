@@ -876,7 +876,7 @@ func (r *run) startEager() (bool, *violation) {
 	// Explore starts over without EagerStart (see there) when the start did
 	// something another process could see, so that where it started
 	// matters.
-	if !maps.Equal(before, r.startEffects()) {
+	if before != r.startEffects() {
 		return true, &violation{kind: "fatal", err: &eagerStartError{proc: p.name, what: "moved a sequence, AUTO_INCREMENT or generated uuid counter or took a lock"}}
 	}
 	// A call that returned without yielding, such as DB.Peek or
@@ -897,30 +897,16 @@ func (r *run) startEager() (bool, *violation) {
 	return true, r.checkAlways()
 }
 
-// startEffects records the state of the databases that code before a yield
-// point can change, which an eager start must leave as it was: the counters
-// of generated values, which an INSERT draws from as it fills its defaults,
-// and the locks, which a function such as pg_try_advisory_xact_lock in its
-// values takes.
-func (r *run) startEffects() map[string]int64 {
-	m := map[string]int64{}
+// startEffects counts the changes the databases made to their counters of
+// generated values and their locks, which an eager start must make none
+// of. A statement makes none before its yield point, but UPDATE and DELETE
+// try their WHERE before it, which a locking subquery in it can lock from.
+func (r *run) startEffects() uint64 {
+	var n uint64
 	for _, db := range r.s.dbs {
-		for k, v := range db.seqs {
-			m[db.name+"\x00seq\x00"+k] = v
-		}
-		// Keys of their own, which no sequence name can take.
-		m[db.name+"\x00uuid"] = db.uuids
-		m[db.name+"\x00effects"] = int64(db.effects) //nolint:gosec // compared, never read as a number
-		for lk, holders := range db.locks {
-			for tx, mode := range holders {
-				m[fmt.Sprintf("%s\x00lock\x00%s\x00%s\x00%p", db.name, lk.table, lk.key, tx)] = int64(mode)
-			}
-		}
-		for _, g := range db.gaps {
-			m[fmt.Sprintf("%s\x00gap\x00%p", db.name, g)] = 1
-		}
+		n += db.effects
 	}
-	return m
+	return n
 }
 
 // breakEager records that the run did something whose outcome depends on
@@ -1607,9 +1593,9 @@ func (p *Proc) Context() context.Context { return p.r.ctx }
 // that runs a statement on a transaction it shares with p, get to where it
 // blocks before p goes on into the engine. It is no yield point: the
 // scheduler runs p on at once, without a choice. Without it, what p does in
-// the engine before its yield point, such as an insert taking a sequence's
-// value, would race those goroutines for the engine mutex, and the Go
-// runtime would decide the order.
+// the engine before its yield point, such as the checks a statement makes
+// against the schema, would race those goroutines for the engine mutex, and
+// the Go runtime would decide the order.
 func (p *Proc) drain() {
 	if p.r.over() {
 		return
