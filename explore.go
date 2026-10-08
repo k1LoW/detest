@@ -121,16 +121,20 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		if lazy != "" {
 			runOpts = append(slices.Clip(opts), withoutEagerStart(lazy))
 		}
-		stop := watchStall(f)
-		if n == 1 {
-			var r *result
-			if r, expect = exploreBubble(t, fn, runOpts, f, 0); r != nil {
-				res = f.merge([]*result{r}, 1)
+		// A pass of its own, so that the watchdog stops however the pass
+		// ends, a t.Fatal of the declaration function included.
+		func() {
+			stop := watchStall(f)
+			defer stop()
+			if n == 1 {
+				var r *result
+				if r, expect = exploreBubble(t, fn, runOpts, f, 0); r != nil {
+					res = f.merge([]*result{r}, 1)
+				}
+			} else {
+				res, expect = exploreWorkers(t, fn, runOpts, f, n)
 			}
-		} else {
-			res, expect = exploreWorkers(t, fn, runOpts, f, n)
-		}
-		stop()
+		}()
 		if res == nil {
 			return nil, nil // fn stopped the test
 		}
