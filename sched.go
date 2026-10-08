@@ -155,8 +155,8 @@ type run struct {
 	choices  []choice
 	pos      int
 	procs    []*Proc
-	opts     []option          // reused by enabled, whose result lives for one step
-	ids      map[*procType]int // instances started so far, by type, which name them
+	opts     []option       // reused by enabled, whose result lives for one step
+	ids      map[string]int // processes started so far, by name, which number them
 	clock    int64
 	trace    []step
 	failures int
@@ -316,8 +316,8 @@ type Proc struct {
 	dead atomic.Bool
 }
 
-// Name returns the instance name, the type's name and the instance's number
-// among the type's, such as "sweeper#2".
+// Name returns the instance name, the name it was declared or spawned with
+// and its number among the processes of that name, such as "sweeper#2".
 func (p *Proc) Name() string { return p.name }
 
 // Current returns the process whose goroutine is calling. Production code
@@ -488,8 +488,8 @@ func (r *run) execute() (v *violation) {
 				return v
 			}
 			if started {
-				// Settle first what the start set going, such as a goroutine
-				// to adopt, as after a step.
+				// Check what the start left as after a step, and look for
+				// another start that may be taken now.
 				continue
 			}
 		}
@@ -845,6 +845,10 @@ func (r *run) startEager() (bool, *violation) {
 	r.runs[pt]++
 	p := r.spawn(pt, nil)
 	r.resume(p)
+	// What the start set going, such as a goroutine to adopt, runs to its
+	// first yield point too, as it would within the start's step, and its
+	// draws count as the start's.
+	r.settle()
 	// The schedule picks no step here, so the process that ran last stays
 	// the one a switch is counted from. The start spends no preemption, and
 	// a resume of the new process is counted as a switch is now.
@@ -896,11 +900,12 @@ func (r *run) advanceClock() bool {
 }
 
 func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
-	// Numbered within the type, so that which instance gets which name does
-	// not depend on the order processes of different types started in,
-	// which EagerStart fixes.
-	r.ids[pt]++
-	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.ids[pt]), pt: pt, r: r,
+	// Numbered among the processes of the name, so that which instance gets
+	// which name does not depend on the order processes of other names
+	// started in, which EagerStart fixes. By name rather than by type, as
+	// Proc.Spawn makes a type for every process it spawns.
+	r.ids[pt.name]++
+	p := &Proc{name: pt.name + "#" + strconv.Itoa(r.ids[pt.name]), pt: pt, r: r,
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
@@ -1946,7 +1951,7 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[*procType]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.

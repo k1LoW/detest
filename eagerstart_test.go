@@ -271,3 +271,54 @@ func TestProcessNamesDoNotDependOnStartOrder(t *testing.T) {
 		})
 	}
 }
+
+// A goroutine a start sets going reaches its first call within the start, so
+// a generated key it draws there counts as the start's.
+func TestEagerStartCountsADrawOfAGoroutineItStarted(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		for _, buyer := range []string{"alice", "bob"} {
+			s.Manual(buyer, 1, func(p *Proc) error {
+				done := make(chan error)
+				go func() {
+					_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ($1)`, buyer)
+					done <- err
+				}()
+				return <-done
+			})
+		}
+	}, nil)
+	if res.Fatal != nil || res.lazy == "" {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
+
+// Every process Proc.Spawn spawns under one name gets a number of its own.
+func TestSpawnedProcessesOfOneNameGetNumbersOfTheirOwn(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE owners (name text PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		s.Manual("parent", 1, func(p *Proc) error {
+			for range 2 {
+				p.Spawn("runner", func(p *Proc) error {
+					_, err := db.ExecContext(p.Context(), `INSERT INTO owners VALUES ($1)`, p.Name())
+					return err
+				})
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			for _, want := range []string{"runner#1", "runner#2"} {
+				if _, ok := st.Row(store, "owners", want); !ok {
+					return fmt.Errorf("no owner %s", want)
+				}
+			}
+			return nil
+		})
+	})
+}
