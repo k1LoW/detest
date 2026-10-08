@@ -223,6 +223,31 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "case folding under the C collation and the database's",
+		Schema: []string{
+			`CREATE TABLE f (id int PRIMARY KEY, name text, code text COLLATE "C")`,
+			`CREATE TABLE g (id int PRIMARY KEY, code text COLLATE "C")`,
+			`CREATE UNIQUE INDEX g_lower ON g (lower(code))`,
+		},
+		Seed: []string{
+			`INSERT INTO f VALUES (1, 'Äb', 'Äb'), (2, 'äB', 'äB'), (3, 'ab', 'ab')`,
+			`INSERT INTO g VALUES (1, 'Äb'), (2, 'äB')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM f WHERE lower(name) = 'äb' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE lower(code) = 'äb' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE upper(code) = 'ÄB' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE upper(name COLLATE "C") = 'äB' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE name ILIKE 'äb' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE code ILIKE 'Ä%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE name ILIKE 'ÄB' COLLATE "POSIX" ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM f WHERE code NOT ILIKE 'AB' ORDER BY id`),
+			difftest.S(0, `INSERT INTO g VALUES (3, 'äb')`),
+			difftest.Q(0, `SELECT count(*) FROM g`),
+		},
+	},
+	{
 		Name: "IN and NOT IN over a subquery with NULLs",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,

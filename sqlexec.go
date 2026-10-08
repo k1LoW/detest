@@ -593,7 +593,7 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	}
 	// The collations and the materialized view above change the schema
 	// after applySchema dropped the cache.
-	x.tx.db.declaredCache = nil
+	x.tx.db.declaredCache, x.tx.db.keptCache = nil, nil
 	return x.fill(table, st, selCols, rows)
 }
 

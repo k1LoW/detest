@@ -464,6 +464,12 @@ func TestPersistedCollate(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t VALUES (2, 'Z')`); !errors.Is(err, ErrCheckViolation) {
 		t.Errorf("a CHECK ordered by fold: got %v, want a check violation", err)
 	}
+	// A CHECK without COLLATE orders by its column's collation.
+	mustExec(t, db, `CREATE TABLE c (id int PRIMARY KEY, name text COLLATE "fold" CHECK (name < 'm'))`)
+	mustExec(t, db, `INSERT INTO c VALUES (1, 'B')`)
+	if _, err := db.Exec(`INSERT INTO c VALUES (2, 'Z')`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("a CHECK of a column of fold: got %v, want a check violation", err)
+	}
 }
 
 // The built-in name type orders by C whatever the database's collation, as
@@ -506,5 +512,41 @@ func TestCheckSQLCollate(t *testing.T) {
 	}
 	if err := CheckSQL(postgres.New(), `SELECT name FROM t ORDER BY name COLLATE "en_US.utf8"`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("an undeclared collation: got %v, want unsupported", err)
+	}
+}
+
+// lower, upper and ILIKE fold case by the ctype of their collation, which a
+// Collation does not tell, so text under a declared collation other than C
+// and POSIX, or of a subquery where a column declares one, is refused. The
+// database's and C's are checked against Postgres in internal/difftest.
+func TestCaseFoldingCollations(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"en_US.utf8": foldCase{}})))
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text COLLATE "en_US.utf8", code text COLLATE "C", plain text)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'Äb', 'Äb', 'Äb')`)
+	for _, q := range []string{
+		`SELECT lower(name) FROM t`,
+		`SELECT upper(plain COLLATE "en_US.utf8") FROM t`,
+		`SELECT id FROM t WHERE name ILIKE 'äb'`,
+		`SELECT id FROM t WHERE plain NOT ILIKE 'x' COLLATE "en_US.utf8"`,
+		`SELECT lower(s.code) FROM (SELECT code FROM t) s`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT lower(code) FROM t`, []string{"Äb"}},
+		{`SELECT lower(plain) FROM t`, []string{"äb"}},
+		{`SELECT lower(name) IS NULL FROM t WHERE false`, nil},
+		{`SELECT id FROM t WHERE code ILIKE 'ÄB'`, []string{"1"}},
+		{`SELECT count(*) FROM t WHERE code ILIKE 'äb'`, []string{"0"}},
+	} {
+		if got := rowsOf(t, db, tc.q); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
+		}
 	}
 }

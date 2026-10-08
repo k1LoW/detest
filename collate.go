@@ -166,7 +166,12 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return x.collationOf(out)
 		}
 		n, ok := x.colls[e]
-		if !ok || !n.known {
+		if !ok {
+			// A column of an expression the table keeps, which the column
+			// check of the statement does not see.
+			n.name, n.known = x.tx.db.keptCollations()[e]
+		}
+		if !n.known {
 			return collationUse{unknown: true}, nil
 		}
 		return collationUse{name: n.name}, nil
@@ -475,6 +480,44 @@ func textlessOutputs(sel *sqlir.SelectStmt, n int) bool {
 	return true
 }
 
+// keptCollations are the collations the columns the expressions tables
+// keep refer to declare, by reference: those of CHECKs, generated columns,
+// defaults and unique indexes, which a write evaluates.
+func (db *DB) keptCollations() map[*sqlir.ColumnRef]string {
+	if db.keptCache != nil {
+		return db.keptCache
+	}
+	m := map[*sqlir.ColumnRef]string{}
+	for _, def := range db.defs {
+		add := func(e sqlir.Expr, alias map[string]string) {
+			for _, r := range sqlir.ColumnRefs(e) {
+				name := r.Column
+				if n, ok := alias[name]; ok {
+					name = n
+				}
+				m[r] = def.collations[name]
+			}
+		}
+		for _, c := range def.checks {
+			add(c.Expr, c.alias)
+		}
+		for _, g := range def.generated {
+			add(g.Expr, g.alias)
+		}
+		for _, d := range def.defaults {
+			add(d, nil)
+		}
+		for _, u := range def.uniques {
+			for _, e := range u.Elems {
+				add(e, nil)
+			}
+			add(u.Where, nil)
+		}
+	}
+	db.keptCache = m
+	return m
+}
+
 // declared is declaresCollations, kept until the schema changes, as the
 // explorations run the same statements on one schema again and again.
 func (db *DB) declared() bool {
@@ -551,9 +594,71 @@ func compareOrdered(c sqlir.Collation, a, b any) (int, bool) {
 	return compareValues(a, b)
 }
 
+// asciiFold is whether lower, upper and ILIKE fold the text of exprs, which
+// vals hold, to one case by ASCII only, as Postgres does under C and POSIX,
+// rather than by Go's Unicode mapping, which detest takes the database's
+// ctype to give. Another collation fails when a value is text: Postgres
+// folds by its ctype, which a Collation does not tell.
+func (x *sqlExec) asciiFold(vals []any, exprs ...sqlir.Expr) (bool, error) {
+	db := x.tx.db
+	if db.kind.InnoDB() || !slices.ContainsFunc(vals, func(v any) bool { _, ok := textValue(v); return ok }) {
+		return false, nil
+	}
+	u, err := x.combineAll(exprs)
+	if err != nil {
+		return false, err
+	}
+	if u.unknown && (x.collates || db.declared() || db.collatesColumns()) {
+		return false, x.unsupported("case folding of text of a subquery, view or CTE where a column or COLLATE sets a collation")
+	}
+	switch u.name {
+	case "", "default":
+		return false, nil
+	case "C", "POSIX":
+		return true, nil
+	}
+	return false, x.unsupported(fmt.Sprintf("case folding of text under collation %q, whose character classes detest does not know", u.name))
+}
+
+// collatesColumns reports whether a column declares a collation of any name,
+// C included, which declaresCollations does not count on a database of the
+// C collation.
+func (db *DB) collatesColumns() bool {
+	for _, def := range db.defs {
+		for _, c := range def.collations {
+			if c != "" && c != "default" {
+				return true
+			}
+		}
+	}
+	return len(db.collatedDomains) > 0
+}
+
+// foldASCII maps the ASCII letters of s to one case and leaves the others.
+func foldASCII(s string, upper bool) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case upper && r >= 'a' && r <= 'z':
+			return r - 'a' + 'A'
+		case !upper && r >= 'A' && r <= 'Z':
+			return r - 'A' + 'a'
+		}
+		return r
+	}, s)
+}
+
 // callOrdered is callFunc, with greatest and least of text ordered by the
-// collation of their arguments.
+// collation of their arguments, and lower and upper folding by it.
 func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
+	if (v.Name == "lower" || v.Name == "upper") && len(args) == 1 {
+		ascii, err := x.asciiFold(args, v.Args...)
+		if err != nil {
+			return nil, err
+		}
+		if t, ok := textValue(args[0]); ok && ascii {
+			return foldASCII(t, v.Name == "upper"), nil
+		}
+	}
 	if v.Name != "greatest" && v.Name != "least" {
 		return x.callFunc(v.Name, args)
 	}
@@ -616,10 +721,25 @@ func (x *sqlExec) keyCollations(keys []sqlir.OrderKey, vals [][]any) ([]sqlir.Co
 	return out, nil
 }
 
-// orderedOperands is v's comparison of the text l and r under the collation
-// of its operands, and false when v is not one, which binary takes.
+// orderedOperands is v's comparison or ILIKE of the text l and r under the
+// collation of its operands, and false when binary gives the same, which
+// binary takes.
 func (x *sqlExec) orderedOperands(v *sqlir.BinaryExpr, l, r any) (any, bool, error) {
 	switch v.Op {
+	case "ILIKE", "NOT ILIKE":
+		// Postgres folds both sides by the collation's ctype and matches
+		// them as LIKE does.
+		ascii, err := x.asciiFold([]any{l, r}, v.L, v.R)
+		if err != nil || !ascii {
+			return nil, false, err
+		}
+		lt, lok := textValue(l)
+		rt, rok := textValue(r)
+		if !lok || !rok {
+			return nil, false, nil
+		}
+		out, err := x.binary(strings.TrimSuffix(v.Op, "ILIKE")+"LIKE", foldASCII(lt, false), foldASCII(rt, false))
+		return out, true, err
 	case "<", "<=", ">", ">=":
 	default:
 		return nil, false, nil
