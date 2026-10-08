@@ -281,6 +281,9 @@ type ColumnDef struct {
 	// Using marks ALTER COLUMN TYPE ... USING, which converts the rows by an
 	// expression rather than by a cast to the new type.
 	Using bool
+	// Constrained is a domain with a constraint, a default or a modifier of
+	// its base type, which detest does not check.
+	Constrained bool
 	// NotNull adds NOT NULL (in CREATE TABLE, ADD COLUMN or SET NOT NULL);
 	// DropNotNull removes it.
 	NotNull     bool

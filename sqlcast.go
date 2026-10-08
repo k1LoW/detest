@@ -177,11 +177,12 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 // castTo is x.cast of v for c, cut to the length of a varchar(n) cast, as
 // an explicit cast cuts longer text.
 func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
-	// A cast to a domain casts to its base type; detest checks no domain's
-	// constraints.
+	// A cast to a domain casts to its base type, and one to a domain whose
+	// constraints, default or type modifier detest does not check is
+	// refused.
 	typ := x.tx.db.baseType(c.Type)
-	if typ == ambiguousDomain {
-		return nil, x.unsupported("a cast to " + ambiguousDomain)
+	if typ == ambiguousDomain || typ == constrainedDomain {
+		return nil, x.unsupported("a cast to " + typ)
 	}
 	out, err := x.cast(v, typ)
 	if err != nil || c.Len == 0 {

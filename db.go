@@ -1246,7 +1246,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
-		db.noteDomain(col.Name, db.qualifyDomain(ch.Table, col.Name), db.baseType(col.Type))
+		base := db.baseType(col.Type)
+		if col.Constrained {
+			base = constrainedDomain
+		}
+		db.noteDomain(col.Name, db.qualifyDomain(ch.Table, col.Name), base)
 		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}

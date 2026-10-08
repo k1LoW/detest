@@ -619,8 +619,8 @@ func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 		switch x.tx.db.baseType(typ) {
 		case "bytea":
 			return "bytea"
-		case ambiguousDomain:
-			return ambiguousDomain
+		case ambiguousDomain, constrainedDomain:
+			return x.tx.db.baseType(typ)
 		}
 		return ""
 	}

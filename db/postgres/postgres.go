@@ -551,8 +551,9 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
 	case *pg.Node_CreateDomainStmt:
 		// The base type is kept, which a column of the domain and a cast
-		// to it take, and the collation, which orders it. detest does not
-		// check the domain's constraints.
+		// to it take, and the collation, which orders it. A domain with a
+		// constraint, a default or a modifier of its base type is marked,
+		// as detest does not check them.
 		names := s.CreateDomainStmt.Domainname
 		if len(names) == 0 {
 			return nil, true, nil
@@ -566,7 +567,8 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		// schemas can be told apart; Columns[0].Name is the bare name a
 		// column's type is written with.
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", Create: true,
-			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause)}}}}, true, nil
+			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause),
+				Constrained: constrainedDomain(s.CreateDomainStmt)}}}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
@@ -2449,4 +2451,15 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		return between, nil
 	}
 	return nil, c.unsupported("operator kind " + e.Kind.String())
+}
+
+// constrainedDomain reports whether a domain declares a CHECK, NOT NULL or
+// a DEFAULT, or a modifier of its base type such as varchar(5)'s.
+func constrainedDomain(d *pg.CreateDomainStmt) bool {
+	for _, c := range d.Constraints {
+		if c.GetConstraint().GetContype() != pg.ConstrType_CONSTR_NULL {
+			return true
+		}
+	}
+	return len(d.GetTypeName().GetTypmods()) > 0
 }

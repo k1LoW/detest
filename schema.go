@@ -743,6 +743,13 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			cols = append(cols, c)
 		}
 	}
+	for _, col := range def.columns {
+		// Postgres checks the domain whether the write gives the column a
+		// value, NULL or none, against its NOT NULL and default.
+		if def.types[col] == constrainedDomain {
+			return x.unsupported(fmt.Sprintf("a write to a table with column %q, of %s", col, constrainedDomain))
+		}
+	}
 	for _, col := range cols {
 		v, present := row[col]
 		if !present {

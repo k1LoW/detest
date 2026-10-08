@@ -122,6 +122,11 @@ func (db *DB) existingDomain(table, bare string) string {
 // refuses.
 const ambiguousDomain = "a domain of a name two schemas declare with different base types"
 
+// constrainedDomain is the base type of a domain with a constraint, a
+// default or a modifier of its base type, which detest does not check, so
+// that a write to a table with a column of it and a cast to it are refused.
+const constrainedDomain = "a domain with a constraint, a default or a type modifier"
+
 // baseType is typ, or the base type of the domain typ names.
 func (db *DB) baseType(typ string) string {
 	if base, ok := db.domainBases[typ]; ok {
@@ -153,7 +158,7 @@ func collatableType(typ string) bool {
 // declares none of its own.
 func (db *DB) collatable(typ string) bool {
 	base := db.baseType(typ)
-	return collatableType(base) || base == ambiguousDomain || db.collatedDomains[typ]
+	return collatableType(base) || base == ambiguousDomain || base == constrainedDomain || db.collatedDomains[typ]
 }
 
 // noteOutput records that the ORDER BY key k names or numbers the select

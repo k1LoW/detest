@@ -670,3 +670,39 @@ func TestCaseMappingCollations(t *testing.T) {
 		}
 	}
 }
+
+// A domain with a CHECK, NOT NULL, a DEFAULT or a modifier of its base type
+// loads, but a write to a table with a column of it and a cast to it are
+// refused, as detest does not check them. A domain that declares only NULL,
+// and a domain over a marked one, are told apart.
+func TestConstrainedDomains(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE DOMAIN positive AS int CHECK (VALUE > 0)`,
+		`CREATE DOMAIN required AS text NOT NULL`,
+		`CREATE DOMAIN defaulted AS text DEFAULT 'x'`,
+		`CREATE DOMAIN short AS varchar(5)`,
+		`CREATE DOMAIN over AS positive`,
+		`CREATE DOMAIN nullable AS text NULL`,
+	} {
+		mustExec(t, db, q)
+	}
+	for _, typ := range []string{"positive", "required", "defaulted", "short", "over"} {
+		mustExec(t, db, `CREATE TABLE t_`+typ+` (id int PRIMARY KEY, v `+typ+`)`)
+		for _, q := range []string{
+			`INSERT INTO t_` + typ + ` VALUES (1, NULL)`,
+			`INSERT INTO t_` + typ + ` (id) VALUES (1)`,
+			`SELECT NULL::` + typ,
+		} {
+			if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s: got %v, want unsupported", q, err)
+			}
+		}
+	}
+	mustExec(t, db, `CREATE TABLE t_nullable (id int PRIMARY KEY, v nullable)`)
+	mustExec(t, db, `INSERT INTO t_nullable VALUES (1, NULL), (2, 'a')`)
+	if got := rowsOf(t, db, `SELECT count(*) FROM t_nullable WHERE v::nullable = 'a'`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a domain that declares only NULL: got %v", got)
+	}
+}
