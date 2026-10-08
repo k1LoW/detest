@@ -97,9 +97,6 @@ type sqlExec struct {
 	// outputs are the ORDER BY keys that name an output column, with the
 	// select list's expression they name.
 	outputs map[sqlir.Expr]sqlir.Expr
-	// declared caches whether a column of the database declares a
-	// collation other than the database's, which DML does not change.
-	declared *bool
 	// searchOuter is the row a joined table's search is run for, whose
 	// columns the search takes as constants.
 	searchOuter *searchOuter
@@ -331,7 +328,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// What the column check noted, and whether a column declares a
 			// collation, belong to the statement before, whose DDL may
 			// have changed the latter.
-			x.colls, x.outputs, x.collates, x.declared = nil, nil, false, nil
+			x.colls, x.outputs, x.collates = nil, nil, false
 			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			r, err := x.execStatement(sub)
@@ -584,6 +581,9 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	if st.Materialized {
 		x.tx.db.matviews[table] = st
 	}
+	// The collations and the materialized view above change the schema
+	// after applySchema dropped the cache.
+	x.tx.db.declaredCache = nil
 	return x.fill(table, st, selCols, rows)
 }
 

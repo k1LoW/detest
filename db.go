@@ -155,12 +155,14 @@ type DB struct {
 	// or are based on one that does. detest does not follow a domain's
 	// collation, so text of such a domain is not ordered (domainCollation).
 	collatedDomains map[string]bool
-	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
-	views           map[string]*sqlir.SchemaChange      // the query of each view
-	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
-	seqs            map[string]int64                    // sequence values of the run, for nextval
-	uuids           int64                               // gen_random_uuid values handed out in the run
-	ignored         map[string]bool                     // tables Ignore took out of the simulation
+	// declaredCache is declaresCollations, dropped by every schema change.
+	declaredCache *bool
+	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
+	views         map[string]*sqlir.SchemaChange      // the query of each view
+	seqDefs       map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
+	seqs          map[string]int64                    // sequence values of the run, for nextval
+	uuids         int64                               // gen_random_uuid values handed out in the run
+	ignored       map[string]bool                     // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -1153,6 +1155,8 @@ func (db *DB) newUUID() string {
 // in Postgres and sees the transaction's own writes, so renames and drops
 // carry tx's pending rows along.
 func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
+	db.declaredCache = nil
+	defer func() { db.declaredCache = nil }()
 	if db.defs == nil {
 		db.defs = map[string]*tableDef{}
 		db.matviews = map[string]*sqlir.CreateTableAsStmt{}

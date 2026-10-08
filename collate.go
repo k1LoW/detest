@@ -40,15 +40,16 @@ func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, erro
 	if db.kind.InnoDB() {
 		return nil, nil
 	}
-	if x.declared == nil {
-		d := db.declaresCollations()
-		x.declared = &d
-	}
-	if !*x.declared && !x.collates {
+	if !db.declared() && !x.collates {
 		return nil, nil
 	}
 	if sel.SetOp != "" || len(sel.Values) > 0 || len(sel.Targets) != n || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
-		return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+		// The columns cannot be mapped to a select list, which matters
+		// only when one of them can be text.
+		if !textlessOutputs(sel, n) {
+			return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+		}
+		return nil, nil
 	}
 	out := make([]string, n)
 	for i, t := range sel.Targets {
@@ -264,18 +265,14 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	if db.kind.InnoDB() {
 		return nil, nil
 	}
-	if x.declared == nil {
-		d := db.declaresCollations()
-		x.declared = &d
-	}
-	if _, bytes := db.kind.TextCollation().(sqlir.ByteOrder); bytes && !x.collates && !*x.declared {
+	if _, bytes := db.kind.TextCollation().(sqlir.ByteOrder); bytes && !x.collates && !db.declared() {
 		return nil, nil
 	}
 	u, err := x.combineAll(exprs)
 	if err != nil {
 		return nil, err
 	}
-	if u.unknown && (*x.declared || x.collates) {
+	if u.unknown && (db.declared() || x.collates) {
 		// The item's query may take the collation of a column or of a
 		// COLLATE of its own, which detest does not carry, and which matters
 		// only when the values are text.
@@ -381,6 +378,45 @@ func hasCollate(n any) bool {
 	}
 	walk(reflect.ValueOf(n))
 	return found
+}
+
+// textlessOutputs reports whether every one of the n columns sel gives has
+// a type the statement shows to be other than text, as in SELECT 1 UNION
+// SELECT 2, which needs no collation kept.
+func textlessOutputs(sel *sqlir.SelectStmt, n int) bool {
+	for sel.SetOp != "" {
+		sel = sel.Larg
+	}
+	var exprs []sqlir.Expr
+	if len(sel.Values) > 0 {
+		exprs = sel.Values[0]
+	} else {
+		for _, t := range sel.Targets {
+			if t.Star {
+				return false
+			}
+			exprs = append(exprs, t.Expr)
+		}
+	}
+	if len(exprs) != n {
+		return false
+	}
+	for _, e := range exprs {
+		if typ := expressionType(e, nil); typ == "" || collatableType(typ) {
+			return false
+		}
+	}
+	return true
+}
+
+// declared is declaresCollations, kept until the schema changes, as the
+// explorations run the same statements on one schema again and again.
+func (db *DB) declared() bool {
+	if db.declaredCache == nil {
+		d := db.declaresCollations()
+		db.declaredCache = &d
+	}
+	return *db.declaredCache
 }
 
 // declaresCollations reports whether a column or a domain of the database

@@ -225,6 +225,11 @@ func TestCollationsAcrossStatements(t *testing.T) {
 	if c, ok := store.defs[store.resolve("n")].collations["n"]; ok {
 		t.Errorf("the integer column n of CREATE TABLE AS keeps collation %q", c)
 	}
+	// Columns that cannot be text need no collation, whatever the query's
+	// shape, on a schema that declares collations.
+	mustExec(t, db, `CREATE TABLE decl (s text COLLATE "C")`)
+	mustExec(t, db, `CREATE TABLE ints AS SELECT 1 AS n UNION SELECT 2`)
+	mustExec(t, db, `CREATE TABLE vals AS VALUES (1, true), (2, false)`)
 	_, err := db.Exec(`SELECT id FROM t ORDER BY name; CREATE TABLE d (name text COLLATE "C"); INSERT INTO d VALUES ('b'), ('B'); SELECT s.name FROM (SELECT name FROM d) s ORDER BY s.name`)
 	if !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a script ordering a subquery's text after declaring a collation: got %v, want unsupported", err)
