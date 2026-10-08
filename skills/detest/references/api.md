@@ -82,6 +82,14 @@ mysql.New(mysql.Errors(mysqlerr.Convert))       // .../mysql/mysqlerr: *mysql.My
 mysql.New(mysql.Isolation(detest.ReadCommitted), mysql.Database("app"), mysql.Collation("utf8mb4_bin"))
 ```
 
+A libc collation, such as glibc's `en_US.utf8`, comes from `github.com/k1LoW/glibctext`, one package per glibc version and locale. It implements `LC_COLLATE` only, so embed the ctype's case mapping.
+
+```go
+type enUS struct{ detest.UnicodeCase } // en_US.UTF-8 maps case by Unicode
+func (enUS) Compare(a, b string) int { return en_us_utf8.Collation.Compare(a, b) } // github.com/k1LoW/glibctext/collate/glibc2_41/en_us_utf8
+postgres.New(postgres.Collation(enUS{}))
+```
+
 GORM is always given its connection through `gormpool`, so that goroutines sharing a GORM transaction (an errgroup deleting the rows its transaction locked) are scheduled and their lock waits explored rather than refused. Keep `PrepareStmt` off.
 
 ```go
