@@ -396,6 +396,8 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		return c.exprs(v.Items)
 	case *sqlir.Cast:
 		return c.expr(v.X)
+	case *sqlir.Collate:
+		return c.expr(v.X)
 	case *sqlir.CaseExpr:
 		if !c.innodb {
 			if what := intervalBranchMismatch(caseBranches(v), nil, nil); what != "" {

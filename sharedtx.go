@@ -312,6 +312,8 @@ func simpleExpr(e sqlir.Expr) bool {
 		return simpleExpr(e.X)
 	case *sqlir.Cast:
 		return simpleExpr(e.X)
+	case *sqlir.Collate:
+		return simpleExpr(e.X)
 	}
 	return false
 }
@@ -321,6 +323,8 @@ func isValue(e sqlir.Expr) bool {
 	case *sqlir.Param, *sqlir.Const:
 		return true
 	case *sqlir.Cast:
+		return isValue(e.X)
+	case *sqlir.Collate:
 		return isValue(e.X)
 	}
 	return false

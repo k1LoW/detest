@@ -16,6 +16,23 @@ type Server = sqlir.Server
 // IsolationLevel is a transaction isolation level.
 type IsolationLevel = sqlir.IsolationLevel
 
+// Collation orders text and maps its case for a Postgres database, as
+// postgres.Collation and postgres.Collations declare it. detest has C and
+// C.UTF-8 (postgres.C, postgres.CUTF8); another, such as the one glibc
+// gives en_US.utf8, comes from a package of its own. ByteOrder, ASCIICase
+// and UnicodeCase can be embedded for the half one shares with them.
+type Collation = sqlir.Collation
+
+// ByteOrder orders text byte by byte, which is code point order in UTF-8.
+type ByteOrder = sqlir.ByteOrder
+
+// ASCIICase maps the case of the ASCII letters only, as the C ctype does.
+type ASCIICase = sqlir.ASCIICase
+
+// UnicodeCase maps the case of each character by Unicode's simple case
+// mapping, as a UTF-8 ctype such as C.UTF-8 does.
+type UnicodeCase = sqlir.UnicodeCase
+
 // The isolation levels. The semantics of a level depend on the kind of
 // server, and detest implements a level only for the kinds it lists.
 const (

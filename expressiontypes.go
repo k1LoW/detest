@@ -19,6 +19,8 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	switch e := e.(type) {
 	case *sqlir.Cast:
 		return e.Type
+	case *sqlir.Collate:
+		return expressionTypeIn(e.X, column, subquery)
 	case *sqlir.ColumnRef:
 		if column != nil {
 			return column(e)

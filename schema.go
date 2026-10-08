@@ -743,6 +743,13 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			cols = append(cols, c)
 		}
 	}
+	for _, col := range def.columns {
+		// Postgres checks the domain whether the write gives the column a
+		// value, NULL or none, against its NOT NULL and default.
+		if def.types[col] == constrainedDomain {
+			return x.unsupported(fmt.Sprintf("a write to a table with column %q, of %s", col, constrainedDomain))
+		}
+	}
 	for _, col := range cols {
 		v, present := row[col]
 		if !present {
@@ -753,6 +760,24 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			continue
 		}
 		t := def.types[col]
+		if t == ambiguousDomain {
+			return x.unsupported(fmt.Sprintf("a value written to column %q, of %s", col, ambiguousDomain))
+		}
+		if t == untypedCTAS {
+			return x.unsupported(fmt.Sprintf("a value written to column %q, %s", col, untypedCTAS))
+		}
+		if t == "bytea" && !x.tx.db.kind.InnoDB() {
+			// A bytea is held as its bytes, so that a literal and a []byte
+			// parameter of one value are one value.
+			if s, ok := v.(string); ok {
+				b, berr := parseBytea(s)
+				if berr != nil {
+					return x.tx.db.kind.Error(berr.kind, berr.msg, relname(table), col, "")
+				}
+				row[col] = b
+			}
+			continue
+		}
 		if x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
 			if l, ok := def.strs[col]; ok && l.members != nil {
 				stored, err := x.mysqlMember(table, col, l, v)

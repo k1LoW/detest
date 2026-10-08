@@ -937,6 +937,10 @@ func TestRowComparison(t *testing.T) {
 		`SELECT count(*) FROM p WHERE (name, a) = (1, 9)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (1, 2, 3)`,
 		`SELECT count(*) FROM p WHERE (SELECT a, b FROM p LIMIT 1) = (a, b)`,
+		`SELECT a FROM p ORDER BY (name, a)`,
+		`SELECT (name, a) AS pair FROM p ORDER BY pair`,
+		`SELECT (name, a) FROM p ORDER BY 1`,
+		`SELECT a, row_number() OVER (ORDER BY (a, b)) FROM p`,
 		`SELECT count(*) FROM p WHERE (a, b) = (SELECT a, b, name FROM p LIMIT 1)`,
 		`SELECT count(*) FROM p WHERE (a, b) = (SELECT * FROM p LIMIT 1)`,
 	} {

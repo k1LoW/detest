@@ -27,6 +27,8 @@ type config struct {
 	convert    func(*sqlir.DBError) error
 	timeZone   *time.Location
 	zoneErr    error
+	collation  sqlir.Collation
+	collations map[string]sqlir.Collation
 }
 
 // Isolation sets the level transactions run at when they do not ask for one,
@@ -57,6 +59,41 @@ func TimeZone(name string) Option {
 	}
 }
 
+// C is the C and POSIX collation: byte order, and lower, upper and ILIKE
+// mapping the case of ASCII letters only.
+var C sqlir.Collation = sqlir.C{}
+
+// CUTF8 is C.UTF-8: byte order, and lower, upper and ILIKE mapping the case
+// of every character by Unicode.
+var CUTF8 sqlir.Collation = sqlir.CUTF8{}
+
+// Collation sets the database's collation, which orders text that declares
+// none, ORDER BY, <, min and max over it, and maps its case, lower, upper
+// and ILIKE (default CUTF8). It must be the collation and the ctype the real
+// database has, or the statements that order or case map text read and
+// lock other rows than they do in production. pg_database shows them by
+// their provider, datlocprovider: datcollate and datctype for libc, and for
+// ICU and the builtin provider datlocale on Postgres 17 and later and
+// daticulocale on 15 and 16. Before 15 there is libc only. A database of
+// the C locale takes C, and one that orders as C and maps case by Unicode,
+// as C.UTF-8 does, CUTF8. A ctype with case rules of its own, such as
+// tr_TR.UTF-8, which maps I to a dotless ı, needs a Collation whose Lower
+// and Upper follow them. Equality does not depend on it, as Postgres tells
+// two strings equal only when their bytes are.
+func Collation(c sqlir.Collation) Option {
+	return func(cf *config) { cf.collation = c }
+}
+
+// Collations declares the collations COLLATE and a column may name, besides
+// "C", "POSIX" (both C) and "default", which detest knows. An unqualified
+// name is declared as it is written, such as en_US.utf8, and a name in a
+// schema other than pg_catalog with each part double quoted, as
+// `"app"."name"`. A statement that orders or case maps text by a collation
+// neither names is refused.
+func Collations(named map[string]sqlir.Collation) Option {
+	return func(cf *config) { cf.collations = named }
+}
+
 // Errors sets how the database errors detest raises reach the code under
 // test. Production code branches on its driver's error type, such as pgx's
 // *pgconn.PgError; convert builds that type from the SQLSTATE and the details
@@ -73,15 +110,17 @@ func New(opts ...Option) sqlir.Server {
 		o(c)
 	}
 	return sqlir.NewServer(sqlir.ServerSpec{
-		Name:        "postgres",
-		Parser:      parser{},
-		Isolation:   c.isolation,
-		Supported:   []sqlir.IsolationLevel{sqlir.ReadCommitted},
-		SearchPath:  c.searchPath,
-		Codes:       codes,
-		Convert:     c.convert,
-		TimeZone:    c.timeZone,
-		TimeZoneErr: c.zoneErr,
+		Name:          "postgres",
+		Parser:        parser{},
+		Isolation:     c.isolation,
+		Supported:     []sqlir.IsolationLevel{sqlir.ReadCommitted},
+		SearchPath:    c.searchPath,
+		Codes:         codes,
+		Convert:       c.convert,
+		TimeZone:      c.timeZone,
+		TimeZoneErr:   c.zoneErr,
+		TextCollation: c.collation,
+		Collations:    c.collations,
 	})
 }
 
@@ -428,6 +467,20 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
+		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_DOMAIN {
+			for _, obj := range s.DropStmt.Objects {
+				var parts []string
+				for _, n := range obj.GetTypeName().GetNames() {
+					parts = append(parts, n.GetString_().GetSval())
+				}
+				if len(parts) == 0 {
+					continue
+				}
+				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "domain", Drop: true,
+					Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE, Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
+			}
+			return changes, true, nil
+		}
 		object, ok := map[pg.ObjectType]string{pg.ObjectType_OBJECT_TABLE: "", pg.ObjectType_OBJECT_VIEW: "view",
 			pg.ObjectType_OBJECT_MATVIEW: "matview", pg.ObjectType_OBJECT_INDEX: "index", pg.ObjectType_OBJECT_SEQUENCE: "sequence"}[s.DropStmt.RemoveType]
 		if !ok {
@@ -464,6 +517,23 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return []sqlir.SchemaChange{{Table: rangeVarName(r.Relation), RenameConstraint: [2]string{r.Subname, r.Newname}, IfExists: r.MissingOk}}, true, nil
 		case pg.ObjectType_OBJECT_INDEX:
 			return []sqlir.SchemaChange{{Table: rangeVarName(r.Relation), Object: "index", RenameConstraint: [2]string{r.Relation.GetRelname(), r.Newname}, IfExists: r.MissingOk}}, true, nil
+		case pg.ObjectType_OBJECT_DOMAIN, pg.ObjectType_OBJECT_TYPE:
+			// A domain's collation follows it to its new name; renaming
+			// another type changes nothing detest keeps.
+			var parts []string
+			for _, n := range r.Object.GetList().GetItems() {
+				parts = append(parts, n.GetString_().GetSval())
+			}
+			if len(parts) == 0 {
+				return nil, true, nil
+			}
+			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && builtinTypes[r.Newname] {
+				return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", r.Newname))
+			}
+			// Columns[0].Name is the bare name, which a dot in a quoted
+			// identifier would make Table's last part misread.
+			return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", RenameTo: r.Newname,
+				Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}}, true, nil
 		}
 		return nil, true, nil
 	case *pg.Node_DoStmt:
@@ -482,11 +552,36 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, err
 		}
 		return []sqlir.SchemaChange{{Table: rangeVarName(s.AlterSeqStmt.Sequence), Object: "sequence", Sequence: opts, IfExists: s.AlterSeqStmt.MissingOk}}, true, nil
+	case *pg.Node_CreateDomainStmt:
+		// The base type is kept, which a column of the domain and a cast
+		// to it take, and the collation, which orders it. A domain with a
+		// constraint, a default or a modifier of its base type is marked,
+		// as detest does not check them.
+		names := s.CreateDomainStmt.Domainname
+		if len(names) == 0 {
+			return nil, true, nil
+		}
+		name := names[len(names)-1].GetString_().GetSval()
+		if builtinTypes[name] {
+			// Postgres finds the built-in type first by its bare name,
+			// which is all a column of the domain keeps in detest.
+			return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", name))
+		}
+		var parts []string
+		for _, n := range names {
+			parts = append(parts, n.GetString_().GetSval())
+		}
+		// Table is the qualified name, so that domains of one name in two
+		// schemas can be told apart; Columns[0].Name is the bare name a
+		// column's type is written with.
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", Create: true,
+			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause),
+				Constrained: constrainedDomain(s.CreateDomainStmt)}}}}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
 		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
-		*pg.Node_CompositeTypeStmt, *pg.Node_CreateDomainStmt, *pg.Node_DefineStmt,
+		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
 		*pg.Node_AlterEnumStmt, *pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
 		*pg.Node_CreateStatsStmt, *pg.Node_AlterObjectSchemaStmt:
 		return nil, true, nil
@@ -610,9 +705,32 @@ func unqualify(e sqlir.Expr) {
 	}
 }
 
+// collationName is the name a COLLATE clause gives, empty without one. An
+// unqualified name is kept as written, en_US.utf8 among them, and so is a
+// name in pg_catalog, which pg_dump qualifies the built-in ones with
+// (pg_catalog."C"). A name in any other schema is written with each part
+// double quoted, "app"."name", since two schemas may have collations of the
+// same name, and an unqualified collation may be named app.name itself.
+func collationName(cc *pg.CollateClause) string {
+	var parts []string
+	for _, n := range cc.GetCollname() {
+		parts = append(parts, n.GetString_().GetSval())
+	}
+	if len(parts) > 1 && parts[0] == "pg_catalog" {
+		parts = parts[1:]
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	for i, p := range parts {
+		parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+	}
+	return strings.Join(parts, ".")
+}
+
 // columnDef converts a column with the constraints written on it.
 func (c *pgConv) columnDef(table string, d *pg.ColumnDef) (sqlir.ColumnDef, []sqlir.UniqueDef, []sqlir.CheckDef, error) {
-	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName)}
+	col := sqlir.ColumnDef{Name: d.Colname, Type: typeName(d.TypeName), Collation: collationName(d.CollClause)}
 	if err := c.columnLimits(&col, d.TypeName); err != nil {
 		return col, nil, nil, err
 	}
@@ -1119,7 +1237,7 @@ func (c *pgConv) alterTable(s *pg.AlterTableStmt) (*sqlir.SchemaChange, error) {
 			ch.ForeignKeys = append(ch.ForeignKeys, columnForeignKeys(cmd.Def.GetColumnDef())...)
 		case pg.AlterTableType_AT_AlterColumnType:
 			if cd := cmd.Def.GetColumnDef(); cd != nil {
-				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true, Using: cd.RawDefault != nil}
+				col := sqlir.ColumnDef{Name: cmd.Name, Type: typeName(cd.TypeName), TypeOnly: true, Using: cd.RawDefault != nil, Collation: collationName(cd.CollClause)}
 				if err := c.columnLimits(&col, cd.TypeName); err != nil {
 					return nil, err
 				}
@@ -1767,6 +1885,12 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			return &sqlir.Const{Value: v.Boolval.Boolval}, nil
 		}
 		return nil, c.unsupported("constant")
+	case *pg.Node_CollateClause:
+		x, err := c.expr(e.CollateClause.Arg)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlir.Collate{X: x, Name: collationName(e.CollateClause)}, nil
 	case *pg.Node_TypeCast:
 		if len(e.TypeCast.TypeName.GetArrayBounds()) > 0 {
 			// Dropping array bounds would run scalar casts and operators
@@ -2335,4 +2459,26 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 		return between, nil
 	}
 	return nil, c.unsupported("operator kind " + e.Kind.String())
+}
+
+// constrainedDomain reports whether a domain declares a CHECK, NOT NULL or
+// a DEFAULT, or a modifier of its base type such as varchar(5)'s.
+func constrainedDomain(d *pg.CreateDomainStmt) bool {
+	for _, c := range d.Constraints {
+		if c.GetConstraint().GetContype() != pg.ConstrType_CONSTR_NULL {
+			return true
+		}
+	}
+	return len(d.GetTypeName().GetTypmods()) > 0
+}
+
+// builtinTypes are the names of pg_catalog's types a column is commonly
+// declared with, as typeName gives them, which a domain of the name would
+// shadow by its bare name in detest but not in Postgres.
+var builtinTypes = map[string]bool{
+	"bool": true, "boolean": true, "int2": true, "int4": true, "int8": true, "smallint": true, "integer": true, "int": true, "bigint": true,
+	"float4": true, "float8": true, "real": true, "numeric": true, "decimal": true, "money": true,
+	"text": true, "varchar": true, "bpchar": true, "char": true, "name": true, "bytea": true, "uuid": true,
+	"date": true, "time": true, "timetz": true, "timestamp": true, "timestamptz": true, "interval": true,
+	"json": true, "jsonb": true, "xml": true, "inet": true, "cidr": true, "macaddr": true, "oid": true,
 }
