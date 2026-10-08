@@ -908,8 +908,9 @@ func (r *run) startEffects() map[string]int64 {
 		for k, v := range db.seqs {
 			m[db.name+"\x00seq\x00"+k] = v
 		}
-		// A key of its own, which no sequence name can take.
+		// Keys of their own, which no sequence name can take.
 		m[db.name+"\x00uuid"] = db.uuids
+		m[db.name+"\x00effects"] = int64(db.effects) //nolint:gosec // compared, never read as a number
 		for lk, holders := range db.locks {
 			for tx, mode := range holders {
 				m[fmt.Sprintf("%s\x00lock\x00%s\x00%s\x00%p", db.name, lk.table, lk.key, tx)] = int64(mode)

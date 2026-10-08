@@ -176,7 +176,11 @@ type DB struct {
 	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs            map[string]int64                    // sequence values of the run, for nextval
 	uuids           int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
-	ignored         map[string]bool                     // tables Ignore took out of the simulation
+	// effects counts the changes to the counters of generated values and to
+	// the locks, which an eager start must make none of, even ones that a
+	// later change in the same start undoes (see startEffects).
+	effects uint64
+	ignored map[string]bool // tables Ignore took out of the simulation
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
@@ -1147,6 +1151,7 @@ func (db *DB) nextval(seq string) (int64, string) {
 		v = d.first
 	}
 	db.seqs[seq] = v
+	db.effects++
 	return v, ""
 }
 
@@ -1158,12 +1163,14 @@ func (db *DB) setval(seq string, v int64, called bool) {
 		v -= db.seqOptions(seq).inc
 	}
 	db.seqs[seq] = v
+	db.effects++
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
 // random bits, so a schedule replays with the same ids.
 func (db *DB) newUUID() string {
 	db.uuids++
+	db.effects++
 	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
 }
 

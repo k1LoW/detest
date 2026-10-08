@@ -126,8 +126,10 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 			if cur, held := holders[tx]; !held {
 				holders[tx] = mode
 				tx.locks = append(tx.locks, lk)
+				tx.db.effects++
 			} else if mode > cur {
 				holders[tx] = mode
+				tx.db.effects++
 			}
 			if grant == (lockStruct{}) && tx.db.kind.InnoDB() {
 				if tx.implicit == nil {
@@ -558,6 +560,7 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 			continue
 		}
 		delete(holders, tx)
+		tx.db.effects++
 		delete(tx.grants, lk)
 		delete(tx.implicit, lk)
 		delete(tx.explicit, lk)

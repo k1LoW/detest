@@ -643,3 +643,30 @@ func TestEagerStartOffUnderShard(t *testing.T) {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
+
+// A start that moves a counter and moves it back leaves it as it found it,
+// but the value it drew still depends on where it started.
+func TestEagerStartDroppedWhenAStartRestoresACounter(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE SEQUENCE s`)
+		mustExec(t, db, `CREATE TABLE t (a bigint, b bigint)`)
+		s.Seed(func() { mustExec(t, db, `SELECT setval('s', 10)`) })
+		var got int64
+		s.Seed(func() { got = 0 })
+		s.Manual("drawer", 1, func(p *Proc) error {
+			if _, err := db.ExecContext(p.Context(), `INSERT INTO t VALUES (nextval('s'), setval('s', 10))`); err != nil {
+				return err
+			}
+			return db.QueryRowContext(p.Context(), `SELECT max(a) FROM t`).Scan(&got)
+		})
+		s.Manual("advancer", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `SELECT nextval('s')`)
+			return err
+		})
+		s.Sometimes("the drawer draws after the advancer", func(*State) bool { return got == 12 })
+	}, nil)
+	if res.Fatal != nil || !strings.Contains(res.lazy, "moved a sequence") || len(res.Unreached) > 0 {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
