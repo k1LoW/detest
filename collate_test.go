@@ -387,6 +387,15 @@ func TestBytesAsText(t *testing.T) {
 	if err := db.QueryRow(`SELECT payload FROM lit WHERE id = 1`).Scan(&raw); err != nil || string(raw) != "a" {
 		t.Errorf("a bytea literal read back: got %q, %v", raw, err)
 	}
+	// A []byte parameter is read when the statement runs, as a server reads
+	// it, so the caller reusing the buffer after changes nothing written.
+	buf := []byte("q")
+	mustExec(t, db, `CREATE TABLE reused (id int PRIMARY KEY, payload bytea)`)
+	mustExec(t, db, `INSERT INTO reused VALUES (1, $1)`, buf)
+	buf[0] = 'r'
+	if got := rowsOf(t, db, `SELECT id FROM reused WHERE payload = 'q'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a []byte parameter changed after the write: got %v", got)
+	}
 	// A CREATE TABLE AS column of bytea is bytea, by the query's type or,
 	// for a *, by its values, so a later bytea literal written to it is
 	// read as bytea input.
