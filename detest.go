@@ -142,32 +142,50 @@ func MaxPreemptions(n int) Option {
 	return func(s *Sim) { s.maxPreemptions = n; s.boundPreemptions = true }
 }
 
-// EagerStart starts a Manual process without After or When as soon as it may
-// start, without a choice, instead of exploring every step at which it could
-// start. Starting a process runs it up to its first yield point, which
-// reaches no simulated resource but the generated values below, so where
-// among the other processes' steps it starts changes nothing they observe. When its first operation then runs
-// is still explored, so every interleaving of the processes' operations
-// within the bounds is still tried, and the runs that differ only in where a
-// process started are left out. Started this way, a process spends no
-// preemption and the process that ran last stays the one a switch is counted
-// from.
+// EagerStart sets whether a Manual process without After or When starts as
+// soon as it may start, without a choice, instead of at every step at which
+// it could start. It is on by default. Starting a process runs it up to its
+// first yield point, which reaches no simulated resource but the generated
+// values below, so where among the other processes' steps it starts changes
+// nothing they observe. When its first operation then runs is still
+// explored, so every interleaving of the processes' operations within the
+// bounds is still tried, and the runs that differ only in where a process
+// started are left out. Started this way, a process spends no preemption and
+// the process that ran last stays the one a switch is counted from.
 //
 // It assumes that the code a Manual process runs before its first yield
 // point reads or writes no state outside detest, such as a package variable,
-// in an order that matters. detest cannot see such state and does not check
-// this. It does check the state of its own the code before a yield point can
-// change. A process that draws a sequence, AUTO_INCREMENT or
-// gen_random_uuid value before its first yield point, as an INSERT into a
-// table with a generated key does when it is the first statement and runs
-// outside a transaction, stops the exploration, since the value it gets
-// depends on where it starts. The clock is not one of these counters, since
+// in an order that matters. detest cannot see such state, as it explores no
+// race through it anywhere else. A test that records when a process began
+// in a variable should record it after a yield point, such as a Proc.Step,
+// so that it reads the time the schedule picks.
+//
+// A process that draws a sequence, AUTO_INCREMENT or gen_random_uuid value
+// before its first yield point, as an INSERT into a table with a generated
+// key does when it is the first statement and runs outside a transaction,
+// gets a value that depends on where it starts. Explore then starts the
+// exploration over without EagerStart and says so in its report, and the
+// schedules it prints replay without it. The clock needs no such check, since
 // while a start is left the scheduler has a step to take and the clock does
 // not move.
-//
-// The choices of a schedule differ with and without EagerStart, so a
-// schedule printed by one does not replay under the other.
-func EagerStart() Option { return func(s *Sim) { s.eagerStart = true } }
+func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
+
+// withoutEagerStart is EagerStart(false) after a start drew a generated
+// value, which the report and the schedules it prints carry.
+func withoutEagerStart(why string) Option {
+	return func(s *Sim) { s.eagerStart, s.lazy = false, why }
+}
+
+// eagerDrawError is a start that drew a generated value under EagerStart.
+type eagerDrawError struct{ proc string }
+
+func (e *eagerDrawError) Error() string {
+	return e.proc + " drew a sequence, AUTO_INCREMENT or gen_random_uuid value before its first yield point, so the value depends on where it starts"
+}
+
+// lazyPrefix marks a schedule explored without EagerStart after a start drew
+// a generated value, so that it replays without it in a test that leaves it on.
+const lazyPrefix = "lazy:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
 // DETEST_MAX_RUNS overrides n.
@@ -205,7 +223,9 @@ func Shard(index, total, depth int) Option {
 func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 
 // Replay makes Explore run the one schedule a violation was reported with
-// (the value printed after DETEST_REPLAY=) instead of exploring. A
+// (the value printed after DETEST_REPLAY=) instead of exploring. One printed
+// by an exploration that dropped EagerStart starts with "lazy:" and replays
+// without it. A
 // regression test pins the counterexample of a bug with it: with
 // ExpectViolation it fails once the bug is fixed, without it it fails while
 // the bug is there. A schedule recorded before the code under test changed
@@ -237,6 +257,7 @@ type Sim struct {
 	maxSpins         int
 	boundPreemptions bool
 	eagerStart       bool
+	lazy             string // why EagerStart was dropped (see withoutEagerStart)
 	maxRuns          int
 	maxDuration      time.Duration
 	verbose          bool
@@ -308,7 +329,7 @@ type Sim struct {
 }
 
 func newSimDefaults() *Sim {
-	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100}
+	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100, eagerStart: true}
 }
 
 func newSim(t *testing.T, opts ...Option) *Sim {
@@ -430,7 +451,8 @@ type result struct {
 	Complete bool
 	Shard    string // "index/total" when DETEST_SHARD or Shard splits the exploration across machines
 	strategy strategy
-	eager    bool // EagerStart applied
+	eager    bool   // EagerStart applied
+	lazy     string // why EagerStart was dropped, if it was
 	Workers  int
 	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
@@ -459,6 +481,9 @@ type result struct {
 func (r *result) report() string {
 	var msg strings.Builder
 	msg.WriteString(r.outcome())
+	if r.lazy != "" {
+		fmt.Fprintf(&msg, "\ndetest: explored without EagerStart, as %s; the runs branched on where each process started", r.lazy)
+	}
 	if r.Shared > 0 {
 		fmt.Fprintf(&msg, "\ndetest: %d statements ran from goroutines sharing a transaction with their process, each at once, without interleaving with other processes", r.Shared)
 	}
@@ -545,6 +570,12 @@ func (s *Sim) countShared(r *run) {
 func (s *Sim) check() *result {
 	start := time.Now()
 	if sched, fromEnv := replaySchedule(s.schedule); sched != "" {
+		if rest, ok := strings.CutPrefix(sched, lazyPrefix); ok {
+			sched = rest
+			if s.lazy == "" {
+				s.eagerStart, s.lazy = false, "the schedule replayed was explored without it"
+			}
+		}
 		var prefix []choice
 		for f := range strings.SplitSeq(sched, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(f))
@@ -642,8 +673,12 @@ func (s *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, s
 	for _, c := range r.choices {
 		sched = append(sched, strconv.Itoa(c.picked))
 	}
+	schedule := strings.Join(sched, ",")
+	if s.lazy != "" {
+		schedule = lazyPrefix + schedule
+	}
 	res := &result{Runs: runs, MaxDepth: depth, Complete: complete, Elapsed: time.Since(start),
-		Schedule: strings.Join(sched, ","), Trace: r.traceString()}
+		Schedule: schedule, Trace: r.traceString()}
 	if v != nil {
 		res.Violated, res.Kind, res.Err = true, v.kind, v.err
 	}

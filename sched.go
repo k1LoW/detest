@@ -853,7 +853,8 @@ func (r *run) startEager() (bool, *violation) {
 		return true, r.pending
 	}
 	if !maps.Equal(draws, r.draws()) {
-		return true, &violation{kind: "fatal", err: fmt.Errorf("detest: %s drew a sequence, AUTO_INCREMENT or gen_random_uuid value before its first yield point, such as with an INSERT into a table with a generated key run outside a transaction, so under EagerStart the value it gets depends on where it starts; explore it without EagerStart", p.name)}
+		// Explore starts over without EagerStart (see there).
+		return true, &violation{kind: "fatal", err: &eagerDrawError{proc: p.name}}
 	}
 	return true, r.checkAlways()
 }

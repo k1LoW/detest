@@ -29,8 +29,9 @@ func TestRandomWorkersReportTheFirstViolation(t *testing.T) {
 	t.Setenv("DETEST_SHARD", "")
 	model := func(t *testing.T, s *Sim) { counterModel(s, false) }
 	// Under seed 17 the first runs pass, so the 4 workers find violations
-	// in other runs before the first one.
-	opts := []Option{Random(17)}
+	// in other runs before the first one. Branching on where the
+	// processes start is what lets those first runs pass.
+	opts := []Option{Random(17), EagerStart(false)}
 	one, _ := exploreBubble(t, model, opts, nil, 0)
 	if !one.Violated || one.Runs <= 4 {
 		t.Fatalf("want a violation after more runs than workers, got %s", one.report())

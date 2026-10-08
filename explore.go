@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -31,71 +32,9 @@ import (
 // more to record its trace, so seeds and invariants see that run twice.
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
-	start := time.Now()
-	env, err := envOptions()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts = append(slices.Clip(opts), env...)
-	n := workerCount(opts)
-	maxRuns, maxDuration := limitsOf(opts)
-	f := newFrontier(n, maxRuns)
-	st := strategyOf(opts)
-	if st.prioritized && st.depth < 1 {
-		t.Fatal("detest: Prioritized needs a depth of at least 1")
-	}
-	f.random = st.random
-	if maxDuration != 0 {
-		// The clock inside the bubbles is fake, so the deadline is kept by a
-		// timer outside them.
-		timer := time.AfterFunc(maxDuration, f.expire)
-		defer timer.Stop()
-	}
-	// Work done once per process, such as compiling a parser, makes no
-	// scheduling progress, so it is done before the watchdog starts.
-	sqlir.Warmup()
-	stop := watchStall(f)
-	defer stop()
-	ckpt := os.Getenv("DETEST_CHECKPOINT")
-	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
-		ckpt = "" // a replay neither resumes nor ends an exploration
-	}
-	if ckpt != "" && f.random {
-		// A random exploration has no subtrees left to save: it goes on with
-		// another seed instead.
-		t.Fatal("detest: DETEST_CHECKPOINT does not apply to Random or Prioritized; run again with another seed")
-	}
-	if ckpt != "" {
-		if err := f.load(ckpt); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var res *result
-	var expect *string
-	if n == 1 {
-		var r *result
-		if r, expect = exploreBubble(t, fn, opts, f, 0); r != nil {
-			res = f.merge([]*result{r}, 1)
-		}
-	} else {
-		res, expect = exploreWorkers(t, fn, opts, f, n)
-	}
+	res, expect := explore(t, fn, opts)
 	if res == nil {
 		return // fn stopped the test
-	}
-	if res.Fatal != nil {
-		t.Fatal(res.Fatal)
-	}
-	res.Elapsed = time.Since(start) // the bubble's clock is fake
-	res.PriorRuns = f.prior
-	if ckpt != "" {
-		if res.Violated || res.Complete {
-			_ = os.Remove(ckpt) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
-		} else if err := f.save(ckpt); err != nil {
-			t.Error(err)
-		} else {
-			res.Checkpoint = ckpt
-		}
 	}
 	switch {
 	case expect == nil && res.Violated:
@@ -113,6 +52,102 @@ func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	default:
 		t.Log(res.report())
 	}
+}
+
+// explore runs the exploration Explore reports on, starting it over without
+// EagerStart when a start drew a generated value, and saves or ends the
+// checkpoint.
+func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*result, *string) {
+	t.Helper()
+	start := time.Now()
+	env, err := envOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts = append(slices.Clip(opts), env...)
+	n := workerCount(opts)
+	maxRuns, maxDuration := limitsOf(opts)
+	st := strategyOf(opts)
+	if st.prioritized && st.depth < 1 {
+		t.Fatal("detest: Prioritized needs a depth of at least 1")
+	}
+	// Work done once per process, such as compiling a parser, makes no
+	// scheduling progress, so it is done before the watchdog starts.
+	sqlir.Warmup()
+	ckpt := os.Getenv("DETEST_CHECKPOINT")
+	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
+		ckpt = "" // a replay neither resumes nor ends an exploration
+	}
+	if ckpt != "" && st.random {
+		// A random exploration has no subtrees left to save: it goes on with
+		// another seed instead.
+		t.Fatal("detest: DETEST_CHECKPOINT does not apply to Random or Prioritized; run again with another seed")
+	}
+	var (
+		f      *frontier
+		res    *result
+		expect *string
+		// lazy says why EagerStart was dropped, once a start drew a
+		// generated value. The exploration then starts over without it,
+		// since switching inside one would leave the frontier, a checkpoint
+		// and the other workers holding subtrees of another tree.
+		lazy string
+	)
+	for {
+		f = newFrontier(n, maxRuns)
+		f.random = st.random
+		if maxDuration != 0 {
+			// The clock inside the bubbles is fake, so the deadline is kept
+			// by a timer outside them, from the start of Explore.
+			timer := time.AfterFunc(max(maxDuration-time.Since(start), 0), f.expire)
+			defer timer.Stop()
+		}
+		if ckpt != "" && lazy == "" {
+			if err := f.load(ckpt); err != nil {
+				t.Fatal(err)
+			}
+			lazy = f.lazy
+		}
+		f.lazy = lazy
+		runOpts := opts
+		if lazy != "" {
+			runOpts = append(slices.Clip(opts), withoutEagerStart(lazy))
+		}
+		stop := watchStall(f)
+		if n == 1 {
+			var r *result
+			if r, expect = exploreBubble(t, fn, runOpts, f, 0); r != nil {
+				res = f.merge([]*result{r}, 1)
+			}
+		} else {
+			res, expect = exploreWorkers(t, fn, runOpts, f, n)
+		}
+		stop()
+		if res == nil {
+			return nil, nil // fn stopped the test
+		}
+		var draw *eagerDrawError
+		if lazy == "" && errors.As(res.Fatal, &draw) {
+			lazy = draw.Error()
+			continue
+		}
+		break
+	}
+	if res.Fatal != nil {
+		t.Fatal(res.Fatal)
+	}
+	res.Elapsed = time.Since(start) // the bubble's clock is fake
+	res.PriorRuns = f.prior
+	if ckpt != "" {
+		if res.Violated || res.Complete {
+			_ = os.Remove(ckpt) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
+		} else if err := f.save(ckpt); err != nil {
+			t.Error(err)
+		} else {
+			res.Checkpoint = ckpt
+		}
+	}
+	return res, expect
 }
 
 func workerCount(opts []Option) int {
@@ -217,7 +252,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 			res.Shard = fmt.Sprintf("%d/%d", s.shardIndex, s.shardTotal)
 		}
 		res.strategy = s.strategy
-		res.eager = s.eagerStart
+		res.eager, res.lazy = s.eagerStart, s.lazy
 		expect = s.expect
 	})
 	return res, expect

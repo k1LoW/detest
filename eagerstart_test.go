@@ -3,6 +3,7 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -62,8 +63,8 @@ func lastItemModel(lock bool) func(t *testing.T, s *Sim) {
 }
 
 func TestEagerStartLeavesOutWhereProcessesStart(t *testing.T) {
-	without, _ := exploreBubble(t, lastItemModel(true), nil, nil, 0)
-	with, _ := exploreBubble(t, lastItemModel(true), []Option{EagerStart()}, nil, 0)
+	without, _ := exploreBubble(t, lastItemModel(true), []Option{EagerStart(false)}, nil, 0)
+	with, _ := exploreBubble(t, lastItemModel(true), nil, nil, 0)
 	for _, res := range []*result{without, with} {
 		if res.Fatal != nil || res.Violated || !res.Complete {
 			t.Fatalf("got %s", res.report())
@@ -72,8 +73,8 @@ func TestEagerStartLeavesOutWhereProcessesStart(t *testing.T) {
 	if with.Runs >= without.Runs {
 		t.Fatalf("explored %d runs with EagerStart, %d without", with.Runs, without.Runs)
 	}
-	if !strings.Contains(with.report(), "EagerStart") {
-		t.Errorf("the report does not say EagerStart applied: %s", with.report())
+	if !strings.Contains(with.report(), "EagerStart") || strings.Contains(without.report(), "EagerStart") {
+		t.Errorf("the reports do not tell EagerStart apart:\n%s\n%s", with.report(), without.report())
 	}
 }
 
@@ -81,7 +82,7 @@ func TestEagerStartStillFindsTheRace(t *testing.T) {
 	Explore(t, func(t *testing.T, s *Sim) {
 		lastItemModel(false)(t, s)
 		s.ExpectViolation("sold 2 of 1")
-	}, EagerStart())
+	})
 }
 
 // Selling twice takes one switch away from a buyer that could go on, so a
@@ -93,8 +94,8 @@ func TestEagerStartSpendsNoPreemption(t *testing.T) {
 	}{{0, false}, {1, true}} {
 		t.Run(fmt.Sprint(tc.preemptions), func(t *testing.T) {
 			for _, opts := range [][]Option{
+				{MaxPreemptions(tc.preemptions), EagerStart(false)},
 				{MaxPreemptions(tc.preemptions)},
-				{MaxPreemptions(tc.preemptions), EagerStart()},
 			} {
 				res, _ := exploreBubble(t, lastItemModel(false), opts, nil, 0)
 				if res.Fatal != nil || res.Violated != tc.violated {
@@ -105,23 +106,66 @@ func TestEagerStartSpendsNoPreemption(t *testing.T) {
 	}
 }
 
-// A start that draws a generated key would get another key wherever else it
-// started, which EagerStart would leave unexplored.
-func TestEagerStartRefusesADrawBeforeTheFirstYield(t *testing.T) {
-	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
-		db, _ := s.DB("app", postgres.New())
-		if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
-			t.Fatal(err)
-		}
-		for _, buyer := range []string{"alice", "bob"} {
-			s.Manual(buyer, 1, func(p *Proc) error {
-				_, err := db.ExecContext(p.Context(), `INSERT INTO orders (buyer) VALUES ($1)`, buyer)
+// firstIDModel declares two buyers whose orders take generated ids before
+// their first yield point, and the rule that bob never gets the first one,
+// which only the order of their starts breaks.
+func firstIDModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	if _, err := db.Exec(`CREATE TABLE orders (id serial PRIMARY KEY, buyer text NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int{}
+	s.Seed(func() { clear(ids) })
+	for _, buyer := range []string{"alice", "bob"} {
+		s.Manual(buyer, 1, func(p *Proc) error {
+			var id int
+			if err := db.QueryRowContext(p.Context(), `INSERT INTO orders (buyer) VALUES ($1) RETURNING id`, buyer).Scan(&id); err != nil {
 				return err
-			})
+			}
+			ids[buyer] = id
+			return nil
+		})
+	}
+	s.AtQuiescence(func(*State) error {
+		if ids["bob"] == 1 {
+			return errors.New("bob took the first id")
 		}
-	}, []Option{EagerStart()}, nil, 0)
-	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "alice#1 drew a sequence") {
-		t.Fatalf("got %v, want EagerStart refusing alice's draw", res.Fatal)
+		return nil
+	})
+}
+
+// Which id a start draws depends on where it starts, so the exploration
+// starts over without EagerStart, finds the order that breaks the rule, and
+// prints a schedule that replays without it in a test that leaves it on.
+func TestEagerStartDroppedWhenAStartDrawsAValue(t *testing.T) {
+	res, _ := explore(t, firstIDModel, nil)
+	if !res.Violated || res.lazy == "" || !strings.HasPrefix(res.Schedule, lazyPrefix) {
+		t.Fatalf("got %s", res.report())
+	}
+	if !strings.Contains(res.report(), "explored without EagerStart, as alice#1 drew a sequence") {
+		t.Errorf("the report does not say why EagerStart was dropped:\n%s", res.report())
+	}
+	replayed, _ := explore(t, firstIDModel, []Option{Replay(res.Schedule)})
+	if !replayed.Violated || replayed.Schedule != res.Schedule {
+		t.Fatalf("replaying %s got %s", res.Schedule, replayed.report())
+	}
+}
+
+// A checkpoint of an exploration that dropped EagerStart resumes without it.
+func TestEagerStartDroppedAcrossACheckpoint(t *testing.T) {
+	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
+	t.Setenv("DETEST_CHECKPOINT", ckpt)
+	model := func(t *testing.T, s *Sim) {
+		firstIDModel(t, s)
+		s.ExpectViolation("bob took the first id")
+	}
+	first, _ := explore(t, model, []Option{MaxRuns(1)})
+	if first.Violated || first.Checkpoint == "" || first.lazy == "" {
+		t.Fatalf("got %s", first.report())
+	}
+	rest, _ := explore(t, model, nil)
+	if !rest.Violated || rest.lazy == "" {
+		t.Fatalf("resumed, got %s", rest.report())
 	}
 }
 
@@ -147,5 +191,5 @@ func TestEagerStartLeavesAfterToTheSchedule(t *testing.T) {
 			}
 			return nil
 		}, After(func(st *State) bool { return len(st.Rows(store, "flags")) > 0 }))
-	}, EagerStart())
+	})
 }

@@ -20,7 +20,9 @@ func departures(choices []choice) int {
 func TestShrinkSimplifiesTheSchedule(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		s := newSim(t)
+		// The departures to shrink come mostly from where the processes
+		// start, which EagerStart would leave out.
+		s := newSim(t, EagerStart(false))
 		defer s.closeSQL()
 		counterModel(s, false)
 		s.Manual("noise", 1, func(p *Proc) error {
