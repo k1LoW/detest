@@ -1506,7 +1506,9 @@ func (p *Proc) Choose(label string, n int) int {
 // Spawn starts another process instance from this one, such as a scheduler
 // starting a runner.
 func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
-	defer p.r.s.leaveSched()
+	// Counted as a call, since the spawn takes the next number of the name,
+	// which a spawn of another process may take first.
+	defer p.r.s.leave()
 	defer func() { absorbAbort(recover(), p, nil) }()
 	p = p.resolve(func() string { return "spawn " + name })
 	goneStale(p) // its run is over and must not grow

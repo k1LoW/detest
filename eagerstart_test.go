@@ -444,3 +444,34 @@ func TestEagerStartKeptOnAChoice(t *testing.T) {
 		t.Fatalf("with %s\nwithout %s", with.report(), without.report())
 	}
 }
+
+// A spawn takes the next number of its name, so two starts spawning under one
+// name number their children by where they started, and the exploration
+// starts over without eager starts.
+func TestEagerStartDroppedOnASpawn(t *testing.T) {
+	res, _ := explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		if _, err := db.Exec(`CREATE TABLE children (parent text PRIMARY KEY, name text NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		for _, parent := range []string{"alice", "bob"} {
+			s.Manual(parent, 1, func(p *Proc) error {
+				p.Spawn("runner", func(c *Proc) error {
+					c.Step("before reading its name")
+					_, err := db.ExecContext(c.Context(), `INSERT INTO children VALUES ($1, $2)`, parent, c.Name())
+					return err
+				})
+				return nil
+			})
+		}
+		s.AtQuiescence(func(st *State) error {
+			if row, ok := st.Row(store, "children", "bob"); ok && row.Str("name") == "runner#1" {
+				return errors.New("bob's runner came first")
+			}
+			return nil
+		})
+	}, nil)
+	if !res.Violated || !strings.Contains(res.lazy, "without reaching a yield point") {
+		t.Fatalf("got %s", res.report())
+	}
+}
