@@ -172,13 +172,15 @@ func MaxPreemptions(n int) Option {
 // connection is taken from the pool before the first yield point as well,
 // and it keeps its session settings and LAST_INSERT_ID from one process to
 // the next, so a run that sets a session setting on a connection, reads
-// LAST_INSERT_ID() or waits for a connection of a capped pool starts the
-// exploration over too. Explore then starts the
-// exploration over without EagerStart, calling the declaration function once
-// more per worker, and says so in its report, and the
-// schedules it prints replay without it. The clock needs no such check, since
-// while a start is left the scheduler has a step to take and the clock does
-// not move.
+// LAST_INSERT_ID() or waits for a connection of a capped pool depends on it
+// too. In each of these cases Explore starts the exploration over without
+// EagerStart, calling the declaration function once more per worker, says
+// so in its report, and prints schedules that replay without it. The clock
+// needs no such check, since while a start is left the scheduler has a step
+// to take and the clock does not move.
+//
+// It does not apply under Shard or DETEST_SHARD, since the machines could
+// not agree on starting over.
 func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 
 // withoutEagerStart is EagerStart(false) after a start moved a counter of
@@ -373,6 +375,12 @@ func newSim(t *testing.T, opts ...Option) *Sim {
 			t.Fatalf("detest: bad DETEST_SHARD %q, want index/total[/depth]", env)
 		}
 		s.shardIndex, s.shardTotal, s.shardDepth = idx, total, depth
+	}
+	if s.shardTotal > 1 {
+		// Each machine would decide on its own whether to start over without
+		// eager starts, and the shards of the two trees would not add up to
+		// either.
+		s.eagerStart = false
 	}
 	return s
 }

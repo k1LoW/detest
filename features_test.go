@@ -616,7 +616,8 @@ func TestDroppedOmitsRedeliveredAndLost(t *testing.T) {
 func TestShardsSplitTheRuns(t *testing.T) {
 	t.Parallel()
 	model := func(t *testing.T, s *Sim) { counterModel(s, true) }
-	whole, _ := exploreBubble(t, model, nil, nil, 0)
+	// Shards branch on starts, so the whole they split does too.
+	whole, _ := exploreBubble(t, model, []Option{EagerStart(false)}, nil, 0)
 	sum := 0
 	for i := range 2 {
 		res, _ := exploreBubble(t, model, []Option{Shard(i, 2, 2)}, nil, 0)

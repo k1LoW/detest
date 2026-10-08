@@ -633,3 +633,13 @@ func TestEagerStartKeptOnSetLocal(t *testing.T) {
 		t.Fatalf("got %v, %s", res.Fatal, res.report())
 	}
 }
+
+// Shards could not agree on starting over without eager starts, so a
+// sharded exploration branches on starts from the start.
+func TestEagerStartOffUnderShard(t *testing.T) {
+	t.Setenv("DETEST_SHARD", "")
+	res, _ := exploreBubble(t, lastItemModel(true), []Option{Shard(0, 2, 1)}, nil, 0)
+	if res.Fatal != nil || res.eager || strings.Contains(res.report(), "EagerStart") {
+		t.Fatalf("got %v, %s", res.Fatal, res.report())
+	}
+}
