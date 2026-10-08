@@ -342,6 +342,13 @@ func TestBytesAsText(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE lit (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `INSERT INTO lit VALUES (1, 'a'), (2, 'B')`)
 	mustExec(t, db, `CREATE TABLE copied AS SELECT id, payload FROM lit`)
+	mustExec(t, db, `CREATE TABLE mixed (id int PRIMARY KEY, payload bytea)`)
+	mustExec(t, db, `INSERT INTO mixed VALUES (1, 'a'), (2, 'B')`)
+	mustExec(t, db, `INSERT INTO mixed VALUES (3, $1)`, []byte("z"))
+	var raw []byte
+	if err := db.QueryRow(`SELECT payload FROM lit WHERE id = 1`).Scan(&raw); err != nil || string(raw) != "a" {
+		t.Errorf("a bytea literal read back: got %q, %v", raw, err)
+	}
 	mustExec(t, db, `CREATE DOMAIN bytes AS bytea`)
 	mustExec(t, db, `CREATE TABLE dom (id int PRIMARY KEY, payload bytes)`)
 	mustExec(t, db, `INSERT INTO dom VALUES (1, 'a'), (2, 'B')`)
@@ -361,6 +368,11 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT id FROM lit ORDER BY payload`, nil, []string{"2", "1"}},
 		{`SELECT id FROM copied ORDER BY payload`, nil, []string{"2", "1"}},
 		{`SELECT id FROM dom ORDER BY payload`, nil, []string{"2", "1"}},
+		// A literal and a []byte parameter of one value are one value, and
+		// rows written either way order by bytes together.
+		{`SELECT id FROM lit WHERE payload = $1`, []any{[]byte("B")}, []string{"2"}},
+		{`SELECT id FROM lit WHERE payload = '\x42'`, nil, []string{"2"}},
+		{`SELECT id FROM mixed ORDER BY payload`, nil, []string{"2", "1", "3"}},
 		{`SELECT id FROM t WHERE name < $1 COLLATE "default"`, []any{[]byte("B")}, []string{"1"}},
 		{`SELECT min(name COLLATE "default") < $1 COLLATE "default" FROM t`, []any{[]byte("B")}, []string{"true"}},
 	} {

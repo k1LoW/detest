@@ -753,6 +753,18 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			continue
 		}
 		t := def.types[col]
+		if t == "bytea" && !x.tx.db.kind.InnoDB() {
+			// A bytea is held as its bytes, so that a literal and a []byte
+			// parameter of one value are one value.
+			if s, ok := v.(string); ok {
+				b, berr := parseBytea(s)
+				if berr != nil {
+					return x.tx.db.kind.Error(berr.kind, berr.msg, relname(table), col, "")
+				}
+				row[col] = b
+			}
+			continue
+		}
 		if x.tx.db.kind.InnoDB() && (mysqlTextType(t) || mysqlTemporalType(t)) {
 			if l, ok := def.strs[col]; ok && l.members != nil {
 				stored, err := x.mysqlMember(table, col, l, v)

@@ -155,9 +155,10 @@ type DB struct {
 	// or are based on one that does. detest does not follow a domain's
 	// collation, so text of such a domain is not ordered (domainCollation).
 	collatedDomains map[string]bool
-	// binaryDomains are the names of the domains over bytea, which order
-	// byte by byte as bytea does.
-	binaryDomains map[string]bool
+	// domainBases are the base types of the domains, through domains over
+	// domains, which a column of a domain is recorded with, so that its
+	// writes, checks and ordering are its base type's.
+	domainBases map[string]string
 	// declaredCache is declaresCollations, dropped by every schema change.
 	declaredCache *bool
 	matviews      map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
@@ -1177,25 +1178,28 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "domain" && ch.Drop:
-		// The name stays marked: a domain of it created again, or one of
-		// another schema, may still be collated, and refusing is safe.
+		// The collated mark stays: a domain of the name created again, or
+		// one of another schema, may still be collated, and refusing is
+		// safe. A column already of the domain keeps the base type it was
+		// recorded with, as Postgres refuses the drop while one is.
+		delete(db.domainBases, ch.Columns[0].Name)
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
-		if db.collatedDomains[ch.Columns[0].Name] {
+		old := ch.Columns[0].Name
+		if db.collatedDomains[old] {
 			db.collatedDomains[ch.RenameTo] = true
 		}
-		if db.binaryDomains[ch.Columns[0].Name] {
-			db.binaryDomains[ch.RenameTo] = true
+		if base, ok := db.domainBases[old]; ok {
+			delete(db.domainBases, old)
+			db.domainBases[ch.RenameTo] = base
 		}
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
-		if db.isBinaryType(col.Type) {
-			if db.binaryDomains == nil {
-				db.binaryDomains = map[string]bool{}
-			}
-			db.binaryDomains[col.Name] = true
+		if db.domainBases == nil {
+			db.domainBases = map[string]string{}
 		}
+		db.domainBases[col.Name] = db.baseType(col.Type)
 		if c := cmp.Or(col.Collation, typeCollation(col.Type)); (c != "" && c != "default") || db.collatedDomains[col.Type] {
 			if db.collatedDomains == nil {
 				db.collatedDomains = map[string]bool{}
@@ -1321,7 +1325,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			if _, had := def.types[col.Name]; had && db.kind.InnoDB() {
 				redefined = true
 			}
-			def.types[col.Name] = col.Type
+			def.types[col.Name] = db.baseType(col.Type)
 			if db.kind.InnoDB() {
 				def.setCaseInsensitive(col.Name, col.Collation, db.kind.Collation())
 			} else if c := cmp.Or(col.Collation, db.domainCollation(col.Type), typeCollation(col.Type)); c != "" && c != "default" {

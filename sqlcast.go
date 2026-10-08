@@ -177,7 +177,9 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 // castTo is x.cast of v for c, cut to the length of a varchar(n) cast, as
 // an explicit cast cuts longer text.
 func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
-	out, err := x.cast(v, c.Type)
+	// A cast to a domain casts to its base type; detest checks no domain's
+	// constraints.
+	out, err := x.cast(v, x.tx.db.baseType(c.Type))
 	if err != nil || c.Len == 0 {
 		return out, err
 	}
@@ -345,6 +347,20 @@ func castValue(v any, typ string) (any, error) {
 			return b != 0, nil
 		}
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to boolean", v)}
+	case "bytea":
+		// A bytea is held as its bytes, whatever text wrote it.
+		if b, ok := v.([]byte); ok {
+			return b, nil
+		}
+		s, ok := v.(string)
+		if !ok {
+			return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to bytea", v)}
+		}
+		b, berr := parseBytea(s)
+		if berr != nil {
+			return nil, kindError{berr.kind, berr.msg}
+		}
+		return b, nil
 	case "uuid":
 		// Read as a uuid column stores it, so it equals the column's value
 		// however it was written. Postgres has no cast to uuid from a type

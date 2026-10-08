@@ -461,7 +461,11 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 				for _, n := range obj.GetTypeName().GetNames() {
 					parts = append(parts, n.GetString_().GetSval())
 				}
-				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "domain", Drop: true})
+				if len(parts) == 0 {
+					continue
+				}
+				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "domain", Drop: true,
+					Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
 			}
 			return changes, true, nil
 		}

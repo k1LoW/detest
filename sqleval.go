@@ -834,6 +834,17 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		return v, nil
 	}
 	switch derefValue(other).(type) {
+	case []byte:
+		// A parameter bound as []byte is a bytea already; text, a
+		// literal or a string parameter, is bytea input.
+		if _, raw := derefValue(v).([]byte); raw {
+			return v, nil
+		}
+		b, berr := parseBytea(s)
+		if berr != nil {
+			return nil, x.tx.db.kind.Error(berr.kind, berr.msg, "", "", "")
+		}
+		return b, nil
 	case pgInterval:
 		iv, ierr := parseInterval(s)
 		switch {

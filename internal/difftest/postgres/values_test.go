@@ -164,6 +164,32 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "bytea input in hex and escape formats",
+		Schema: []string{
+			`CREATE TABLE bi (id int PRIMARY KEY, payload bytea)`,
+			`CREATE DOMAIN blob AS bytea`,
+			`CREATE TABLE bd (id int PRIMARY KEY, payload blob)`,
+		},
+		Seed: []string{
+			`INSERT INTO bi VALUES (1, '\x6162'), (2, 'ab'), (3, '\141\142'), (4, '\x 61 62'), (5, 'a\\b'), (6, '\x00'), (7, '')`,
+			`INSERT INTO bd VALUES (1, 'B'), (2, 'a'), (3, '\x41')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM bi WHERE payload = '\x6162' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM bi WHERE payload = 'ab'::bytea ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM bi ORDER BY payload, id`),
+			difftest.Q(0, `SELECT count(*) FROM bi WHERE payload < 'b'`),
+			difftest.Q(0, `SELECT id FROM bd ORDER BY payload, id`),
+			difftest.Q(0, `SELECT '\x6162'::bytea = 'ab'::bytea, '\101'::bytea = 'A'::bytea`),
+			difftest.S(0, `INSERT INTO bi VALUES (8, '\x6')`),
+			difftest.S(0, `INSERT INTO bi VALUES (9, '\x6g')`),
+			difftest.S(0, `INSERT INTO bi VALUES (10, '\9')`),
+			difftest.S(0, `INSERT INTO bi VALUES (11, 'a\')`),
+			difftest.Q(0, `SELECT count(*) FROM bi WHERE payload = '\x6'`),
+		},
+	},
+	{
 		Name: "bytea ordered byte by byte",
 		Schema: []string{
 			`CREATE TABLE bb (id int PRIMARY KEY, payload bytea)`,
