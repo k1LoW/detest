@@ -560,9 +560,15 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	for _, c := range cols {
 		ch.Columns = append(ch.Columns, sqlir.ColumnDef{Name: c})
 	}
-	colls, err := x.outputCollations(st.Select, len(cols))
+	colls, binary, err := x.outputCollations(st.Select, len(cols))
 	if err != nil {
 		return nil, err
+	}
+	for i := range ch.Columns {
+		if i < len(binary) && binary[i] {
+			// Kept as bytea, which orders by bytes whatever the collation.
+			ch.Columns[i].Type = "bytea"
+		}
 	}
 	if err := x.tx.db.applySchema(&sqlir.SchemaStmt{Changes: []sqlir.SchemaChange{ch}}, x.tx); err != nil {
 		return nil, err

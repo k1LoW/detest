@@ -180,8 +180,14 @@ func TestCollationOfResults(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
 		}
 	}
-	if _, err := db.Exec(`CREATE TABLE w AS SELECT * FROM t WHERE name COLLATE "C" > ''`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("CREATE TABLE AS of a * with a COLLATE: got %v, want unsupported", err)
+	// A * keeps no collation detest can tell, so the table loads and
+	// ordering its text is refused.
+	mustExec(t, db, `CREATE TABLE w AS SELECT * FROM t WHERE name COLLATE "C" > ''`)
+	if _, err := db.Exec(`SELECT id FROM w ORDER BY name`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("ordering a CREATE TABLE AS column of a *: got %v, want unsupported", err)
+	}
+	if got := rowsOf(t, db, `SELECT id FROM w ORDER BY id`); !reflect.DeepEqual(got, []string{"1", "2", "3"}) {
+		t.Errorf("ordering a non-text CREATE TABLE AS column of a *: got %v", got)
 	}
 	// bytea orders byte by byte, under any collation.
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
@@ -331,6 +337,11 @@ func TestBytesAsText(t *testing.T) {
 	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, payload bytea)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $1), (2, $2, $2)`, []byte("a"), []byte("B"))
+	// A bytea literal, which detest may hold as a string, and a CREATE
+	// TABLE AS of it keep byte order.
+	mustExec(t, db, `CREATE TABLE lit (id int PRIMARY KEY, payload bytea)`)
+	mustExec(t, db, `INSERT INTO lit VALUES (1, 'a'), (2, 'B')`)
+	mustExec(t, db, `CREATE TABLE copied AS SELECT id, payload FROM lit`)
 	for _, tc := range []struct {
 		q    string
 		args []any
@@ -344,6 +355,8 @@ func TestBytesAsText(t *testing.T) {
 		// hold it as a string.
 		{`SELECT greatest('a'::bytea, 'B'::bytea) = 'a'::bytea`, nil, []string{"true"}},
 		{`SELECT 'B'::bytea < 'a'::bytea`, nil, []string{"true"}},
+		{`SELECT id FROM lit ORDER BY payload`, nil, []string{"2", "1"}},
+		{`SELECT id FROM copied ORDER BY payload`, nil, []string{"2", "1"}},
 	} {
 		if got := rowsOf(t, db, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)

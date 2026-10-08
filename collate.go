@@ -31,42 +31,53 @@ func (x *sqlExec) noteCollation(r *sqlir.ColumnRef, sc *colScope) {
 	x.colls[r] = colNote{name: name, known: known, binary: sc.columnType(r) == "bytea"}
 }
 
+// derivedCollation stands for the collation of a CREATE TABLE AS column
+// detest could not tell, as of a * or a set operation, which ordering the
+// column's text refuses, as for the column of a subquery.
+const derivedCollation = "a derived column's collation"
+
 // outputCollations are the collations of the n columns sel gives, empty for
-// the database's, which CREATE TABLE AS keeps on the columns it creates as
-// Postgres does. A query whose columns detest cannot map to its select
-// list, as with a * or a set operation, is refused where a column or a
-// COLLATE sets a collation.
-func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, error) {
+// the database's, and which of them are bytea, which CREATE TABLE AS keeps
+// on the columns it creates as Postgres does. A column it cannot tell gets
+// derivedCollation, so that the table still loads and ordering its text is
+// refused where it matters.
+func (x *sqlExec) outputCollations(sel *sqlir.SelectStmt, n int) ([]string, []bool, error) {
 	db := x.tx.db
 	if db.kind.InnoDB() {
-		return nil, nil
+		return nil, nil, nil
 	}
-	if !db.declared() && !x.collates {
-		return nil, nil
+	_, bytes := db.kind.TextCollation().(sqlir.ByteOrder)
+	if bytes && !db.declared() && !x.collates {
+		// Byte order all through, for text and bytea alike.
+		return nil, nil, nil
 	}
+	names, binary := make([]string, n), make([]bool, n)
 	if sel.SetOp != "" || len(sel.Values) > 0 || len(sel.Targets) != n || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
-		// The columns cannot be mapped to a select list, which matters
-		// only when one of them can be text.
 		if !textlessOutputs(sel, n) {
-			return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+			for i := range names {
+				names[i] = derivedCollation
+			}
 		}
-		return nil, nil
+		return names, binary, nil
 	}
-	out := make([]string, n)
 	for i, t := range sel.Targets {
-		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] {
+		if typ := expressionType(t.Expr, nil); typ != "" && !collatableType(typ) && !db.collatedDomains[typ] && typ != "bytea" {
 			continue // a number or a boolean has no collation to keep
 		}
 		u, err := x.collationOf(t.Expr)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if u.unknown {
-			return nil, x.unsupported("CREATE TABLE AS of a query whose columns' collations detest cannot tell")
+		switch {
+		case u.binary:
+			binary[i] = true
+		case u.unknown:
+			names[i] = derivedCollation
+		default:
+			names[i] = u.name
 		}
-		out[i] = u.name
 	}
-	return out, nil
+	return names, binary, nil
 }
 
 // domainCollation stands for the collation of a domain that declares one,
@@ -301,6 +312,9 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 		return undecided{x.unsupported("text of a subquery, view or CTE ordered where a column or COLLATE sets a collation")}, nil
 	}
 	name := u.name
+	if name == derivedCollation {
+		return undecided{x.unsupported("text of a CREATE TABLE AS column whose collation detest could not tell")}, nil
+	}
 	if name == domainCollation {
 		return nil, x.unsupported("text of a domain that declares a collation, which detest does not follow")
 	}
