@@ -280,7 +280,13 @@ func TestDomainCollations(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)
 		}
 	}
-	// IF NOT EXISTS skips a relation of any kind, a view among them.
+	// IF NOT EXISTS skips a relation of any kind, a view and a unique index
+	// among them.
+	mustExec(t, db, `CREATE UNIQUE INDEX uix ON t (id)`)
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS uix AS SELECT id FROM t`)
+	if _, ok := store.defs[store.resolve("uix")]; ok {
+		t.Error("CREATE TABLE IF NOT EXISTS ... AS made a table of a unique index's name")
+	}
 	mustExec(t, db, `CREATE VIEW vw AS SELECT id FROM t`)
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS vw AS SELECT id, name FROM t`)
 	if _, ok := store.defs[store.resolve("vw")]; ok {
@@ -334,6 +340,10 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT id FROM t ORDER BY payload`, nil, []string{"2", "1"}},
 		{`SELECT id FROM t WHERE name < $1`, []any{[]byte("B")}, []string{"1"}},
 		{`SELECT min(name) FROM t`, nil, []string{"a"}},
+		// A bytea literal or cast orders by bytes too, though detest may
+		// hold it as a string.
+		{`SELECT greatest('a'::bytea, 'B'::bytea) = 'a'::bytea`, nil, []string{"true"}},
+		{`SELECT 'B'::bytea < 'a'::bytea`, nil, []string{"true"}},
 	} {
 		if got := rowsOf(t, db, tc.q, tc.args...); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.q, got, tc.want)

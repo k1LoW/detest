@@ -544,7 +544,7 @@ func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, er
 	db := x.tx.db
 	_, isView := db.views[db.resolve(st.Table)]
 	_, isSeq := db.seqDefs[sequenceName(db.resolve(st.Table))]
-	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq) && st.IfNotExists {
+	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq || db.isIndex(db.resolve(st.Table))) && st.IfNotExists {
 		// Postgres leaves the table as it is, without running the query.
 		return &sqlResult{}, nil
 	}

@@ -13,8 +13,9 @@ import (
 // colNote is the collation a column reference's column declares, empty for
 // the database's, with known false for the column of a derived item.
 type colNote struct {
-	name  string
-	known bool
+	name   string
+	known  bool
+	binary bool
 }
 
 // noteCollation records the collation the column r refers to declares, for
@@ -27,7 +28,7 @@ func (x *sqlExec) noteCollation(r *sqlir.ColumnRef, sc *colScope) {
 	if x.colls == nil {
 		x.colls = map[*sqlir.ColumnRef]colNote{}
 	}
-	x.colls[r] = colNote{name: name, known: known}
+	x.colls[r] = colNote{name: name, known: known, binary: sc.columnType(r) == "bytea"}
 }
 
 // outputCollations are the collations of the n columns sel gives, empty for
@@ -120,6 +121,9 @@ type collationUse struct {
 	// unknown is an expression whose collation detest cannot tell, such as
 	// the column of a subquery.
 	unknown bool
+	// binary is a bytea, which Postgres orders byte by byte whatever the
+	// collation, though detest may hold a bytea literal as a string.
+	binary bool
 }
 
 // collationOf derives the collation of e from the COLLATE clauses and the
@@ -136,6 +140,9 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 			return x.collationOf(out)
 		}
 		n, ok := x.colls[e]
+		if ok && n.binary {
+			return collationUse{binary: true}, nil
+		}
 		if !ok || !n.known {
 			return collationUse{unknown: true}, nil
 		}
@@ -176,6 +183,9 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 		if c := x.tx.db.domainCollation(e.Type); c != "" {
 			// A cast to a domain takes the domain's collation.
 			return collationUse{name: c}, nil
+		}
+		if e.Type == "bytea" {
+			return collationUse{binary: true}, nil
 		}
 		if !collatableType(e.Type) {
 			return collationUse{}, nil
@@ -241,6 +251,10 @@ func (x *sqlExec) collationOf(e sqlir.Expr) (collationUse, error) {
 func (x *sqlExec) combineCollations(uses []collationUse) (collationUse, error) {
 	var out collationUse
 	for _, u := range uses {
+		if u.binary {
+			// A bytea operand makes the comparison a bytea one.
+			return collationUse{binary: true}, nil
+		}
 		switch {
 		case u.explicit && out.explicit:
 			if u.name != out.name {
@@ -276,6 +290,9 @@ func (x *sqlExec) orderCollation(exprs ...sqlir.Expr) (sqlir.Collation, error) {
 	u, err := x.combineAll(exprs)
 	if err != nil {
 		return nil, err
+	}
+	if u.binary {
+		return nil, nil // byte order
 	}
 	if u.unknown && (db.declared() || x.collates) {
 		// The item's query may take the collation of a column or of a
@@ -383,6 +400,31 @@ func hasCollate(n any) bool {
 	}
 	walk(reflect.ValueOf(n))
 	return found
+}
+
+// isIndex reports whether an index of the qualified name exists, which
+// shares the namespace of tables.
+func (db *DB) isIndex(name string) bool {
+	schema, rel, ok := strings.Cut(name, ".")
+	if !ok {
+		return false
+	}
+	for table, def := range db.defs {
+		if !strings.HasPrefix(table, schema+".") {
+			continue
+		}
+		for _, u := range def.uniques {
+			if u.Name == rel {
+				return true
+			}
+		}
+		for _, ix := range def.indexes {
+			if ix.Name == rel {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // textlessOutputs reports whether every one of the n columns sel gives has
