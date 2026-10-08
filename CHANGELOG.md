@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.4.0](https://github.com/k1LoW/detest/compare/v0.3.0...v0.4.0) - 2026-10-08
+
+### Breaking Changes 🛠
+- feat!: start Manual processes eagerly by default by @k1LoW in https://github.com/k1LoW/detest/pull/70
+### Fix bug 🐛
+- fix: pass a multi-row INSERT in CheckSQL instead of reporting 23505 by @k1LoW in https://github.com/k1LoW/detest/pull/64
+### Other Changes
+- fix: run ALTER COLUMN TYPE ... USING on a table without rows by @k1LoW in https://github.com/k1LoW/detest/pull/66
+- feat: run AND, OR and row comparisons over aggregates in HAVING by @k1LoW in https://github.com/k1LoW/detest/pull/67
+- feat: compare a row with a subquery of as many columns on Postgres by @k1LoW in https://github.com/k1LoW/detest/pull/68
+- feat: order Postgres text by a collation the server is given by @k1LoW in https://github.com/k1LoW/detest/pull/69
+- docs: point the skill to glibctext for a libc collation by @k1LoW in https://github.com/k1LoW/detest/pull/71
+
 ## [v0.3.0](https://github.com/k1LoW/detest/compare/v0.2.0...v0.3.0) - 2026-10-07
 
 - refactor: move the server packages and ddl under db/ by @k1LoW in https://github.com/k1LoW/detest/pull/58
