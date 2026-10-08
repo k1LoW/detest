@@ -816,24 +816,50 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 }
 
 // noteSetOpColumns records the columns of the set operation sel its
-// queries resolve to bytea or to text.
+// queries resolve to bytea or to text, by position and, for the columns of
+// a * in the first query, whose position the check does not know, by name.
 func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 	db := c.x.tx.db
 	if db.kind.InnoDB() {
 		return
 	}
 	types := c.setOpTypes(sel)
-	cols := make([]string, len(types))
+	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
-		cols[i] = db.branchKind(t)
+		cols.byPos[i] = db.branchKind(t)
 	}
-	if !slices.ContainsFunc(cols, func(k string) bool { return k != "" }) {
+	first := sel
+	for first.SetOp != "" && first.Larg != nil {
+		first = first.Larg
+	}
+	for name, t := range c.outNamed[first] {
+		if k := db.branchKind(t); k != "" {
+			cols.byName[name] = k
+		}
+	}
+	if !slices.ContainsFunc(cols.byPos, func(k string) bool { return k != "" }) && len(cols.byName) == 0 {
 		return
 	}
 	if c.x.setOpColumns == nil {
-		c.x.setOpColumns = map[*sqlir.SelectStmt][]string{}
+		c.x.setOpColumns = map[*sqlir.SelectStmt]setOpColumns{}
 	}
 	c.x.setOpColumns[sel] = cols
+}
+
+// setOpColumns are the kinds of type, by branchKind, the columns of a set
+// operation resolve to, by position and by the name of the first query's
+// column.
+type setOpColumns struct {
+	byPos  []string
+	byName map[string]string
+}
+
+// kind is the kind of type of the j-th column, named name.
+func (s setOpColumns) kind(j int, name string) string {
+	if j < len(s.byPos) && s.byPos[j] != "" {
+		return s.byPos[j]
+	}
+	return s.byName[name]
 }
 
 // setOpTypes are the types of the output columns of sel by position, over
@@ -846,6 +872,11 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 	}
 	l, r := c.setOpTypes(sel.Larg), c.setOpTypes(sel.Rarg)
 	out := slices.Clone(l)
+	if len(out) < len(r) {
+		// The left query's types are unknown by position, as of a * or
+		// VALUES, which leaves the right one's.
+		out = append(out, make([]string, len(r)-len(out))...)
+	}
 	for i, t := range r {
 		switch {
 		case i >= len(out):

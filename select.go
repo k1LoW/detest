@@ -551,8 +551,10 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 	// a string parameter under it as bytea input, and one they resolve to
 	// text reads bytes a driver sent as the text they hold, as Postgres
 	// types them.
-	for j, kind := range x.setOpColumns[sel] {
-		if kind == "" || j >= len(lcols) {
+	cols, typed := x.setOpColumns[sel]
+	for j := range lcols {
+		kind := cols.kind(j, lcols[j])
+		if !typed || kind == "" {
 			continue
 		}
 		for _, r := range slices.Concat(lrows, rrows) {

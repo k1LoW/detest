@@ -538,6 +538,10 @@ func TestBytesAsText(t *testing.T) {
 		{`SELECT greatest(name, $1) FROM t WHERE id = 2`, []any{[]byte("a")}, []string{"B"}},
 		{`SELECT id FROM t ORDER BY CASE WHEN id = 1 THEN name ELSE $1 END`, []any{[]byte("B")}, []string{"1", "2"}},
 		{`SELECT count(*) FROM (SELECT name FROM t UNION SELECT $1) s`, []any{[]byte("a")}, []string{"2"}},
+		// A set operation whose first query is VALUES or a * still takes
+		// the types the others give.
+		{`SELECT count(*) FROM (VALUES ('\x61') UNION SELECT payload FROM lit) s`, nil, []string{"2"}},
+		{`SELECT count(*) FROM (SELECT * FROM lit UNION SELECT 1, '\x61') s`, nil, []string{"2"}},
 		{`SELECT id FROM t WHERE name < $1 COLLATE "default"`, []any{[]byte("B")}, []string{"1"}},
 		{`SELECT min(name COLLATE "default") < $1 COLLATE "default" FROM t`, []any{[]byte("B")}, []string{"true"}},
 	} {

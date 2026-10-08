@@ -95,7 +95,7 @@ type sqlExec struct {
 	// literal or a string parameter among them is bytea input of, or a
 	// []byte parameter the text of.
 	branchTypes  map[sqlir.Expr]string
-	setOpColumns map[*sqlir.SelectStmt][]string
+	setOpColumns map[*sqlir.SelectStmt]setOpColumns
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
 	// statement has a COLLATE clause.
