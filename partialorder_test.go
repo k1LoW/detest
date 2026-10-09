@@ -74,16 +74,12 @@ func exploreAll() Option { return func(s *Sim) { s.exploreAll = true } }
 // reduction must reach every one the full tree reaches.
 type outcome struct {
 	state   string
-	locals  map[string]bool // "<type>:<hash of the process's steps>"
+	locals  map[string]int // "<type>:<hash of the process's steps>" -> how many processes
 	verdict string
 	picks   string
 }
 
-var (
-	uuidOrTime = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\d{4}-\d\d-\d\d[ T][0-9:.]+`)
-	uuidOnly   = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	procNumber = regexp.MustCompile(`#\d+`)
-)
+var procNumber = regexp.MustCompile(`#\d+`)
 
 func outcomeOf(r *run, v *violation) outcome {
 	s := r.s
@@ -92,33 +88,30 @@ func outcomeOf(r *run, v *violation) outcome {
 		for t, rows := range db.committed {
 			for k, row := range rows {
 				cols := make([]string, 0, len(row))
+				// Generated uuids and times are the simulation's own, drawn
+				// from counters and the clock, so two runs that give them out
+				// in another order differ, and the raw values tell.
 				for c, val := range row {
-					if _, ok := val.(interface{ UnixNano() int64 }); ok {
-						val = "T"
-					}
-					cols = append(cols, uuidOrTime.ReplaceAllString(fmt.Sprintf("%s=%v", c, val), "U"))
+					cols = append(cols, fmt.Sprintf("%s=%v", c, val))
 				}
 				sort.Strings(cols)
-				lines = append(lines, db.name+"/"+t+"/"+uuidOrTime.ReplaceAllString(k, "U")+"/"+strings.Join(cols, ","))
+				lines = append(lines, db.name+"/"+t+"/"+k+"/"+strings.Join(cols, ","))
 			}
 		}
 	}
 	for _, q := range s.queues {
 		for _, m := range q.msgs {
-			lines = append(lines, "queue/"+q.name+"/"+uuidOrTime.ReplaceAllString(fmt.Sprint(m.msg), "U"))
+			lines = append(lines, "queue/"+q.name+"/"+fmt.Sprint(m.msg))
 		}
 		for _, m := range q.dropped {
-			lines = append(lines, "dropped/"+q.name+"/"+uuidOrTime.ReplaceAllString(fmt.Sprint(m), "U"))
+			lines = append(lines, "dropped/"+q.name+"/"+fmt.Sprint(m))
 		}
 	}
 	sort.Strings(lines)
-	o := outcome{state: strings.Join(lines, "\n"), locals: map[string]bool{}}
-	// Each process's steps, with the row keys it touched numbered in the
-	// order it first touched them: the uuids the code generates differ
-	// between runs, the order a process meets them in does not. Waits are
-	// the scheduler's, not something the process sees.
+	o := outcome{state: strings.Join(lines, "\n"), locals: map[string]int{}}
+	// Each process's steps and what it touched. Waits are the scheduler's,
+	// not something the process sees.
 	hashes := map[string]uint64{}
-	seen := map[string]map[string]string{}
 	for _, e := range r.dep().events {
 		if e.proc == "-" {
 			continue
@@ -132,22 +125,11 @@ func outcomeOf(r *run, v *violation) outcome {
 		for _, c := range e.choices {
 			h = hashInt(h, int64(c))
 		}
-		if seen[e.proc] == nil {
-			seen[e.proc] = map[string]string{}
-		}
 		var acc []string
 		for res, w := range e.acc {
 			if res == "waits" {
 				continue
 			}
-			res = uuidOnly.ReplaceAllStringFunc(res, func(u string) string {
-				if id, ok := seen[e.proc][u]; ok {
-					return id
-				}
-				id := fmt.Sprintf("U%d", len(seen[e.proc]))
-				seen[e.proc][u] = id
-				return id
-			})
 			acc = append(acc, fmt.Sprintf("%s=%v", res, w))
 		}
 		sort.Strings(acc)
@@ -164,19 +146,20 @@ func outcomeOf(r *run, v *violation) outcome {
 			h = fnvOffset
 		}
 		if p.err != nil {
-			h = hashString(h, procNumber.ReplaceAllString(uuidOrTime.ReplaceAllString(p.err.Error(), "U"), "#"))
+			h = hashString(h, procNumber.ReplaceAllString(p.err.Error(), "#"))
 		}
 		hashes[p.name] = h
 	}
+	// A multiset: two processes of one type with one history are two.
 	for p, h := range hashes {
-		o.locals[fmt.Sprintf("%s:%x", procNumber.ReplaceAllString(p, ""), h)] = true
+		o.locals[fmt.Sprintf("%s:%x", procNumber.ReplaceAllString(p, ""), h)]++
 	}
 	if v != nil {
 		msg := v.err.Error()
 		if pp, ok := errors.AsType[*procPanic](v.err); ok {
 			msg = fmt.Sprintf("%s: %T %v", pp.proc, pp.value, pp.value)
 		}
-		o.verdict = v.kind + ":" + procNumber.ReplaceAllString(uuidOrTime.ReplaceAllString(msg, "U"), "#")
+		o.verdict = v.kind + ":" + procNumber.ReplaceAllString(msg, "#")
 	}
 	var b strings.Builder
 	for _, c := range r.choices {
@@ -210,8 +193,8 @@ func outcomes(t *testing.T, model func(t *testing.T, s *Sim), opts ...Option) ([
 // class keeps every key the full tree reaches.
 func (o outcome) key() string {
 	locals := make([]string, 0, len(o.locals))
-	for l := range o.locals {
-		locals = append(locals, l)
+	for l, n := range o.locals {
+		locals = append(locals, fmt.Sprintf("%s*%d", l, n))
 	}
 	sort.Strings(locals)
 	return o.state + "|" + o.verdict + "|" + strings.Join(locals, ",")
