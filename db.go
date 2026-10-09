@@ -2293,6 +2293,7 @@ func (tx *Tx) insert(table string, row Row) error {
 	// sqlExec.execInsert).
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
 	tx.depTable(table, true) // the key may be generated, and a unique constraint reads other rows
+	tx.depFKs(table, true)
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
@@ -2351,6 +2352,7 @@ func (tx *Tx) delete(table, key string) (bool, error) {
 	lk := lockKey{table, key}
 	tx.yieldf("%s: delete %s id=%s", tx.db.name, table, key)
 	tx.depRow(table, key, true)
+	tx.depFKs(table, false)
 	if err := tx.lock(lk); err != nil {
 		return false, err
 	}
@@ -2815,6 +2817,7 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
 	tx.depTable(table, true) // by a predicate, which may match any row
+	tx.depFKs(table, false)
 	// Aborted by another goroutine while it stood at its yield point. An
 	// update matching no row takes no lock that would tell.
 	if err := tx.check(); err != nil {
@@ -3074,5 +3077,11 @@ func (tx *Tx) depTable(table string, write bool) {
 func (tx *Tx) depRow(table, key string, write bool) {
 	if tx.p != nil {
 		tx.p.r.depRow(tx, tx.db, table, key, write)
+	}
+}
+
+func (tx *Tx) depFKs(table string, insert bool) {
+	if tx.p != nil {
+		tx.p.r.depFKs(tx, tx.db, table, insert)
 	}
 }

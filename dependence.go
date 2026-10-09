@@ -522,20 +522,33 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 	tx.depPin = depPin{table: target, key: key}
 	// The row the engine then locks and writes is recorded by its key, so
 	// the pin is what the statement names, kept for the trace of tests.
-	// The tables foreign keys lead to: a write checks the rows it refers to,
-	// and a delete or an update of a referenced row acts on the rows
-	// referring to it.
-	if write && def != nil {
-		for _, fk := range def.fks {
-			r.depTable(tx, db, db.resolve(fk.RefTable), false)
-		}
-		if _, ok := stmt.(*sqlir.InsertStmt); !ok {
-			for name, other := range db.defs {
-				for _, fk := range other.fks {
-					if db.resolve(fk.RefTable) == target {
-						r.depTable(tx, db, name, true)
-					}
-				}
+	if write {
+		_, insert := stmt.(*sqlir.InsertStmt)
+		r.depFKs(tx, db, target, insert)
+	}
+}
+
+// depFKs records the tables the foreign keys of table lead to, for a write
+// of its rows: the tables it refers to, whose rows the write checks, and
+// which the engine records only where it finds and locks one, not where
+// the parent is absent and the write fails; and, unless the write is an
+// insert, the tables referring to it, whose rows a delete or an update of
+// a referenced row acts on.
+func (r *run) depFKs(tx *Tx, db *DB, table string, insert bool) {
+	def := db.defs[table]
+	if !r.depOn() || def == nil {
+		return
+	}
+	for _, fk := range def.fks {
+		r.depTable(tx, db, db.resolve(fk.RefTable), false)
+	}
+	if insert {
+		return
+	}
+	for name, other := range db.defs {
+		for _, fk := range other.fks {
+			if db.resolve(fk.RefTable) == table {
+				r.depTable(tx, db, name, true)
 			}
 		}
 	}
