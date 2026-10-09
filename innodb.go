@@ -312,6 +312,7 @@ func (tx *Tx) gapAround(table string, key func(Row) ixKey, row Row, through bool
 	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
 	tx.db.effects++
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, key: key, ranges: []valRange{gap}})
+	tx.depGap(table)
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or
