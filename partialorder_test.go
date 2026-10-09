@@ -292,6 +292,57 @@ func crashTxModel(t *testing.T, s *Sim) {
 	}, After(func(*State) bool { return shared != nil }))
 }
 
+// fkParentModel: a child insert through the hand-written API succeeds or
+// fails by whether the parent was inserted before it.
+func fkParentModel(t *testing.T, s *Sim) {
+	db, store := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE parent (id text PRIMARY KEY)")
+	mustExec(t, db, "CREATE TABLE child (id text PRIMARY KEY, pid text NOT NULL REFERENCES parent(id))")
+	mustExec(t, db, "CREATE TABLE refused (who text PRIMARY KEY)")
+	s.Manual("a", 1, func(p *Proc) error {
+		err := store.Tx(p, func(tx *Tx) error { return tx.Insert("child", Row{"id": "c1", "pid": "p1"}) })
+		if err != nil {
+			return store.Tx(p, func(tx *Tx) error { return tx.Insert("refused", Row{"who": "b"}) })
+		}
+		return nil
+	})
+	s.Manual("b", 1, func(p *Proc) error {
+		return store.Tx(p, func(tx *Tx) error { return tx.Insert("parent", Row{"id": "p1"}) })
+	})
+}
+
+// fkDeferredModel: a deferred foreign key is checked at the commit, and
+// the parent is inserted by a consumer the child's inserter signals once
+// its row is in, so the parent lands before the commit or after it, and
+// only the check at the commit tells the two apart.
+func fkDeferredModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE parent (id text PRIMARY KEY)")
+	mustExec(t, db, "CREATE TABLE child (id text PRIMARY KEY, pid text NOT NULL REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+	mustExec(t, db, "CREATE TABLE refused (who text PRIMARY KEY)")
+	q := s.Queue("parents")
+	s.Manual("a", 1, func(p *Proc) error {
+		tx, err := db.BeginTx(p.Context(), nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(p.Context(), "INSERT INTO child (id, pid) VALUES ('c1', 'p1')"); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		q.Enqueue(p, Msg{"id": "p1"})
+		if err := tx.Commit(); err != nil {
+			_, err = db.ExecContext(p.Context(), "INSERT INTO refused (who) VALUES ('a')")
+			return err
+		}
+		return nil
+	})
+	s.OnMessage("b", q, func(p *Proc, msg Msg) error {
+		_, err := db.ExecContext(p.Context(), "INSERT INTO parent (id) VALUES ($1)", msg.Str("id"))
+		return err
+	})
+}
+
 func poolWaitModel(t *testing.T, s *Sim) {
 	db, _ := s.DB("app", postgres.New())
 	db.SetMaxOpenConns(1)
@@ -397,6 +448,8 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"backstop", orderModel(true), nil},
 		{"dropped", droppedModel, nil},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
+		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
+		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},
 		{"pool wait", poolWaitModel, []Option{EagerStart(false)}},
 		{"session state", sessionStateModel, []Option{EagerStart(false)}},
 	} {
