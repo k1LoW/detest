@@ -57,9 +57,6 @@ func (mu *Mutex) Lock() {
 
 // Unlock releases the mutex. As with sync.Mutex, any goroutine may unlock it.
 func (mu *Mutex) Unlock() {
-	if r := mu.s.run; r != nil {
-		r.depRecord("mutex:"+mu.name, true)
-	}
 	defer mu.s.leave()
 	// A goroutine of an ended run ends here, as at any entry point with
 	// no error to return, its deferred calls running.
@@ -69,6 +66,9 @@ func (mu *Mutex) Unlock() {
 		// a mutex it never got. The next run resets the mutex anyway.
 		mu.held, mu.holder = false, nil
 		return
+	}
+	if r := mu.s.run; r != nil {
+		r.depRecord("mutex:"+mu.name, true)
 	}
 	if !mu.held {
 		panic(fmt.Sprintf("detest: unlock of unlocked mutex %s", mu.name))
@@ -146,14 +146,14 @@ func (rw *RWMutex) Lock() {
 
 // Unlock releases the write lock.
 func (rw *RWMutex) Unlock() {
-	if r := rw.s.run; r != nil {
-		r.depRecord("mutex:"+rw.name, true)
-	}
 	defer rw.s.leave()
 	goneStale(rw.s.currentAs(func() string { return "unlock " + rw.name }))
 	if r := rw.s.run; r != nil && r.over() {
 		rw.writing, rw.writer = false, nil // as Mutex.Unlock
 		return
+	}
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, true)
 	}
 	if !rw.writing {
 		panic(fmt.Sprintf("detest: unlock of unlocked rwmutex %s", rw.name))
@@ -191,9 +191,6 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
-	if r := rw.s.run; r != nil {
-		r.depRecord("mutex:"+rw.name, false)
-	}
 	defer rw.s.leave()
 	// Resolved first, as a goroutine of an ended run must not read s.run,
 	// which the scheduler may be setting for the next run.
@@ -201,6 +198,9 @@ func (rw *RWMutex) RUnlock() {
 	goneStale(p)
 	if r := rw.s.run; r != nil && r.over() {
 		return // as Mutex.Unlock, the next run resets the read locks
+	}
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, false)
 	}
 	// A read lock taken by another goroutine of the caller's pod, such as
 	// its parent's, is released before anyone else's, since an adopted
