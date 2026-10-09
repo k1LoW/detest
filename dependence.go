@@ -363,14 +363,17 @@ func (e *depEvent) writesState() bool {
 }
 
 // depSameRes reports whether two resources overlap: the same one, everything,
-// or a table and one of its rows.
+// or a table and one of its rows. A row's resource is its table's followed
+// by "#" and the key, so the table is tested as a prefix rather than by
+// splitting at the first "#", which a quoted table name may hold, where the
+// split would make a table and its rows look distinct. Two tables where one's
+// name is the other's followed by "#" count as overlapping, which only adds
+// a dependence.
 func depSameRes(a, b string) bool {
 	if a == b || a == depAll || b == depAll {
 		return true
 	}
-	ta, ka, _ := strings.Cut(a, "#")
-	tb, kb, _ := strings.Cut(b, "#")
-	return ta == tb && (ka == "" || kb == "")
+	return strings.HasPrefix(b, a+"#") || strings.HasPrefix(a, b+"#")
 }
 
 func (e *depEvent) isStep() bool {
