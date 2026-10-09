@@ -431,6 +431,15 @@ func (c *sqlConn) depConn() {
 // process gets this one depends on the order they take them in.
 func (c *sqlConn) setSession(p *Proc) {
 	c.db.s.breakEager(p, sessionSet)
+	c.taintPool()
+}
+
+// taintPool records that a connection of the pool now carries state the
+// next process to take it reads, so that every take and return of the
+// pool's connections is recorded from here on (see depConn), including
+// the one a process makes before its first yield point, where a start
+// takes the connection its first statement runs on.
+func (c *sqlConn) taintPool() {
 	if r := c.db.s.run; r != nil && r.depOn() {
 		if r.depTainted == nil {
 			r.depTainted = map[int]bool{}
@@ -676,6 +685,7 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 	}
 	if err == nil && res.hasLastID {
 		c.lastInsertID = res.lastID
+		c.taintPool() // LAST_INSERT_ID() reads it on whichever process takes the connection next
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
 		// MySQL session settings take effect immediately, even in a transaction.
