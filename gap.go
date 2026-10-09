@@ -628,6 +628,7 @@ scan:
 	}
 	tx.db.effects++
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, cols: cols, ranges: []valRange{gap}})
+	tx.depGap(table)
 	return true, nil
 }
 
@@ -813,6 +814,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 		tx.noteLockStruct(table, "PRIMARY", mode, "next-key") // the supremum's, also of an empty table
 		tx.db.effects++
 		tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table})
+		tx.depGap(table)
 		return nil
 	}
 	g := &gapLock{tx: tx, table: table, cols: cols}
@@ -909,6 +911,7 @@ func (x *sqlExec) lockRange(table, alias string, where sqlir.Expr, mode lockMode
 	if len(g.ranges) > 0 {
 		tx.db.effects++
 		tx.db.gaps = append(tx.db.gaps, g)
+		tx.depGap(table)
 	}
 	return nil
 }

@@ -662,17 +662,27 @@ func depKeyOf(def *tableDef, vals map[string]any) string {
 }
 
 // depLock records a lock the transaction takes or waits for: the row for a
-// row lock, the table for an entry of a unique or an index.
+// row lock, the table for an entry of a unique or an index, and for the
+// gap an insert waits for, which the gap's holder records as the table too
+// (see depGap).
 func (r *run) depLock(tx *Tx, lk lockKey) {
 	if !r.depOn() {
 		return
 	}
 	table, _ := entryIndex(lk)
-	if lk.table == table {
+	if lk.table == table && lk.key != gapWaitKey {
 		r.depRow(tx, tx.db, table, lk.key, true)
 	} else {
 		r.depTable(tx, tx.db, table, true)
 	}
+}
+
+// depGap records a gap lock InnoDB takes, which keeps other transactions
+// from inserting into the gap: a write of the table, as the rows it covers
+// have no key to name, and the statement's own pin would name only the row
+// it found or missed.
+func (tx *Tx) depGap(table string) {
+	tx.depTable(table, true)
 }
 
 // depCascade records a write a foreign key action makes to another table
