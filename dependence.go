@@ -33,7 +33,6 @@ package detest
 //     waits for, is a step of its own that touches everything.
 
 import (
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -448,7 +447,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 			target = db.resolve(s.From.Name)
 			def = db.defs[target]
 			if def != nil && depPinnable(def, false) {
-				key = x.depPinnedKey(def, s.From.Name, s.From.Alias, s.Where)
+				key = x.depPinnedKey(def, target, s.From.Name, s.From.Alias, s.Where)
 			}
 		}
 	case *sqlir.InsertStmt:
@@ -462,7 +461,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 			all = true
 		}
 		if def != nil && s.Select == nil && s.OnConflict == nil && len(s.Rows) == 1 && depPinnable(def, true) {
-			key = x.depInsertKey(def, s)
+			key = x.depInsertKey(def, target, s)
 		}
 	case *sqlir.UpdateStmt:
 		target = db.resolve(s.Table)
@@ -479,7 +478,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 			}
 		}
 		if def != nil && !all && depPinnable(def, true) {
-			key = x.depPinnedKey(def, s.Table, s.Alias, s.Where)
+			key = x.depPinnedKey(def, target, s.Table, s.Alias, s.Where)
 		}
 	case *sqlir.DeleteStmt:
 		target = db.resolve(s.Table)
@@ -491,7 +490,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 			walkRef(&s.Using[i])
 		}
 		if def != nil && !all && depPinnable(def, false) {
-			key = x.depPinnedKey(def, s.Table, s.Alias, s.Where)
+			key = x.depPinnedKey(def, target, s.Table, s.Alias, s.Where)
 		}
 	default:
 		all = true
@@ -562,11 +561,11 @@ func depPinnable(def *tableDef, writes bool) bool {
 
 // depPinnedKey returns the primary key the WHERE pins every column of to
 // a value, or "".
-func (x *sqlExec) depPinnedKey(def *tableDef, name, alias string, where sqlir.Expr) string {
+func (x *sqlExec) depPinnedKey(def *tableDef, table, name, alias string, where sqlir.Expr) string {
 	if where == nil {
 		return ""
 	}
-	vals := map[string]string{}
+	vals := map[string]any{}
 	var walk func(e sqlir.Expr) bool
 	walk = func(e sqlir.Expr) bool {
 		b, ok := e.(*sqlir.BinaryExpr)
@@ -581,10 +580,13 @@ func (x *sqlExec) depPinnedKey(def *tableDef, name, alias string, where sqlir.Ex
 				c, isCol := side[0].(*sqlir.ColumnRef)
 				if isCol && (c.Table == "" || c.Table == name || c.Table == alias) && isValue(side[1]) {
 					v, err := x.eval(side[1], nil)
+					if err == nil {
+						v, err = x.columnValue(table, c.Column, v)
+					}
 					if err != nil {
 						return false
 					}
-					vals[c.Column] = fmt.Sprint(v)
+					vals[c.Column] = v
 				}
 			}
 		}
@@ -593,12 +595,12 @@ func (x *sqlExec) depPinnedKey(def *tableDef, name, alias string, where sqlir.Ex
 	if !walk(where) {
 		return ""
 	}
-	return depJoinKey(def, vals)
+	return depKeyOf(def, vals)
 }
 
 // depInsertKey returns the primary key an INSERT of one row gives, or "".
-func (x *sqlExec) depInsertKey(def *tableDef, s *sqlir.InsertStmt) string {
-	vals := map[string]string{}
+func (x *sqlExec) depInsertKey(def *tableDef, table string, s *sqlir.InsertStmt) string {
+	vals := map[string]any{}
 	cols := s.Columns
 	if len(cols) == 0 {
 		cols = def.columns // the row gives every column in declaration order
@@ -606,25 +608,36 @@ func (x *sqlExec) depInsertKey(def *tableDef, s *sqlir.InsertStmt) string {
 	for i, c := range cols {
 		if i < len(s.Rows[0]) && isValue(s.Rows[0][i]) {
 			v, err := x.eval(s.Rows[0][i], nil)
+			if err == nil {
+				v, err = x.columnValue(table, c, v)
+			}
 			if err != nil {
 				return ""
 			}
-			vals[c] = fmt.Sprint(v)
+			vals[c] = v
 		}
 	}
-	return depJoinKey(def, vals)
+	return depKeyOf(def, vals)
 }
 
-func depJoinKey(def *tableDef, vals map[string]string) string {
-	parts := make([]string, 0, len(def.pk))
+// depKeyOf returns the identity of the row whose primary key is vals, as
+// encodeKey gives it to the row and to its locks, so that the row a
+// statement pins and the row the engine locks are one resource; or "" when
+// a key column is missing, or a value is bytes, which the comparisons take
+// as the text they spell while encodeKey does not.
+func depKeyOf(def *tableDef, vals map[string]any) string {
+	key := make([]any, 0, len(def.pk))
 	for _, c := range def.pk {
 		v, ok := vals[c]
 		if !ok {
 			return ""
 		}
-		parts = append(parts, v)
+		if _, isBytes := derefValue(v).([]byte); isBytes {
+			return ""
+		}
+		key = append(key, v)
 	}
-	return strings.Join(parts, "|")
+	return encodeKey(key)
 }
 
 // depLock records a lock the transaction takes or waits for: the row for a
