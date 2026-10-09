@@ -278,11 +278,11 @@ func (t *sqlTx) Commit() (err error) {
 	tx.commit()
 	if tx.pendingLockTimeout != nil {
 		t.c.lockTimeout = *tx.pendingLockTimeout
-		t.c.db.s.breakEager(tx.p, sessionSet)
+		t.c.setSession(tx.p)
 	}
 	if tx.pendingTimeZone != nil {
 		t.c.timeZone = tx.pendingTimeZone.loc
-		t.c.db.s.breakEager(tx.p, sessionSet)
+		t.c.setSession(tx.p)
 	}
 	return nil
 }
@@ -402,7 +402,8 @@ func recoverRunOver(err *error) {
 // another process may hold or wait for it: the connection of a transaction,
 // which the goroutines sharing it and its commit take turns on, and one of
 // a capped pool. An uncapped pool never makes a process wait, so its other
-// connections are no resource the processes share. A statement that
+// connections are no resource the processes share, until a session
+// setting is set on one of them (see setSession). A statement that
 // database/sql turns away with ErrTxDone, the transaction having ended
 // before it, never reaches the driver and records nothing, as one turned
 // away for its ended context does not (see runQuery). It is called once
@@ -417,10 +418,25 @@ func (c *sqlConn) depConn() {
 	if tx := c.tx; tx != nil && tx.p != nil && tx.p.r == r {
 		r.depRecord("txconn:"+tx.p.name, true)
 	}
-	if c.pool == nil || c.pool.Stats().MaxOpenConnections <= 0 {
+	if c.pool == nil || (c.pool.Stats().MaxOpenConnections <= 0 && !r.depTainted[c.poolID]) {
 		return
 	}
 	r.depRecord(fmt.Sprintf("conn:%s:%d", c.db.name, c.poolID), true)
+}
+
+// setSession records that a session setting now lives on the connection,
+// which the pool hands to whichever process takes it next. The step is
+// ordered against every other (breakEager), and from here on every take
+// and return of the pool's connections is recorded too, since which
+// process gets this one depends on the order they take them in.
+func (c *sqlConn) setSession(p *Proc) {
+	c.db.s.breakEager(p, sessionSet)
+	if r := c.db.s.run; r != nil && r.depOn() {
+		if r.depTainted == nil {
+			r.depTainted = map[int]bool{}
+		}
+		r.depTainted[c.poolID] = true
+	}
 }
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
@@ -664,16 +680,16 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
 		// MySQL session settings take effect immediately, even in a transaction.
 		c.lockTimeout = tx.lockTimeout
-		c.db.s.breakEager(tx.p, sessionSet)
+		c.setSession(tx.p)
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
 		switch set.Name {
 		case "no_auto_value_on_zero":
 			c.noAutoZero = tx.noAutoZero
-			c.db.s.breakEager(tx.p, sessionSet)
+			c.setSession(tx.p)
 		case "foreign_key_checks":
 			c.noFKChecks = tx.noFKChecks
-			c.db.s.breakEager(tx.p, sessionSet)
+			c.setSession(tx.p)
 		}
 	}
 	switch {
@@ -699,11 +715,11 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 			tx.commit()
 			if tx.pendingLockTimeout != nil {
 				c.lockTimeout = *tx.pendingLockTimeout
-				c.db.s.breakEager(tx.p, sessionSet)
+				c.setSession(tx.p)
 			}
 			if tx.pendingTimeZone != nil {
 				c.timeZone = tx.pendingTimeZone.loc
-				c.db.s.breakEager(tx.p, sessionSet)
+				c.setSession(tx.p)
 			}
 		}
 	case err != nil:

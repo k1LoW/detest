@@ -234,6 +234,9 @@ type run struct {
 	// enabled(), which the reduction counts as enabled all the same.
 	depTrace *depTrace
 	depExtra []option
+	// depTainted holds the pools a session setting was set on a connection
+	// of in this run, whose connections are recorded from then on.
+	depTainted map[int]bool
 	// The sleep sets (see sleep.go): the transitions asleep now, the sleep
 	// set of the prefix, applied once its last choice is made, the sleep set
 	// that arrived at each step choice, and whether the run stopped because
