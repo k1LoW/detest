@@ -437,6 +437,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 func (db *DB) Peek(table string) []Row {
 	defer db.s.leave()
 	defer db.s.enterAny()()
+	db.depNow("db:"+db.name+":"+db.resolve(table), false)
 	return publicRows(db.selectCommitted(table, nil))
 }
 
@@ -835,6 +836,12 @@ func (def *tableDef) reads(col string) bool {
 func (db *DB) SeedRowNow(table string, row Row) {
 	defer db.s.leave()
 	defer db.s.enterAny()()
+	db.depNow("db:"+db.name+":"+db.resolve(table), true)
+	if def := db.defs[db.resolve(table)]; def != nil {
+		for col := range def.autoInc {
+			db.depNow("autoinc:"+db.name+":"+autoIncKey(db.resolve(table), col), true) // the seed may move the counter
+		}
+	}
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
 		return
@@ -3055,6 +3062,20 @@ func nextvalOf(e sqlir.Expr) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprint(c.Value), true
+}
+
+// depNow records, under PartialOrder, an access a fake makes through the
+// hand-written API from within a step, such as Peek from an External's
+// callee, on that step. Outside any step, from a When or an invariant the
+// scheduler evaluates, nothing is recorded: the start's and the
+// invariants' reads are accounted for by the trace already, and a step of
+// its own here would be a dependence with everything.
+func (db *DB) depNow(res string, write bool) {
+	r := db.s.run
+	if r == nil || !r.depOn() || r.dep().cur == nil {
+		return
+	}
+	r.depRecord(res, write)
 }
 
 // depRes records a write of a resource the database owns outside its
