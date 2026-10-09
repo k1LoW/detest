@@ -83,6 +83,9 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		// another seed instead.
 		t.Fatal("detest: DETEST_CHECKPOINT does not apply to Random or Prioritized; run again with another seed")
 	}
+	if err := partialOrderRefusal(opts, ckpt != ""); err != nil {
+		t.Fatal(err)
+	}
 	var (
 		f      *frontier
 		res    *result
@@ -102,6 +105,8 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	for {
 		f = newFrontier(n, maxRuns)
 		f.random = st.random
+		f.exploreAll = exploreAllOf(opts)
+		f.partial = partialOrderRefusal(opts, false) == nil && partialOrderOf(opts)
 		if maxDuration != 0 {
 			// The clock inside the bubbles is fake, so the deadline is kept
 			// by a timer outside them, from the start of Explore.
@@ -160,6 +165,50 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		}
 	}
 	return res, expect
+}
+
+// partialOrderRefusal returns why PartialOrder cannot apply to the
+// exploration opts describe, or nil. The reduction holds for one worker
+// exploring depth first: a second worker, a machine's share of the tree or
+// a resumed exploration would miss the backtrack points the runs it does not
+// make would have found, and a random order has no backtrack points at all.
+func partialOrderRefusal(opts []Option, checkpoint bool) error {
+	probe := newSimDefaults()
+	for _, o := range opts {
+		o(probe)
+	}
+	if !probe.partialOrder {
+		return nil
+	}
+	switch {
+	case probe.workers > 1:
+		return fmt.Errorf("detest: PartialOrder applies to a single worker; Workers(%d) is refused with it", probe.workers)
+	case probe.strategy.random:
+		return fmt.Errorf("detest: PartialOrder does not apply to Random or Prioritized, which explore no tree to reduce")
+	case probe.shardTotal > 1 || os.Getenv("DETEST_SHARD") != "":
+		return fmt.Errorf("detest: PartialOrder does not apply under Shard or DETEST_SHARD; the shards would not agree on the backtrack points")
+	case checkpoint:
+		return fmt.Errorf("detest: PartialOrder does not apply with DETEST_CHECKPOINT; the subtrees explored so far are not saved")
+	case probe.maxSpins < newSimDefaults().maxSpins:
+		return fmt.Errorf("detest: PartialOrder does not keep the spin verdicts, so MaxSpins(%d) below the default %d is refused with it", probe.maxSpins, newSimDefaults().maxSpins)
+	}
+	return nil
+}
+
+func partialOrderOf(opts []Option) bool {
+	probe := &Sim{}
+	for _, o := range opts {
+		o(probe)
+	}
+	return probe.partialOrder
+}
+
+func exploreAllOf(opts []Option) bool {
+	probe := &Sim{}
+	for _, o := range opts {
+		o(probe)
+	}
+	return probe.exploreAll
 }
 
 func workerCount(opts []Option) int {
@@ -272,6 +321,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 		}
 		res.strategy = s.strategy
 		res.eager, res.lazy = s.eagerStart, s.lazy
+		res.partial = s.partialOrder
 		expect = s.expect
 	})
 	return res, expect

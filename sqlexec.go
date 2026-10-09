@@ -273,6 +273,9 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 		// ROLLBACK TO is how an aborted transaction continues, so it skips the
 		// aborted check the other statements take.
 		tx.yieldf("%s: %s %s", tx.db.name, strings.ReplaceAll(sp.Op, "_", " "), sp.Name)
+		if tx.p != nil {
+			tx.p.r.depSavepoint(tx) // a rollback to it releases locks, which wakes waiters
+		}
 		return &sqlResult{}, tx.savepoint(sp.Op, sp.Name)
 	}
 	if err := tx.check(); err != nil {
@@ -816,6 +819,7 @@ func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
 	}
 	x.inSelect, x.selectStmt = true, true
 	x.tx.yieldf("%s: %s", x.tx.db.name, lazyString(func() string { return x.summarize(sel) }))
+	x.depStatement(sel, sel.Lock != nil || queryHasEffects(sel))
 	// A plain SELECT waits too, in pg_advisory_xact_lock or a locking
 	// subquery, and reads from its snapshot after the wait all the same.
 	x.freeze(sel)
@@ -1632,6 +1636,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 	ignored := x.tx.db.ignored[table]
 	if !ignored {
 		x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, lazyString(func() string { return x.insertPreview(ins, cols) }))
+		x.depStatement(ins, true)
 	}
 	x.freeze(ins)
 	var rows []Row
@@ -1753,6 +1758,7 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if i > 0 {
 			// The first row's is the statement's, above.
 			x.tx.yieldf("%s: insert %s %s", x.tx.db.name, ins.Table, row)
+			x.depStatement(ins, true)
 		}
 		var existing, cur Row
 		var lk lockKey
@@ -2202,6 +2208,7 @@ func (x *sqlExec) execUpdate(up *sqlir.UpdateStmt) (*sqlResult, error) {
 		return row.String()
 	})
 	x.tx.yieldf("%s: update %s set %s where %s", x.tx.db.name, up.Table, preview, lazyString(func() string { return x.exprString(up.Where) }))
+	x.depStatement(up, true)
 	x.freeze(up)
 	body := *up
 	body.With = nil
@@ -2386,6 +2393,7 @@ func (x *sqlExec) execDelete(del *sqlir.DeleteStmt) (*sqlResult, error) {
 		return x.returningResult(del.Returning, x.tableCols(x.tx.db.resolve(del.Table)), ""), nil // nothing to delete
 	}
 	x.tx.yieldf("%s: delete %s where %s", x.tx.db.name, del.Table, lazyString(func() string { return x.exprString(del.Where) }))
+	x.depStatement(del, true)
 	x.freeze(del)
 	body := *del
 	body.With = nil

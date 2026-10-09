@@ -28,8 +28,8 @@ type frontier struct {
 	mu         sync.Mutex
 	wake       []chan struct{} // per worker, buffered so a wakeup is never lost
 	waiting    []bool
-	stack      [][]choice // LIFO keeps the order depth first and the stack small
-	busy       int        // workers running a prefix taken from the stack
+	stack      []subtree // LIFO keeps the order depth first and the stack small
+	busy       int       // workers running a prefix taken from the stack
 	stopped    bool
 	incomplete bool // MaxRuns or MaxDuration cut the exploration short
 	// random hands out run indexes instead of subtrees, under the Random
@@ -64,6 +64,18 @@ type frontier struct {
 	// shared counts the statements goroutines ran at once on a transaction
 	// they share with their process (see sqlConn.runShared).
 	shared atomic.Int64
+	// partial is PartialOrder, under which pushed is the subtrees pushed or
+	// run so far, where the backtrack points of several runs name the same
+	// subtree.
+	partial bool
+	pushed  map[string]*subtree
+	// zIn is, by a state's prefix key, the sleep set that arrived there,
+	// and explored the options run from it so far (see sleep.go).
+	zIn      map[string][]sleeper
+	explored map[string][]explored
+	// exploreAll keeps the exploration going past violations (see
+	// Sim.exploreAll).
+	exploreAll bool
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -75,7 +87,7 @@ type workerProgress struct {
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
-	f := &frontier{stack: [][]choice{nil}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers)}
+	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}}
 	for i := range f.wake {
 		f.wake[i] = make(chan struct{}, 1)
 	}
@@ -116,14 +128,14 @@ func (f *frontier) settled(pushed int) {
 // take returns the next prefix to run, waiting while other workers may still
 // add some, and under the Random strategy the index of the run instead. It
 // reports false once the exploration is over.
-func (f *frontier) take(worker int) ([]choice, int, bool) {
+func (f *frontier) take(worker int) (subtree, int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.random {
 		return f.takeRandom(worker)
 	}
 	for {
-		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1]) {
+		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1].prefix) {
 			f.stack = f.stack[:len(f.stack)-1] // after the best violation
 		}
 		if len(f.stack) > 0 || f.busy == 0 || f.stopped {
@@ -139,13 +151,13 @@ func (f *frontier) take(worker int) ([]choice, int, bool) {
 	if f.stopped || len(f.stack) == 0 {
 		f.progress[worker].idle.Store(true)
 		f.wakeAll() // the exploration is over: let the others see it
-		return nil, 0, false
+		return subtree{}, 0, false
 	}
 	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
 		f.wakeAll()
-		return nil, 0, false
+		return subtree{}, 0, false
 	}
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
@@ -158,21 +170,21 @@ func (f *frontier) take(worker int) ([]choice, int, bool) {
 // order, so once a run violates every run before it has been taken, and no
 // other is needed to report the violation of the lowest index. f.mu
 // is held.
-func (f *frontier) takeRandom(worker int) ([]choice, int, bool) {
+func (f *frontier) takeRandom(worker int) (subtree, int, bool) {
 	if f.stopped || f.halted {
 		f.progress[worker].idle.Store(true)
-		return nil, 0, false
+		return subtree{}, 0, false
 	}
 	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
-		return nil, 0, false
+		return subtree{}, 0, false
 	}
 	i := f.next
 	f.next++
 	f.busy++
 	f.runs++
-	return nil, i, true
+	return subtree{}, i, true
 }
 
 // cut counts a run cut at MaxIdleTicks.
@@ -192,18 +204,51 @@ func (f *frontier) cutRuns() int {
 func (f *frontier) expire() { f.expired.Store(true) }
 
 // finish returns a taken prefix with the subtrees its run revealed.
-func (f *frontier) finish(children [][]choice) {
+func (f *frontier) finish(children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	pushed := f.push(children)
+	f.busy--
+	f.settled(pushed)
+}
+
+// push adds the subtrees not after the best violation and, under
+// PartialOrder where several runs' backtrack points name one subtree, not
+// pushed before. It returns how many it added. f.mu is held.
+func (f *frontier) push(children []subtree) int {
 	pushed := 0
-	for _, c := range children {
-		if !f.after(c) {
+	for i := range children {
+		c := children[i]
+		if f.partial {
+			k := prefixKey(c.prefix)
+			if prev := f.pushed[k]; prev != nil {
+				if prev.conservative && !c.conservative {
+					prev.conservative = false // the bound is not the only reason any more
+				}
+				continue
+			}
+			f.pushed[k] = &c
+		}
+		if !f.after(c.prefix) {
 			f.stack = append(f.stack, c)
 			pushed++
 		}
 	}
-	f.busy--
-	f.settled(pushed)
+	return pushed
+}
+
+// walked marks the states a run went through as explored, under
+// PartialOrder: the first run through a state takes its first option, so a
+// backtrack point naming that option is explored already.
+func (f *frontier) walked(choices []choice) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for j := range choices {
+		k := prefixKey(choices[:j+1])
+		if f.pushed[k] == nil {
+			f.pushed[k] = &subtree{}
+		}
+	}
 }
 
 // declareSometimes records the conditions a worker declared. Every worker
@@ -277,7 +322,7 @@ func (f *frontier) halt() {
 // found records a violating run, keeping the earliest one: the first in
 // depth-first order, or the one of the lowest index under the Random
 // strategy.
-func (f *frontier) found(choices []choice, index int, res *result) {
+func (f *frontier) found(choices []choice, index int, res *result, children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.random {
@@ -295,15 +340,19 @@ func (f *frontier) found(choices []choice, index int, res *result) {
 	if f.best == nil || precedes(picks, f.best) {
 		f.best, f.bestResult = picks, res
 	}
+	// Under PartialOrder the violating run's backtrack points go to its
+	// ancestors, where the alternatives before its own are before it in
+	// depth-first order and still to be explored.
+	pushed := f.push(children)
 	f.busy--
-	f.settled(0)
+	f.settled(pushed)
 }
 
 // after reports whether every run under prefix comes after the best
 // violation in depth-first order: at the first choice they differ, the
 // prefix took a later alternative.
 func (f *frontier) after(prefix []choice) bool {
-	if f.best == nil {
+	if f.best == nil || f.exploreAll {
 		return false
 	}
 	for i, c := range prefix {
@@ -329,8 +378,8 @@ func precedes(a, b []int) bool {
 // children returns the subtrees below prefix that the run with choices c did
 // not enter: at every choice the run made past the prefix, the alternatives it
 // did not pick. They are ordered so that the stack yields the deepest first.
-func (s *Sim) children(c []choice, prefix int) [][]choice {
-	var out [][]choice
+func (s *Sim) children(c []choice, prefix int) []subtree {
+	var out []subtree
 	for j := prefix; j < len(c); j++ {
 		for v := c[j].n - 1; v > c[j].picked; v-- {
 			p := make([]choice, j+1)
@@ -339,7 +388,7 @@ func (s *Sim) children(c []choice, prefix int) [][]choice {
 			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
 				continue // another machine's subtree
 			}
-			out = append(out, p)
+			out = append(out, subtree{prefix: p})
 		}
 	}
 	return out
@@ -371,12 +420,18 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		k = r.steps
 	}
 	for {
-		prefix, index, ok := f.take(worker)
+		taken, index, ok := f.take(worker)
 		if !ok {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
+		prefix := taken.prefix
 		runs++
 		r := s.newRun(prefix)
+		if s.partialOrder {
+			f.mu.Lock()
+			r.sleepPending = f.sleepFor(prefix)
+			f.mu.Unlock()
+		}
 		if f.random {
 			r.rng, r.seen, r.path = s.rngFor(index), seen, fnvOffset
 			if s.strategy.prioritized {
@@ -389,6 +444,19 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		}
 		r.tracing = s.verbose
 		v := r.execute()
+		if s.depObserve != nil && !r.covered {
+			s.depObserve(r, v) // a run cut where its siblings cover the rest is no run of its own
+		}
+		var children []subtree
+		switch {
+		case f.random:
+		case s.partialOrder:
+			f.record(r, len(prefix))
+			children = s.reduce(r, len(prefix), v != nil || r.cut || r.pending != nil, f.sleepAt(r, len(prefix)))
+			f.walked(r.choices)
+		case v == nil || s.exploreAll:
+			children = s.children(r.choices, len(prefix))
+		}
 		maxDepth = max(maxDepth, len(r.choices))
 		if r.cut {
 			f.cut()
@@ -405,24 +473,22 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 				f.halt() // shrinking takes a run per choice
 			}
 			choices := r.choices
-			r, v = s.shrink(r, v)
-			if !r.tracing {
-				r, v = s.retrace(r, v)
-				if v.kind == "fatal" { // the rerun took another path
-					f.fail(v.err)
-					return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
+			if !s.exploreAll {
+				r, v = s.shrink(r, v)
+				if !r.tracing {
+					r, v = s.retrace(r, v)
+					if v.kind == "fatal" { // the rerun took another path
+						f.fail(v.err)
+						return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
+					}
 				}
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start))
+			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start), children)
 			continue
 		}
-		if f.random {
-			f.finish(nil)
-			continue
-		}
-		f.finish(s.children(r.choices, len(prefix)))
+		f.finish(children)
 	}
 }
 
@@ -510,7 +576,7 @@ func (f *frontier) load(path string) error {
 		for i, c := range st {
 			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP}
 		}
-		f.stack = append(f.stack, p)
+		f.stack = append(f.stack, subtree{prefix: p})
 	}
 	f.prior, f.cuts, f.lazy = ck.Runs, ck.Cuts, ck.Lazy
 	for _, n := range ck.Reached {
@@ -530,9 +596,9 @@ func (f *frontier) save(path string) error {
 	}
 	sort.Strings(ck.Reached)
 	ck.Refused = slices.Sorted(maps.Keys(f.refused))
-	for _, p := range f.stack {
-		st := make([]savedChoice, len(p))
-		for i, c := range p {
+	for _, sub := range f.stack {
+		st := make([]savedChoice, len(sub.prefix))
+		for i, c := range sub.prefix {
 			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp}
 		}
 		ck.Subtrees = append(ck.Subtrees, st)

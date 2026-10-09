@@ -48,6 +48,7 @@ func (mu *Mutex) Lock() {
 		return
 	}
 	p.yieldf("lock %s", mu.name)
+	p.r.depRecord("mutex:"+mu.name, true)
 	for mu.held {
 		p.blockOnLock(mu, fmt.Sprintf("mutex %s held by %s", mu.name, procName(mu.holder)))
 	}
@@ -56,6 +57,9 @@ func (mu *Mutex) Lock() {
 
 // Unlock releases the mutex. As with sync.Mutex, any goroutine may unlock it.
 func (mu *Mutex) Unlock() {
+	if r := mu.s.run; r != nil {
+		r.depRecord("mutex:"+mu.name, true)
+	}
 	defer mu.s.leave()
 	// A goroutine of an ended run ends here, as at any entry point with
 	// no error to return, its deferred calls running.
@@ -127,6 +131,7 @@ func (rw *RWMutex) Lock() {
 		return
 	}
 	p.yieldf("lock %s", rw.name)
+	p.r.depRecord("mutex:"+rw.name, true)
 	for rw.writing || rw.readLocked() {
 		rw.pendingWriters[p] = true
 		held := "readers"
@@ -141,6 +146,9 @@ func (rw *RWMutex) Lock() {
 
 // Unlock releases the write lock.
 func (rw *RWMutex) Unlock() {
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, true)
+	}
 	defer rw.s.leave()
 	goneStale(rw.s.currentAs(func() string { return "unlock " + rw.name }))
 	if r := rw.s.run; r != nil && r.over() {
@@ -169,6 +177,7 @@ func (rw *RWMutex) RLock() {
 		return
 	}
 	p.yieldf("rlock %s", rw.name)
+	p.r.depRecord("mutex:"+rw.name, false)
 	for rw.writing || len(rw.pendingWriters) > 0 {
 		held := "a waiting writer"
 		if rw.writing {
@@ -182,6 +191,9 @@ func (rw *RWMutex) RLock() {
 // RUnlock releases a read lock. A read lock taken by another goroutine is
 // released when the calling process holds none, as sync.RWMutex allows.
 func (rw *RWMutex) RUnlock() {
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, false)
+	}
 	defer rw.s.leave()
 	// Resolved first, as a goroutine of an ended run must not read s.run,
 	// which the scheduler may be setting for the next run.
@@ -312,6 +324,7 @@ func (s *Sim) released(l waitable, op string) {
 // nothing breaks a cycle through a mutex: the processes hang. A wait that
 // closes one is reported instead.
 func (p *Proc) blockOnLock(l waitable, what string) {
+	p.r.depRecord("waits", true)
 	for _, h := range l.holders(p) {
 		if p.r.waitsFor(h, p) {
 			p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s, closing a cycle of waits that nothing can break", p.name, what)}

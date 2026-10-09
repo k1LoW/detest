@@ -181,6 +181,37 @@ func MaxPreemptions(n int) Option {
 // not agree on starting over.
 func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 
+// PartialOrder makes the exploration skip the runs that differ from one it
+// made only in the order of independent steps, such as two processes'
+// reads of different rows. It records what each step reads and writes of
+// the simulated resources (tables and rows, sequences, queues, External
+// calls, mutexes, locks and connections), and explores a reordering only
+// where two steps touch the same thing and one of them writes. Which
+// final states, process histories and violations are reachable within the
+// bounds stays the same; the runs explored to reach them are fewer.
+//
+// It assumes that the processes share no state outside detest's resources:
+// a package variable, a fake's internal state or a test variable that one
+// process writes and another reads is a dependence detest cannot see, and
+// a reordering across it may be skipped. State read only at quiescence, or
+// written in an order that does not matter, such as a set or a counter, is
+// fine. A fake that records what the External calls it serves did, and
+// reads that record on a later call that goes through no External, must
+// report the read with External.Observe. The report says the option was
+// on, since the result rests on this assumption.
+//
+// The running process's next step is explored first at every state, so the
+// violation found first may differ from the one Explore reports without the
+// option. A schedule found with it replays with DETEST_REPLAY as any other,
+// with or without the option.
+//
+// It applies to a single worker exploring depth first: Workers above one,
+// Random, Prioritized, Shard, DETEST_SHARD and DETEST_CHECKPOINT are
+// refused with it, and so is a MaxSpins below the default, since the spin
+// verdicts depend on the order of commits the reduction takes as
+// independent.
+func PartialOrder() Option { return func(s *Sim) { s.partialOrder = true } }
+
 // withoutEagerStart is EagerStart(false) after a start moved a counter of
 // generated values, which the report and the schedules it prints carry.
 func withoutEagerStart(why string) Option {
@@ -282,17 +313,22 @@ type Sim struct {
 	boundPreemptions bool
 	eagerStart       bool
 	lazy             string // why EagerStart was dropped (see withoutEagerStart)
-	maxRuns          int
-	maxDuration      time.Duration
-	verbose          bool
-	sqlObserver      func(query string, err error)
-	shardIndex       int
-	shardTotal       int
-	shardDepth       int
-	workers          int
-	strategy         strategy
-	frontier         *frontier // shared with the other workers, when Workers splits the exploration
-	worker           int
+	partialOrder     bool
+	depObserve       func(r *run, v *violation) // tests: sees each run and its verdict
+	// exploreAll makes the exploration go on past violations, shrinking
+	// none, so that tests can compare everything two explorations reach.
+	exploreAll  bool
+	maxRuns     int
+	maxDuration time.Duration
+	verbose     bool
+	sqlObserver func(query string, err error)
+	shardIndex  int
+	shardTotal  int
+	shardDepth  int
+	workers     int
+	strategy    strategy
+	frontier    *frontier // shared with the other workers, when Workers splits the exploration
+	worker      int
 
 	dbs       []*DB
 	queues    []*Queue
@@ -486,6 +522,7 @@ type result struct {
 	strategy strategy
 	eager    bool   // EagerStart applied
 	lazy     string // why EagerStart was dropped, if it was
+	partial  bool   // PartialOrder applied
 	Workers  int
 	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
@@ -553,6 +590,9 @@ func (r *result) outcome() string {
 		}
 		if r.eager {
 			workers += ", EagerStart"
+		}
+		if r.partial {
+			workers += ", PartialOrder (assumes no state shared outside detest)"
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		if r.CutRuns > 0 {
@@ -643,6 +683,8 @@ func (s *Sim) check() *result {
 		// always passes the frontier it saves and resumes.
 		f = newFrontier(1, s.maxRuns)
 		f.random = s.strategy.random
+		f.exploreAll = s.exploreAll
+		f.partial = s.partialOrder
 		s.frontier = f
 		return f.merge([]*result{s.checkShared(f, 0)}, 1)
 	}

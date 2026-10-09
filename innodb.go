@@ -330,12 +330,14 @@ func (x *sqlExec) autoIncrement(table string, row Row) (int64, bool) {
 		n, isInt := autoIncValue(derefValue(v))
 		if !present || derefValue(v) == nil || isInt && n == 0 && !x.tx.noAutoZero {
 			x.tx.db.effects++
+			x.tx.db.depRes("autoinc:" + x.tx.db.name + ":" + key)
 			seqs[key]++
 			row[col] = seqs[key]
 			return seqs[key], true
 		}
 		if isInt && n > seqs[key] {
 			x.tx.db.effects++
+			x.tx.db.depRes("autoinc:" + x.tx.db.name + ":" + key)
 			seqs[key] = n
 		}
 	}

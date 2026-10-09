@@ -35,6 +35,7 @@ type qmsg struct {
 	msg         Msg
 	redelivered int
 	duplicate   bool
+	depEnq      *depEvent // PartialOrder: the event that enqueued it
 }
 
 func (q *qmsg) String() string {
@@ -114,5 +115,10 @@ func (q *Queue) push(p *Proc, msg Msg) {
 		q.s.run.queuesTouched = true
 	}
 	q.nextID++
-	q.msgs = append(q.msgs, &qmsg{id: q.nextID, msg: msg})
+	m := &qmsg{id: q.nextID, msg: msg}
+	if r := q.s.run; r != nil {
+		r.depRecord("queue:"+q.name, true)
+		m.depEnq = r.depCur()
+	}
+	q.msgs = append(q.msgs, m)
 }

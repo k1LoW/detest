@@ -344,6 +344,7 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 				}
 				delete(x.tx.writes, lk)
 				x.tx.deleted[lk] = true
+				x.tx.depCascade(ck.table)
 				if err := x.onParentDelete(ck.table, cur); err != nil {
 					return err
 				}
@@ -498,6 +499,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.writes[nlk] = updated
+		x.tx.depCascade(ck.table)
 		x.tx.endUpdate(lk)
 	}
 	return nil

@@ -114,6 +114,9 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 	tx.started = true
 	table, _ := entryIndex(lk)
 	tx.noteTableLock(table, mode)
+	if tx.p != nil {
+		tx.p.r.depLock(tx, lk)
+	}
 	var cancelWait func()
 	for {
 		conflict := tx.conflicting(lk, mode)

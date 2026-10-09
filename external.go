@@ -87,6 +87,7 @@ func (e *External) Call(p *Proc, db *DB, desc string, effect func(tx *Tx) error)
 		p.r.failures++
 	}
 	p.yieldf("calls %s(%s)", e.name, desc)
+	p.r.depRecord("ext:"+e.name, true)
 	if out == FailBefore {
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
@@ -136,6 +137,7 @@ func (e *External) Do(p *Proc, desc string, call func() error) (err error) {
 		p.r.failures++
 	}
 	p.yieldf("calls %s(%s)", e.name, desc)
+	p.r.depRecord("ext:"+e.name, true)
 	if out == FailBefore {
 		p.r.note(p, "%s(%s): %s", e.name, desc, out)
 		return ErrUnavailable
@@ -250,4 +252,18 @@ func requestKey(req *http.Request) string {
 		return key
 	}
 	return key + " " + string(b)
+}
+
+// Observe records that the calling process reads what the External's calls
+// left behind, without making a call: a fake that keeps what its calls did,
+// such as the executions a job service started, and answers a later call
+// from that record, reads state detest cannot see. Under PartialOrder the
+// read is a dependence on the calls, and a fake must report it here, else
+// an order in which the read comes before a call may be skipped. It is a
+// no-op otherwise.
+func (e *External) Observe(p *Proc) {
+	if p == nil || p.r == nil {
+		return
+	}
+	p.r.depRecord("ext:"+e.name, false)
 }

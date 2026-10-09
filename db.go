@@ -395,6 +395,7 @@ func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
+	p.r.depRow(nil, db, table, key, false)
 	r, ok := db.committed[table][key]
 	if !ok {
 		return nil, false
@@ -425,6 +426,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
+	p.r.depTable(nil, db, table, false)
 	return publicRows(db.selectCommitted(table, publicPred(pred)))
 }
 
@@ -453,6 +455,7 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 		return nil
 	}
 	tx.yieldf("%s: select %s where ...", tx.db.name, table)
+	tx.depTable(table, false)
 	// Another goroutine using the transaction may have had it aborted
 	// while this one stood at its yield point.
 	if tx.check() != nil {
@@ -484,7 +487,9 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 // Open returns another database/sql handle on the database, a pool of its own,
 // for a second service that shares the database.
 func (db *DB) Open() *sql.DB {
-	sqlDB := sql.OpenDB(&sqlConnector{db: db})
+	conn := &sqlConnector{db: db, id: len(db.s.sqlDBs)}
+	sqlDB := sql.OpenDB(conn)
+	conn.pool = sqlDB
 	db.s.sqlDBs = append(db.s.sqlDBs, sqlDB)
 	return sqlDB
 }
@@ -1152,6 +1157,7 @@ func (db *DB) nextval(seq string) (int64, string) {
 	}
 	db.seqs[seq] = v
 	db.effects++
+	db.depRes("seq:" + db.name + ":" + seq)
 	return v, ""
 }
 
@@ -1164,6 +1170,7 @@ func (db *DB) setval(seq string, v int64, called bool) {
 	}
 	db.seqs[seq] = v
 	db.effects++
+	db.depRes("seq:" + db.name + ":" + seq)
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
@@ -1171,6 +1178,7 @@ func (db *DB) setval(seq string, v int64, called bool) {
 func (db *DB) newUUID() string {
 	db.uuids++
 	db.effects++
+	db.depRes("uuid:" + db.name)
 	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
 }
 
@@ -1957,6 +1965,12 @@ type Tx struct {
 	// dump sets it: foreign keys are neither checked nor acted on.
 	noFKChecks bool
 	saves      []savepoint
+	// PartialOrder: what the transaction wrote or locked, which its end
+	// publishes; whether its snapshot was recorded; and the row the running
+	// statement pins.
+	depTouched map[string]bool
+	depSnapped bool
+	depPin     depPin
 	// deferAll and deferNamed are what SET CONSTRAINTS set, for ALL and by
 	// constraint name; nil when it was not run.
 	deferAll   *bool
@@ -2017,6 +2031,7 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 		return nil, false
 	}
 	tx.yieldf("%s: select %s id=%s", tx.db.name, table, key)
+	tx.depRow(table, key, false)
 	if tx.check() != nil {
 		return nil, false // aborted while it stood at its yield point, as Select
 	}
@@ -2039,6 +2054,7 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 		return nil, false, err
 	}
 	tx.yieldf("%s: select %s id=%s for update", tx.db.name, table, key)
+	tx.depRow(table, key, true)
 	if err := tx.lock(lockKey{table, key}); err != nil {
 		return nil, false, err
 	}
@@ -2276,6 +2292,7 @@ func (tx *Tx) insert(table string, row Row) error {
 	// Before the defaults are drawn, as the SQL INSERT does (see
 	// sqlExec.execInsert).
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
+	tx.depTable(table, true) // the key may be generated, and a unique constraint reads other rows
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
@@ -2333,6 +2350,7 @@ func (tx *Tx) delete(table, key string) (bool, error) {
 	}
 	lk := lockKey{table, key}
 	tx.yieldf("%s: delete %s id=%s", tx.db.name, table, key)
+	tx.depRow(table, key, true)
 	if err := tx.lock(lk); err != nil {
 		return false, err
 	}
@@ -2590,6 +2608,9 @@ func (tx *Tx) takeConn(p *Proc) {
 	if c.by != p {
 		p.conns = append(p.conns, c)
 	}
+	// The connection is what the processes sharing the transaction take
+	// turns on.
+	p.r.depRecord("txconn:"+tx.p.name, true)
 	c.by = p
 	c.depth++
 }
@@ -2614,6 +2635,7 @@ func (tx *Tx) dropConn(p *Proc) bool {
 	}
 	c.by = nil
 	p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
+	p.r.depRecord("txconn:"+tx.p.name, true)
 	return !tx.p.r.over()
 }
 
@@ -2788,6 +2810,7 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 		return 0, err
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
+	tx.depTable(table, true) // by a predicate, which may match any row
 	// Aborted by another goroutine while it stood at its yield point. An
 	// update matching no row takes no lock that would tell.
 	if err := tx.check(); err != nil {
@@ -2914,6 +2937,9 @@ func (tx *Tx) commit() {
 func (tx *Tx) rollback() { tx.release() }
 
 func (tx *Tx) release() {
+	if tx.p != nil {
+		tx.p.r.depTxEnd(tx)
+	}
 	tx.closed = true
 	if tx.p != nil && tx.p.r.over() {
 		// The run ended and the next one resets the simulated resources. Releasing here
@@ -3022,4 +3048,27 @@ func nextvalOf(e sqlir.Expr) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprint(c.Value), true
+}
+
+// depRes records a write of a resource the database owns outside its
+// tables, such as a sequence or the uuid counter.
+func (db *DB) depRes(res string) {
+	if db.s == nil || db.s.run == nil {
+		return
+	}
+	db.s.run.depRecord(res, true)
+}
+
+// depTable and depRow record what a hand-written operation of the
+// transaction touches.
+func (tx *Tx) depTable(table string, write bool) {
+	if tx.p != nil {
+		tx.p.r.depTable(tx, tx.db, table, write)
+	}
+}
+
+func (tx *Tx) depRow(table, key string, write bool) {
+	if tx.p != nil {
+		tx.p.r.depRow(tx, tx.db, table, key, write)
+	}
 }

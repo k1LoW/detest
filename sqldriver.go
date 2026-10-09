@@ -72,10 +72,26 @@ func CheckSQL(d Server, query string) error {
 	return nil
 }
 
-type sqlConnector struct{ db *DB }
+type sqlConnector struct {
+	db   *DB
+	pool *sql.DB // the pool the connector serves, for PartialOrder
+	id   int     // the pool's number among the simulation's
+}
 
 func (c *sqlConnector) Connect(context.Context) (driver.Conn, error) {
-	return &sqlConn{db: c.db}, nil
+	return &sqlConn{db: c.db, pool: c.pool, poolID: c.id}, nil
+}
+
+// depConn records that the statement takes or gives back a connection of a
+// capped pool, which another process may hold or wait for. An uncapped
+// pool never makes a process wait, so its connections are no resource the
+// processes share.
+func (c *sqlConn) depConn() {
+	r := c.db.s.run
+	if r == nil || !r.depOn() || c.pool == nil || c.pool.Stats().MaxOpenConnections <= 0 {
+		return
+	}
+	r.depRecord(fmt.Sprintf("conn:%s:%d", c.db.name, c.poolID), true)
 }
 func (c *sqlConnector) Driver() driver.Driver { return sqlDriver{} }
 
@@ -87,8 +103,10 @@ func (sqlDriver) Open(string) (driver.Conn, error) {
 
 // sqlConn is a connection. It holds the open detest transaction, if any.
 type sqlConn struct {
-	db *DB
-	tx *Tx
+	db     *DB
+	pool   *sql.DB
+	poolID int
+	tx     *Tx
 	// lastInsertID is MySQL's LAST_INSERT_ID() of the connection: the first
 	// AUTO_INCREMENT value its latest insert that generated one generated.
 	lastInsertID int64
@@ -134,6 +152,7 @@ func (c *sqlConn) Ping(context.Context) error {
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.Tx, err error) {
 	defer c.db.s.leave()
+	c.depConn()
 	defer func() {
 		// A begin cut short by the end of the run returns no Tx, so
 		// database/sql never rolls it back: the connection must not keep it.
@@ -188,6 +207,9 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 // option converts them, the type the production code's driver returns.
 func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
 	defer c.db.s.leave()
+	c.depConn()
+	defer c.depConn() // the connection goes back to the pool
+	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	rows, affected, err := c.run(ctx, query, args)
 	if err != nil {
@@ -208,6 +230,7 @@ type sqlTx struct {
 
 func (t *sqlTx) Commit() (err error) {
 	defer t.c.db.s.leave()
+	defer t.c.depConn()
 	defer recoverRunOver(&err)
 	if t.c.bad {
 		return driver.ErrBadConn
@@ -279,6 +302,7 @@ func (t *sqlTx) Commit() (err error) {
 
 func (t *sqlTx) Rollback() (err error) {
 	defer t.c.db.s.leave()
+	defer t.c.depConn()
 	defer recoverRunOver(&err)
 	if t.c.bad {
 		return driver.ErrBadConn
@@ -351,6 +375,9 @@ func (p *Proc) forgetTx(tx *Tx) {
 
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
 	defer c.db.s.leave()
+	c.depConn()
+	defer c.depConn()
+	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	tx := c.tx
 	rows, _, err := c.run(ctx, query, args)
@@ -775,3 +802,10 @@ func (r *sqlRows) Next(dest []driver.Value) error {
 // sessionSet is what breakEager says of a session setting set on a
 // connection.
 const sessionSet = "set a session setting on its connection, which the pool hands to the process that takes it next"
+
+// depStmtEnd forgets the row the statement pinned, once it ran.
+func (c *sqlConn) depStmtEnd() {
+	if c.tx != nil {
+		c.tx.depPin = depPin{}
+	}
+}
