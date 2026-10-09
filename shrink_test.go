@@ -45,7 +45,9 @@ func TestShrinkSimplifiesTheSchedule(t *testing.T) {
 				}
 				continue
 			}
-			stack = append(stack, s.children(r.choices, len(prefix))...)
+			for _, c := range s.children(r.choices, len(prefix)) {
+				stack = append(stack, c.prefix)
+			}
 		}
 		if worst == nil {
 			t.Fatal("no violating schedule")

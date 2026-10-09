@@ -344,6 +344,7 @@ func (x *sqlExec) onParentDelete(table string, row Row) error {
 				}
 				delete(x.tx.writes, lk)
 				x.tx.deleted[lk] = true
+				x.tx.depCascade(ck.table)
 				if err := x.onParentDelete(ck.table, cur); err != nil {
 					return err
 				}
@@ -498,6 +499,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 			return err
 		}
 		x.tx.writes[nlk] = updated
+		x.tx.depCascade(ck.table)
 		x.tx.endUpdate(lk)
 	}
 	return nil
@@ -529,6 +531,9 @@ func (x *sqlExec) checkDeferred(only func(sqlir.ForeignKey) bool) error {
 				if !ok {
 					continue
 				}
+				// The check reads the parent, found or not: the engine
+				// records only a parent it finds and locks.
+				tx.depTable(fk.RefTable, false)
 				found, err := x.lockParent(fk, vals)
 				if err != nil {
 					return err
@@ -558,6 +563,7 @@ func (x *sqlExec) checkDeferred(only func(sqlir.ForeignKey) bool) error {
 				if !only(ck.fk) {
 					continue
 				}
+				tx.depTable(ck.table, false) // scanned for rows referring to the key
 				cols := tx.db.refColumns(ck.fk)
 				ov, ok2 := values(old, cols)
 				if !ok2 {

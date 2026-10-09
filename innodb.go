@@ -155,6 +155,7 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.inserts, tx.entries, tx.updating = nil, nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
+			tx.depRelease()
 			tx.releaseLocks(tx.locks)
 			tx.releaseGaps()
 		}
@@ -312,6 +313,7 @@ func (tx *Tx) gapAround(table string, key func(Row) ixKey, row Row, through bool
 	gap := valRange{lo: lo, hasLo: lo != nil, loOpen: true, hi: hi, hasHi: hi != nil, hiOpen: true}
 	tx.db.effects++
 	tx.db.gaps = append(tx.db.gaps, &gapLock{tx: tx, table: table, key: key, ranges: []valRange{gap}})
+	tx.depGap(table)
 }
 
 // autoIncrement fills row's AUTO_INCREMENT column as MySQL does: NULL, 0 or
@@ -330,12 +332,14 @@ func (x *sqlExec) autoIncrement(table string, row Row) (int64, bool) {
 		n, isInt := autoIncValue(derefValue(v))
 		if !present || derefValue(v) == nil || isInt && n == 0 && !x.tx.noAutoZero {
 			x.tx.db.effects++
+			x.tx.db.depRes("autoinc:" + x.tx.db.name + ":" + key)
 			seqs[key]++
 			row[col] = seqs[key]
 			return seqs[key], true
 		}
 		if isInt && n > seqs[key] {
 			x.tx.db.effects++
+			x.tx.db.depRes("autoinc:" + x.tx.db.name + ":" + key)
 			seqs[key] = n
 		}
 	}

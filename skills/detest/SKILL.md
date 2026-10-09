@@ -245,6 +245,14 @@ Use `-v` so the summary line `detest: explored N runs (max depth D, complete=tru
 
 Start with the smallest scenario that can show the bug, which is two actors, one run each, one seeded row and the default bounds. When it passes and its `Sometimes` hold, widen it in the direction the user cares about. Add crashes (`detest.MaxCrashes(1)`), duplicate deliveries (`detest.Duplicates(1)`), a third actor, a background sweeper. Each step multiplies the runs, so widen one thing at a time and watch the run count and `complete=`.
 
+When the exploration is too slow to widen, `detest.PartialOrder()` skips the runs that only reorder independent steps, typically half of them, and reaches the same states and violations. It rests on an assumption detest cannot check, that the processes share no state outside detest in an order that matters, so before proposing it read the test and the fakes for state they share:
+
+- a fake that remembers what the calls through `ext.Do` did and answers a later call from that record without going through `ext.Do`, such as a job service whose status query reads the executions it started: add `ext.Observe(p)` where it reads, else an order in which the read comes first is skipped;
+- a variable of the test or a package variable that one process writes and another reads, or that two processes write, and whose value depends on the order: not reducible, leave the option off. Reading it only at quiescence does not make it safe, since the reduction keeps one order of two independent writes and the value at the end is that order's. A value that does not depend on the order (a set, a counter, a flag) is fine;
+- an id or a value drawn at declaration or in a seed, such as `uuid.New()`, is fine, as every run sees the same one.
+
+Say in the proposal that the option is on and what it assumes, as the report must. If a violation the scenario was written for is found without the option and not with it, the assumption is broken somewhere above; find the shared state before trusting either result. `PartialOrder` applies to one worker exploring depth first and is refused with `Workers`, `Random`, `Prioritized`, `Shard` and `DETEST_CHECKPOINT`, so leave `DETEST_WORKERS` unset for such a test.
+
 When the harness itself fails (unsupported SQL, "blocked outside the scheduler", "nondeterministic simulation", runs capped before completion, self-waits), read `references/troubleshooting.md`. Fix the harness, not the result. Never rewrite the production SQL inside the test or loosen an invariant to make a run pass.
 
 ## 6. Triage a violation
@@ -289,6 +297,7 @@ Always end with a report the user can act on without knowing detest. It answers 
 ### What this guarantees, and what it does not
 - Guaranteed: <for every interleaving of the listed operations, with the listed faults, within the bounds, the listed invariants hold (or: this schedule breaks them, reproducibly)>
 - Not covered: <bounds not explored (more actors, more crashes or stalls, preemptions beyond N), faults not injected, invariants not written, code outside the scenario, data races on Go memory between DB calls (use `go test -race`), statements detest refused, behavior that depends on the real server's planner or settings beyond the defaults>
+- Assumed, when `detest.PartialOrder()` is on: <the processes share no state outside detest in an order that matters, named with what was checked (the fakes' records, the test's variables) and what the fake reports with `Observe`>
 
 ### Next steps
 <the recommended fix as a diff with why it works and what it costs, the offer to apply it and verify it with a complete exploration, the pinned regression test and how to run it, the remaining candidates from step 2, offered as the next round>

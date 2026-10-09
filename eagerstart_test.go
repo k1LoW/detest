@@ -421,6 +421,17 @@ func TestEagerStartDroppedOnACallThatDoesNotYield(t *testing.T) {
 				return nil
 			})
 		}},
+		{"observe", func(t *testing.T, s *Sim) {
+			ext := s.External("svc")
+			s.Manual("observer", 1, func(p *Proc) error {
+				ext.Observe(p) // reads the record of the calls made so far, where the start is
+				p.Step("after observing")
+				return nil
+			})
+			s.Manual("caller", 1, func(p *Proc) error {
+				return ext.Do(p, "call", func() error { return nil })
+			})
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, _ := explore(t, tc.model, nil)

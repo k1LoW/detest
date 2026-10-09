@@ -48,6 +48,7 @@ func (mu *Mutex) Lock() {
 		return
 	}
 	p.yieldf("lock %s", mu.name)
+	p.r.depRecord("mutex:"+mu.name, true)
 	for mu.held {
 		p.blockOnLock(mu, fmt.Sprintf("mutex %s held by %s", mu.name, procName(mu.holder)))
 	}
@@ -65,6 +66,9 @@ func (mu *Mutex) Unlock() {
 		// a mutex it never got. The next run resets the mutex anyway.
 		mu.held, mu.holder = false, nil
 		return
+	}
+	if r := mu.s.run; r != nil {
+		r.depRecord("mutex:"+mu.name, true)
 	}
 	if !mu.held {
 		panic(fmt.Sprintf("detest: unlock of unlocked mutex %s", mu.name))
@@ -127,6 +131,7 @@ func (rw *RWMutex) Lock() {
 		return
 	}
 	p.yieldf("lock %s", rw.name)
+	p.r.depRecord("mutex:"+rw.name, true)
 	for rw.writing || rw.readLocked() {
 		rw.pendingWriters[p] = true
 		held := "readers"
@@ -146,6 +151,9 @@ func (rw *RWMutex) Unlock() {
 	if r := rw.s.run; r != nil && r.over() {
 		rw.writing, rw.writer = false, nil // as Mutex.Unlock
 		return
+	}
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, true)
 	}
 	if !rw.writing {
 		panic(fmt.Sprintf("detest: unlock of unlocked rwmutex %s", rw.name))
@@ -169,6 +177,7 @@ func (rw *RWMutex) RLock() {
 		return
 	}
 	p.yieldf("rlock %s", rw.name)
+	p.r.depRecord("mutex:"+rw.name, false)
 	for rw.writing || len(rw.pendingWriters) > 0 {
 		held := "a waiting writer"
 		if rw.writing {
@@ -189,6 +198,9 @@ func (rw *RWMutex) RUnlock() {
 	goneStale(p)
 	if r := rw.s.run; r != nil && r.over() {
 		return // as Mutex.Unlock, the next run resets the read locks
+	}
+	if r := rw.s.run; r != nil {
+		r.depRecord("mutex:"+rw.name, false)
 	}
 	// A read lock taken by another goroutine of the caller's pod, such as
 	// its parent's, is released before anyone else's, since an adopted
@@ -312,6 +324,7 @@ func (s *Sim) released(l waitable, op string) {
 // nothing breaks a cycle through a mutex: the processes hang. A wait that
 // closes one is reported instead.
 func (p *Proc) blockOnLock(l waitable, what string) {
+	p.r.depRecord("waits", true)
 	for _, h := range l.holders(p) {
 		if p.r.waitsFor(h, p) {
 			p.r.pending = &violation{kind: "progress", err: fmt.Errorf("process %s waits for %s, closing a cycle of waits that nothing can break", p.name, what)}

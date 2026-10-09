@@ -72,11 +72,16 @@ func CheckSQL(d Server, query string) error {
 	return nil
 }
 
-type sqlConnector struct{ db *DB }
+type sqlConnector struct {
+	db   *DB
+	pool *sql.DB // the pool the connector serves, for PartialOrder
+	id   int     // the pool's number among the simulation's
+}
 
 func (c *sqlConnector) Connect(context.Context) (driver.Conn, error) {
-	return &sqlConn{db: c.db}, nil
+	return &sqlConn{db: c.db, pool: c.pool, poolID: c.id}, nil
 }
+
 func (c *sqlConnector) Driver() driver.Driver { return sqlDriver{} }
 
 type sqlDriver struct{}
@@ -87,8 +92,10 @@ func (sqlDriver) Open(string) (driver.Conn, error) {
 
 // sqlConn is a connection. It holds the open detest transaction, if any.
 type sqlConn struct {
-	db *DB
-	tx *Tx
+	db     *DB
+	pool   *sql.DB
+	poolID int
+	tx     *Tx
 	// lastInsertID is MySQL's LAST_INSERT_ID() of the connection: the first
 	// AUTO_INCREMENT value its latest insert that generated one generated.
 	lastInsertID int64
@@ -155,6 +162,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 		return nil, errRunOver
 	}
 	defer c.db.s.enter(p)()
+	c.depConn()
 	c.dropStaleTx()
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
@@ -188,6 +196,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 // option converts them, the type the production code's driver returns.
 func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
 	defer c.db.s.leave()
+	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	rows, affected, err := c.run(ctx, query, args)
 	if err != nil {
@@ -237,6 +246,7 @@ func (t *sqlTx) Commit() (err error) {
 		return errRunOver
 	}
 	defer t.c.db.s.enter(caller)()
+	defer t.c.depConn() // the connection goes back to the pool
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
@@ -268,11 +278,11 @@ func (t *sqlTx) Commit() (err error) {
 	tx.commit()
 	if tx.pendingLockTimeout != nil {
 		t.c.lockTimeout = *tx.pendingLockTimeout
-		t.c.db.s.breakEager(tx.p, sessionSet)
+		t.c.setSession(tx.p)
 	}
 	if tx.pendingTimeZone != nil {
 		t.c.timeZone = tx.pendingTimeZone.loc
-		t.c.db.s.breakEager(tx.p, sessionSet)
+		t.c.setSession(tx.p)
 	}
 	return nil
 }
@@ -326,6 +336,7 @@ func (t *sqlTx) Rollback() (err error) {
 	tx.p.comeBack()
 	defer tx.p.forgetTxUnlessOver(tx)
 	defer t.c.db.s.enter(tx.p)()
+	defer t.c.depConn() // the connection goes back to the pool
 	tx.p.yieldf("%s: rollback", tx.db.name)
 	tx.rollback()
 	return nil
@@ -351,6 +362,7 @@ func (p *Proc) forgetTx(tx *Tx) {
 
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
 	defer c.db.s.leave()
+	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	tx := c.tx
 	rows, _, err := c.run(ctx, query, args)
@@ -386,6 +398,55 @@ func recoverRunOver(err *error) {
 	}
 }
 
+// depConn records the connection the statement takes or gives back where
+// another process may hold or wait for it: the connection of a transaction,
+// which the goroutines sharing it and its commit take turns on, and one of
+// a capped pool. An uncapped pool never makes a process wait, so its other
+// connections are no resource the processes share, until a session
+// setting is set on one of them (see setSession). A statement that
+// database/sql turns away with ErrTxDone, the transaction having ended
+// before it, never reaches the driver and records nothing, as one turned
+// away for its ended context does not (see runQuery). It is called once
+// the caller is resolved and the engine entered, as a goroutine of an
+// ended run must not read s.run, which the scheduler may be setting for
+// the next run.
+func (c *sqlConn) depConn() {
+	r := c.db.s.run
+	if r == nil || !r.depOn() {
+		return
+	}
+	if tx := c.tx; tx != nil && tx.p != nil && tx.p.r == r {
+		r.depRecord("txconn:"+tx.p.name, true)
+	}
+	if c.pool == nil || (c.pool.Stats().MaxOpenConnections <= 0 && !r.depTainted[c.poolID]) {
+		return
+	}
+	r.depRecord(fmt.Sprintf("conn:%s:%d", c.db.name, c.poolID), true)
+}
+
+// setSession records that a session setting now lives on the connection,
+// which the pool hands to whichever process takes it next. The step is
+// ordered against every other (breakEager), and from here on every take
+// and return of the pool's connections is recorded too, since which
+// process gets this one depends on the order they take them in.
+func (c *sqlConn) setSession(p *Proc) {
+	c.db.s.breakEager(p, sessionSet)
+	c.taintPool()
+}
+
+// taintPool records that a connection of the pool now carries state the
+// next process to take it reads, so that every take and return of the
+// pool's connections is recorded from here on (see depConn), including
+// the one a process makes before its first yield point, where a start
+// takes the connection its first statement runs on.
+func (c *sqlConn) taintPool() {
+	if r := c.db.s.run; r != nil && r.depOn() {
+		if r.depTainted == nil {
+			r.depTainted = map[int]bool{}
+		}
+		r.depTainted[c.poolID] = true
+	}
+}
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
 // statementTx returns the transaction a statement runs in: the open one, or an
@@ -463,6 +524,8 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 		p.drain()
 	}
 	defer c.db.s.enter(p)()
+	c.depConn()
+	defer c.depConn() // the connection goes back to the pool
 	// The context may have ended while the statement waited above.
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -505,6 +568,8 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	if tx.p.r.over() {
 		return nil, 0, errRunOver
 	}
+	c.depConn()
+	defer c.depConn()
 	// The process that began the transaction crashed or returned, which
 	// drops its connection with the transaction. A goroutine detest did not
 	// adopt outlives it, and must not reach the closed transaction, which
@@ -620,20 +685,21 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 	}
 	if err == nil && res.hasLastID {
 		c.lastInsertID = res.lastID
+		c.taintPool() // LAST_INSERT_ID() reads it on whichever process takes the connection next
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil && c.db.kind.InnoDB() && (set.Name == "lock_timeout" || set.Name == "all") && !set.Local {
 		// MySQL session settings take effect immediately, even in a transaction.
 		c.lockTimeout = tx.lockTimeout
-		c.db.s.breakEager(tx.p, sessionSet)
+		c.setSession(tx.p)
 	}
 	if set, ok := stmt.stmt.(*sqlir.SetStmt); ok && err == nil {
 		switch set.Name {
 		case "no_auto_value_on_zero":
 			c.noAutoZero = tx.noAutoZero
-			c.db.s.breakEager(tx.p, sessionSet)
+			c.setSession(tx.p)
 		case "foreign_key_checks":
 			c.noFKChecks = tx.noFKChecks
-			c.db.s.breakEager(tx.p, sessionSet)
+			c.setSession(tx.p)
 		}
 	}
 	switch {
@@ -659,11 +725,11 @@ func (c *sqlConn) exec(ctx context.Context, stmt *parsedStatement, args []driver
 			tx.commit()
 			if tx.pendingLockTimeout != nil {
 				c.lockTimeout = *tx.pendingLockTimeout
-				c.db.s.breakEager(tx.p, sessionSet)
+				c.setSession(tx.p)
 			}
 			if tx.pendingTimeZone != nil {
 				c.timeZone = tx.pendingTimeZone.loc
-				c.db.s.breakEager(tx.p, sessionSet)
+				c.setSession(tx.p)
 			}
 		}
 	case err != nil:
@@ -775,3 +841,10 @@ func (r *sqlRows) Next(dest []driver.Value) error {
 // sessionSet is what breakEager says of a session setting set on a
 // connection.
 const sessionSet = "set a session setting on its connection, which the pool hands to the process that takes it next"
+
+// depStmtEnd forgets the row the statement pinned, once it ran.
+func (c *sqlConn) depStmtEnd() {
+	if c.tx != nil {
+		c.tx.depPin = depPin{}
+	}
+}

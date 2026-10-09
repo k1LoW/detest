@@ -395,6 +395,7 @@ func (db *DB) Get(p *Proc, table, key string) (Row, bool) {
 	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s id=%s", db.name, table, key)
+	p.r.depRow(nil, db, table, key, false)
 	r, ok := db.committed[table][key]
 	if !ok {
 		return nil, false
@@ -425,6 +426,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 	defer db.s.enter(p)()
 	table = db.resolve(table)
 	p.yieldf("%s: select %s where ...", db.name, table)
+	p.r.depTable(nil, db, table, false)
 	return publicRows(db.selectCommitted(table, publicPred(pred)))
 }
 
@@ -435,6 +437,7 @@ func (db *DB) Select(p *Proc, table string, pred func(Row) bool) []Row {
 func (db *DB) Peek(table string) []Row {
 	defer db.s.leave()
 	defer db.s.enterAny()()
+	db.depNow("db:"+db.name+":"+db.resolve(table), false)
 	return publicRows(db.selectCommitted(table, nil))
 }
 
@@ -453,6 +456,7 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 		return nil
 	}
 	tx.yieldf("%s: select %s where ...", tx.db.name, table)
+	tx.depTable(table, false)
 	// Another goroutine using the transaction may have had it aborted
 	// while this one stood at its yield point.
 	if tx.check() != nil {
@@ -484,7 +488,9 @@ func (tx *Tx) Select(table string, pred func(Row) bool) []Row {
 // Open returns another database/sql handle on the database, a pool of its own,
 // for a second service that shares the database.
 func (db *DB) Open() *sql.DB {
-	sqlDB := sql.OpenDB(&sqlConnector{db: db})
+	conn := &sqlConnector{db: db, id: len(db.s.sqlDBs)}
+	sqlDB := sql.OpenDB(conn)
+	conn.pool = sqlDB
 	db.s.sqlDBs = append(db.s.sqlDBs, sqlDB)
 	return sqlDB
 }
@@ -830,6 +836,12 @@ func (def *tableDef) reads(col string) bool {
 func (db *DB) SeedRowNow(table string, row Row) {
 	defer db.s.leave()
 	defer db.s.enterAny()()
+	db.depNow("db:"+db.name+":"+db.resolve(table), true)
+	if def := db.defs[db.resolve(table)]; def != nil {
+		for col := range def.autoInc {
+			db.depNow("autoinc:"+db.name+":"+autoIncKey(db.resolve(table), col), true) // the seed may move the counter
+		}
+	}
 	if !db.kind.InnoDB() {
 		db.SeedRow(table, row)
 		return
@@ -1152,6 +1164,7 @@ func (db *DB) nextval(seq string) (int64, string) {
 	}
 	db.seqs[seq] = v
 	db.effects++
+	db.depRes("seq:" + db.name + ":" + seq)
 	return v, ""
 }
 
@@ -1164,6 +1177,7 @@ func (db *DB) setval(seq string, v int64, called bool) {
 	}
 	db.seqs[seq] = v
 	db.effects++
+	db.depRes("seq:" + db.name + ":" + seq)
 }
 
 // newUUID returns the run's next generated UUID. It counts instead of drawing
@@ -1171,6 +1185,7 @@ func (db *DB) setval(seq string, v int64, called bool) {
 func (db *DB) newUUID() string {
 	db.uuids++
 	db.effects++
+	db.depRes("uuid:" + db.name)
 	return fmt.Sprintf("00000000-0000-4000-8000-%012x", db.uuids)
 }
 
@@ -1957,6 +1972,12 @@ type Tx struct {
 	// dump sets it: foreign keys are neither checked nor acted on.
 	noFKChecks bool
 	saves      []savepoint
+	// PartialOrder: what the transaction wrote or locked, which its end
+	// publishes; whether its snapshot was recorded; and the row the running
+	// statement pins.
+	depTouched map[string]bool
+	depSnapped bool
+	depPin     depPin
 	// deferAll and deferNamed are what SET CONSTRAINTS set, for ALL and by
 	// constraint name; nil when it was not run.
 	deferAll   *bool
@@ -2017,6 +2038,7 @@ func (tx *Tx) Get(table, key string) (Row, bool) {
 		return nil, false
 	}
 	tx.yieldf("%s: select %s id=%s", tx.db.name, table, key)
+	tx.depRow(table, key, false)
 	if tx.check() != nil {
 		return nil, false // aborted while it stood at its yield point, as Select
 	}
@@ -2039,6 +2061,7 @@ func (tx *Tx) GetForUpdate(table, key string) (_ Row, _ bool, err error) {
 		return nil, false, err
 	}
 	tx.yieldf("%s: select %s id=%s for update", tx.db.name, table, key)
+	tx.depRow(table, key, true)
 	if err := tx.lock(lockKey{table, key}); err != nil {
 		return nil, false, err
 	}
@@ -2276,6 +2299,8 @@ func (tx *Tx) insert(table string, row Row) error {
 	// Before the defaults are drawn, as the SQL INSERT does (see
 	// sqlExec.execInsert).
 	tx.yieldf("%s: insert %s %s", tx.db.name, table, row)
+	tx.depTable(table, true) // the key may be generated, and a unique constraint reads other rows
+	tx.depFKs(table, true)
 	x := tx.evaluator()
 	if err := x.applyDefaults(table, row); err != nil {
 		return err
@@ -2333,6 +2358,8 @@ func (tx *Tx) delete(table, key string) (bool, error) {
 	}
 	lk := lockKey{table, key}
 	tx.yieldf("%s: delete %s id=%s", tx.db.name, table, key)
+	tx.depRow(table, key, true)
+	tx.depFKs(table, false)
 	if err := tx.lock(lk); err != nil {
 		return false, err
 	}
@@ -2458,6 +2485,7 @@ func (tx *Tx) abort() {
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}
+	tx.depRelease()
 	if n := len(tx.saves); n > 0 {
 		tx.rollbackLocks(&tx.saves[n-1])
 		return
@@ -2470,6 +2498,7 @@ func (tx *Tx) abort() {
 // InnoDB undoes them with the writes they came with: it keeps them, except
 // those of rows inserted since, which go with the rows.
 func (tx *Tx) releaseInsertLocks(from int) {
+	tx.depRelease()
 	since := tx.locks[from:]
 	tx.locks = tx.locks[:from:from]
 	var gone []lockKey
@@ -2577,7 +2606,14 @@ func (tx *Tx) takeConn(p *Proc) {
 		// reaches its own yield above only at the scheduler's next step.
 		p.yieldf("%s: use the transaction", tx.db.name)
 	}
-	for c.by != nil && c.by != p {
+	// The connection is what the processes sharing the transaction take
+	// turns on, recorded by every step that looks at it, the one that finds
+	// it held as a row lock's wait is, and the one that takes it after.
+	for {
+		p.r.depRecord("txconn:"+tx.p.name, true)
+		if c.by == nil || c.by == p {
+			break
+		}
 		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
 	}
 	if wants {
@@ -2614,6 +2650,7 @@ func (tx *Tx) dropConn(p *Proc) bool {
 	}
 	c.by = nil
 	p.conns = slices.DeleteFunc(p.conns, func(o *txConn) bool { return o == c })
+	p.r.depRecord("txconn:"+tx.p.name, true)
 	return !tx.p.r.over()
 }
 
@@ -2788,6 +2825,8 @@ func (tx *Tx) update(table string, pred func(Row) bool, fields Row, desc any) (i
 		return 0, err
 	}
 	tx.yieldf("%s: update %s set %s where %s", tx.db.name, table, fields, desc)
+	tx.depTable(table, true) // by a predicate, which may match any row
+	tx.depFKs(table, false)
 	// Aborted by another goroutine while it stood at its yield point. An
 	// update matching no row takes no lock that would tell.
 	if err := tx.check(); err != nil {
@@ -2914,6 +2953,9 @@ func (tx *Tx) commit() {
 func (tx *Tx) rollback() { tx.release() }
 
 func (tx *Tx) release() {
+	if tx.p != nil {
+		tx.p.r.depTxEnd(tx)
+	}
 	tx.closed = true
 	if tx.p != nil && tx.p.r.over() {
 		// The run ended and the next one resets the simulated resources. Releasing here
@@ -3022,4 +3064,47 @@ func nextvalOf(e sqlir.Expr) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprint(c.Value), true
+}
+
+// depNow records, under PartialOrder, an access a fake makes through the
+// hand-written API from within a step, such as Peek from an External's
+// callee, on that step. Outside any step, from a When or an invariant the
+// scheduler evaluates, nothing is recorded: the start's and the
+// invariants' reads are accounted for by the trace already, and a step of
+// its own here would be a dependence with everything.
+func (db *DB) depNow(res string, write bool) {
+	r := db.s.run
+	if r == nil || !r.depOn() || r.dep().cur == nil {
+		return
+	}
+	r.depRecord(res, write)
+}
+
+// depRes records a write of a resource the database owns outside its
+// tables, such as a sequence or the uuid counter.
+func (db *DB) depRes(res string) {
+	if db.s == nil || db.s.run == nil {
+		return
+	}
+	db.s.run.depRecord(res, true)
+}
+
+// depTable and depRow record what a hand-written operation of the
+// transaction touches.
+func (tx *Tx) depTable(table string, write bool) {
+	if tx.p != nil {
+		tx.p.r.depTable(tx, tx.db, table, write)
+	}
+}
+
+func (tx *Tx) depRow(table, key string, write bool) {
+	if tx.p != nil {
+		tx.p.r.depRow(tx, tx.db, table, key, write)
+	}
+}
+
+func (tx *Tx) depFKs(table string, insert bool) {
+	if tx.p != nil {
+		tx.p.r.depFKs(tx, tx.db, table, insert)
+	}
 }

@@ -229,6 +229,22 @@ type run struct {
 	// woken outside detest read it, unlike current, which the scheduler
 	// changes while they run.
 	began atomic.Bool
+	// depTrace is what the run's steps touched, under PartialOrder, and
+	// depExtra the options the preemption bound left out of the last
+	// enabled(), which the reduction counts as enabled all the same.
+	depTrace *depTrace
+	depExtra []option
+	// depTainted holds the pools a session setting was set on a connection
+	// of in this run, whose connections are recorded from then on.
+	depTainted map[int]bool
+	// The sleep sets (see sleep.go): the transitions asleep now, the sleep
+	// set of the prefix, applied once its last choice is made, the sleep set
+	// that arrived at each step choice, and whether the run stopped because
+	// every option left was asleep.
+	sleep        []sleeper
+	sleepPending []sleeper
+	sleepIn      map[int][]sleeper
+	covered      bool
 }
 
 type step struct {
@@ -239,15 +255,17 @@ type step struct {
 
 // Proc is one running process instance.
 type Proc struct {
-	name     string
-	pt       *procType
-	r        *run
-	resume   chan struct{}
-	ev       chan procEvent
-	state    procState
-	waitRow  *rowWait // the row lock we wait for
-	waitLock waitable // Mutex or RWMutex we wait for
-	waitAt   int64
+	depOp      uint64    // PartialOrder: the operation the process yields at
+	depCreator *depEvent // PartialOrder: the event the process was created in, until its first step
+	name       string
+	pt         *procType
+	r          *run
+	resume     chan struct{}
+	ev         chan procEvent
+	state      procState
+	waitRow    *rowWait // the row lock we wait for
+	waitLock   waitable // Mutex or RWMutex we wait for
+	waitAt     int64
 	// stall is how long the process sleeps on the bubble's clock when it is
 	// next resumed, set by the scheduler before it resumes the process.
 	// stalling is the scheduler's own record of it, which the process does
@@ -408,8 +426,16 @@ func (r *run) choose(label string, n int) int {
 			picked = r.rng.IntN(n)
 		}
 		r.path = hashInt(r.path, int64(picked))
+	} else if r.want >= 0 && label == "step" {
+		picked = r.want // PartialOrder's default (see defaultPick)
 	}
 	r.want = -1
+	if r.sleepPending != nil && r.pos+1 == len(r.prefix) {
+		// The sleep set holds from the state the prefix ends in: the step
+		// making its last choice wakes what it depends on.
+		r.sleep, r.sleepPending = r.sleepPending, nil
+	}
+	r.depChoice(label, picked)
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
 	r.pos++
 	r.mixString(label)
@@ -510,6 +536,8 @@ func (r *run) execute() (v *violation) {
 		// progress violation every run without it ends in.
 		if len(opts) == 0 || (r.spinner() != nil || r.turnsSpent()) && onlyFaults(opts) {
 			if r.advanceClock() {
+				r.depBarrier("clock")
+				r.sleep = nil // the clock is a step every transition depends on
 				continue
 			}
 			// A goroutine that returned is told apart before waiting, which
@@ -518,6 +546,8 @@ func (r *run) execute() (v *violation) {
 				continue
 			}
 			if r.waitOutside() {
+				r.depBarrier("waitoutside")
+				r.sleep = nil // a process back from outside detest is a step every transition depends on
 				continue
 			}
 			// One that slept after its last call may have returned while the
@@ -543,6 +573,11 @@ func (r *run) execute() (v *violation) {
 		if r.prio != nil {
 			i = r.prio.pick(r, opts)
 		}
+		if k := r.defaultPick(opts); k >= 0 {
+			r.want, i = k, k
+		} else if r.covered {
+			return nil
+		}
 		if len(opts) > 1 {
 			if r.prio != nil {
 				// Only the step choice takes the pick, or a lone option would
@@ -556,9 +591,23 @@ func (r *run) execute() (v *violation) {
 		o := opts[i]
 		cur := r.current
 		gaveWay, before := r.spinner(), r.version
+		ci := -1
+		if len(opts) > 1 {
+			ci = len(r.choices) - 1
+		}
+		if ci >= 0 && r.depOn() {
+			if r.sleepIn == nil {
+				r.sleepIn = map[int][]sleeper{}
+			}
+			r.sleepIn[ci] = cloneSleep(r.sleep)
+		}
+		r.depStart(o, opts, ci)
+		stepEvent := r.depCur()
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
 		r.apply(o, !o.kind.fault() && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
+		r.depEnd()
+		r.wake(stepEvent)
 		r.countSpin(o, before)
 		if gaveWay != nil {
 			r.handoff(gaveWay, before)
@@ -787,14 +836,21 @@ func (r *run) enabled() []option {
 			}
 		}
 	}
-	if bounded {
+	r.depExtra = r.depExtra[:0]
+	if bounded && !r.depOn() {
 		return opts
+	}
+	// Under PartialOrder the options the bound leaves out are listed apart:
+	// the reduction's notion of enabled is the one before the bound.
+	dst := &opts
+	if bounded {
+		dst = &r.depExtra
 	}
 	// Lose a message, on a lossy queue.
 	for _, q := range r.s.queues {
 		if q.lossBudget > 0 {
 			for i := range q.msgs {
-				opts = append(opts, option{kind: optLose, q: q, i: i})
+				*dst = append(*dst, option{kind: optLose, q: q, i: i})
 			}
 		}
 	}
@@ -805,7 +861,7 @@ func (r *run) enabled() []option {
 				continue
 			}
 			for i := range q.msgs {
-				opts = append(opts, option{kind: optDeliver, q: q, i: i, pt: pt})
+				*dst = append(*dst, option{kind: optDeliver, q: q, i: i, pt: pt})
 			}
 		}
 	}
@@ -827,7 +883,7 @@ func (r *run) enabled() []option {
 		if pt.when != nil && !pt.when() {
 			continue
 		}
-		opts = append(opts, option{kind: optStart, pt: pt})
+		*dst = append(*dst, option{kind: optStart, pt: pt})
 	}
 	return opts
 }
@@ -858,6 +914,10 @@ func (r *run) startEager() (bool, *violation) {
 	calls := r.s.calls.Load()
 	first := len(r.procs)
 	cur := r.current
+	r.depStart(option{kind: optStart, pt: pt}, nil, -1)
+	if e := r.depCur(); e != nil {
+		e.eager = true
+	}
 	r.runs[pt]++
 	p := r.spawn(pt, nil)
 	r.resume(p)
@@ -865,6 +925,9 @@ func (r *run) startEager() (bool, *violation) {
 	// first yield point too, as it would within the start's step, and what
 	// it does counts as the start's.
 	r.settle()
+	eagerEvent := r.depCur()
+	r.depEnd()
+	r.wake(eagerEvent)
 	// The schedule picks no step here, so the process that ran last stays
 	// the one a switch is counted from. The start spends no preemption, and
 	// a resume of the new process is counted as a switch is now.
@@ -918,7 +981,13 @@ func (r *run) startEffects() uint64 {
 // it next. It is called under the engine mutex by the processes.
 func (s *Sim) breakEager(p *Proc, what string) {
 	r := s.run
-	if r == nil || !s.eagerStart {
+	if r == nil {
+		return
+	}
+	// The connection's state is shared with whichever process takes the
+	// connection next, which no resource of the trace names.
+	r.depRecord(depAll, true)
+	if !s.eagerStart {
 		return
 	}
 	name := "a seed"
@@ -992,6 +1061,7 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 	if r.prio != nil {
 		r.prio.spawned(p)
 	}
+	r.depCreated(p)
 	r.procs = append(r.procs, p)
 	go p.main()
 	return p
@@ -1005,6 +1075,7 @@ func (p *Proc) Step(format string, args ...any) {
 	p = p.resolve(func() string { return canonical(format, args) })
 	goneStale(p)
 	p.yieldf(format, args...)
+	p.r.depRecord(depAll, true) // what a user's step touches is not known
 }
 
 // goroutineID returns the current goroutine's id from its stack header.
@@ -1160,6 +1231,7 @@ func (r *run) runSync(p *Proc) {
 // parkOutside records that p blocked on a primitive detest does not model.
 // An adopted goroutine that returned looks the same, until reapAdopted.
 func (r *run) parkOutside(p *Proc) {
+	r.depBarrier("parkoutside")
 	p.state = stateBlockedOutside
 	p.away.Store(awayOutside)
 	if !p.adopted {
@@ -1392,6 +1464,12 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 		// state set by the process
 	case evDone:
 		p.state = stateDone
+		if p.msg != nil && p.pt.queue != nil {
+			r.depRecord("queue:"+p.pt.queue.name, true) // the message is acked, or put back
+		}
+		if p.pt.kind == trigLoop || p.pt.fromLoop {
+			r.depRecord(depAll, false) // whether the tick was idle reads the state
+		}
 		if p.tx != nil && !p.tx.closed {
 			p.tx.rollback()
 		}
@@ -1503,6 +1581,8 @@ func (r *run) deliver(q *Queue, i int, pt *procType) {
 			q.dupBudget--
 			dup := *msg
 			dup.duplicate = true
+			q.copies++
+			dup.copy = q.copies
 			q.msgs = append(q.msgs, &dup)
 			r.note(nil, "duplicate %s stays in %s", msg, q.name)
 		}
@@ -1650,6 +1730,9 @@ func (p *Proc) yieldf(format string, args ...any) {
 		// Formatted at the yield point, where the arguments are those the
 		// operation was reached with.
 		st = p.r.newStep(p, format, args, callerLoc())
+	}
+	if p.r.depOn() {
+		p.depOp = opHash(format)
 	}
 	p.send(procEvent{kind: evYield, op: opHash(format)})
 	p.wait()
@@ -2080,6 +2163,13 @@ func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
 
 // blockOnRow blocks until a row lock we need may be free.
 func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
+	// Each attempt at the lock, the retries after a wake included, is a
+	// write of the row, and every wait touches "waits": the order of the
+	// waits decides deadlocks and their victims.
+	p.r.depRecord("waits", true)
+	if w.tx != nil {
+		p.r.depLock(w.tx, w.key)
+	}
 	p.state = stateBlockedLock
 	p.waitRow = &w
 	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
