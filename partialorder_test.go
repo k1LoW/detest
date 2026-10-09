@@ -49,9 +49,20 @@ func TestPartialOrderRefusals(t *testing.T) {
 // The report says the option was on, as the result rests on its assumption.
 func TestPartialOrderReported(t *testing.T) {
 	t.Parallel()
+	const assumption = "PartialOrder (assumes no state shared outside detest)"
 	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) { counterModel(s, true) }, []Option{PartialOrder()}, nil, 0)
-	if res.Violated || !strings.Contains(res.report(), "PartialOrder (assumes no state shared outside detest)") {
+	if res.Violated || !strings.Contains(res.report(), assumption) {
 		t.Fatalf("got %s", res.report())
+	}
+	// Through Explore's path, whose merge of the workers' results must
+	// carry it, for a violation too.
+	res, _ = explore(t, func(t *testing.T, s *Sim) { counterModel(s, true) }, []Option{PartialOrder()})
+	if res.Violated || !strings.Contains(res.report(), assumption) {
+		t.Fatalf("got %s", res.report())
+	}
+	res, _ = explore(t, func(t *testing.T, s *Sim) { counterModel(s, false) }, []Option{PartialOrder()})
+	if !res.Violated || !res.partial {
+		t.Fatalf("got partial=%v for %s", res.partial, res.report())
 	}
 }
 
