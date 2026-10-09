@@ -315,6 +315,63 @@ func viewModel(t *testing.T, s *Sim) {
 	})
 }
 
+// limitModel: readers under LIMIT, one by the key and one over a range,
+// keep what they read while a writer updates the rows, so a LIMIT must
+// leave the rows the WHERE matches recorded, and no more.
+func limitModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, n int NOT NULL)")
+	mustExec(t, db, "CREATE TABLE seen (who text PRIMARY KEY, v int NOT NULL)")
+	s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0), (2, 0)") })
+	s.Manual("point", 1, func(p *Proc) error {
+		var n int
+		if err := db.QueryRowContext(p.Context(), "SELECT n FROM t WHERE id = 1 ORDER BY id LIMIT 1").Scan(&n); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(p.Context(), "INSERT INTO seen VALUES ('point', $1)", n)
+		return err
+	})
+	s.Manual("range", 1, func(p *Proc) error {
+		var id int
+		if err := db.QueryRowContext(p.Context(), "SELECT id FROM t WHERE n = 0 ORDER BY id DESC LIMIT 1 OFFSET 0").Scan(&id); err != nil {
+			id = -1
+		}
+		_, err := db.ExecContext(p.Context(), "INSERT INTO seen VALUES ('range', $1)", id)
+		return err
+	})
+	s.Manual("writer", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "UPDATE t SET n = 1 WHERE id = 2")
+		return err
+	})
+}
+
+// insertSelectModel: an INSERT ... SELECT copies rows a writer updates
+// and a reader reads back, so it must read the query's table and write
+// its target.
+func insertSelectModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE src (id int PRIMARY KEY, n int NOT NULL)")
+	mustExec(t, db, "CREATE TABLE dst (id int PRIMARY KEY, n int NOT NULL)")
+	mustExec(t, db, "CREATE TABLE seen (who text PRIMARY KEY, v int NOT NULL)")
+	s.Seed(func() { mustExec(t, db, "INSERT INTO src VALUES (1, 0)") })
+	s.Manual("copier", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "INSERT INTO dst (id, n) SELECT id, n FROM src WHERE id = 1")
+		return err
+	})
+	s.Manual("writer", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "UPDATE src SET n = 1 WHERE id = 1")
+		return err
+	})
+	s.Manual("reader", 1, func(p *Proc) error {
+		var n int
+		if err := db.QueryRowContext(p.Context(), "SELECT n FROM dst WHERE id = 1").Scan(&n); err != nil {
+			n = -1
+		}
+		_, err := db.ExecContext(p.Context(), "INSERT INTO seen VALUES ('reader', $1)", n)
+		return err
+	})
+}
+
 func crashTxModel(t *testing.T, s *Sim) {
 	_, store := s.DB("app", postgres.New())
 	s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
@@ -500,6 +557,8 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"dropped", droppedModel, nil},
 		{"duplicates", duplicatesModel, []Option{MaxRedeliveries(1)}},
 		{"view", viewModel, []Option{EagerStart(false)}},
+		{"limit", limitModel, []Option{EagerStart(false)}},
+		{"insert select", insertSelectModel, []Option{EagerStart(false)}},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
 		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},

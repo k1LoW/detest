@@ -441,7 +441,9 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 				all = true
 			}
 		}
-		if !simpleTargets(sel.Targets) || !depSimple(sel.Where) || !depSimple(sel.Having) || sel.Limit != nil || sel.Offset != nil {
+		// LIMIT and OFFSET keep some of the rows the WHERE matched, which
+		// are read all the same.
+		if !simpleTargets(sel.Targets) || !depSimple(sel.Where) || !depSimple(sel.Having) || !depSimple(sel.Limit) || !depSimple(sel.Offset) {
 			all = true
 		}
 		for _, g := range sel.GroupBy {
@@ -471,8 +473,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 		target = db.resolve(s.Table)
 		def = db.defs[target]
 		if s.Select != nil {
-			walkSelect(s.Select)
-			all = true
+			walkSelect(s.Select) // the rows come from the tables the query names, and go to the target as a whole
 		}
 		if !simpleTargets(s.Returning) {
 			all = true
