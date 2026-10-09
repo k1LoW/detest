@@ -2485,6 +2485,7 @@ func (tx *Tx) abort() {
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}
+	tx.depRelease()
 	if n := len(tx.saves); n > 0 {
 		tx.rollbackLocks(&tx.saves[n-1])
 		return
@@ -2497,6 +2498,7 @@ func (tx *Tx) abort() {
 // InnoDB undoes them with the writes they came with: it keeps them, except
 // those of rows inserted since, which go with the rows.
 func (tx *Tx) releaseInsertLocks(from int) {
+	tx.depRelease()
 	since := tx.locks[from:]
 	tx.locks = tx.locks[:from:from]
 	var gone []lockKey

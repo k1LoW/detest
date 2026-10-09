@@ -155,6 +155,7 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 		tx.inserts, tx.entries, tx.updating = nil, nil, nil
 		tx.snap = -1
 		if tx.p == nil || !tx.p.r.over() {
+			tx.depRelease()
 			tx.releaseLocks(tx.locks)
 			tx.releaseGaps()
 		}

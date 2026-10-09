@@ -342,6 +342,17 @@ func (r *run) depSavepoint(tx *Tx) {
 	}
 }
 
+// depRelease records a release of locks the transaction's own failure
+// makes, without a savepoint: a statement that aborts a Postgres
+// transaction, or fails in InnoDB, or a deadlock that ends it. What it
+// locked is published as a savepoint's end publishes it, since a waiter
+// the release wakes is ordered against this step by what it waits for.
+func (tx *Tx) depRelease() {
+	if tx.p != nil && !tx.p.r.over() {
+		tx.p.r.depSavepoint(tx)
+	}
+}
+
 // depConflicts reports whether two events depend on each other: the same
 // process's, a step outside any process's, or two touching one resource
 // with a write among them. Under Always or Sometimes, which are checked
