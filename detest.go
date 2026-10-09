@@ -192,10 +192,13 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 //
 // It assumes that the processes share no state outside detest's resources:
 // a package variable, a fake's internal state or a test variable that one
-// process writes and another reads is a dependence detest cannot see, and
-// a reordering across it may be skipped. State read only at quiescence, or
-// written in an order that does not matter, such as a set or a counter, is
-// fine. A fake that records what the External calls it serves did, and
+// process writes and another reads, or that two processes write, is a
+// dependence detest cannot see, and a reordering across it may be skipped,
+// whichever point it is read at: the reduction keeps one order of two
+// independent writes, and a value read at quiescence is the one that order
+// leaves. State written in an order that does not matter, such as a set, a
+// counter or a flag, is fine. A fake that records what the External calls
+// it serves did, and
 // reads that record on a later call that goes through no External, must
 // report the read with External.Observe. A *sql.Tx one process hands to
 // another is shared through database/sql as well: a statement it turns
