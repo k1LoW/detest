@@ -35,6 +35,7 @@ type qmsg struct {
 	msg         Msg
 	redelivered int
 	duplicate   bool
+	copy        int       // which duplicated copy of the queue's this run it is, 0 for an original
 	depEnq      *depEvent // PartialOrder: the event that enqueued it
 }
 
@@ -54,6 +55,7 @@ type Queue struct {
 	dropped    []Msg
 	nextID     int
 	dupBudget  int
+	copies     int // duplicated copies made this run, numbering them
 	dups       int
 	lossBudget int
 	losses     int
@@ -105,6 +107,7 @@ func (q *Queue) reset() {
 	q.dropped = nil
 	q.nextID = 0
 	q.dupBudget = q.dups
+	q.copies = 0
 	q.lossBudget = q.losses
 }
 

@@ -264,6 +264,23 @@ func droppedModel(t *testing.T, s *Sim) {
 	})
 }
 
+// duplicatesModel: a message delivered twice, whose copies may be
+// duplicated again and are put back when their handling fails, so that
+// several copies with one id are queued at once.
+func duplicatesModel(t *testing.T, s *Sim) {
+	q := s.Queue("events", Duplicates(2))
+	s.Seed(func() { q.SeedMsg(Msg{"id": "e1"}) })
+	var attempts int
+	s.Seed(func() { attempts = 0 })
+	s.OnMessage("consumer", q, func(p *Proc, msg Msg) error {
+		attempts++
+		if attempts%2 == 1 {
+			return errors.New("boom")
+		}
+		return nil
+	})
+}
+
 func crashTxModel(t *testing.T, s *Sim) {
 	_, store := s.DB("app", postgres.New())
 	s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
@@ -447,6 +464,7 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"order", orderModel(false), nil},
 		{"backstop", orderModel(true), nil},
 		{"dropped", droppedModel, nil},
+		{"duplicates", duplicatesModel, []Option{MaxRedeliveries(1)}},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
 		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},

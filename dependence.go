@@ -112,10 +112,14 @@ func depIdent(o option) string {
 	return "?"
 }
 
+// depMsgID names a message by its id and, for a duplicated copy, the
+// copy's number: a copy and the original it was cloned from, or two copies,
+// may be queued at once, such as when a delivered copy is put back, and
+// are options of their own.
 func depMsgID(m *qmsg) string {
 	id := strconv.Itoa(m.id)
-	if m.duplicate {
-		id += "dup"
+	if m.copy > 0 {
+		id += "." + strconv.Itoa(m.copy)
 	}
 	return id
 }

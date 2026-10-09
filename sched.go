@@ -1581,6 +1581,8 @@ func (r *run) deliver(q *Queue, i int, pt *procType) {
 			q.dupBudget--
 			dup := *msg
 			dup.duplicate = true
+			q.copies++
+			dup.copy = q.copies
 			q.msgs = append(q.msgs, &dup)
 			r.note(nil, "duplicate %s stays in %s", msg, q.name)
 		}
