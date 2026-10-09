@@ -2595,7 +2595,14 @@ func (tx *Tx) takeConn(p *Proc) {
 		// reaches its own yield above only at the scheduler's next step.
 		p.yieldf("%s: use the transaction", tx.db.name)
 	}
-	for c.by != nil && c.by != p {
+	// The connection is what the processes sharing the transaction take
+	// turns on, recorded by every step that looks at it, the one that finds
+	// it held as a row lock's wait is, and the one that takes it after.
+	for {
+		p.r.depRecord("txconn:"+tx.p.name, true)
+		if c.by == nil || c.by == p {
+			break
+		}
 		p.blockOnLock(c, fmt.Sprintf("the transaction of %s, in use by %s", tx.p.name, c.by.name))
 	}
 	if wants {
@@ -2608,9 +2615,6 @@ func (tx *Tx) takeConn(p *Proc) {
 	if c.by != p {
 		p.conns = append(p.conns, c)
 	}
-	// The connection is what the processes sharing the transaction take
-	// turns on.
-	p.r.depRecord("txconn:"+tx.p.name, true)
 	c.by = p
 	c.depth++
 }

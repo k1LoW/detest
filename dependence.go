@@ -64,9 +64,11 @@ type depEvent struct {
 	creator *depEvent
 	eager   bool // an eager start, which the schedule does not pick
 	// free marks a step taken where the running process could not go on,
-	// so that any option there was a switch costing no preemption.
-	free  bool
-	index int
+	// so that any option there was a switch costing no preemption, and
+	// preempt one taken away from a running process that could, which cost
+	// one.
+	free, preempt bool
+	index         int
 }
 
 type depTrace struct {
@@ -151,6 +153,7 @@ func (r *run) depStart(o option, opts []option, ci int) {
 	}
 	cur := r.current
 	e.free = cur == nil || cur.state != stateReady || r.keptOut(cur)
+	e.preempt = !e.free && (o.kind != optResume || o.p != cur)
 	switch o.kind {
 	case optResume:
 		e.proc, e.kind, e.op = o.p.name, "resume", o.p.depOp

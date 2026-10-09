@@ -8,14 +8,17 @@ package detest
 // what it does again from any state the independent steps in between lead
 // to. A sleeping option is neither taken nor added as a backtrack point.
 //
-// Under a preemption bound two more rules keep the equivalent order within
-// the bound. The running process's next step is explored first at every
-// state (see defaultPick), so a sibling that preempts it leaves it asleep
-// and the order with it first costs no more. A step taken where the running
-// process could not go on, so that any option there was a free switch, never
-// sleeps: with it first, the switch to its sibling would cost a preemption.
-// Nor does one added as a backtrack point for the bound alone, as the paper
-// on bounded partial order reduction does.
+// Under a preemption bound, only a transition whose order first costs no
+// more than the order explored sleeps. The running process's next step is
+// explored first at every state (see defaultPick), so a sibling that
+// preempts it leaves it asleep: with it first, the sibling preempts it just
+// the same. A step taken where the running process could not go on, so that
+// any option there was a free switch, never sleeps: with it first, the
+// switch to its sibling would cost a preemption. Nor does a step that
+// preempted the running process: run later, at a free switch, it costs
+// nothing, where first it cost one, and the sibling after it another. Nor
+// does one added as a backtrack point for the bound alone, as the paper on
+// bounded partial order reduction does.
 
 import "strings"
 
@@ -122,7 +125,8 @@ func (f *frontier) record(r *run, prefix int) {
 			f.zIn[k] = r.sleepIn[e.ci]
 		}
 		conservative := e.ci == prefix-1 && me != nil && me.conservative
-		f.explored[k] = append(f.explored[k], explored{ident: e.ident, acc: e.acc, conservative: conservative || e.free})
+		awake := conservative || e.free || (r.s.boundPreemptions && e.preempt)
+		f.explored[k] = append(f.explored[k], explored{ident: e.ident, acc: e.acc, conservative: awake})
 	}
 }
 
