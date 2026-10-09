@@ -202,8 +202,15 @@ func (o outcome) key() string {
 // the two trees differ.
 func checkReduction(t *testing.T, name string, model func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
-	full, _ := outcomes(t, model, opts...)
-	reduced, _ := outcomes(t, model, append(slices.Clone(opts), PartialOrder())...)
+	full, fullRes := outcomes(t, model, opts...)
+	reduced, reducedRes := outcomes(t, model, append(slices.Clone(opts), PartialOrder())...)
+	// A Sometimes condition is checked after every step, so a state the
+	// reduction skips on the way to the same end shows up here.
+	for _, u := range reducedRes.Unreached {
+		if !slices.Contains(fullRes.Unreached, u) {
+			t.Errorf("%s: the reduction never meets the Sometimes condition %q, which the full tree meets", name, u)
+		}
+	}
 	keys := map[string]bool{}
 	for _, o := range reduced {
 		keys[o.key()] = true
