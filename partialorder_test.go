@@ -392,6 +392,30 @@ func subqueryModel(t *testing.T, s *Sim) {
 	})
 }
 
+// lastIDModel: two readers start once an insert left LAST_INSERT_ID on a
+// connection of an uncapped pool, and their starts, where each takes the
+// connection its SELECT runs on, decide which of them reads the id.
+func lastIDModel(t *testing.T, s *Sim) {
+	db, store := s.DB("app", mysqlBin())
+	mustExec(t, db, "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+	mustExec(t, db, "CREATE TABLE seen (who VARCHAR(8) PRIMARY KEY, v BIGINT NOT NULL)")
+	s.Manual("inserter", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "INSERT INTO ai (v) VALUES (1)")
+		return err
+	})
+	inserted := func(st *State) bool { return len(st.Rows(store, "ai")) > 0 }
+	for _, who := range []string{"r1", "r2"} {
+		s.Manual(who, 1, func(p *Proc) error {
+			var id int64
+			if err := db.QueryRowContext(p.Context(), "SELECT LAST_INSERT_ID()").Scan(&id); err != nil {
+				return err
+			}
+			_, err := db.ExecContext(p.Context(), "INSERT INTO seen VALUES (?, ?)", who, id)
+			return err
+		}, After(inserted))
+	}
+}
+
 func crashTxModel(t *testing.T, s *Sim) {
 	_, store := s.DB("app", postgres.New())
 	s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
@@ -580,6 +604,7 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"limit", limitModel, []Option{EagerStart(false)}},
 		{"insert select", insertSelectModel, []Option{EagerStart(false)}},
 		{"subquery", subqueryModel, []Option{EagerStart(false)}},
+		{"last insert id", lastIDModel, []Option{EagerStart(false)}},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
 		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},
