@@ -625,6 +625,11 @@ func (r *result) outcome() string {
 	if r.strategy.random && !r.Replay { // a replay draws nothing from the seed
 		seed = " of " + r.strategy.String()
 	}
+	if r.partial {
+		// The violation was found under the assumption, and may be the first
+		// found only because the reduction took the steps it did.
+		seed += ", PartialOrder (assumes no state shared outside detest)"
+	}
 	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		what, r.Runs, seed, choices, r.Schedule, r.Trace)
 }

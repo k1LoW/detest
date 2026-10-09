@@ -61,8 +61,8 @@ func TestPartialOrderReported(t *testing.T) {
 		t.Fatalf("got %s", res.report())
 	}
 	res, _ = explore(t, func(t *testing.T, s *Sim) { counterModel(s, false) }, []Option{PartialOrder()})
-	if !res.Violated || !res.partial {
-		t.Fatalf("got partial=%v for %s", res.partial, res.report())
+	if !res.Violated || !strings.Contains(res.report(), assumption) {
+		t.Fatalf("got %s", res.report())
 	}
 }
 
