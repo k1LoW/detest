@@ -292,6 +292,29 @@ func duplicatesModel(t *testing.T, s *Sim) {
 	})
 }
 
+// viewModel: a reader selects through a view of the table a writer
+// updates, and keeps what it read, so the view's query must count as a
+// read of the table.
+func viewModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, n int NOT NULL)")
+	mustExec(t, db, "CREATE VIEW v AS SELECT id, n FROM t")
+	mustExec(t, db, "CREATE TABLE seen (who text PRIMARY KEY, n int NOT NULL)")
+	s.Seed(func() { mustExec(t, db, "INSERT INTO t VALUES (1, 0)") })
+	s.Manual("reader", 1, func(p *Proc) error {
+		var n int
+		if err := db.QueryRowContext(p.Context(), "SELECT n FROM v WHERE id = 1").Scan(&n); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(p.Context(), "INSERT INTO seen VALUES ('reader', $1)", n)
+		return err
+	})
+	s.Manual("writer", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "UPDATE t SET n = 1 WHERE id = 1")
+		return err
+	})
+}
+
 func crashTxModel(t *testing.T, s *Sim) {
 	_, store := s.DB("app", postgres.New())
 	s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
@@ -476,6 +499,7 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"backstop", orderModel(true), nil},
 		{"dropped", droppedModel, nil},
 		{"duplicates", duplicatesModel, []Option{MaxRedeliveries(1)}},
+		{"view", viewModel, []Option{EagerStart(false)}},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
 		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},

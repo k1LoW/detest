@@ -414,7 +414,12 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 		case t.Func != nil:
 			all = true // a function may read any table
 		case t.Name != "":
-			refs[db.resolve(t.Name)] = true
+			name := db.resolve(t.Name)
+			if v := db.views[name]; v != nil && v.View != nil {
+				walkSelect(v.View) // a view reads the tables its query names
+			} else {
+				refs[name] = true
+			}
 		}
 	}
 	walkSelect = func(sel *sqlir.SelectStmt) {
