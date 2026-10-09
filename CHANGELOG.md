@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.5.0](https://github.com/k1LoW/detest/compare/v0.4.0...v0.5.0) - 2026-10-09
+
+### New Features 🎉
+- feat: skip runs that only reorder independent steps with PartialOrder by @k1LoW in https://github.com/k1LoW/detest/pull/72
+
 ## [v0.4.0](https://github.com/k1LoW/detest/compare/v0.3.0...v0.4.0) - 2026-10-08
 
 ### Breaking Changes 🛠
