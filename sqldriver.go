@@ -141,7 +141,6 @@ func (c *sqlConn) Ping(context.Context) error {
 
 func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.Tx, err error) {
 	defer c.db.s.leave()
-	c.depConn()
 	defer func() {
 		// A begin cut short by the end of the run returns no Tx, so
 		// database/sql never rolls it back: the connection must not keep it.
@@ -163,6 +162,7 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 		return nil, errRunOver
 	}
 	defer c.db.s.enter(p)()
+	c.depConn()
 	c.dropStaleTx()
 	if c.tx != nil {
 		return nil, fmt.Errorf("detest: nested transaction on one connection")
@@ -196,8 +196,6 @@ func (c *sqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (_ driver.
 // option converts them, the type the production code's driver returns.
 func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Result, err error) {
 	defer c.db.s.leave()
-	c.depConn()
-	defer c.depConn() // the connection goes back to the pool
 	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	rows, affected, err := c.run(ctx, query, args)
@@ -219,7 +217,6 @@ type sqlTx struct {
 
 func (t *sqlTx) Commit() (err error) {
 	defer t.c.db.s.leave()
-	defer t.c.depConn()
 	defer recoverRunOver(&err)
 	if t.c.bad {
 		return driver.ErrBadConn
@@ -249,6 +246,7 @@ func (t *sqlTx) Commit() (err error) {
 		return errRunOver
 	}
 	defer t.c.db.s.enter(caller)()
+	defer t.c.depConn() // the connection goes back to the pool
 	tx := t.c.tx
 	t.c.tx = nil
 	if tx == nil {
@@ -291,7 +289,6 @@ func (t *sqlTx) Commit() (err error) {
 
 func (t *sqlTx) Rollback() (err error) {
 	defer t.c.db.s.leave()
-	defer t.c.depConn()
 	defer recoverRunOver(&err)
 	if t.c.bad {
 		return driver.ErrBadConn
@@ -339,6 +336,7 @@ func (t *sqlTx) Rollback() (err error) {
 	tx.p.comeBack()
 	defer tx.p.forgetTxUnlessOver(tx)
 	defer t.c.db.s.enter(tx.p)()
+	defer t.c.depConn() // the connection goes back to the pool
 	tx.p.yieldf("%s: rollback", tx.db.name)
 	tx.rollback()
 	return nil
@@ -364,8 +362,6 @@ func (p *Proc) forgetTx(tx *Tx) {
 
 func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (_ driver.Rows, err error) {
 	defer c.db.s.leave()
-	c.depConn()
-	defer c.depConn()
 	defer c.depStmtEnd()
 	defer recoverRunOver(&err)
 	tx := c.tx
@@ -409,7 +405,10 @@ func recoverRunOver(err *error) {
 // connections are no resource the processes share. A statement that
 // database/sql turns away with ErrTxDone, the transaction having ended
 // before it, never reaches the driver and records nothing, as one turned
-// away for its ended context does not (see runQuery).
+// away for its ended context does not (see runQuery). It is called once
+// the caller is resolved and the engine entered, as a goroutine of an
+// ended run must not read s.run, which the scheduler may be setting for
+// the next run.
 func (c *sqlConn) depConn() {
 	r := c.db.s.run
 	if r == nil || !r.depOn() {
@@ -500,6 +499,8 @@ func (c *sqlConn) runQuery(ctx context.Context, query string, named []driver.Nam
 		p.drain()
 	}
 	defer c.db.s.enter(p)()
+	c.depConn()
+	defer c.depConn() // the connection goes back to the pool
 	// The context may have ended while the statement waited above.
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -542,6 +543,8 @@ func (c *sqlConn) runShared(ctx context.Context, tx *Tx, query string, args []dr
 	if tx.p.r.over() {
 		return nil, 0, errRunOver
 	}
+	c.depConn()
+	defer c.depConn()
 	// The process that began the transaction crashed or returned, which
 	// drops its connection with the transaction. A goroutine detest did not
 	// adopt outlives it, and must not reach the closed transaction, which
