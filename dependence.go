@@ -84,7 +84,12 @@ func (r *run) dep() *depTrace {
 	return r.depTrace
 }
 
-func (r *run) depOn() bool { return r != nil && r.s.partialOrder && !r.measuring }
+// depOn reports whether the run records its trace: under PartialOrder, and
+// for a test that observes the runs, whose full tree is compared by the
+// histories the trace gives.
+func (r *run) depOn() bool {
+	return r != nil && (r.s.partialOrder || r.s.depObserve != nil) && !r.measuring
+}
 
 // depIdent names an option so that the same option can be found at the same
 // state in another run: a process by its name, a message by its id in its

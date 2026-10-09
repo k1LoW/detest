@@ -302,7 +302,7 @@ func (s *Sim) reduce(r *run, prefix int, truncated bool, sleepAt func(ci int) ma
 // a fault, which never sleeps. With every option asleep the subtree is the
 // siblings' and the run ends (covered).
 func (r *run) defaultPick(opts []option) int {
-	if !r.depOn() || r.pos < len(r.prefix) || r.prio != nil {
+	if !r.s.partialOrder || !r.depOn() || r.pos < len(r.prefix) || r.prio != nil {
 		return -1
 	}
 	cur := r.current

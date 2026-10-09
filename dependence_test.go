@@ -193,7 +193,7 @@ func TestDependenceOtherResources(t *testing.T) {
 			}
 			ext.Observe(p)
 			mu.Lock()
-			mu.Unlock()
+			mu.Unlock() //nolint:staticcheck // the lock and the unlock are the steps under test
 			p.Step("free")
 			return nil
 		})

@@ -3,6 +3,7 @@ package detest
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -180,36 +181,39 @@ func outcomes(t *testing.T, model func(t *testing.T, s *Sim), opts ...Option) ([
 	return out, res
 }
 
+// key is what a run's outcome amounts to: its final state, its verdict and
+// the history of each process, together. Two runs that reorder independent
+// steps only share all three, so a reduction that keeps one run of each
+// class keeps every key the full tree reaches.
+func (o outcome) key() string {
+	locals := make([]string, 0, len(o.locals))
+	for l := range o.locals {
+		locals = append(locals, l)
+	}
+	sort.Strings(locals)
+	return o.state + "|" + o.verdict + "|" + strings.Join(locals, ",")
+}
+
 // checkReduction explores model with and without PartialOrder and fails
-// the test if the reduction misses a final state, a process history or a
-// verdict the full tree reaches. model is called once per exploration and
-// must declare the same simulation both times: a uuid drawn at declaration
-// would make the two trees differ.
+// the test if the reduction misses an outcome the full tree reaches: a
+// final state, a verdict and a set of process histories that some run
+// reaches together. model is called once per exploration and must declare
+// the same simulation both times: a uuid drawn at declaration would make
+// the two trees differ.
 func checkReduction(t *testing.T, name string, model func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	full, _ := outcomes(t, model, opts...)
 	reduced, _ := outcomes(t, model, append(slices.Clone(opts), PartialOrder())...)
-	states, locals := map[string]bool{}, map[string]bool{}
+	keys := map[string]bool{}
 	for _, o := range reduced {
-		states[o.state+"|"+o.verdict] = true
-		for l := range o.locals {
-			locals[l] = true
-		}
+		keys[o.key()] = true
 	}
 	missing := 0
 	for _, o := range full {
-		if !states[o.state+"|"+o.verdict] {
+		if !keys[o.key()] {
 			missing++
 			if missing <= 3 {
-				t.Errorf("%s: the reduction misses the final state and verdict %q of the run %s:\n%s", name, o.verdict, o.picks, o.state)
-			}
-		}
-		for l := range o.locals {
-			if !locals[l] {
-				missing++
-				if missing <= 3 {
-					t.Errorf("%s: the reduction misses the history %s of a process in the run %s", name, l, o.picks)
-				}
+				t.Errorf("%s: the reduction misses the outcome of the run %s, verdict %q, histories %v, state:\n%s", name, o.picks, o.verdict, slices.Sorted(maps.Keys(o.locals)), o.state)
 			}
 		}
 	}
