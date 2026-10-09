@@ -156,6 +156,18 @@ func outcomeOf(r *run, v *violation) outcome {
 		}
 		hashes[e.proc] = h
 	}
+	// What each process returned is part of its history too: a handler
+	// that failed and one that succeeded with the same steps differ.
+	for _, p := range r.procs {
+		h, ok := hashes[p.name]
+		if !ok {
+			h = fnvOffset
+		}
+		if p.err != nil {
+			h = hashString(h, procNumber.ReplaceAllString(uuidOrTime.ReplaceAllString(p.err.Error(), "U"), "#"))
+		}
+		hashes[p.name] = h
+	}
 	for p, h := range hashes {
 		o.locals[fmt.Sprintf("%s:%x", procNumber.ReplaceAllString(p, ""), h)] = true
 	}
