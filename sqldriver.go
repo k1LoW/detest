@@ -82,17 +82,6 @@ func (c *sqlConnector) Connect(context.Context) (driver.Conn, error) {
 	return &sqlConn{db: c.db, pool: c.pool, poolID: c.id}, nil
 }
 
-// depConn records that the statement takes or gives back a connection of a
-// capped pool, which another process may hold or wait for. An uncapped
-// pool never makes a process wait, so its connections are no resource the
-// processes share.
-func (c *sqlConn) depConn() {
-	r := c.db.s.run
-	if r == nil || !r.depOn() || c.pool == nil || c.pool.Stats().MaxOpenConnections <= 0 {
-		return
-	}
-	r.depRecord(fmt.Sprintf("conn:%s:%d", c.db.name, c.poolID), true)
-}
 func (c *sqlConnector) Driver() driver.Driver { return sqlDriver{} }
 
 type sqlDriver struct{}
@@ -413,6 +402,27 @@ func recoverRunOver(err *error) {
 	}
 }
 
+// depConn records the connection the statement takes or gives back where
+// another process may hold or wait for it: the connection of a transaction,
+// which the goroutines sharing it and its commit take turns on, and one of
+// a capped pool. An uncapped pool never makes a process wait, so its other
+// connections are no resource the processes share. A statement that
+// database/sql turns away with ErrTxDone, the transaction having ended
+// before it, never reaches the driver and records nothing, as one turned
+// away for its ended context does not (see runQuery).
+func (c *sqlConn) depConn() {
+	r := c.db.s.run
+	if r == nil || !r.depOn() {
+		return
+	}
+	if tx := c.tx; tx != nil && tx.p != nil && tx.p.r == r {
+		r.depRecord("txconn:"+tx.p.name, true)
+	}
+	if c.pool == nil || c.pool.Stats().MaxOpenConnections <= 0 {
+		return
+	}
+	r.depRecord(fmt.Sprintf("conn:%s:%d", c.db.name, c.poolID), true)
+}
 func (c *sqlConn) current() *Proc { return c.db.s.Current() }
 
 // statementTx returns the transaction a statement runs in: the open one, or an

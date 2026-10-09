@@ -197,7 +197,11 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // written in an order that does not matter, such as a set or a counter, is
 // fine. A fake that records what the External calls it serves did, and
 // reads that record on a later call that goes through no External, must
-// report the read with External.Observe. The report says the option was
+// report the read with External.Observe. A *sql.Tx one process hands to
+// another is shared through database/sql as well: a statement it turns
+// away with sql.ErrTxDone, the transaction having ended, never reaches
+// detest, so the order where the statement ran before the end is explored
+// only when some other step ordered them. The report says the option was
 // on, since the result rests on this assumption.
 //
 // The running process's next step is explored first at every state, so the
