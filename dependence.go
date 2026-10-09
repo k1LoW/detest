@@ -451,6 +451,11 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 				all = true
 			}
 		}
+		for _, d := range sel.DistinctOn {
+			if !simpleExpr(d) {
+				all = true
+			}
+		}
 		for _, o := range sel.OrderBy {
 			if !simpleExpr(o.Expr) {
 				all = true
@@ -478,13 +483,28 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 		if !simpleTargets(s.Returning) {
 			all = true
 		}
+		for _, row := range s.Rows {
+			if slices.ContainsFunc(row, depReads) {
+				all = true // a value from a query, such as (SELECT n FROM src)
+			}
+		}
+		if oc := s.OnConflict; oc != nil {
+			if depReads(oc.InferWhere) || depReads(oc.Where) {
+				all = true
+			}
+			for _, a := range oc.Set {
+				if depReads(a.Value) {
+					all = true
+				}
+			}
+		}
 		if def != nil && s.Select == nil && s.OnConflict == nil && len(s.Rows) == 1 && depPinnable(def, true) {
 			key = x.depInsertKey(def, target, s)
 		}
 	case *sqlir.UpdateStmt:
 		target = db.resolve(s.Table)
 		def = db.defs[target]
-		if len(s.With) > 0 || len(s.From) > 0 || !simpleTargets(s.Returning) || s.Limit != nil || len(s.OrderBy) > 0 {
+		if len(s.With) > 0 || len(s.From) > 0 || !simpleTargets(s.Returning) || s.Limit != nil || len(s.OrderBy) > 0 || depReads(s.Where) {
 			all = true
 		}
 		for i := range s.From {
@@ -501,7 +521,7 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 	case *sqlir.DeleteStmt:
 		target = db.resolve(s.Table)
 		def = db.defs[target]
-		if len(s.Using) > 0 || !simpleTargets(s.Returning) || s.Limit != nil || s.Truncate {
+		if len(s.With) > 0 || len(s.Using) > 0 || !simpleTargets(s.Returning) || s.Limit != nil || len(s.OrderBy) > 0 || s.Truncate || depReads(s.Where) {
 			all = true
 		}
 		for i := range s.Using {
@@ -567,6 +587,37 @@ func (r *run) depFKs(tx *Tx, db *DB, table string, insert bool) {
 // depSimple reports whether an expression, absent or present, reads no
 // table: simpleExpr takes an absent one for a subquery.
 func depSimple(e sqlir.Expr) bool { return e == nil || simpleExpr(e) }
+
+// depReads reports whether an expression holds a query, which reads the
+// tables it names: a subquery, EXISTS or IN (SELECT ...). A kind of node
+// it does not know counts as one.
+func depReads(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case nil, *sqlir.ColumnRef, *sqlir.Param, *sqlir.Const, *sqlir.Default:
+		return false
+	case *sqlir.BinaryExpr:
+		return depReads(e.L) || depReads(e.R)
+	case *sqlir.UnaryExpr:
+		return depReads(e.X)
+	case *sqlir.ArrayCmp:
+		return depReads(e.X) || depReads(e.Array)
+	case *sqlir.InExpr:
+		return e.Sub != nil || depReads(e.X) || slices.ContainsFunc(e.List, depReads)
+	case *sqlir.IsNull:
+		return depReads(e.X)
+	case *sqlir.FuncCall:
+		return slices.ContainsFunc(e.Args, depReads)
+	case *sqlir.RowExpr:
+		return slices.ContainsFunc(e.Items, depReads)
+	case *sqlir.Cast:
+		return depReads(e.X)
+	case *sqlir.Collate:
+		return depReads(e.X)
+	case *sqlir.CaseExpr:
+		return depReads(e.Arg) || depReads(e.Else) || slices.ContainsFunc(e.Whens, func(w sqlir.CaseWhen) bool { return depReads(w.When) || depReads(w.Then) })
+	}
+	return true
+}
 
 // depPin is the row a statement touches by its primary key, so that the
 // engine's records of the statement's own table name the row instead.

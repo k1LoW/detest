@@ -372,6 +372,31 @@ func insertSelectModel(t *testing.T, s *Sim) {
 	})
 }
 
+// subqueryModel: an update, a delete and an insert read a gate table
+// through a subquery in WHERE or in VALUES while a writer opens the gate,
+// so the subquery must count as a read of the gate.
+func subqueryModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE gate (id int PRIMARY KEY, open boolean NOT NULL, n int NOT NULL)")
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, n int NOT NULL)")
+	mustExec(t, db, "CREATE TABLE copied (id int PRIMARY KEY, n int NOT NULL)")
+	s.Seed(func() { mustExec(t, db, "INSERT INTO gate VALUES (1, false, 0); INSERT INTO t VALUES (1, 0), (2, 0)") })
+	s.Manual("gated", 1, func(p *Proc) error {
+		if _, err := db.ExecContext(p.Context(), "UPDATE t SET n = 1 WHERE id = 1 AND EXISTS (SELECT 1 FROM gate WHERE open)"); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(p.Context(), "DELETE FROM t WHERE id = 2 AND EXISTS (SELECT 1 FROM gate WHERE open)"); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(p.Context(), "INSERT INTO copied VALUES (1, (SELECT n FROM gate WHERE id = 1))")
+		return err
+	})
+	s.Manual("opener", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), "UPDATE gate SET open = true, n = 1 WHERE id = 1")
+		return err
+	})
+}
+
 func crashTxModel(t *testing.T, s *Sim) {
 	_, store := s.DB("app", postgres.New())
 	s.Seed(func() { store.SeedRow("counters", Row{"id": "a", "n": int64(0)}) })
@@ -559,6 +584,7 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"view", viewModel, []Option{EagerStart(false)}},
 		{"limit", limitModel, []Option{EagerStart(false)}},
 		{"insert select", insertSelectModel, []Option{EagerStart(false)}},
+		{"subquery", subqueryModel, []Option{EagerStart(false)}},
 		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
 		{"fk parent", fkParentModel, []Option{EagerStart(false)}},
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},
