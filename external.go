@@ -262,7 +262,17 @@ func requestKey(req *http.Request) string {
 // an order in which the read comes before a call may be skipped. It is a
 // no-op otherwise.
 func (e *External) Observe(p *Proc) {
-	if p == nil || p.r == nil {
+	if p == nil {
+		return
+	}
+	// As Do enters, without the yield: the caller is resolved, so that a
+	// goroutine of the process is adopted and one of an ended run is turned
+	// away, and the call is counted, so that an eager start that observes
+	// before its first yield point falls back (see startEager).
+	defer e.s.leave()
+	defer func() { absorbAbort(recover(), p, nil) }()
+	p = p.resolve(func() string { return e.name + " observe" })
+	if p.stale() {
 		return
 	}
 	p.r.depRecord("ext:"+e.name, false)
