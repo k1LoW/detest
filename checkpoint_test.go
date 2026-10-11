@@ -1,13 +1,17 @@
 package detest
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -154,4 +158,102 @@ func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
 	if err := newFrontier(1, 10).load(path); err == nil || !strings.Contains(err.Error(), "version 1") {
 		t.Fatalf("got %v, want a refusal of version 1", err)
 	}
+}
+
+// A SIGINT or SIGTERM stops an exploration that saves to DETEST_CHECKPOINT as
+// MaxDuration does: the runs in flight finish, the rest is saved and the test
+// fails naming the signal, later explorations in the binary are skipped, and
+// resuming explores the runs one exploration makes. A second signal ends the
+// test binary as it would without detest. The signals are real, so the
+// exploration runs in a child process.
+func TestCheckpointSavedOnSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Process.Signal sends only os.Kill on Windows")
+	}
+	if mode := os.Getenv("DETEST_SIGNAL_CHILD"); mode != "" {
+		var runs atomic.Int64
+		Explore(t, func(t *testing.T, s *Sim) {
+			counterModel(s, true)
+			s.Seed(func() {
+				if runs.Add(1) != 3 {
+					return
+				}
+				p, _ := os.FindProcess(os.Getpid())
+				_ = p.Signal(map[string]os.Signal{"INT": os.Interrupt, "TERM": syscall.SIGTERM, "TWICE": os.Interrupt}[mode])
+				if mode == "TWICE" {
+					for interruptedBy.Load() == nil {
+						runtime.Gosched()
+					}
+					_ = p.Signal(os.Interrupt)
+					select {} // the second signal ends the process
+				}
+			})
+		}, MaxPreemptions(2))
+		t.Run("later", func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				fmt.Println("later exploration declared")
+				counterModel(s, true)
+			})
+		})
+		return
+	}
+	var full atomic.Int64
+	Explore(t, func(t *testing.T, s *Sim) {
+		counterModel(s, true)
+		s.Seed(func() { full.Add(1) })
+	}, MaxPreemptions(2))
+
+	child := func(mode, path string) (string, error) {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCheckpointSavedOnSignal$", "-test.v") //nolint:gosec // the test binary itself
+		cmd.Env = append(os.Environ(), "DETEST_SIGNAL_CHILD="+mode, "DETEST_CHECKPOINT="+path)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	for _, sig := range []string{"INT", "TERM"} {
+		t.Run(sig, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ckpt")
+			out, err := child(sig, path)
+			if err == nil || !strings.Contains(out, "detest: interrupted by") || !strings.Contains(out, "DETEST_CHECKPOINT="+path) {
+				t.Fatalf("expected the child to fail naming the signal and the checkpoint (%v):\n%s", err, out)
+			}
+			if strings.Contains(out, "later exploration declared") || !strings.Contains(out, "an earlier exploration of this test binary was interrupted") {
+				t.Fatalf("expected the later exploration to be skipped:\n%s", out)
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ck checkpoint
+			if err := json.Unmarshal(b, &ck); err != nil {
+				t.Fatal(err)
+			}
+			// The worker may take a run or more before the signal reaches the
+			// frontier; the sum below shows that none is lost.
+			if ck.Runs < 3 || int64(ck.Runs) >= full.Load() {
+				t.Fatalf("the checkpoint holds %d runs, want at least the 3 before the signal and fewer than %d", ck.Runs, full.Load())
+			}
+			var resumed atomic.Int64
+			t.Setenv("DETEST_CHECKPOINT", path)
+			for range 100 {
+				Explore(t, func(t *testing.T, s *Sim) {
+					counterModel(s, true)
+					s.Seed(func() { resumed.Add(1) })
+				}, MaxPreemptions(2))
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					break
+				}
+			}
+			if got := int64(ck.Runs) + resumed.Load(); got != full.Load() {
+				t.Fatalf("%d runs before the signal and %d after, one exploration %d", ck.Runs, resumed.Load(), full.Load())
+			}
+		})
+	}
+	t.Run("twice", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "ckpt")
+		out, err := child("TWICE", path)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.Success() || strings.Contains(out, "detest: interrupted by") {
+			t.Fatalf("expected the second signal to end the child (%v):\n%s", err, out)
+		}
+	})
 }
