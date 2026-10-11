@@ -361,7 +361,7 @@ These environment variables override or add to them.
 | `DETEST_MAX_DURATION` | Wall-clock cap such as `10m`, overriding `detest.MaxDuration` |
 | `DETEST_SEED` | Seed of a test under `detest.Random` or `detest.Prioritized`, overriding the one it passes. A test under `detest.DepthFirst` is left as it is |
 | `DETEST_SHARD` | `index/total[/depth]`, explore one shard of the space (for splitting across CI jobs) |
-| `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, and to resume from on the next run |
+| `DETEST_CHECKPOINT` | A file to save the unexplored part to when `MaxRuns` or `MaxDuration` is reached, or when a SIGINT or SIGTERM stops the test, and to resume from on the next run. An interrupted test fails, and a second signal ends it without saving |
 | `DETEST_STALL` | How long a process may block outside the scheduler before it is reported (default `30s`) |
 | `DETEST_DEBUG` | Print scheduler events to stderr |
 

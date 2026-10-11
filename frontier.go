@@ -31,7 +31,7 @@ type frontier struct {
 	stack      []subtree // LIFO keeps the order depth first and the stack small
 	busy       int       // workers running a prefix taken from the stack
 	stopped    bool
-	incomplete bool // MaxRuns or MaxDuration cut the exploration short
+	incomplete bool // MaxRuns, MaxDuration or a signal cut the exploration short
 	// random hands out run indexes instead of subtrees, under the Random
 	// strategy, with next the index of the next run and bestIndex the
 	// index of the best violation's run. halted stops handing them out
@@ -42,7 +42,7 @@ type frontier struct {
 	halted    bool
 	runs      int
 	maxRuns   int
-	expired   atomic.Bool // MaxDuration has passed
+	expired   atomic.Bool // MaxDuration has passed, or a signal came
 	// best is the choices of the earliest violating run found so far, in the
 	// depth-first order one worker explores in, with its result. Subtrees
 	// after it are dropped and the ones before it still explored, so the
@@ -528,7 +528,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	return merged
 }
 
-// checkpoint is the rest of an exploration MaxRuns or MaxDuration cut short: the subtrees
+// checkpoint is the rest of an exploration MaxRuns, MaxDuration or a signal cut short: the subtrees
 // not explored yet, each as the choices that lead to it.
 // checkpointVersion is the version of the checkpoint format. 2 is the tree
 // of eager starts and of INSERT yielding first, whose prefixes a checkpoint

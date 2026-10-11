@@ -536,6 +536,8 @@ type result struct {
 	// Checkpoint is the file the rest of the exploration was saved to.
 	PriorRuns  int
 	Checkpoint string
+	// Interrupted is the SIGINT or SIGTERM that stopped the exploration.
+	Interrupted os.Signal
 	// Fatal is a misuse that stopped the exploration, which fails the test
 	// rather than being reported as a violation.
 	Fatal error

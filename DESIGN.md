@@ -113,7 +113,7 @@ The first violating schedule in depth-first order is often not the simplest one.
 
 ### Checkpoints and shards
 
-`MaxRuns` caps an exploration by runs, and `MaxDuration` by wall-clock time. With `DETEST_CHECKPOINT` set, the unexplored prefixes are saved when either cap is reached, and the next execution resumes from them, so a large space can be explored across several CI runs.
+`MaxRuns` caps an exploration by runs, and `MaxDuration` by wall-clock time. With `DETEST_CHECKPOINT` set, the unexplored prefixes are saved when either cap is reached, and the next execution resumes from them, so a large space can be explored across several CI runs. A SIGINT or SIGTERM stops such an exploration as the caps do: the runs in flight finish, the rest is saved, the test fails naming the signal, and the explorations of later tests in the binary are skipped. The go command waits for a test binary it was interrupted with rather than killing it, which leaves the time to save. A second signal ends the binary as it would without detest.
 
 `DETEST_SHARD` (or `Shard`) splits the space across machines by hashing a fixed number of leading picks. The split is decided in advance, so the shallow runs above the split depth repeat on every machine.
 

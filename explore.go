@@ -32,11 +32,17 @@ import (
 // more to record its trace, so seeds and invariants see that run twice.
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
+	if sig, _ := interruptedBy.Load().(os.Signal); sig != nil {
+		t.Skipf("detest: not explored; an earlier exploration of this test binary was interrupted by %v", sig)
+	}
 	res, expect := explore(t, fn, opts)
 	if res == nil {
 		return // fn stopped the test
 	}
 	switch {
+	case !res.Violated && res.Interrupted != nil:
+		// Not ok: the exploration did not run to the bounds the test set.
+		t.Errorf("detest: interrupted by %v\n%s", res.Interrupted, res.report())
 	case expect == nil && res.Violated:
 		t.Error(res.report())
 	case expect == nil && len(res.Unreached) > 0 && res.Complete && res.Shard == "":
@@ -102,6 +108,13 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 			timer.Stop()
 		}
 	}()
+	// Only an exploration that has somewhere to save catches the signals,
+	// since catching them changes how the whole test binary ends.
+	var in *interrupt
+	if ckpt != "" {
+		in = watchInterrupt()
+		defer in.stop()
+	}
 	for {
 		f = newFrontier(n, maxRuns)
 		f.random = st.random
@@ -114,6 +127,9 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 				timer.Stop()
 			}
 			timer = time.AfterFunc(max(maxDuration-time.Since(start), 0), f.expire)
+		}
+		if in != nil {
+			in.watch(f)
 		}
 		if ckpt != "" && lazy == "" {
 			if err := f.load(ckpt); err != nil {
@@ -155,6 +171,9 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	}
 	res.Elapsed = time.Since(start) // the bubble's clock is fake
 	res.PriorRuns = f.prior
+	if in != nil && !res.Complete {
+		res.Interrupted = in.signal()
+	}
 	if ckpt != "" {
 		if res.Violated || res.Complete {
 			_ = os.Remove(ckpt) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
