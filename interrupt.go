@@ -17,32 +17,42 @@ var interruptedBy atomic.Value // os.Signal
 // and the rest is saved. The go command does not kill a test binary it was
 // interrupted with, it waits for it, so the save has the time it needs.
 type interrupt struct {
-	mu   sync.Mutex
-	f    *frontier
-	sig  os.Signal
-	ch   chan os.Signal
-	done chan struct{}
+	mu     sync.Mutex
+	f      *frontier
+	sig    os.Signal
+	ch     chan os.Signal
+	done   chan struct{}
+	exited chan struct{}
+	once   sync.Once
 }
 
 // watchInterrupt starts catching the signals until stop is called.
 func watchInterrupt() *interrupt {
-	in := &interrupt{ch: make(chan os.Signal, 1), done: make(chan struct{})}
+	in := &interrupt{ch: make(chan os.Signal, 1), done: make(chan struct{}), exited: make(chan struct{})}
 	signal.Notify(in.ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
+		defer close(in.exited)
+		var sig os.Signal
 		select {
-		case sig := <-in.ch:
-			// Stop rather than Reset, which would also undo a handler the code
-			// under test installed. With no other handler the second signal
-			// ends the process as it would without detest.
-			signal.Stop(in.ch)
-			in.mu.Lock()
-			defer in.mu.Unlock()
-			in.sig = sig
-			interruptedBy.Store(sig)
-			if in.f != nil {
-				in.f.expire()
-			}
+		case sig = <-in.ch:
 		case <-in.done:
+			// A signal delivered before stop is still the exploration's.
+			select {
+			case sig = <-in.ch:
+			default:
+				return
+			}
+		}
+		// Stop rather than Reset, which would also undo a handler the code
+		// under test installed. With no other handler the second signal
+		// ends the process as it would without detest.
+		signal.Stop(in.ch)
+		in.mu.Lock()
+		defer in.mu.Unlock()
+		in.sig = sig
+		interruptedBy.Store(sig)
+		if in.f != nil {
+			in.f.expire()
 		}
 	}()
 	return in
@@ -66,7 +76,12 @@ func (in *interrupt) signal() os.Signal {
 	return in.sig
 }
 
+// stop stops catching the signals and waits for the watcher, so that signal
+// then reports any signal delivered before.
 func (in *interrupt) stop() {
-	signal.Stop(in.ch)
-	close(in.done)
+	in.once.Do(func() {
+		signal.Stop(in.ch)
+		close(in.done)
+		<-in.exited
+	})
 }

@@ -171,8 +171,11 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	}
 	res.Elapsed = time.Since(start) // the bubble's clock is fake
 	res.PriorRuns = f.prior
-	if in != nil && !res.Complete {
-		res.Interrupted = in.signal()
+	if in != nil {
+		in.stop()
+		if !res.Complete {
+			res.Interrupted = in.signal()
+		}
 	}
 	if ckpt != "" {
 		if res.Violated || res.Complete {
