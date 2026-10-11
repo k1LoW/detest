@@ -171,12 +171,6 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	}
 	res.Elapsed = time.Since(start) // the bubble's clock is fake
 	res.PriorRuns = f.prior
-	if in != nil {
-		in.stop()
-		if !res.Complete {
-			res.Interrupted = in.signal()
-		}
-	}
 	if ckpt != "" {
 		if res.Violated || res.Complete {
 			_ = os.Remove(ckpt) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
@@ -184,6 +178,14 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 			t.Error(err)
 		} else {
 			res.Checkpoint = ckpt
+		}
+	}
+	// The signals are caught until the checkpoint is written, so that one
+	// arriving during the write does not leave it cut off.
+	if in != nil {
+		in.stop()
+		if !res.Complete {
+			res.Interrupted = in.signal()
 		}
 	}
 	return res, expect
