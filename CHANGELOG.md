@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.5.1](https://github.com/k1LoW/detest/compare/v0.5.0...v0.5.1) - 2026-10-11
+
+### Fix bug 🐛
+- fix: keep no lock on the row ON CONFLICT DO NOTHING skips on Postgres by @k1LoW in https://github.com/k1LoW/detest/pull/75
+### Other Changes
+- feat: save DETEST_CHECKPOINT when SIGINT or SIGTERM stops go test by @k1LoW in https://github.com/k1LoW/detest/pull/78
+
 ## [v0.5.0](https://github.com/k1LoW/detest/compare/v0.4.0...v0.5.0) - 2026-10-09
 
 ### New Features 🎉
