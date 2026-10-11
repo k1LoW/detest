@@ -2402,10 +2402,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		if err := tx.check(); err != nil {
 			return err
 		}
-		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), modes: map[lockKey]lockMode{}, deferred: len(tx.deferred)}
-		for _, lk := range tx.locks {
-			sp.modes[lk] = tx.db.locks[lk][tx]
-		}
+		sp := savepoint{name: name, writes: map[lockKey]Row{}, deleted: map[lockKey]bool{}, locks: len(tx.locks), modes: tx.heldModes(), deferred: len(tx.deferred)}
 		for k, v := range tx.writes {
 			sp.writes[k] = v.clone()
 		}
