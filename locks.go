@@ -578,13 +578,27 @@ func (tx *Tx) releaseLocks(keys []lockKey) {
 // rollbackLocks returns tx's locks to what it held at sp: it releases the
 // ones taken since and weakens the ones strengthened since, as Postgres does
 // when it aborts the subtransaction that took them.
-func (tx *Tx) rollbackLocks(sp *savepoint) {
-	tx.releaseLocks(tx.locks[sp.locks:])
-	tx.locks = tx.locks[:sp.locks]
+func (tx *Tx) rollbackLocks(sp *savepoint) { tx.restoreLocks(sp.locks, sp.modes) }
+
+// heldModes is the strength of each lock tx holds, for restoreLocks.
+func (tx *Tx) heldModes() map[lockKey]lockMode {
+	modes := make(map[lockKey]lockMode, len(tx.locks))
+	for _, lk := range tx.locks {
+		modes[lk] = tx.db.locks[lk][tx]
+	}
+	return modes
+}
+
+// restoreLocks returns tx's locks to the first n of them at the strengths in
+// modes, releasing the ones taken since and weakening the ones strengthened
+// since.
+func (tx *Tx) restoreLocks(n int, modes map[lockKey]lockMode) {
+	tx.releaseLocks(tx.locks[n:])
+	tx.locks = tx.locks[:n]
 	weakened := map[lockKey]bool{}
 	for _, lk := range tx.locks {
-		if holders := tx.db.locks[lk]; holders[tx] > sp.modes[lk] {
-			holders[tx] = sp.modes[lk]
+		if holders := tx.db.locks[lk]; holders[tx] > modes[lk] {
+			holders[tx] = modes[lk]
 			weakened[lk] = true
 		}
 	}

@@ -162,6 +162,77 @@ var writeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "do nothing keeps no lock on the skipped row",
+		Schema: []string{
+			`CREATE TABLE s (k text, idx int, tag text UNIQUE, PRIMARY KEY (k, idx))`,
+		},
+		Seed:  []string{`INSERT INTO s VALUES ('k', 0, 'a'), ('k', 1, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `INSERT INTO s VALUES ('k', 0, 'x') ON CONFLICT (k, idx) DO NOTHING`),
+			difftest.S(0, `INSERT INTO s VALUES ('k', 9, 'b') ON CONFLICT (tag) DO NOTHING`),
+			difftest.S(1, `BEGIN`),
+			difftest.S(1, `INSERT INTO s VALUES ('k', 0, 'y') ON CONFLICT (k, idx) DO NOTHING`),
+			difftest.S(1, `INSERT INTO s VALUES ('k', 8, 'b') ON CONFLICT (tag) DO NOTHING`),
+			difftest.S(1, `DELETE FROM s WHERE idx = 0`),
+			difftest.S(1, `UPDATE s SET tag = 'c' WHERE idx = 1`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(0, `SELECT k, idx, tag FROM s ORDER BY idx`),
+		},
+	},
+	{
+		Name: "do update on a unique value makes an insert of the value wait",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE, n int NOT NULL)`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 'a', 0)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `INSERT INTO u VALUES (3, 'a', 1) ON CONFLICT (email) DO UPDATE SET email = 'b'`),
+			difftest.S(1, `INSERT INTO u VALUES (4, 'a', 1)`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, email FROM u ORDER BY id`),
+		},
+	},
+	{
+		Name: "a duplicate key error keeps no lock on the row",
+		Schema: []string{
+			`CREATE TABLE s (k text, idx int, tag text UNIQUE, PRIMARY KEY (k, idx))`,
+		},
+		Seed:  []string{`INSERT INTO s VALUES ('k', 0, 'a'), ('k', 1, 'b')`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `INSERT INTO s VALUES ('k', 0, 'x')`),
+			difftest.S(1, `BEGIN`),
+			difftest.S(1, `INSERT INTO s VALUES ('k', 9, 'b')`),
+			difftest.S(2, `DELETE FROM s WHERE idx = 0`),
+			difftest.S(2, `UPDATE s SET tag = 'c' WHERE idx = 1`),
+			difftest.S(0, `ROLLBACK`),
+			difftest.S(1, `ROLLBACK`),
+			difftest.Q(2, `SELECT k, idx, tag FROM s ORDER BY idx`),
+		},
+	},
+	{
+		Name: "do nothing that skipped a row does not deadlock with its deleter",
+		Schema: []string{
+			`CREATE TABLE s (k text, idx int, PRIMARY KEY (k, idx))`,
+		},
+		Seed:  []string{`INSERT INTO s VALUES ('k', 0), ('k', 1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `DELETE FROM s WHERE k = 'k' AND idx >= 1`),
+			difftest.S(1, `INSERT INTO s (k, idx) SELECT 'k', gs - 1 FROM generate_series(1, 2) AS gs ON CONFLICT (k, idx) DO NOTHING`),
+			difftest.S(0, `INSERT INTO s (k, idx) SELECT 'k', gs - 1 FROM generate_series(1, 1) AS gs ON CONFLICT (k, idx) DO NOTHING`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT k, idx FROM s ORDER BY idx`),
+		},
+	},
+	{
 		Name: "immediate unique checked per statement",
 		Schema: []string{
 			`CREATE TABLE pos (id int PRIMARY KEY, p int UNIQUE)`,

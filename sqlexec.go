@@ -1762,6 +1762,17 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		var existing, cur Row
 		var lk lockKey
+		// Postgres's DO NOTHING only waits for a transaction still writing
+		// the conflicting row or value and locks nothing, so a skipped row
+		// leaves the locks as they were before the conflict check. The
+		// check's lock on the key stays for DO UPDATE and for a plain
+		// insert, where it stands for the write that follows.
+		var heldLocks int
+		var heldModes map[lockKey]lockMode
+		skipUnlocked := ins.OnConflict != nil && ins.OnConflict.DoNothing && !x.tx.db.kind.InnoDB()
+		if skipUnlocked {
+			heldLocks, heldModes = len(x.tx.locks), x.tx.heldModes()
+		}
 		for ins.OnConflict != nil {
 			var err error
 			if existing, err = x.findConflict(table, ins.OnConflict, row); err != nil {
@@ -1801,6 +1812,9 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		}
 		if existing != nil {
 			if ins.OnConflict.DoNothing {
+				if skipUnlocked {
+					x.tx.restoreLocks(heldLocks, heldModes)
+				}
 				if x.tx.p != nil {
 					x.tx.note("on conflict do nothing: row skipped")
 				}

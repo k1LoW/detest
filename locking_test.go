@@ -470,6 +470,82 @@ func TestUpsertRechecksConflictAfterWait(t *testing.T) {
 	})
 }
 
+// ON CONFLICT DO NOTHING on a committed row takes no lock on it, so another
+// transaction's DO NOTHING on the same row does not wait for the first to
+// finish, whether the arbiter is the primary key or another unique index.
+func TestDoNothingKeepsNoLockOnSkippedRow(t *testing.T) {
+	for _, q := range []string{
+		`INSERT INTO s (k, idx, tag) VALUES ('k', 0, 'b') ON CONFLICT (k, idx) DO NOTHING`,
+		`INSERT INTO s (k, idx, tag) VALUES ('k', 1, 'a') ON CONFLICT (tag) DO NOTHING`,
+	} {
+		t.Run(q, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, store := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE s (k text, idx int, tag text UNIQUE, PRIMARY KEY (k, idx))`)
+				s.Seed(func() { mustExec(t, db, `INSERT INTO s VALUES ('k', 0, 'a')`) })
+				for _, name := range []string{"x", "y"} {
+					s.Manual(name, 1, func(p *Proc) error {
+						tx, err := db.BeginTx(p.Context(), nil)
+						if err != nil {
+							return err
+						}
+						defer func() { _ = tx.Rollback() }()
+						if _, err := tx.ExecContext(p.Context(), q); err != nil {
+							return err
+						}
+						if len(store.locks) != 0 {
+							t.Errorf("locks held after DO NOTHING: %v", store.locks)
+						}
+						p.Step("holds the transaction")
+						return tx.Commit()
+					})
+				}
+			})
+		})
+	}
+}
+
+// A transaction that deletes a row and then skips another with DO NOTHING
+// does not deadlock with a statement that skipped that other row first and
+// then waits on the deleted one.
+func TestDoNothingDoesNotDeadlockOnSkippedRow(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE s (k text, idx int, PRIMARY KEY (k, idx))`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO s VALUES ('k', 0), ('k', 1)`) })
+		var errs []error
+		s.Seed(func() { errs = nil })
+		s.Manual("shrink", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `DELETE FROM s WHERE k = 'k' AND idx >= 1`); err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			if _, err := tx.ExecContext(p.Context(), `INSERT INTO s (k, idx) SELECT 'k', gs - 1 FROM generate_series(1, 1) AS gs ON CONFLICT (k, idx) DO NOTHING`); err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			if err := tx.Commit(); err != nil {
+				errs = append(errs, err)
+			}
+			return nil
+		})
+		s.Manual("fill", 1, func(p *Proc) error {
+			if _, err := db.ExecContext(p.Context(), `INSERT INTO s (k, idx) SELECT 'k', gs - 1 FROM generate_series(1, 2) AS gs ON CONFLICT (k, idx) DO NOTHING`); err != nil {
+				errs = append(errs, err)
+			}
+			return nil
+		})
+		s.AtQuiescence(func(*State) error {
+			return errors.Join(errs...)
+		})
+	})
+}
+
 // A locking read that waited on a row deleted meanwhile keeps no lock on its
 // key, so an insert of that key does not wait for the reader to finish.
 func TestNoLockKeptOnDeletedRow(t *testing.T) {
