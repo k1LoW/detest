@@ -167,6 +167,9 @@ func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
 // test binary as it would without detest. The signals are real, so the
 // exploration runs in a child process.
 func TestCheckpointSavedOnSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Process.Signal sends only os.Kill on Windows")
+	}
 	if mode := os.Getenv("DETEST_SIGNAL_CHILD"); mode != "" {
 		var runs atomic.Int64
 		Explore(t, func(t *testing.T, s *Sim) {
