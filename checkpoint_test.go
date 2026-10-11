@@ -162,9 +162,10 @@ func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
 
 // A SIGINT or SIGTERM stops an exploration that saves to DETEST_CHECKPOINT as
 // MaxDuration does: the runs in flight finish, the rest is saved and the test
-// fails naming the signal, and resuming explores the runs one exploration
-// makes. A second signal ends the test binary as it would without detest.
-// The signals are real, so the exploration runs in a child process.
+// fails naming the signal, later explorations in the binary are skipped, and
+// resuming explores the runs one exploration makes. A second signal ends the
+// test binary as it would without detest. The signals are real, so the
+// exploration runs in a child process.
 func TestCheckpointSavedOnSignal(t *testing.T) {
 	if mode := os.Getenv("DETEST_SIGNAL_CHILD"); mode != "" {
 		var runs atomic.Int64
@@ -185,6 +186,12 @@ func TestCheckpointSavedOnSignal(t *testing.T) {
 				}
 			})
 		}, MaxPreemptions(2))
+		t.Run("later", func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				fmt.Println("later exploration declared")
+				counterModel(s, true)
+			})
+		})
 		return
 	}
 	var full atomic.Int64
@@ -206,6 +213,9 @@ func TestCheckpointSavedOnSignal(t *testing.T) {
 			if err == nil || !strings.Contains(out, "detest: interrupted by") || !strings.Contains(out, "DETEST_CHECKPOINT="+path) {
 				t.Fatalf("expected the child to fail naming the signal and the checkpoint (%v):\n%s", err, out)
 			}
+			if strings.Contains(out, "later exploration declared") || !strings.Contains(out, "an earlier exploration of this test binary was interrupted") {
+				t.Fatalf("expected the later exploration to be skipped:\n%s", out)
+			}
 			b, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -214,8 +224,10 @@ func TestCheckpointSavedOnSignal(t *testing.T) {
 			if err := json.Unmarshal(b, &ck); err != nil {
 				t.Fatal(err)
 			}
-			if ck.Runs != 3 {
-				t.Fatalf("the checkpoint holds %d runs, want the 3 before the signal", ck.Runs)
+			// The worker may take a run or more before the signal reaches the
+			// frontier; the sum below shows that none is lost.
+			if ck.Runs < 3 || int64(ck.Runs) >= full.Load() {
+				t.Fatalf("the checkpoint holds %d runs, want at least the 3 before the signal and fewer than %d", ck.Runs, full.Load())
 			}
 			var resumed atomic.Int64
 			t.Setenv("DETEST_CHECKPOINT", path)
