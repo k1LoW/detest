@@ -52,6 +52,10 @@ func keyString(v any) string {
 		return pgInterval{micros: v.span()}.String()
 	case instant:
 		return v.UTC().Format(time.RFC3339Nano)
+	case enumValue:
+		// As its label, so that a key read through the transaction API,
+		// where an enum is its label, finds its row again.
+		return v.String()
 	case time.Time:
 		// As an instant's, so that a key read through the transaction
 		// API, where a timestamptz is a time.Time, finds its row again.
@@ -166,6 +170,11 @@ type DB struct {
 	// domainAliases are the base types of the names domains were renamed
 	// from, which the casts stored before the rename still name.
 	domainAliases map[string]string
+	// enums are the Postgres enums, by their bare name, and otherTypes the
+	// bare names of the other types a schema declares, which detest does
+	// not keep but which share the names of enums.
+	enums      map[string]*enumType
+	otherTypes map[string]bool
 	// declaredCache is declaresCollations, keptCache keptCollations and
 	// keptBranchCache keptBranchTypes, dropped by every schema change.
 	declaredCache   *bool
@@ -1241,7 +1250,33 @@ func (db *DB) forgetDomain(name, q string) {
 
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
+	switch ch.Object {
+	case "enum", "type", "domain", "sequence", "index":
+	default:
+		// A table, a view or a materialized view has a row type of its
+		// name, which detest would take for the enum it knows by it.
+		if name := relname(table); (ch.Create || ch.RenameTo != "") && db.enumOf(cmp.Or(relname(ch.RenameTo), name)) != nil {
+			return unsupported(fmt.Sprintf("a relation named %q, as an enum is", cmp.Or(relname(ch.RenameTo), name)), "")
+		}
+	}
 	switch {
+	case ch.Object == "enum":
+		return db.applyEnum(ch, tx)
+	case ch.Object == "type":
+		name := ch.Columns[0].Name
+		if db.enumOf(name) != nil {
+			// detest knows a type by its bare name, which the enum has.
+			return unsupported(fmt.Sprintf("a type named %q, as an enum is", name), "")
+		}
+		if db.otherTypes == nil {
+			db.otherTypes = map[string]bool{}
+		}
+		db.otherTypes[name] = true
+		return nil
+	case ch.Object == "domain" && ch.RenameTo != "" && (db.enumOf(ch.Columns[0].Name) != nil || db.enumOf(ch.RenameTo) != nil):
+		// A column of the enum keeps the type's old name, and a type
+		// renamed to the enum's would be taken for it.
+		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO %s", ch.Columns[0].Name, ch.RenameTo), "")
 	case ch.Object == "domain" && ch.Drop:
 		// The collated mark stays: a domain of the name created again, or
 		// one of another schema, may still be collated, and refusing is
@@ -1260,6 +1295,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
 		old := ch.Columns[0].Name
+		if db.otherTypes[old] {
+			// The old name stays marked too: another schema may have a
+			// type of it, which detest does not tell apart.
+			db.otherTypes[ch.RenameTo] = true
+		}
 		if db.collatedDomains[old] {
 			db.collatedDomains[ch.RenameTo] = true
 		}
@@ -1286,6 +1326,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
+		if db.enumOf(col.Name) != nil {
+			// detest knows a type by its bare name, which would make a
+			// column of the enum, in another schema, one of the domain.
+			return unsupported(fmt.Sprintf("a domain named %q, as an enum is", col.Name), "")
+		}
 		base := db.baseType(col.Type)
 		if col.Constrained {
 			base = constrainedDomain

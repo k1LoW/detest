@@ -111,6 +111,46 @@ ORDER BY c.relname`, schema)
 		}
 	}
 	var b strings.Builder
+	// The enums the columns are of, directly or through a domain, come
+	// first, as their labels order the columns' values and decide which
+	// values a write takes.
+	enums := map[string]bool{}
+	for _, t := range tables {
+		rows, err := db.QueryContext(ctx, `
+WITH RECURSIVE dom(oid, base) AS (
+	SELECT t.oid, t.typbasetype FROM pg_type t WHERE t.typtype = 'd'
+	UNION ALL
+	SELECT dom.oid, t.typbasetype FROM dom JOIN pg_type t ON t.oid = dom.base AND t.typtype = 'd'
+)
+SELECT format_type(t.oid, NULL), coalesce(string_agg(quote_literal(e.enumlabel), ', ' ORDER BY e.enumsortorder), '')
+FROM pg_type t
+LEFT JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e' AND t.oid IN (
+	SELECT coalesce(dom.base, a.atttypid) FROM pg_attribute a
+	LEFT JOIN dom ON dom.oid = a.atttypid AND NOT EXISTS (SELECT 1 FROM pg_type b WHERE b.oid = dom.base AND b.typtype = 'd')
+	WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
+)
+GROUP BY t.oid
+ORDER BY 1`, t.oid)
+		if err != nil {
+			return "", err
+		}
+		for rows.Next() {
+			var name, labels string
+			if err := rows.Scan(&name, &labels); err != nil {
+				rows.Close()
+				return "", err
+			}
+			if !enums[name] {
+				enums[name] = true
+				fmt.Fprintf(&b, "CREATE TYPE %s AS ENUM (%s);\n", name, labels)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+	}
 	for _, t := range tables {
 		var defs []string
 		// A column of a domain is written as the domain's base type, with

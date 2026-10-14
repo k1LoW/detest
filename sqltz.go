@@ -60,16 +60,23 @@ func dateIn(t time.Time, loc *time.Location) time.Time {
 
 // publicRow is r as the code under test reads it through the transaction
 // API and State: a timestamptz is a time.Time, as before detest told it from
-// a timestamp. r is copied only when it holds one.
+// a timestamp, and an enum is its label. r is copied only when it holds one.
 func publicRow(r Row) Row {
 	var out Row
 	for k, v := range r {
-		if t, ok := v.(instant); ok {
-			if out == nil {
-				out = r.clone()
-			}
-			out[k] = t.Time
+		var pub any
+		switch v := v.(type) {
+		case instant:
+			pub = v.Time
+		case enumValue:
+			pub = v.String()
+		default:
+			continue
 		}
+		if out == nil {
+			out = r.clone()
+		}
+		out[k] = pub
 	}
 	if out == nil {
 		return r
@@ -114,12 +121,27 @@ func (db *DB) typedRow(table string, row Row) Row {
 // typedValue is v as the transaction API writes it to table's column col
 // (typedRow), and whether that differs from v.
 func (db *DB) typedValue(table, col string, v any) (any, bool) {
-	t, ok := v.(time.Time)
-	if !ok || db.kind.InnoDB() {
+	if db.kind.InnoDB() {
 		return v, false
 	}
-	if def := db.defs[db.resolve(table)]; def != nil && def.types[col] == "timestamptz" {
-		return newInstant(t), true
+	def := db.defs[db.resolve(table)]
+	if def == nil {
+		return v, false
+	}
+	switch v := v.(type) {
+	case time.Time:
+		if def.types[col] == "timestamptz" {
+			return newInstant(v), true
+		}
+	case string:
+		// An enum's label is the enum's value, as SQL writes it, so that
+		// SeedRow stores what an INSERT does and CAS compares with it. Text
+		// that is no label is left for the write's checks, where it has any.
+		if e := db.enumOf(def.types[col]); e != nil {
+			if l := e.lookup(v); l != nil {
+				return enumValue{e, l}, true
+			}
+		}
 	}
 	return v, false
 }

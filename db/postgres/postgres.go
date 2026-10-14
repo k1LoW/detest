@@ -467,6 +467,19 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
+		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_TYPE {
+			// Only an enum is kept among the types DROP TYPE drops; the
+			// database ignores a name that is none.
+			for _, obj := range s.DropStmt.Objects {
+				parts := nodeNames(obj.GetTypeName().GetNames())
+				if len(parts) == 0 {
+					continue
+				}
+				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "enum", Drop: true,
+					Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE, Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
+			}
+			return changes, true, nil
+		}
 		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_DOMAIN {
 			for _, obj := range s.DropStmt.Objects {
 				var parts []string
@@ -577,13 +590,75 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause),
 				Constrained: constrainedDomain(s.CreateDomainStmt)}}}}, true, nil
+	case *pg.Node_CreateEnumStmt:
+		// The labels are kept in their order, which orders the values of
+		// the type, and a value written to a column of it must be one.
+		parts := nodeNames(s.CreateEnumStmt.TypeName)
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		name := parts[len(parts)-1]
+		if builtinTypes[name] || strings.HasPrefix(name, "pg_") {
+			return nil, true, c.unsupported(fmt.Sprintf("an enum named %q, as a built-in type is", name))
+		}
+		if name != strings.ToLower(name) {
+			// A cast to it reaches detest lowercased, as other types' names
+			// do, so detest could not tell the enum by it.
+			return nil, true, c.unsupported(fmt.Sprintf("an enum with the quoted name %q", name))
+		}
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", Create: true,
+			Columns: []sqlir.ColumnDef{{Name: name}}, Labels: nodeNames(s.CreateEnumStmt.Vals)}}, true, nil
+	case *pg.Node_CompositeTypeStmt, *pg.Node_CreateRangeStmt, *pg.Node_DefineStmt:
+		// detest keeps no other kind of type than an enum, but knows the
+		// name, which an enum of it in another schema would be taken for.
+		var name string
+		switch s := n.Node.(type) {
+		case *pg.Node_CompositeTypeStmt:
+			name = s.CompositeTypeStmt.GetTypevar().GetRelname()
+		case *pg.Node_CreateRangeStmt:
+			if parts := nodeNames(s.CreateRangeStmt.TypeName); len(parts) > 0 {
+				name = parts[len(parts)-1]
+			}
+		case *pg.Node_DefineStmt:
+			if parts := nodeNames(s.DefineStmt.Defnames); s.DefineStmt.Kind == pg.ObjectType_OBJECT_TYPE && len(parts) > 0 {
+				name = parts[len(parts)-1]
+			}
+		}
+		if name == "" {
+			return nil, true, nil
+		}
+		return []sqlir.SchemaChange{{Table: name, Object: "type", Create: true, Columns: []sqlir.ColumnDef{{Name: name}}}}, true, nil
+	case *pg.Node_AlterObjectSchemaStmt:
+		// An enum keeps the schema it is in; other objects keep none.
+		a := s.AlterObjectSchemaStmt
+		if a.ObjectType != pg.ObjectType_OBJECT_TYPE {
+			return nil, true, nil
+		}
+		parts := nodeNames(a.Object.GetList().GetItems())
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", NewSchema: a.Newschema,
+			Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}}, true, nil
+	case *pg.Node_AlterEnumStmt:
+		a := s.AlterEnumStmt
+		parts := nodeNames(a.TypeName)
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		ch := sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "enum", Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}
+		if a.OldVal != "" {
+			ch.RenameLabel = [2]string{a.OldVal, a.NewVal}
+		} else {
+			ch.AddLabel, ch.Neighbor, ch.AfterNeighbor, ch.IfNotExists = a.NewVal, a.NewValNeighbor, a.NewValIsAfter, a.SkipIfNewValExists
+		}
+		return []sqlir.SchemaChange{ch}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
-		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
-		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
-		*pg.Node_AlterEnumStmt, *pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
-		*pg.Node_CreateStatsStmt, *pg.Node_AlterObjectSchemaStmt:
+		*pg.Node_AlterDefaultPrivilegesStmt,
+		*pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
+		*pg.Node_CreateStatsStmt:
 		return nil, true, nil
 	}
 	return nil, false, nil
@@ -2475,10 +2550,40 @@ func constrainedDomain(d *pg.CreateDomainStmt) bool {
 // builtinTypes are the names of pg_catalog's types a column is commonly
 // declared with, as typeName gives them, which a domain of the name would
 // shadow by its bare name in detest but not in Postgres.
-var builtinTypes = map[string]bool{
-	"bool": true, "boolean": true, "int2": true, "int4": true, "int8": true, "smallint": true, "integer": true, "int": true, "bigint": true,
-	"float4": true, "float8": true, "real": true, "numeric": true, "decimal": true, "money": true,
-	"text": true, "varchar": true, "bpchar": true, "char": true, "name": true, "bytea": true, "uuid": true,
-	"date": true, "time": true, "timetz": true, "timestamp": true, "timestamptz": true, "interval": true,
-	"json": true, "jsonb": true, "xml": true, "inet": true, "cidr": true, "macaddr": true, "oid": true,
+var builtinTypes = func() map[string]bool {
+	m := map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
+	// The types of pg_catalog in Postgres 18, other than arrays and the
+	// catalogs' row types, which an unqualified name finds first.
+	for t := range map[string]bool{
+	"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
+	"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
+	"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
+	"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
+	"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
+	"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
+	"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
+	"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
+	"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
+	"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
+	"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
+	"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
+	"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
+	"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
+	"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
+	"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
+	"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
+	"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
+	} {
+		m[t] = true
+	}
+	return m
+}()
+
+// nodeNames are the strings of nodes, such as the parts of a qualified name.
+func nodeNames(nodes []*pg.Node) []string {
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.GetString_().GetSval())
+	}
+	return out
 }

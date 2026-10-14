@@ -47,6 +47,14 @@ func TestFromPostgres(t *testing.T) {
 		`CREATE DOMAIN public.code5 AS varchar(5) NOT NULL DEFAULT 'x'`,
 		`CREATE DOMAIN public.code5b AS public.code5`,
 		`CREATE TABLE public.blobs (id int PRIMARY KEY, b public.blob, c public.code5b)`,
+		`CREATE TYPE billing.status AS ENUM ('new', 'paid', 'void')`,
+		`ALTER TYPE billing.status ADD VALUE 'draft' BEFORE 'new'`,
+		`CREATE DOMAIN public.state AS billing.status`,
+		`CREATE TYPE public.unused AS ENUM ('x')`,
+		`CREATE TYPE public.later AS ENUM ()`,
+		`CREATE TABLE public.pending (id int PRIMARY KEY, l public.later)`,
+		`CREATE TABLE public.tickets (id int PRIMARY KEY, s billing.status DEFAULT 'new', st public.state, ref text)`,
+		`CREATE UNIQUE INDEX tickets_paid_ref ON public.tickets (ref) WHERE s = 'paid'`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -58,12 +66,15 @@ func TestFromPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log(schema)
+	if strings.Contains(schema, "unused") {
+		t.Error("DDL writes an enum no column of the tables is of")
+	}
 	if strings.Contains(schema, "label text COLLATE") {
 		t.Error("DDL writes the database's collation on a column that declares none")
 	}
 	// A column's own collation is written, and one that is the database's is
 	// not.
-	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t text COLLATE pg_catalog."C"`, "b bytea", "c character varying(5) DEFAULT 'x'::character varying NOT NULL"} {
+	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t text COLLATE pg_catalog."C"`, "b bytea", "c character varying(5) DEFAULT 'x'::character varying NOT NULL", "CREATE TYPE billing.status AS ENUM ('draft', 'new', 'paid', 'void');", "CREATE TYPE later AS ENUM ();"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("DDL lacks %q", want)
 		}
@@ -112,6 +123,34 @@ func TestFromPostgres(t *testing.T) {
 		}
 		if err := exec(`INSERT INTO blobs (id, c) VALUES (2, NULL)`); !errors.Is(err, detest.ErrNotNullViolation) {
 			t.Errorf("a domain's NOT NULL: %v", err)
+		}
+		// An enum orders its values by its labels, also through a domain.
+		if err := exec(`INSERT INTO tickets VALUES (1, 'paid', 'new'), (2, 'draft', 'void')`); err != nil {
+			t.Fatalf("columns of an enum: %v", err)
+		}
+		var first int64
+		if err := db.QueryRow(`SELECT id FROM tickets ORDER BY s LIMIT 1`).Scan(&first); err != nil || first != 2 {
+			t.Errorf("an enum's order: %d %v", first, err)
+		}
+		if err := db.QueryRow(`SELECT id FROM tickets ORDER BY st LIMIT 1`).Scan(&first); err != nil || first != 1 {
+			t.Errorf("the order of a domain over an enum: %d %v", first, err)
+		}
+		if err := exec(`INSERT INTO tickets VALUES (3, 'bogus', NULL)`); !errors.Is(err, detest.ErrInvalidTextRepresentation) {
+			t.Errorf("a value that is no label: %v", err)
+		}
+		if err := exec(`INSERT INTO pending VALUES (1, 'x')`); !errors.Is(err, detest.ErrInvalidTextRepresentation) {
+			t.Errorf("an enum with no labels yet: %v", err)
+		}
+		// The default and the index's predicate are written with casts to
+		// the qualified enum.
+		if err := exec(`INSERT INTO tickets (id, ref) VALUES (4, 'r')`); err != nil {
+			t.Fatalf("the enum's default: %v", err)
+		}
+		if err := db.QueryRow(`SELECT id FROM tickets WHERE s = 'new'`).Scan(&first); err != nil || first != 4 {
+			t.Errorf("a row of the enum's default: %d %v", first, err)
+		}
+		if err := exec(`INSERT INTO tickets (id, s, ref) VALUES (5, 'paid', 'r'), (6, 'paid', 'r')`); !errors.Is(err, detest.ErrUniqueViolation) {
+			t.Errorf("a partial index over an enum: %v", err)
 		}
 		var doubled int64
 		if err := db.QueryRow(`INSERT INTO billing.invoices (total) VALUES (10) RETURNING id, doubled`).Scan(&id, &doubled); err != nil || id != 1 || doubled != 20 {

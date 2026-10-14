@@ -547,10 +547,10 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		}
 		rrows[i] = m
 	}
-	// A column the queries resolve to bytea reads the text of a literal or
-	// a string parameter under it as bytea input, and one they resolve to
-	// text reads bytes a driver sent as the text they hold, as Postgres
-	// types them.
+	// A column the queries resolve to bytea or to an enum reads the text of
+	// a literal or a string parameter under it as that type's input, and one
+	// they resolve to text reads bytes a driver sent as the text they hold,
+	// as Postgres types them.
 	cols, typed := x.setOpColumns[sel]
 	for j := range lcols {
 		kind := cols.kind(j, lcols[j])
@@ -560,6 +560,16 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		for _, r := range slices.Concat(lrows, rrows) {
 			switch v := derefValue(r[lcols[j]]).(type) {
 			case string:
+				if t := x.tx.db.enumOf(kind); t != nil {
+					// An enum column reads it as the enum's input, so a
+					// label sorts as the enum does and other text fails.
+					ev, err := x.tx.db.enumInput(t, v, "", "")
+					if err != nil {
+						return nil, nil, err
+					}
+					r[lcols[j]] = ev
+					continue
+				}
 				if kind != "bytea" {
 					continue
 				}

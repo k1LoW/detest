@@ -625,6 +625,8 @@ func (db *DB) branchKind(typ string) string {
 		return "bytea"
 	case collatableType(base):
 		return "text"
+	case db.enumOf(base) != nil:
+		return base // an untyped branch is read as the enum's input
 	}
 	return ""
 }

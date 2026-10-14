@@ -1218,7 +1218,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if p, ok := e.Array.(*sqlir.Param); ok {
 					c.params.array(p.Index, typ)
 				}
-				if sample := typeSample(typ); sample != nil && e.ElemType == "" {
+				if sample := c.x.tx.db.typeSample(typ); sample != nil && e.ElemType == "" {
 					if c.x.arrayTypes == nil {
 						c.x.arrayTypes = map[*sqlir.ArrayCmp]any{}
 					}
@@ -1357,7 +1357,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		c.params.comparedWith(p.Index, typ)
 		c.timeParams(typ, a)
 	}
-	sample := typeSample(typ)
+	sample := c.x.tx.db.typeSample(typ)
 	if sample == nil {
 		return
 	}
@@ -1454,6 +1454,13 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 
 // typeSample is a value of type typ, for untyped to read text as typ, or nil
 // for a type whose input detest does not read up front.
+func (db *DB) typeSample(typ string) any {
+	if t := db.enumOf(typ); t != nil {
+		return enumValue{typ: t}
+	}
+	return typeSample(typ)
+}
+
 func typeSample(typ string) any {
 	switch typ {
 	case "int2", "int4", "int8", "int", "integer", "smallint", "bigint":

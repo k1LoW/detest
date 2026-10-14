@@ -159,6 +159,9 @@ func (x *sqlExec) paramTextCast(c *sqlir.Cast, v any) error {
 // cast is castValue with the error a cast of text that does not read as the
 // type raises.
 func (x *sqlExec) cast(v any, typ string) (any, error) {
+	if t := x.tx.db.enumOf(typ); t != nil {
+		return x.tx.db.enumInput(t, v, "", "")
+	}
 	if !x.tx.db.kind.InnoDB() {
 		switch typ {
 		case "timestamptz", "timestamp", "date":
