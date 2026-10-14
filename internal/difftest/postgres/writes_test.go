@@ -318,6 +318,21 @@ var writeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "an update to a key another transaction only locked fails at once",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 'a'), (2, 'b')`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM u WHERE id = 1 FOR UPDATE`),
+			difftest.S(1, `UPDATE u SET id = 1 WHERE id = 2`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, email FROM u ORDER BY id`),
+		},
+	},
+	{
 		Name: "an insert of a unique value waits for an update of its row still in its own check",
 		Schema: []string{
 			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,

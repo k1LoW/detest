@@ -655,6 +655,16 @@ func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) 
 	if nlk == lk {
 		return lk, nil
 	}
+	if !x.tx.db.kind.InnoDB() {
+		// Postgres's duplicate check waits for the new key's writer, not for
+		// a transaction that only locked the row there, as an insert's does.
+		if err := x.tx.awaitWriters(nlk); err != nil {
+			return lk, err
+		}
+		if _, exists := x.tx.view(table, nlk.key); exists {
+			return lk, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
+		}
+	}
 	if err := x.tx.lockImplicit(nlk, lockStruct{}); err != nil {
 		return lk, err
 	}
