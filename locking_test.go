@@ -592,6 +592,42 @@ func TestDuplicateCheckDoesNotWaitForLocker(t *testing.T) {
 	}
 }
 
+// Tx.Insert's duplicate check waits only for the key's writers too, so it
+// does not deadlock with a transaction that only locked the row with
+// GetForUpdate.
+func TestTxInsertDoesNotWaitForLocker(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE s (id text PRIMARY KEY)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO s VALUES ('1')`) })
+		var deadlocks []error
+		s.Seed(func() { deadlocks = nil })
+		run := func(p *Proc, fn func(tx *Tx) error) error {
+			if err := store.Tx(p, fn); errors.Is(err, ErrDeadlock) {
+				deadlocks = append(deadlocks, err)
+			}
+			return nil
+		}
+		s.Manual("locker", 1, func(p *Proc) error {
+			return run(p, func(tx *Tx) error {
+				if _, _, err := tx.GetForUpdate("s", "1"); err != nil {
+					return err
+				}
+				return tx.Insert("s", Row{"id": "2"})
+			})
+		})
+		s.Manual("inserter", 1, func(p *Proc) error {
+			return run(p, func(tx *Tx) error {
+				if err := tx.Insert("s", Row{"id": "2"}); err != nil {
+					return err
+				}
+				return tx.Insert("s", Row{"id": "1"})
+			})
+		})
+		s.AtQuiescence(func(*State) error { return errors.Join(deadlocks...) })
+	})
+}
+
 // An insert of a unique value another transaction is changing away waits for
 // that transaction, and takes the value once it commits.
 func TestInsertWaitsForUniqueValueUpdatedAway(t *testing.T) {

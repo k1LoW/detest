@@ -2327,6 +2327,16 @@ func (tx *Tx) insert(table string, row Row) error {
 		}
 		return err
 	}
+	if !tx.db.kind.InnoDB() {
+		// Postgres's duplicate check waits for the key's writer, not for a
+		// transaction that only locked the row, as in sqlExec.execInsert.
+		if err := tx.awaitWriters(lk); err != nil {
+			return err
+		}
+		if _, exists := tx.view(table, row.Key()); exists {
+			return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
+		}
+	}
 	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
 		return err
 	}
