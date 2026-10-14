@@ -84,6 +84,10 @@ type columnChecker struct {
 	untyped []func() error
 	// timeConflict names a parameter given two date and time types.
 	timeConflict string
+	// paramNumbers is the number type each parameter takes, and
+	// numberConflict names one given two, by numberRank.
+	paramNumbers   map[int]string
+	numberConflict string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -123,6 +127,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.timeConflict != "" {
 		return x.unsupported(c.timeConflict)
+	}
+	if c.numberConflict != "" {
+		return x.unsupported(c.numberConflict)
 	}
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
@@ -880,6 +887,13 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	if db.kind.InnoDB() {
 		return nil
 	}
+	for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
+		if starQuery(q) && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
+			// The check does not place the targets beside a * by position,
+			// which Postgres types their input by.
+			return c.x.unsupported("a set operation of a query with a * beside a string literal or a parameter")
+		}
+	}
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
@@ -1497,6 +1511,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
+		c.numberParam(p, typ)
 	}
 	sample := c.x.tx.db.typeSample(typ)
 	if sample == nil {
@@ -1532,8 +1547,30 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 		// Postgres gives the parameter this type for the whole statement,
 		// as it does where the parameter is compared.
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+		c.numberParam(p, typ)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
+}
+
+// numberParam records the number type typ the parameter p takes. Postgres
+// gives p the type of the use it meets first, in an order that is not the
+// statement's (UPDATE reads WHERE before SET), and converts it to the
+// others' at each row, so p's input is read by one type only. One given two
+// number types is refused rather than following that order, since reading
+// it by the other's input could fail it where Postgres does not, as 40000
+// for a smallint beside an integer.
+func (c *columnChecker) numberParam(p *sqlir.Param, typ string) {
+	if numberRank[typ] == 0 {
+		return
+	}
+	if c.paramNumbers == nil {
+		c.paramNumbers = map[int]string{}
+	}
+	if first, ok := c.paramNumbers[p.Index]; ok && numberRank[first] != numberRank[typ] {
+		c.numberConflict = fmt.Sprintf("parameter $%d typed as both %s and %s", p.Index+1, first, typ)
+	} else if !ok {
+		c.paramNumbers[p.Index] = typ
+	}
 }
 
 // untypedValue is the text of a string literal, or the value bound to a
@@ -1820,6 +1857,9 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if _, err := c.query(ins.Select, nil); err != nil {
 			return err
 		}
+		if err := c.setOpInsert(ins); err != nil {
+			return err
+		}
 		if ins.Select.SetOp == "" && len(ins.Select.Values) == 0 && !slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return t.Star }) {
 			exprs := make([]sqlir.Expr, len(ins.Select.Targets))
 			for i, t := range ins.Select.Targets {
@@ -1856,6 +1896,36 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		}
 	}
 	return c.returning(ins.Returning, sc, targetAlias(ins.Table, ins.Alias))
+}
+
+// setOpInsert refuses INSERT ... SELECT of a set operation with a column of
+// untyped queries alone, which Postgres resolves to text and fails to
+// assign to a column of another type (42804) when it plans the statement,
+// and which the run would read as the column's input instead.
+func (c *columnChecker) setOpInsert(ins *sqlir.InsertStmt) error {
+	sel := ins.Select
+	if sel.SetOp == "" {
+		return nil
+	}
+	def := c.x.tx.db.defs[c.x.tx.db.resolve(ins.Table)]
+	if def == nil {
+		return nil
+	}
+	cols := ins.Columns
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	types := c.setOpTypes(sel)
+	for i, col := range cols {
+		exprs := setOpColumnExprs(sel, i)
+		if i < len(types) && types[i] != "" || exprs == nil || resolvedType("", exprs) != "text" {
+			continue
+		}
+		if typ := def.types[col]; typ != "" && c.paramTypeFamily(typ) != "text" {
+			return c.x.unsupported(fmt.Sprintf("INSERT ... SELECT of a set operation of untyped values into the %s column %q", typ, col))
+		}
+	}
+	return nil
 }
 
 func (c *columnChecker) update(up *sqlir.UpdateStmt) error {

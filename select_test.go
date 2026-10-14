@@ -930,6 +930,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// The check knows a *'s column types by position only over one
 		// declared table.
 		`SELECT * FROM t JOIN t t2 ON true WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k', 1, 'bad', 1, true, 1.5, 'k' WHERE false`,
+		`SELECT *, 'bad' FROM t WHERE false UNION SELECT *, u FROM t WHERE false`,
+		// Postgres resolves a column of untyped queries alone to text,
+		// which it does not assign to an integer.
+		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -943,10 +947,14 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 	// Postgres gives a parameter one type for the statement, so one
 	// written to columns of two families fails whatever is bound to it.
+	// One of two number types is refused too, as Postgres reads it by the
+	// first it meets and converts it to the other at each row.
 	for _, q := range []string{
 		`UPDATE t SET b = $1, n = $1 WHERE false`,
 		`UPDATE t SET n = $1 WHERE k = $1`,
 		`SELECT coalesce(u, $1), coalesce(n, $1) FROM t`,
+		`UPDATE t SET id = $1 WHERE false AND $1 = 1::smallint`,
+		`SELECT coalesce(n, $1), coalesce(1::bigint, $1) FROM t`,
 	} {
 		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -987,6 +995,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
 		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
 		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
+		{`INSERT INTO t (id, k) SELECT 1, 'x' WHERE false UNION ALL SELECT 2, 'y' WHERE false`, nil},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
 		// The inner pair widens to an integer, which takes 40000.
 		{`SELECT 1::smallint WHERE false UNION SELECT 2 WHERE false UNION SELECT '40000' WHERE false`, nil},
@@ -1023,6 +1032,9 @@ func TestEnumInputReadBeforeAnyRow(t *testing.T) {
 	// with no other.
 	if _, err := db.Exec(`SELECT CASE WHEN true THEN m ELSE $1 END, CASE WHEN true THEN id ELSE $1 END FROM p WHERE false`, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a parameter taken as an enum and an integer: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`INSERT INTO p (id, m) SELECT 1, 'ok' WHERE false UNION ALL SELECT 2, 'ok' WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a set operation of untyped values written to an enum: got %v, want unsupported", err)
 	}
 	// An enum resolves with no other type in a set operation.
 	if _, err := db.Exec(`SELECT m FROM p WHERE false UNION SELECT 1 WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
