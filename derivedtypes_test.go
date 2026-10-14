@@ -121,6 +121,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// branches' type.
 		{`SELECT coalesce(s.name, $1) = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, true},
+		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, []byte("bogus")},
+		{`SELECT coalesce(u.v, 'x') = '01' FROM (SELECT NULL AS v UNION ALL SELECT $1) u`, int64(1)},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
 		{`SELECT coalesce(n, $1) FROM t`, 1.5},
 	} {

@@ -1079,6 +1079,16 @@ func (c *columnChecker) pairType(sel *sqlir.SelectStmt, i, n int) (string, bool)
 	if k, isConst := e.(*sqlir.Const); isConst && k.Value == nil {
 		return nullOperand, true
 	}
+	if p, isParam := e.(*sqlir.Param); isParam && p.Index >= 0 && p.Index < len(c.x.args) {
+		switch derefValue(c.x.args[p.Index]).(type) {
+		case nil, string, []byte:
+		default:
+			// The driver sends it as text that Postgres reads as the
+			// column's type, which evalSetOp does not reproduce, so the
+			// column is left unresolved.
+			return "", true
+		}
+	}
 	if untypedExpr(e) {
 		return untypedOperand, true
 	}

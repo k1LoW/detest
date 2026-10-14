@@ -672,7 +672,11 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 				continue
 			}
 			switch v := derefValue(x.args[p.Index]).(type) {
-			case nil, string, []byte:
+			case nil, string:
+			case []byte:
+				if timeRank[typ] > 0 {
+					return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+				}
 			case time.Time:
 				if timeRank[typ] == 0 {
 					return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
