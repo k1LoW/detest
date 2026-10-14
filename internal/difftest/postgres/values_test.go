@@ -853,7 +853,7 @@ var valueCases = []difftest.Case{
 		// assigned to, a cast or the other branches when it plans the
 		// statement, so a write or a branch no row reaches fails too.
 		Name:   "invalid input typed by assignment, cast or branch over no rows",
-		Schema: []string{`CREATE TABLE z (id int PRIMARY KEY, u uuid, n int, b bool, f float8, k text UNIQUE)`},
+		Schema: []string{`CREATE TABLE z (id int PRIMARY KEY, u uuid, n int, b bool, f float8, k text UNIQUE, s smallint, d date, ts timestamptz, j jsonb, x numeric(4, 1))`},
 		Conns:  1,
 		Steps: []difftest.Step{
 			difftest.S(0, `UPDATE z SET u = 'bad' WHERE false`),
@@ -861,6 +861,9 @@ var valueCases = []difftest.Case{
 			difftest.S(0, `UPDATE z SET n = '1.5' WHERE false`),
 			difftest.Q(0, `SELECT coalesce(n, '1e3') FROM z`),
 			difftest.S(0, `UPDATE z SET b = 'maybe' WHERE false`),
+			difftest.S(0, `UPDATE z SET s = '40000' WHERE false`),
+			difftest.S(0, `UPDATE z SET n = '99999999999' WHERE false`),
+			difftest.S(0, `UPDATE z SET x = 'abc' WHERE false`),
 			difftest.S(0, `UPDATE z SET f = 'x' WHERE false`),
 			difftest.Q(0, `SELECT 'bad'::uuid FROM z`),
 			difftest.Q(0, `SELECT 'abc'::int FROM z`),
@@ -873,6 +876,10 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT 'bad' WHERE false UNION ALL SELECT u FROM z`),
 			difftest.S(0, `UPDATE z SET u = '00000000-0000-0000-0000-000000000001', n = '7', b = 'yes', f = '1.5' WHERE false`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(f, '2.5') FROM z) s`),
+			difftest.S(0, `UPDATE z SET s = '-32768', d = '2024-05-20', ts = '2024-05-20 10:00+09', j = '{"a": 1}', x = '1.25' WHERE false`),
+			difftest.S(0, `UPDATE z SET d = 'today', ts = 'now' WHERE false`),
+			difftest.S(0, `UPDATE z SET d = 'infinity', ts = 'epoch' WHERE false`),
+			difftest.S(0, `UPDATE z SET ts = '2024-05-20' WHERE false`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT CASE WHEN true THEN k ELSE 'anything' END FROM z) s`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT '{"a": 1}'::jsonb, '10.0.0.1'::inet, 'x'::text FROM z) s`),
 		},

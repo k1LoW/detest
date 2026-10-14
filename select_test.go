@@ -885,8 +885,6 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 	}
 }
 
-// Postgres compares rows pair by pair: an ordering by the first pair that is
-// not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
@@ -914,6 +912,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
 		}
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, "99999999999"); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("an integer out of the column's range: got %v, want 22003", err)
 	}
 	// Valid input of the type passes, and so does input detest does not
 	// read up front, such as a fraction for a float column.
@@ -953,6 +954,8 @@ func TestEnumInputReadBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// Postgres compares rows pair by pair: an ordering by the first pair that is
+// not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestRowComparison(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())

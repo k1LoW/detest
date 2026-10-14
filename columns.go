@@ -6,8 +6,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -1388,35 +1386,20 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 // inputAs reads a string literal or a parameter that takes the type typ
 // from where it stands rather than from a comparison, such as from the
 // column it is assigned to, or from the other branches of a CASE, a
-// COALESCE, a GREATEST, a LEAST or a set operation. Postgres reads it when it plans or binds the
-// statement, as untypedOperands does, while a write that reaches no row or
-// a branch the run does not take never reads it.
+// COALESCE, a GREATEST, a LEAST or a set operation. Postgres reads it with
+// the type's input function when it plans or binds the statement, which is
+// what a cast of it does too, while a write that reaches no row or a branch
+// the run does not take never reads it.
 //
-// Only the server's errors are raised. untyped's refusals are those of a
-// comparison, which has only a value to go by, such as text with a fraction
-// compared with a number. Here the type is known, so a float takes that
-// text and an integer fails on it.
+// It is read as a cast to typ, rather than by typeSample as a comparison
+// is, because a comparison has only a value to go by and so cannot check an
+// integer's width, a date or a fraction written to an integer, and refuses
+// text with a fraction that a float takes.
 func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
-	sample := c.x.tx.db.typeSample(typ)
-	if sample == nil || !untypedExpr(e) {
+	if typ == "" || typ == "unresolved column type" || !untypedExpr(e) {
 		return
 	}
-	c.untyped = append(c.untyped, func() error {
-		v, ok := c.untypedValue(e)
-		if !ok {
-			return nil
-		}
-		_, err := c.x.untyped(e, v, sample)
-		if errors.As(err, new(*sqlir.DBError)) {
-			return err
-		}
-		if s, isText := v.(string); err != nil && isText && sample == any(int64(0)) && !isOtherNumberText(s) {
-			if _, perr := strconv.ParseInt(strings.TrimSpace(s), 10, 64); errors.Is(perr, strconv.ErrSyntax) {
-				return c.x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
-			}
-		}
-		return nil
-	})
+	c.castInput(&sqlir.Cast{X: e, Type: typ})
 }
 
 // untypedValue is the text of a string literal, or the value bound to a
