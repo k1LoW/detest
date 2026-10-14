@@ -909,6 +909,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT u FROM t WHERE false UNION SELECT 'bad' WHERE false`, nil},
 		{`SELECT 'bad' WHERE false UNION ALL SELECT u FROM t`, nil},
 		{`SELECT * FROM t WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k' WHERE false`, nil},
+		{`VALUES (1) UNION SELECT 'bad' WHERE false`, nil},
+		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
+		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -951,6 +954,22 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 	if _, err := db.Exec(`SELECT n FROM t WHERE false UNION SELECT 'x' UNION SELECT 1`); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("a nested set operation over an integer: got %v, want invalid input", err)
+	}
+	// A parameter taken as a type paramFamily does not group, such as a
+	// bytea, and as another type is refused.
+	mustExec(t, db, `CREATE TABLE y (id int PRIMARY KEY, u uuid, bin bytea, d date)`)
+	if _, err := db.Exec(`UPDATE y SET u = $1, bin = $1 WHERE false`, "00000000-0000-0000-0000-000000000001"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a parameter taken as a uuid and a bytea: got %v, want unsupported", err)
+	}
+	// A parameter a set operation types as a date is sent as a date, the
+	// time's own day, as one written to a date column is.
+	at := time.Date(2024, 5, 20, 8, 0, 0, 0, time.FixedZone("JST", 9*3600))
+	var day time.Time
+	if err := db.QueryRow(`SELECT d FROM y WHERE false UNION ALL SELECT $1`, at).Scan(&day); err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC); !day.Equal(want) {
+		t.Errorf("a time bound where a set operation takes a date: got %v, want %v", day, want)
 	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, "99999999999"); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("an integer out of the column's range: got %v, want 22003", err)

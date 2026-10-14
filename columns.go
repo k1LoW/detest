@@ -169,7 +169,18 @@ func (c *columnChecker) paramTypeFamily(typ string) string {
 	if t := c.x.tx.db.enumOf(typ); t != nil {
 		return "enum " + t.qualified
 	}
-	return paramFamily(typ)
+	switch f := paramFamily(typ); {
+	case f != "":
+		return f
+	case typ == "bpchar":
+		return "text"
+	case typ == "" || typ == "unresolved column type":
+		return ""
+	}
+	// A type paramFamily does not group is a family of its own, so that a
+	// parameter taken as it and as another type is refused, even where
+	// Postgres would cast one to the other.
+	return "type " + typ
 }
 
 // paramFamily groups the types whose values detest reads a parameter
@@ -897,7 +908,9 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 		// pairs from the inside out.
 		for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
 			if q != nil && q.SetOp == "" {
-				for _, e := range setOpColumnExprs(q, i) {
+				exprs := setOpColumnExprs(q, i)
+				c.timeParams(pair, exprs...)
+				for _, e := range exprs {
 					c.inputAs(e, pair)
 				}
 			}
@@ -943,6 +956,11 @@ func untypedColumn(q *sqlir.SelectStmt, i int) bool {
 func (c *columnChecker) setOpBranchType(q *sqlir.SelectStmt, i int) string {
 	if q == nil {
 		return ""
+	}
+	if len(q.Values) > 0 {
+		// VALUES resolves each column over its rows, and leaves one of
+		// untyped rows alone untyped, where a set operation makes it text.
+		return commonType(setOpColumnExprs(q, i), nil, nil)
 	}
 	if q.SetOp == "" {
 		if t := c.outTypes[q]; i < len(t) {
@@ -1373,7 +1391,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				// The branches take the type of the typed ones.
-				typ := expressionType(e, sc.columnType)
+				typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 				c.timeParams(typ, caseBranches(e)...)
 				for _, b := range caseBranches(e) {
 					c.inputAs(b, typ)
@@ -1403,7 +1421,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					// The arguments take the type of the typed ones.
-					typ := commonType(e.Args, sc.columnType, nil)
+					typ := commonType(e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 					c.timeParams(typ, e.Args...)
 					if e.Name != "nullif" { // read as compared, above
 						for _, a := range e.Args {
