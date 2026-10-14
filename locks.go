@@ -752,6 +752,11 @@ func (tx *Tx) wakeNow(keys map[lockKey]bool) {
 	}
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
+			// A duplicate check waits for the key's writers only, so a
+			// release by a holder that only locked the key leaves it waiting.
+			if p.waitRow.writers && len(p.waitRow.blockers()) > 0 {
+				continue
+			}
 			p.state = stateReady
 			p.waitRow = nil
 		}
