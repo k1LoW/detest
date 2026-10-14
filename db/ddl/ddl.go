@@ -122,14 +122,15 @@ WITH RECURSIVE dom(oid, base) AS (
 	UNION ALL
 	SELECT dom.oid, t.typbasetype FROM dom JOIN pg_type t ON t.oid = dom.base AND t.typtype = 'd'
 )
-SELECT format_type(e.enumtypid, NULL), string_agg(quote_literal(e.enumlabel), ', ' ORDER BY e.enumsortorder)
-FROM pg_enum e
-WHERE e.enumtypid IN (
+SELECT format_type(t.oid, NULL), coalesce(string_agg(quote_literal(e.enumlabel), ', ' ORDER BY e.enumsortorder), '')
+FROM pg_type t
+LEFT JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e' AND t.oid IN (
 	SELECT coalesce(dom.base, a.atttypid) FROM pg_attribute a
 	LEFT JOIN dom ON dom.oid = a.atttypid AND NOT EXISTS (SELECT 1 FROM pg_type b WHERE b.oid = dom.base AND b.typtype = 'd')
 	WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
 )
-GROUP BY e.enumtypid
+GROUP BY t.oid
 ORDER BY 1`, t.oid)
 		if err != nil {
 			return "", err

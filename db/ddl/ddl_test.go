@@ -51,6 +51,8 @@ func TestFromPostgres(t *testing.T) {
 		`ALTER TYPE billing.status ADD VALUE 'draft' BEFORE 'new'`,
 		`CREATE DOMAIN public.state AS billing.status`,
 		`CREATE TYPE public.unused AS ENUM ('x')`,
+		`CREATE TYPE public.later AS ENUM ()`,
+		`CREATE TABLE public.pending (id int PRIMARY KEY, l public.later)`,
 		`CREATE TABLE public.tickets (id int PRIMARY KEY, s billing.status DEFAULT 'new', st public.state, ref text)`,
 		`CREATE UNIQUE INDEX tickets_paid_ref ON public.tickets (ref) WHERE s = 'paid'`,
 	} {
@@ -72,7 +74,7 @@ func TestFromPostgres(t *testing.T) {
 	}
 	// A column's own collation is written, and one that is the database's is
 	// not.
-	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t text COLLATE pg_catalog."C"`, "b bytea", "c character varying(5) DEFAULT 'x'::character varying NOT NULL", "CREATE TYPE billing.status AS ENUM ('draft', 'new', 'paid', 'void');"} {
+	for _, want := range []string{"public.users", "public.orders", "billing.invoices", "users_lower_email", "orders_ref_live", "PRIMARY KEY (tenant_id, id)", `code text COLLATE pg_catalog."C"`, `t text COLLATE pg_catalog."C"`, "b bytea", "c character varying(5) DEFAULT 'x'::character varying NOT NULL", "CREATE TYPE billing.status AS ENUM ('draft', 'new', 'paid', 'void');", "CREATE TYPE later AS ENUM ();"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("DDL lacks %q", want)
 		}
@@ -135,6 +137,9 @@ func TestFromPostgres(t *testing.T) {
 		}
 		if err := exec(`INSERT INTO tickets VALUES (3, 'bogus', NULL)`); !errors.Is(err, detest.ErrInvalidTextRepresentation) {
 			t.Errorf("a value that is no label: %v", err)
+		}
+		if err := exec(`INSERT INTO pending VALUES (1, 'x')`); !errors.Is(err, detest.ErrInvalidTextRepresentation) {
+			t.Errorf("an enum with no labels yet: %v", err)
 		}
 		// The default and the index's predicate are written with casts to
 		// the qualified enum.
