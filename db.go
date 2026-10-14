@@ -1950,7 +1950,8 @@ type Tx struct {
 	// other than a savepoint's.
 	started bool
 	// updating is the rows the transaction is updating, by their key, with
-	// their new values, while the checks of their secondary indexes run.
+	// their new values, while the checks of their indexes and foreign keys
+	// run.
 	updating map[lockKey]Row
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
@@ -2135,6 +2136,12 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 		if holders, ok := tx.db.locks[lk]; ok {
 			delete(tx.db.locks, lk)
 			tx.db.locks[lockKey{to, lk.key}] = holders
+			// Each holder releases the locks it lists, at its end.
+			for h := range holders {
+				if i := slices.Index(h.locks, lk); i >= 0 {
+					h.locks[i] = lockKey{to, lk.key}
+				}
+			}
 		}
 	})
 	if def, ok := db.defs[table]; ok {
@@ -2321,6 +2328,16 @@ func (tx *Tx) insert(table string, row Row) error {
 		}
 		return err
 	}
+	if !tx.db.kind.InnoDB() {
+		// Postgres's duplicate check waits for the key's writer, not for a
+		// transaction that only locked the row, as in sqlExec.execInsert.
+		if err := tx.awaitWriters(lk); err != nil {
+			return err
+		}
+		if _, exists := tx.view(table, row.Key()); exists {
+			return tx.db.duplicateKey(table, tx.db.pkConstraint(table))
+		}
+	}
 	if err := tx.lockImplicit(lk, lockStruct{}); err != nil {
 		return err
 	}
@@ -2429,6 +2446,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	sp := &tx.saves[i]
 	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
+	undone := tx.undoneSince(sp)
 	var inserted []putRow
 	if tx.db.kind.InnoDB() && sp.inserts <= len(tx.inserts) {
 		for _, p := range tx.inserts[sp.inserts:] {
@@ -2469,6 +2487,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.rollEntries(sp.entries)
 	default:
 		tx.rollbackLocks(sp)
+		tx.wakeWriterWaits(undone)
 	}
 	tx.aborted = false
 	return nil
@@ -2479,12 +2498,22 @@ func (tx *Tx) savepoint(op, name string) error {
 // ROLLBACK: those taken since the innermost savepoint, or all of them.
 func (tx *Tx) abort() {
 	tx.aborted = true
+	// The failed statement's updates are not written. A duplicate check
+	// waiting on one counted it as written, so it is woken below with
+	// the rows the subtransaction undid.
+	updating := tx.updating
+	tx.updating = nil
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}
 	tx.depRelease()
 	if n := len(tx.saves); n > 0 {
 		tx.rollbackLocks(&tx.saves[n-1])
+		undone := tx.undoneSince(&tx.saves[n-1])
+		for lk := range updating {
+			undone[lk] = true
+		}
+		tx.wakeWriterWaits(undone)
 		return
 	}
 	tx.releaseLocks(tx.locks)

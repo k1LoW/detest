@@ -49,6 +49,10 @@ type rowWait struct {
 	// transaction locked, and old the row it updates, if it is an update
 	// moving an index value.
 	insert, old Row
+	// writers is set for a Postgres duplicate check, which waits for the
+	// transactions that wrote what key stands for, whatever their lock's
+	// strength, and not for the ones that only locked it.
+	writers bool
 }
 
 // blockers returns the transactions w waits for.
@@ -56,7 +60,117 @@ func (w *rowWait) blockers() []*Tx {
 	if w.insert != nil {
 		return w.tx.gapHolders(w.key.table, w.insert, w.old)
 	}
+	if w.writers {
+		return w.tx.writersOf(w.key)
+	}
 	return w.tx.conflicting(w.key, w.mode)
+}
+
+// writersOf returns the transactions other than tx that hold lk as the
+// writers of what it stands for, in the order their processes started: for
+// a row's lock, the ones that inserted, updated or deleted the row, and for
+// a unique value's entry, every holder, as on Postgres only a write of the
+// value takes it.
+func (tx *Tx) writersOf(lk lockKey) []*Tx {
+	var out []*Tx
+	for o := range tx.db.locks[lk] {
+		if o != tx && o.wrote(lk) {
+			out = append(out, o)
+		}
+	}
+	if len(out) > 1 && tx.p != nil {
+		order := func(t *Tx) int { return slices.IndexFunc(tx.p.r.procs, func(p *Proc) bool { return p == t.p }) }
+		slices.SortStableFunc(out, func(a, b *Tx) int { return order(a) - order(b) })
+	}
+	return out
+}
+
+// wrote reports whether tx holds a version of what lk stands for as its
+// writer, a row it is updating while the update's checks run included. The
+// writes of a subtransaction an error aborted are dead at once on Postgres,
+// before ROLLBACK TO undoes them in tx, so an aborted transaction is the
+// writer of what it wrote before its last savepoint only.
+func (tx *Tx) wrote(lk lockKey) bool {
+	if strings.HasPrefix(lk.table, "\x00unique\x00") {
+		return true
+	}
+	writes, deleted := tx.writes, tx.deleted
+	if tx.aborted {
+		if len(tx.saves) == 0 {
+			return false
+		}
+		sp := &tx.saves[len(tx.saves)-1]
+		writes, deleted = sp.writes, sp.deleted
+	} else if _, updating := tx.updating[lk]; updating {
+		return true
+	}
+	_, written := writes[lk]
+	return written || deleted[lk]
+}
+
+// undoneSince returns the rows tx wrote or deleted since sp, which a
+// rollback to sp undoes.
+func (tx *Tx) undoneSince(sp *savepoint) map[lockKey]bool {
+	undone := map[lockKey]bool{}
+	for lk := range tx.writes {
+		if _, kept := sp.writes[lk]; !kept {
+			undone[lk] = true
+		}
+	}
+	for lk := range tx.deleted {
+		if !sp.deleted[lk] {
+			undone[lk] = true
+		}
+	}
+	return undone
+}
+
+// wakeWriterWaits makes ready the processes whose duplicate check waits on
+// one of keys and has no writer left there, rows tx may no longer write once
+// a statement failed or a subtransaction aborted, as Postgres wakes a wait
+// for the subtransaction. The row's lock may stay with tx, taken before the
+// savepoint, so no release wakes them.
+func (tx *Tx) wakeWriterWaits(keys map[lockKey]bool) {
+	if tx.p == nil || len(keys) == 0 {
+		return
+	}
+	if tx.shared != "" {
+		tx.p.r.postCancel(txCancel{tx: tx, writerWake: keys}) // as wake does
+		return
+	}
+	tx.wakeWriterWaitsNow(keys)
+}
+
+func (tx *Tx) wakeWriterWaitsNow(keys map[lockKey]bool) {
+	for _, p := range tx.p.r.procs {
+		if p.state == stateBlockedLock && p.waitRow != nil && p.waitRow.writers && keys[p.waitRow.key] && len(p.waitRow.blockers()) == 0 {
+			p.state = stateReady
+			p.waitRow = nil
+		}
+	}
+}
+
+// awaitWriters blocks tx until no other transaction holds lk as the writer
+// of what it stands for, as a Postgres duplicate check waits for the
+// transaction that inserted, updated or deleted a version holding the value
+// it finds, and not for one that only locked it.
+func (tx *Tx) awaitWriters(lk lockKey) error {
+	if err := tx.check(); err != nil {
+		return err
+	}
+	if tx.p != nil {
+		tx.p.r.depLock(tx, lk)
+	}
+	var cancelWait func()
+	for {
+		writers := tx.writersOf(lk)
+		if len(writers) == 0 {
+			return nil
+		}
+		if err := tx.awaitOnce(rowWait{key: lk, mode: lockShare, tx: tx, writers: true}, writers, lockStruct{}, &cancelWait); err != nil {
+			return err
+		}
+	}
 }
 
 // conflicting returns the transactions other than tx whose hold on lk
@@ -155,43 +269,53 @@ func (tx *Tx) lockWith(lk lockKey, mode lockMode, grant, wait lockStruct) error 
 			}
 			return nil
 		}
-		if err := tx.refuseShared(); err != nil {
-			return err
-		}
-		what := fmt.Sprintf("a lock on %s/%s", lk.table, lk.key)
-		if err := tx.selfWait(conflict, what, "a row lock"); err != nil {
-			return err
-		}
-		if cancelWait == nil {
-			cancelWait = tx.noteWait(wait)
-		}
-		// A holder that took the lock while this one waited turns its
-		// implicit lock explicit too.
-		for _, o := range conflict {
-			o.convertImplicit(lk)
-		}
-		// The timeout is decided before a deadlock victim, since a timeout
-		// that ends this wait breaks the cycle and no victim is aborted.
-		if tx.lockTimeout && tx.proc().Choose("lock timeout on "+lk.table, 2) == 1 {
-			cancelWait()
-			tx.aborted = true
-			tx.p.r.note(tx.proc(), "lock timeout waiting for %s/%s", lk.table, lk.key)
-			markPassedOver(conflict) // gave up on the lock, as NOWAIT does
-			return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
-		}
-		if err := tx.breakCycle(conflict, what); err != nil {
-			return err
-		}
-		tx.proc().blockOnRow(rowWait{key: lk, mode: mode, tx: tx}, conflict[0])
-		if err := tx.victim(); err != nil {
-			return err
-		}
-		// Another goroutine using the transaction may have had it
-		// aborted while this one waited.
-		if err := tx.check(); err != nil {
+		if err := tx.awaitOnce(rowWait{key: lk, mode: mode, tx: tx}, conflict, wait, &cancelWait); err != nil {
 			return err
 		}
 	}
+}
+
+// awaitOnce blocks tx in the wait w for the transactions in conflict, which
+// InnoDB keeps in the lock struct wait, until w's key is released, unless
+// the wait fails: on a transaction of the same process, by lock_timeout, or
+// as a deadlock's victim. cancelWait holds what undoes the struct, across
+// the retries of one lock.
+func (tx *Tx) awaitOnce(w rowWait, conflict []*Tx, wait lockStruct, cancelWait *func()) error {
+	lk := w.key
+	if err := tx.refuseShared(); err != nil {
+		return err
+	}
+	what := fmt.Sprintf("a lock on %s/%s", lk.table, lk.key)
+	if err := tx.selfWait(conflict, what, "a row lock"); err != nil {
+		return err
+	}
+	if *cancelWait == nil {
+		*cancelWait = tx.noteWait(wait)
+	}
+	// A holder that took the lock while this one waited turns its
+	// implicit lock explicit too.
+	for _, o := range conflict {
+		o.convertImplicit(lk)
+	}
+	// The timeout is decided before a deadlock victim, since a timeout
+	// that ends this wait breaks the cycle and no victim is aborted.
+	if tx.lockTimeout && tx.proc().Choose("lock timeout on "+lk.table, 2) == 1 {
+		(*cancelWait)()
+		tx.aborted = true
+		tx.p.r.note(tx.proc(), "lock timeout waiting for %s/%s", lk.table, lk.key)
+		markPassedOver(conflict) // gave up on the lock, as NOWAIT does
+		return tx.db.kind.Error(sqlir.LockWaitTimeout, "canceling statement due to lock timeout", relname(lk.table), "", "")
+	}
+	if err := tx.breakCycle(conflict, what); err != nil {
+		return err
+	}
+	tx.proc().blockOnRow(w, conflict[0])
+	if err := tx.victim(); err != nil {
+		return err
+	}
+	// Another goroutine using the transaction may have had it
+	// aborted while this one waited.
+	return tx.check()
 }
 
 // selfWait fails a wait of tx for another transaction of the same process,
@@ -628,6 +752,11 @@ func (tx *Tx) wakeNow(keys map[lockKey]bool) {
 	}
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && keys[p.waitRow.key] {
+			// A duplicate check waits for the key's writers only, so a
+			// release by a holder that only locked the key leaves it waiting.
+			if p.waitRow.writers && len(p.waitRow.blockers()) > 0 {
+				continue
+			}
 			p.state = stateReady
 			p.waitRow = nil
 		}

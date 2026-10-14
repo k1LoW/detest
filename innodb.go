@@ -191,22 +191,34 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 }
 
 // beginUpdate records that tx is updating the row under lk to row, whose
-// new index entries searches meet as tx writes them.
+// new index entries InnoDB's searches meet as tx writes them, and which a
+// Postgres duplicate check waits for as written, since Postgres writes the
+// new version before it checks the indexes.
 func (tx *Tx) beginUpdate(lk lockKey, row Row) {
-	if !tx.db.kind.InnoDB() {
-		return
-	}
 	if tx.updating == nil {
 		tx.updating = map[lockKey]Row{}
 	}
 	tx.updating[lk] = row
 }
 
-// endUpdate records that the update of the row under lk is written.
-func (tx *Tx) endUpdate(lk lockKey) { delete(tx.updating, lk) }
+// endUpdate records that the update of the row under lk is written, or
+// failed, which a duplicate check waiting for it as written wakes on.
+func (tx *Tx) endUpdate(lk lockKey) {
+	if _, ok := tx.updating[lk]; ok {
+		delete(tx.updating, lk)
+		tx.wakeWriterWaits(map[lockKey]bool{lk: true})
+	}
+}
 
-// endUpdates records that the statement's updates are written.
-func (tx *Tx) endUpdates() { tx.updating = nil }
+// endUpdates records that the statement's updates are written, or failed.
+func (tx *Tx) endUpdates() {
+	keys := map[lockKey]bool{}
+	for lk := range tx.updating {
+		keys[lk] = true
+	}
+	tx.updating = nil
+	tx.wakeWriterWaits(keys)
+}
 
 // entryWrite is a secondary index entry an update wrote.
 type entryWrite struct {
