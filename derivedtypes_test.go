@@ -88,6 +88,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// takes, or with no rows.
 		`SELECT coalesce(s.d, '2025-02-30') FROM (SELECT * FROM d) s WHERE false`,
 		`SELECT CASE WHEN false THEN '2025-02-30' ELSE s.d END FROM (SELECT * FROM d) s`,
+		// A LAG of literals only is text, beside an integer.
+		`SELECT coalesce(s.n, lag('x', 1, 'y') OVER (), 0) FROM (SELECT * FROM t) s`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -115,6 +117,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// Postgres binds it as the number, which another use reads.
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s WHERE $1::text = '5'`, "05"},
 		{`SELECT coalesce(s.n, $1), $1 / 2 FROM (SELECT * FROM t) s`, int64(1)},
+		// The driver sends it as text, which Postgres reads as the
+		// branches' type.
+		{`SELECT coalesce(s.name, $1) = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, true},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
 		{`SELECT coalesce(n, $1) FROM t`, 1.5},
 	} {

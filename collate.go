@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -663,6 +664,26 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
+	}
+	if timeRank[typ] > 0 || x.tx.db.branchKind(typ) != "" {
+		for _, b := range exprs {
+			p, ok := b.(*sqlir.Param)
+			if !ok || p.Index < 0 || p.Index >= len(x.args) {
+				continue
+			}
+			switch v := derefValue(x.args[p.Index]).(type) {
+			case nil, string, []byte:
+			case time.Time:
+				if timeRank[typ] == 0 {
+					return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+				}
+			default:
+				// The driver sends it as text that Postgres reads as the
+				// branches' type, which detest does not reproduce: an
+				// integer beside a text column stays a number.
+				return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+			}
+		}
 	}
 	if timeRank[typ] > 0 {
 		// toTimeType converts the branch a row takes; text in an

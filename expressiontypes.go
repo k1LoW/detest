@@ -423,17 +423,27 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 	return ""
 }
 
-// untypedBranch reports a string literal or a parameter, or a CASE or
-// COALESCE of nothing else or of NULL only, which Postgres resolves to
-// text, as in COALESCE('bogus', 'x') and COALESCE(NULL, NULL).
+// untypedBranch reports a string literal or a parameter, or a CASE,
+// COALESCE, LAG or LEAD of nothing else or of NULL only, which Postgres
+// resolves to text, as in COALESCE('bogus', 'x') and COALESCE(NULL, NULL).
 func untypedBranch(e sqlir.Expr) bool {
 	var branches []sqlir.Expr
+	if w, ok := e.(*sqlir.WindowFunc); ok {
+		e = w.Func
+	}
 	switch e := e.(type) {
 	case *sqlir.CaseExpr:
 		branches = caseBranches(e)
 	case *sqlir.FuncCall:
 		if e.Name == "lag" || e.Name == "lead" {
-			return false
+			// The value and the default, without the offset.
+			if len(e.Args) > 0 {
+				branches = []sqlir.Expr{e.Args[0]}
+			}
+			if len(e.Args) == 3 {
+				branches = append(branches, e.Args[2])
+			}
+			break
 		}
 		branches = branchArgs(e)
 	default:
