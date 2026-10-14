@@ -645,7 +645,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if _, err := c.query(sel.Rarg, outer); err != nil {
 			return nil, err
 		}
-		c.noteSetOpColumns(sel)
+		if err := c.noteSetOpColumns(sel); err != nil {
+			return nil, err
+		}
 		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
@@ -818,18 +820,35 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 // noteSetOpColumns records the columns of the set operation sel its
 // queries resolve to bytea or to text, by position and, for the columns of
 // a * in the first query, whose position the check does not know, by name.
-func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
+func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	db := c.x.tx.db
 	if db.kind.InnoDB() {
-		return
+		return nil
 	}
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
-		exprs := setOpColumnExprs(sel, i)
-		cols.byPos[i] = db.branchKind(resolvedType(t, exprs))
-		for _, e := range exprs {
-			c.inputAs(e, t)
+		cols.byPos[i] = db.branchKind(resolvedType(t, setOpColumnExprs(sel, i)))
+		lt, rt := c.setOpBranchType(sel.Larg, i), c.setOpBranchType(sel.Rarg, i)
+		// Postgres fails a pair it cannot resolve to one type when it plans
+		// the statement (42804), which the run refuses only once it has
+		// rows of both.
+		if fl, fr := valueFamily(lt), valueFamily(rt); fl != "" && fr != "" && fl != fr {
+			return c.x.unsupported("a set operation over a column of values of two types")
+		}
+		pair := lt
+		if pair == "" || rt == "bytea" && rt != "" {
+			pair = rt
+		}
+		// Only the queries of this pair are read by its type. Those of a
+		// nested set operation took that one's, as Postgres resolves the
+		// pairs from the inside out.
+		for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
+			if q != nil && q.SetOp == "" {
+				for _, e := range setOpColumnExprs(q, i) {
+					c.inputAs(e, pair)
+				}
+			}
 		}
 	}
 	first := sel
@@ -842,12 +861,34 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 		}
 	}
 	if !slices.ContainsFunc(cols.byPos, func(k string) bool { return k != "" }) && len(cols.byName) == 0 {
-		return
+		return nil
 	}
 	if c.x.setOpColumns == nil {
 		c.x.setOpColumns = map[*sqlir.SelectStmt]setOpColumns{}
 	}
 	c.x.setOpColumns[sel] = cols
+	return nil
+}
+
+// setOpBranchType is the type of the i-th column of q, a query of a set
+// operation, before the set operation resolves it with the other: a nested
+// set operation's own, text when every query of it is untyped there, and ""
+// for a column of no type of its own, which takes the other query's.
+func (c *columnChecker) setOpBranchType(q *sqlir.SelectStmt, i int) string {
+	if q == nil {
+		return ""
+	}
+	if q.SetOp == "" {
+		if t := c.outTypes[q]; i < len(t) {
+			return t[i]
+		}
+		return ""
+	}
+	var t string
+	if ts := c.setOpTypes(q); i < len(ts) {
+		t = ts[i]
+	}
+	return resolvedType(t, setOpColumnExprs(q, i))
 }
 
 // setOpColumnExprs are the expressions of the i-th column of every query
@@ -1537,24 +1578,27 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
-	family := func(typ string) string {
-		switch f := paramFamily(typ); f {
-		case "integer", "float":
-			return "number"
-		case "":
-			if typ == "timestamp" || typ == "timestamptz" {
-				return "time"
-			}
-		default:
-			return f
-		}
-		return ""
-	}
-	fa, fb := family(expressionType(a, sc.columnType)), family(expressionType(b, sc.columnType))
+	fa, fb := valueFamily(expressionType(a, sc.columnType)), valueFamily(expressionType(b, sc.columnType))
 	if fa == "" || fb == "" || fa == fb {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// valueFamily groups the types Postgres compares or resolves to one
+// another, "" for a type detest does not group.
+func valueFamily(typ string) string {
+	switch f := paramFamily(typ); f {
+	case "integer", "float":
+		return "number"
+	case "":
+		if typ == "timestamp" || typ == "timestamptz" {
+			return "time"
+		}
+	default:
+		return f
+	}
+	return ""
 }
 
 // target is the scope of the table a write targets.

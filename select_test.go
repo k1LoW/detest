@@ -913,6 +913,20 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
 		}
 	}
+	// Postgres resolves a set operation pair by pair, so a nested one whose
+	// queries are all untyped is text, which an integer cannot join (42804).
+	for _, q := range []string{
+		`SELECT 'x' UNION SELECT 'y' UNION SELECT 1`,
+		`SELECT '1' WHERE false UNION SELECT NULL WHERE false UNION SELECT 1 WHERE false`,
+		`SELECT k FROM t WHERE false UNION SELECT u FROM t WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT n FROM t WHERE false UNION SELECT 'x' UNION SELECT 1`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a nested set operation over an integer: got %v, want invalid input", err)
+	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, "99999999999"); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("an integer out of the column's range: got %v, want 22003", err)
 	}
@@ -927,6 +941,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT coalesce(f, '2.5') FROM t`, nil},
 		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
 		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
+		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); err != nil {
 			t.Errorf("%s: got %v, want no error", tc.query, err)

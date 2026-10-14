@@ -874,6 +874,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT greatest(n, 'abc') FROM z`),
 			difftest.Q(0, `SELECT u FROM z WHERE false UNION SELECT 'bad' WHERE false`),
 			difftest.Q(0, `SELECT 'bad' WHERE false UNION ALL SELECT u FROM z`),
+			difftest.Q(0, `SELECT n FROM z WHERE false UNION SELECT 'x' UNION SELECT 1`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM z) s`),
 			difftest.S(0, `UPDATE z SET u = '00000000-0000-0000-0000-000000000001', n = '7', b = 'yes', f = '1.5' WHERE false`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(f, '2.5') FROM z) s`),
 			difftest.S(0, `UPDATE z SET s = '-32768', d = '2024-05-20', ts = '2024-05-20 10:00+09', j = '{"a": 1}', x = '1.25' WHERE false`),
