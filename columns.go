@@ -1469,17 +1469,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				// The branches take the type of the typed ones.
-				typ := expressionType(e, sc.columnType)
-				c.timeParams(typ, caseBranches(e)...)
-				c.x.noteType(e, typ)
-				if err = c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)), caseBranches(e)); err != nil {
-					return
-				}
-				c.branchParams(caseBranches(e), typ)
-				if err = c.x.unconvertedBranches(caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
-					return
-				}
-				if err = c.x.noteNumberBranches(e, caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+				if err = c.branches(e, caseBranches(e), sc); err != nil {
 					return
 				}
 				if e.Arg != nil {
@@ -1505,19 +1495,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					// The arguments take the type of the typed ones.
-					typ := commonType(e.Args, sc.columnType, nil)
-					c.timeParams(typ, e.Args...)
-					c.x.noteType(e, typ)
-					if err = c.x.noteBranchType(e, resolvedType(typ, e.Args), e.Args); err != nil {
-						return
-					}
-					c.branchParams(e.Args, typ)
-					// NULLIF returns its first argument, which the equality
-					// promotes to a numeric beside a numeric.
-					if err = c.x.unconvertedBranches(e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
-						return
-					}
-					if err = c.x.noteNumberBranches(e, e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+					if err = c.branches(e, e.Args, sc); err != nil {
 						return
 					}
 				case "date_trunc":
@@ -1527,16 +1505,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				case "lag", "lead":
 					// The value and the default take one type, as the
 					// arguments of COALESCE do.
-					typ := commonType(branchArgs(e), sc.columnType, nil)
-					c.x.noteType(e, typ)
-					if err = c.x.noteBranchType(e, resolvedType(typ, branchArgs(e)), branchArgs(e)); err != nil {
-						return
-					}
-					c.branchParams(branchArgs(e), typ)
-					if err = c.x.unconvertedBranches(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
-						return
-					}
-					if err = c.x.noteNumberBranches(e, branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+					if err = c.branches(e, branchArgs(e), sc); err != nil {
 						return
 					}
 				}
@@ -1580,6 +1549,31 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 	}
 	walk(reflect.ValueOf(n))
 	return err
+}
+
+// branches checks and records exprs, the branches of e, which Postgres
+// resolves to one type: refusing types detest does not convert them to
+// before it reads any literal as that type, as Postgres fails branches of
+// two types before it converts one, and resolving subqueries among them in
+// their own scope.
+func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope) error {
+	subquery := func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }
+	if err := c.x.unconvertedBranches(exprs, sc.columnType, subquery); err != nil {
+		return err
+	}
+	typ := expressionTypeIn(e, sc.columnType, subquery)
+	if _, isCase := e.(*sqlir.CaseExpr); !isCase {
+		// NULLIF's own type is its first argument's, but the arguments
+		// meet at one type.
+		typ = commonType(exprs, sc.columnType, subquery)
+	}
+	c.timeParams(typ, exprs...)
+	c.x.noteType(e, typ)
+	if err := c.x.noteBranchType(e, resolvedType(typ, exprs), exprs); err != nil {
+		return err
+	}
+	c.branchParams(exprs, typ)
+	return c.x.noteNumberBranches(e, exprs, sc.columnType, subquery)
 }
 
 // branchParams records the parameters among branches as of typ, the type

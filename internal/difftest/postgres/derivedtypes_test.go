@@ -86,6 +86,18 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT (CASE WHEN s.id = 2 THEN '2025-01-02' ELSE s.d END = '2025-01-01'::date)::text FROM (SELECT * FROM d) s ORDER BY s.id`),
 		},
 	},
+	{
+		Name: "a literal beside a scalar subquery among the branches",
+		Schema: []string{
+			`CREATE TABLE a (id int PRIMARY KEY, n text, m numeric)`,
+			`CREATE TABLE b (n numeric)`,
+		},
+		Seed:  []string{`INSERT INTO a VALUES (1, NULL, NULL)`, `INSERT INTO b VALUES (NULL)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT coalesce((SELECT n FROM b), s.m, 'bogus') FROM (SELECT * FROM a) s`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {
