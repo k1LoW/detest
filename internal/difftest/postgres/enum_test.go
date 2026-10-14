@@ -41,6 +41,8 @@ var enumCases = []difftest.Case{
 			difftest.Q(0, `SELECT 'x'::mood::text`),
 			difftest.Q(0, `SELECT id FROM p WHERE m = 'ok'`),
 			difftest.Q(0, `SELECT coalesce(m, 'sad')::text FROM p WHERE id = 4`),
+			difftest.Q(0, `SELECT m::text AS label FROM (SELECT m FROM p WHERE id < 3 UNION SELECT 'ok') u ORDER BY u.m`),
+			difftest.Q(0, `SELECT m FROM p WHERE false UNION SELECT 'bogus'`),
 			difftest.Q(0, `SELECT id FROM p WHERE m = 'ok'::public.mood`),
 			difftest.Q(0, `SELECT 'bogus'::public.mood::text`),
 		},
