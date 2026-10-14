@@ -352,6 +352,9 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 				cols = nil // the ordinality column's name is the alias's next
 			}
 		}
+		if name := funcColumn(t, alias); name != "" {
+			cols = namesSet([]string{name})
+		}
 	default:
 		if alias == "" {
 			alias = relname(t.Name)
@@ -375,14 +378,20 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	if sc.types == nil {
 		sc.types = map[string]map[string]string{}
 	}
-	// A derived item's columns have the types of its query's select list
-	// where expressionType knows them, and an unresolved type otherwise, so
-	// the checks that need a type refuse rather than guess.
+	// A derived item's columns have the types of its query's select list,
+	// a *'s and a set operation's included, and a function's the type of
+	// its values, where the check knows them, and an unresolved type
+	// otherwise, so the checks that need a type refuse rather than guess.
 	switch {
 	case t.Func != nil:
 		sc.types[alias] = map[string]string{}
+		if name := funcColumn(t, alias); name != "" {
+			if typ := seriesType(t.Func, sc.columnType); typ != "" {
+				sc.types[alias][name] = typ
+			}
+		}
 	case t.Sub != nil:
-		sc.types[alias] = namedTypes(t.Sub, c.outTypes[t.Sub], t.Columns)
+		sc.types[alias] = c.derivedTypes(t.Sub, t.Columns)
 	default:
 		db := c.x.tx.db
 		if types, ok := c.cteTypesOf(t.Name); ok {
@@ -623,7 +632,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 			return nil, err
 		}
 		m[cte.Name] = s
-		tm[cte.Name] = namedTypes(cte.Select, c.outTypes[cte.Select], nil)
+		tm[cte.Name] = c.derivedTypes(cte.Select, nil)
 	}
 	return pop, nil
 }
@@ -762,13 +771,44 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	c.noteOutputTypes(sel, sc)
-	return outputColumns(sel), nil
+	if out := outputColumns(sel); out != nil {
+		return out, nil
+	}
+	return starColumns(sel, sc), nil
+}
+
+// starColumns are the columns of a select list with a *, which gives the
+// columns of the items it covers, nil when one of those is not known.
+func starColumns(sel *sqlir.SelectStmt, sc *colScope) colSet {
+	out := colSet{}
+	add := func(name string, once bool) {
+		_, seen := out[name]
+		out[name] = once && !seen
+	}
+	for _, t := range sel.Targets {
+		if !t.Star {
+			add(targetName(t), true)
+			continue
+		}
+		for alias, cols := range sc.items {
+			if t.Table != "" && alias != t.Table {
+				continue
+			}
+			if cols == nil {
+				return nil
+			}
+			for name, once := range cols {
+				add(name, once)
+			}
+		}
+	}
+	return out
 }
 
 // noteOutputTypes records the types of a query's select list items that
 // expressionType knows, by position, and by name. A *'s are recorded by
-// name only, as the order of the columns it gives is not kept, and a set
-// operation's not at all, so their columns stay of unresolved type.
+// name only, as the order of the columns it gives is not kept. A set
+// operation's are its queries', which agreedTypes reads.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	var types []string
 	named := map[string]string{}
@@ -915,13 +955,114 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 	return out
 }
 
+// derivedTypes are the types of the columns of a FROM item, a CTE or a view
+// made of sel, under the names an AS alias(a, b) or a view's column list
+// gives the first ones. A *'s columns are typed by name, which needs no
+// renaming, and a set operation's by the types its queries agree on.
+func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[string]string {
+	if sel.SetOp != "" {
+		return namedTypes(sel, c.agreedTypes(sel), names)
+	}
+	if types, ok := c.outTypes[sel]; ok {
+		return namedTypes(sel, types, names)
+	}
+	out := map[string]string{}
+	if len(names) > 0 {
+		return out
+	}
+	for n, t := range c.outNamed[sel] {
+		if t != "" {
+			out[n] = t
+		}
+	}
+	return out
+}
+
+// agreedTypes are the types of the columns of the set operation sel by
+// position, where every query gives the column the same type or a string
+// literal, a parameter or NULL, which Postgres reads as that type; "" where
+// they give two or one the check does not know. setOpTypes takes the first
+// type one gives instead, which is not the type of int UNION numeric.
+func (c *columnChecker) agreedTypes(sel *sqlir.SelectStmt) []string {
+	var leaves []*sqlir.SelectStmt
+	var walk func(*sqlir.SelectStmt)
+	walk = func(s *sqlir.SelectStmt) {
+		if s.SetOp != "" && s.Larg != nil && s.Rarg != nil {
+			walk(s.Larg)
+			walk(s.Rarg)
+			return
+		}
+		leaves = append(leaves, s)
+	}
+	walk(sel)
+	n := len(outputNames(sel))
+	out := make([]string, n)
+	for i := range out {
+		typ, known := "", true
+		for _, l := range leaves {
+			types, ok := c.outTypes[l]
+			if !ok || len(types) != n || len(l.Values) > 0 {
+				return nil
+			}
+			e := l.Targets[i].Expr
+			if k, isConst := e.(*sqlir.Const); isConst && k.Value == nil || untypedBranch(e) {
+				continue
+			}
+			if types[i] == "" || typ != "" && typ != types[i] {
+				known = false
+			}
+			typ = types[i]
+		}
+		switch {
+		case !known:
+		case typ == "":
+			// Postgres resolves a column of nothing but those to text.
+			out[i] = "text"
+		default:
+			out[i] = typ
+		}
+	}
+	return out
+}
+
+// funcColumn is the name of the one column of the function in FROM t,
+// whose alias is alias: the name its column list gives it, or the alias.
+// "" for a function detest does not run, or one with an ordinality column.
+func funcColumn(t sqlir.TableRef, alias string) string {
+	if t.Func.Name != "generate_series" || t.Ordinality || len(t.Columns) > 1 {
+		return ""
+	}
+	if len(t.Columns) == 1 {
+		return t.Columns[0]
+	}
+	return alias
+}
+
+// seriesType is the type of the values generate_series gives over the
+// integers f's arguments are: bigint where one is a bigint, as Postgres
+// picks the bigint form, and "" where one is of a type the check does not
+// know, as of a parameter.
+func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
+	typ := "int4"
+	for _, a := range f.Args {
+		switch expressionType(a, column) {
+		case "int", "int2", "int4", "integer", "smallint":
+		case "int8", "bigint":
+			typ = "int8"
+		default:
+			return ""
+		}
+	}
+	return typ
+}
+
 // namedTypes are the output types of sel by the names its columns have,
 // under those an AS alias(a, b) or a view's column list gives the first
 // ones. A name two columns have is left unresolved, as its type is either.
 func namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
 	out := map[string]string{}
-	// Without any, as of a * or a set operation, the item's columns are of
-	// unresolved type rather than unknown.
+	// Without types, as of VALUES, the item's columns are of unresolved
+	// type rather than unknown.
 	cols := outputNames(sel)
 	if types == nil || len(cols) != len(types) {
 		return out
@@ -978,7 +1119,7 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) map[string]string {
 	if _, err := vc.query(v.View, nil); err != nil {
 		return map[string]string{}
 	}
-	return namedTypes(v.View, vc.outTypes[v.View], v.ViewColumns)
+	return vc.derivedTypes(v.View, v.ViewColumns)
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that

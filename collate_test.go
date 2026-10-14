@@ -425,13 +425,17 @@ func TestBytesAsText(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE empty1 AS SELECT * FROM lit WHERE false`)
 	mustExec(t, db, `CREATE TABLE empty2 AS SELECT NULL AS payload UNION SELECT payload FROM lit WHERE false`)
 	mustExec(t, db, `CREATE TABLE empty3 AS SELECT l.* FROM lit l WHERE false`)
-	for _, tbl := range []string{"empty1", "empty2", "empty3"} {
+	mustExec(t, db, `CREATE TABLE empty4 AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload FROM lit) s WHERE false`)
+	for _, tbl := range []string{"empty1", "empty2", "empty3", "empty4"} {
 		mustExec(t, db, `INSERT INTO `+tbl+` (payload) VALUES ('\x41')`)
 		if got := rowsOf(t, db, `SELECT count(*) FROM `+tbl+` WHERE payload = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 			t.Errorf("bytea literal written to the empty CREATE TABLE AS table %s: got %v", tbl, got)
 		}
 	}
-	mustExec(t, db, `CREATE TABLE untold AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload FROM lit) s WHERE false`)
+	// Postgres resolves bytea and a domain over it to bytea, which the
+	// check does not, as it tells the queries' types apart by name.
+	mustExec(t, db, `CREATE DOMAIN blob4 AS bytea`)
+	mustExec(t, db, `CREATE TABLE untold AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload::blob4 FROM lit) s WHERE false`)
 	for _, arg := range []any{`\x41`, []byte("A"), 1} {
 		if _, err := db.Exec(`INSERT INTO untold VALUES ($1)`, arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%#v written to a CREATE TABLE AS column of untold type: got %v, want unsupported", arg, err)
