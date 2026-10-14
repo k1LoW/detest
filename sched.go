@@ -1847,7 +1847,11 @@ type txCancel struct {
 	// and gaps the tables of the gap locks it let go of, whose waiters the
 	// scheduler wakes, rather than roll tx back.
 	wake map[lockKey]bool
-	gaps map[string]bool
+	// writerWake holds the rows whose writes a shared transaction's
+	// subtransaction undid, whose duplicate checks waiting for tx as their
+	// writer the scheduler wakes (see Tx.wakeWriterWaits).
+	writerWake map[lockKey]bool
+	gaps       map[string]bool
 	// conn is set when a goroutine gave back tx's connection outside a
 	// step (see seamTx), whose waiters the scheduler wakes.
 	conn bool
@@ -1881,6 +1885,10 @@ func (r *run) takeCancels() bool {
 	for _, c := range cs {
 		if c.wake != nil {
 			c.tx.wakeNow(c.wake)
+			continue
+		}
+		if c.writerWake != nil {
+			c.tx.wakeWriterWaitsNow(c.writerWake)
 			continue
 		}
 		if c.gaps != nil {

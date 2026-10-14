@@ -135,9 +135,13 @@ func (tx *Tx) wakeWriterWaits(keys map[lockKey]bool) {
 		return
 	}
 	if tx.shared != "" {
-		tx.wake(keys) // see wake: the scheduler wakes them at its next step
+		tx.p.r.postCancel(txCancel{tx: tx, writerWake: keys}) // as wake does
 		return
 	}
+	tx.wakeWriterWaitsNow(keys)
+}
+
+func (tx *Tx) wakeWriterWaitsNow(keys map[lockKey]bool) {
 	for _, p := range tx.p.r.procs {
 		if p.state == stateBlockedLock && p.waitRow != nil && p.waitRow.writers && keys[p.waitRow.key] {
 			p.state = stateReady
