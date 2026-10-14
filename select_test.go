@@ -913,6 +913,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`VALUES (1) UNION VALUES (2) UNION SELECT 'bad' WHERE false`, nil},
 		{`SELECT (SELECT u FROM t) WHERE false UNION SELECT 'bad' WHERE false`, nil},
 		{`VALUES ((SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`SELECT (SELECT (SELECT (SELECT u FROM t))) WHERE false UNION SELECT 'bad' WHERE false`, nil},
 		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 	} {
@@ -1004,6 +1005,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	// would round instead.
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 1.25); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a float with a fraction for an integer column: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, true); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a boolean for an integer column: got %v, want unsupported", err)
 	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)

@@ -992,6 +992,11 @@ func untypedColumn(q *sqlir.SelectStmt, i int) bool {
 	return slices.ContainsFunc(setOpColumnExprs(q, i), untypedExpr)
 }
 
+func isParam(e sqlir.Expr) bool {
+	_, ok := e.(*sqlir.Param)
+	return ok
+}
+
 // recordedSubqueryType is the type of a scalar subquery's one column as the
 // walk recorded it, "" where it recorded none.
 func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
@@ -1150,6 +1155,19 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	}
 	if untypedBranch(q.Select.Targets[0].Expr) {
 		return "text"
+	}
+	if _, walked := c.outNamed[q.Select]; walked {
+		// The walk has checked the subquery already, in this scope, and
+		// checking it again here would double the work at each level of
+		// nesting.
+		types, ok := c.outTypes[q.Select]
+		switch {
+		case !ok:
+			return "unresolved column type"
+		case len(types) == 1:
+			return types[0]
+		}
+		return ""
 	}
 	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
@@ -1713,11 +1731,17 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 		if !ok {
 			return nil
 		}
-		if f, isFloat := derefValue(v).(float64); isFloat && numberRank[c.x.tx.db.baseType(e.Type)] > 0 && numberRank[c.x.tx.db.baseType(e.Type)] <= numberRank["int8"] && f != math.Trunc(f) {
+		rank := numberRank[c.x.tx.db.baseType(e.Type)]
+		if f, isFloat := derefValue(v).(float64); isFloat && rank > 0 && rank <= numberRank["int8"] && f != math.Trunc(f) {
 			// A cast rounds the float, where the driver sends its digits
 			// as integer input, which Postgres fails, with a message that
 			// depends on the driver.
 			return c.x.unsupported(fmt.Sprintf("a float with a fraction bound to a parameter taken as %s", e.Type))
+		}
+		if _, isBool := derefValue(v).(bool); isBool && rank > 0 && isParam(e.X) {
+			// A cast makes a boolean 1 or 0, where the driver sends it as
+			// boolean text or refuses it, neither of which a number reads.
+			return c.x.unsupported(fmt.Sprintf("a boolean bound to a parameter taken as %s", e.Type))
 		}
 		if _, err := c.x.eval(e, nil); err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
