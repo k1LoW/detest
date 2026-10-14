@@ -1404,6 +1404,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if err = c.branchTypes(caseBranches(e), sc); err != nil {
+					return
+				}
 				// The branches take the type of the typed ones.
 				typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 				c.timeParams(typ, caseBranches(e)...)
@@ -1434,6 +1437,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
+					if err = c.branchTypes(e.Args, sc); err != nil {
+						return
+					}
 					// The arguments take the type of the typed ones.
 					typ := commonType(e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 					c.timeParams(typ, e.Args...)
@@ -1715,6 +1721,33 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// branchTypes refuses branches of CASE, or arguments of COALESCE,
+// GREATEST, LEAST or NULLIF, of two types Postgres does not resolve to one,
+// which it fails when it plans the statement (42804) and the run would
+// return one of. Two types are taken as one only where valueFamily groups
+// them, or as dates and timestamps, which commonType widens; another pair
+// is refused even where Postgres resolves it, as for a set operation.
+func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope) error {
+	family := func(typ string) string {
+		if timeRank[typ] > 0 {
+			return "time"
+		}
+		return valueFamily(typ)
+	}
+	first := ""
+	for _, e := range exprs {
+		typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+		switch {
+		case typ == "" || typ == "unresolved column type":
+		case first == "":
+			first = typ
+		case typ != first && (family(typ) == "" || family(typ) != family(first)):
+			return c.x.unsupported(fmt.Sprintf("branches of a %s and a %s, which Postgres does not resolve to one type", first, typ))
+		}
+	}
+	return nil
 }
 
 // valueFamily groups the types Postgres compares or resolves to one

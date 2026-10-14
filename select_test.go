@@ -931,6 +931,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// declared table.
 		`SELECT * FROM t JOIN t t2 ON true WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k', 1, 'bad', 1, true, 1.5, 'k' WHERE false`,
 		`SELECT *, 'bad' FROM t WHERE false UNION SELECT *, u FROM t WHERE false`,
+		// Postgres resolves no type for a number and a boolean branch.
+		`SELECT CASE WHEN true THEN 1 ELSE false END FROM t`,
+		`SELECT coalesce(n, b) FROM t`,
+		`SELECT greatest(u, k) FROM t`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
@@ -994,6 +998,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
 		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
 		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
+		{`SELECT CASE WHEN true THEN now()::date ELSE now() END, coalesce(n, 1.5, 2::bigint) FROM t`, nil},
 		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
 		{`INSERT INTO t (id, k) SELECT 1, 'x' WHERE false UNION ALL SELECT 2, 'y' WHERE false`, nil},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
