@@ -598,8 +598,13 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := parts[len(parts)-1]
-		if builtinTypes[name] {
+		if builtinTypes[name] || strings.HasPrefix(name, "pg_") {
 			return nil, true, c.unsupported(fmt.Sprintf("an enum named %q, as a built-in type is", name))
+		}
+		if name != strings.ToLower(name) {
+			// A cast to it reaches detest lowercased, as other types' names
+			// do, so detest could not tell the enum by it.
+			return nil, true, c.unsupported(fmt.Sprintf("an enum with the quoted name %q", name))
 		}
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name}}, Labels: nodeNames(s.CreateEnumStmt.Vals)}}, true, nil
@@ -2545,13 +2550,34 @@ func constrainedDomain(d *pg.CreateDomainStmt) bool {
 // builtinTypes are the names of pg_catalog's types a column is commonly
 // declared with, as typeName gives them, which a domain of the name would
 // shadow by its bare name in detest but not in Postgres.
-var builtinTypes = map[string]bool{
-	"bool": true, "boolean": true, "int2": true, "int4": true, "int8": true, "smallint": true, "integer": true, "int": true, "bigint": true,
-	"float4": true, "float8": true, "real": true, "numeric": true, "decimal": true, "money": true,
-	"text": true, "varchar": true, "bpchar": true, "char": true, "name": true, "bytea": true, "uuid": true,
-	"date": true, "time": true, "timetz": true, "timestamp": true, "timestamptz": true, "interval": true,
-	"json": true, "jsonb": true, "xml": true, "inet": true, "cidr": true, "macaddr": true, "oid": true,
-}
+var builtinTypes = func() map[string]bool {
+	m := map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
+	// The types of pg_catalog in Postgres 18, other than arrays and the
+	// catalogs' row types, which an unqualified name finds first.
+	for t := range map[string]bool{
+	"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
+	"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
+	"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
+	"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
+	"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
+	"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
+	"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
+	"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
+	"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
+	"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
+	"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
+	"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
+	"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
+	"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
+	"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
+	"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
+	"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
+	"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
+	} {
+		m[t] = true
+	}
+	return m
+}()
 
 // nodeNames are the strings of nodes, such as the parts of a qualified name.
 func nodeNames(nodes []*pg.Node) []string {

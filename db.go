@@ -1250,6 +1250,15 @@ func (db *DB) forgetDomain(name, q string) {
 
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
+	switch ch.Object {
+	case "enum", "type", "domain", "sequence", "index":
+	default:
+		// A table, a view or a materialized view has a row type of its
+		// name, which detest would take for the enum it knows by it.
+		if name := relname(table); (ch.Create || ch.RenameTo != "") && db.enumOf(cmp.Or(relname(ch.RenameTo), name)) != nil {
+			return unsupported(fmt.Sprintf("a relation named %q, as an enum is", cmp.Or(relname(ch.RenameTo), name)), "")
+		}
+	}
 	switch {
 	case ch.Object == "enum":
 		return db.applyEnum(ch, tx)
@@ -1264,9 +1273,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		db.otherTypes[name] = true
 		return nil
-	case ch.Object == "domain" && ch.RenameTo != "" && db.enumOf(ch.Columns[0].Name) != nil:
-		// A column of the enum keeps the type's old name.
-		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO", ch.Columns[0].Name), "")
+	case ch.Object == "domain" && ch.RenameTo != "" && (db.enumOf(ch.Columns[0].Name) != nil || db.enumOf(ch.RenameTo) != nil):
+		// A column of the enum keeps the type's old name, and a type
+		// renamed to the enum's would be taken for it.
+		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO %s", ch.Columns[0].Name, ch.RenameTo), "")
 	case ch.Object == "domain" && ch.Drop:
 		// The collated mark stays: a domain of the name created again, or
 		// one of another schema, may still be collated, and refusing is
@@ -1285,6 +1295,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return nil
 	case ch.Object == "domain" && ch.RenameTo != "":
 		old := ch.Columns[0].Name
+		if db.otherTypes[old] {
+			// The old name stays marked too: another schema may have a
+			// type of it, which detest does not tell apart.
+			db.otherTypes[ch.RenameTo] = true
+		}
 		if db.collatedDomains[old] {
 			db.collatedDomains[ch.RenameTo] = true
 		}

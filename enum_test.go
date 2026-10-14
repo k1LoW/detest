@@ -209,7 +209,23 @@ func TestEnumSchemaChanges(t *testing.T) {
 			t.Errorf("%s: want unsupported, got %v", q, err)
 		}
 	}
-	mustExec(t, db, `CREATE TYPE tint AS (r int); DROP TYPE tint; CREATE TYPE tint AS ENUM ('a')`)
+	// Any name detest could take for another type is refused: a built-in
+	// type, a quoted name casts reach lowercased, a relation's row type,
+	// and a type another schema has or had, also through a rename.
+	for _, q := range []string{
+		`CREATE TYPE bit AS ENUM ('zero', 'one')`,
+		`CREATE TYPE pg_mood AS ENUM ('a')`,
+		`CREATE TYPE "Upbeat" AS ENUM ('a')`,
+		`CREATE TYPE p AS ENUM ('a')`,
+		`CREATE TYPE later AS ENUM ('a'); CREATE TABLE later (id int)`,
+		`CREATE TYPE mood2 AS ENUM ('a'); ALTER TABLE p RENAME TO mood2`,
+		`CREATE TYPE other3.tint AS (r int); DROP TYPE IF EXISTS public.tint; CREATE TYPE tint AS ENUM ('a')`,
+		`CREATE TYPE other3.old AS (r int); ALTER TYPE other3.old RENAME TO fresh2; CREATE TYPE fresh2 AS ENUM ('a')`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: want unsupported, got %v", q, err)
+		}
+	}
 	// SET SCHEMA moves the enum, which an ALTER of the new name then finds.
 	mustExec(t, db, `CREATE SCHEMA other; ALTER TYPE public.spare SET SCHEMA other; ALTER TYPE other.spare ADD VALUE 'e'`)
 	mustExec(t, db, `INSERT INTO keyless VALUES (2, 'e')`)

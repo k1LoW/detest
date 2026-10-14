@@ -98,7 +98,14 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 			return unsupported(fmt.Sprintf("an enum named %q, as a domain is", name), "")
 		}
 		if db.otherTypes[name] {
-			return unsupported(fmt.Sprintf("an enum named %q, as another type is", name), "")
+			// The mark stays once another type had the name, as detest
+			// cannot tell which schema a DROP of it reached.
+			return unsupported(fmt.Sprintf("an enum named %q, as another type is or was", name), "")
+		}
+		for _, rel := range slices.Concat(slices.Collect(maps.Keys(db.defs)), slices.Collect(maps.Keys(db.views)), slices.Collect(maps.Keys(db.matviews))) {
+			if relname(rel) == name {
+				return unsupported(fmt.Sprintf("an enum named %q, as a relation is, whose row type has the name", name), "")
+			}
 		}
 		t = &enumType{name: name, qualified: db.qualifyDomain(ch.Table, name)}
 		for _, l := range ch.Labels {
@@ -111,9 +118,6 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 			db.enums = map[string]*enumType{}
 		}
 		db.enums[name] = t
-		return nil
-	case t == nil && ch.Drop:
-		delete(db.otherTypes, name)
 		return nil
 	case t == nil || !db.namesEnum(t, ch.Table, name):
 		// Another kind of type, which detest does not keep, or an enum of
