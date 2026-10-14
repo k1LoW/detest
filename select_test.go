@@ -939,6 +939,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// A nested COALESCE of untyped arguments alone is text.
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce(coalesce('bad', NULL), NULL) END`,
+		`SELECT coalesce('1', NULL) WHERE false UNION SELECT 1 WHERE false`,
+		`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
@@ -969,6 +971,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (1, $1) RETURNING CASE WHEN true THEN 0 ELSE $1::smallint END`,
 		// Postgres fails a parameter VALUES writes to two types (42P08).
 		`INSERT INTO t (id, k, u) VALUES (1, $1, $1)`,
+		// Arithmetic types the parameter where the checks do not follow.
+		`SELECT $1 + 1, CASE WHEN true THEN 0 ELSE $1::smallint END FROM t`,
 	} {
 		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -993,6 +997,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if want := time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC); !day.Equal(want) {
 		t.Errorf("a time bound where a set operation takes a date: got %v, want %v", day, want)
 	}
+	if _, err := db.Exec(`SELECT NULLIF(1::smallint, '40000') FROM t`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("NULLIF of a smallint and 40000: got %v, want 22003", err)
+	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, "99999999999"); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("an integer out of the column's range: got %v, want 22003", err)
 	}
@@ -1012,6 +1019,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
 		{`INSERT INTO t (id, k) SELECT 1, 'x' WHERE false UNION ALL SELECT 2, 'y' WHERE false`, nil},
 		{`VALUES (1) UNION SELECT 2::smallint UNION SELECT '40000' WHERE false`, nil},
+		{`SELECT 1::smallint WHERE false UNION (VALUES (2), ('40000') LIMIT 0)`, nil},
+		{`SELECT 1::smallint WHERE false UNION ALL VALUES ($1), (2)`, []any{int64(40000)}},
+		{`UPDATE t SET n = $1 WHERE $1 IS NOT NULL AND false`, []any{"7"}},
 		{`SELECT $1::int, $1::integer`, []any{"1"}},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
 		// The inner pair widens to an integer, which takes 40000.

@@ -88,6 +88,11 @@ type columnChecker struct {
 	// numberConflict names one given two, by numberRank.
 	paramNumbers   map[int]string
 	numberConflict string
+	// paramAt are the uses of parameters the walk met, paramTyped those a
+	// check gave a type, and paramRead the parameters whose input is read
+	// by a cast to a type before the run.
+	paramAt, paramTyped map[*sqlir.Param]bool
+	paramRead           map[int]bool
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -130,6 +135,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.numberConflict != "" {
 		return x.unsupported(c.numberConflict)
+	}
+	if what := c.untrackedParam(); what != "" {
+		return x.unsupported(what)
 	}
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
@@ -838,6 +846,9 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		if typ == "unresolved column type" {
 			typ = ""
 		}
+		if typ == "" && nestedBranches(t.Expr) != nil && untypedBranch(t.Expr) {
+			typ = "text" // as Postgres resolves a CASE or COALESCE of untyped branches
+		}
 		types = append(types, typ)
 		note(targetName(t), typ)
 	}
@@ -912,7 +923,7 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 		if pair == "" || rt == "bytea" && rt != "" {
 			pair = rt
 		}
-		if pair == "" && (starQuery(sel.Larg) || starQuery(sel.Rarg)) && (untypedColumn(sel.Larg, i) || untypedColumn(sel.Rarg, i)) {
+		if pair == "" && (hasStar(sel.Larg) || hasStar(sel.Rarg)) && (untypedColumn(sel.Larg, i) || untypedColumn(sel.Rarg, i)) {
 			// The column of a * has a type the check does not know by
 			// position, which Postgres reads the other query's input by.
 			return c.x.unsupported("a set operation of a * against a string literal or a parameter")
@@ -926,9 +937,14 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 		for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
 			if q != nil && q.SetOp == "" {
 				exprs := setOpColumnExprs(q, i)
-				c.timeParams(pair, exprs...)
+				typ := pair
+				if own := c.setOpBranchType(q, i); len(q.Values) > 0 && own != "" {
+					// VALUES reads its rows by its own column's type first.
+					typ = own
+				}
+				c.timeParams(typ, exprs...)
 				for _, e := range exprs {
-					c.inputAs(e, pair)
+					c.inputAs(e, typ)
 				}
 			}
 		}
@@ -955,6 +971,15 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 // starQuery reports whether q is a query whose select list has a *.
 func starQuery(q *sqlir.SelectStmt) bool {
 	return q != nil && q.SetOp == "" && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star })
+}
+
+// hasStar reports whether q, or a query of q when it is a set operation,
+// has a * in its select list.
+func hasStar(q *sqlir.SelectStmt) bool {
+	if q != nil && q.SetOp != "" {
+		return hasStar(q.Larg) || hasStar(q.Rarg)
+	}
+	return starQuery(q)
 }
 
 // untypedColumn reports whether the i-th column of q, a query that is no set
@@ -1388,7 +1413,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			case *sqlir.Param:
 				c.params.scalar(e.Index)
+				if c.paramAt == nil {
+					c.paramAt = map[*sqlir.Param]bool{}
+				}
+				c.paramAt[e] = true
 				return
+			case *sqlir.IsNull:
+				if p, ok := e.X.(*sqlir.Param); ok {
+					c.typedParam(p) // IS NULL gives it no type to differ from
+				}
 			case *sqlir.BinaryExpr:
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
@@ -1456,10 +1489,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// The arguments take the type of the typed ones.
 					typ := commonType(e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 					c.timeParams(typ, e.Args...)
-					if e.Name != "nullif" { // read as compared, above
-						for _, a := range e.Args {
-							c.inputAs(a, resolvedType(typ, e.Args))
-						}
+					for _, a := range e.Args {
+						c.inputAs(a, resolvedType(typ, e.Args))
 					}
 					c.x.noteType(e, typ)
 					c.x.noteBranchType(e, resolvedType(typ, e.Args))
@@ -1489,6 +1520,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// and casts it to the other at each row.
 					c.params.comparedWith(p.Index, c.paramTypeFamily(e.Type))
 					c.numberParam(p, e.Type)
+					c.typedParam(p)
+					c.readParam(p)
 				}
 				if typeCollation(e.Type) != "" {
 					// A cast to name brings name's C collation in, as a
@@ -1538,6 +1571,9 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
 		c.numberParam(p, typ)
+		if c.paramTypeFamily(typ) != "" {
+			c.typedParam(p)
+		}
 	}
 	sample := c.x.tx.db.typeSample(typ)
 	if sample == nil {
@@ -1574,6 +1610,8 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 		// as it does where the parameter is compared.
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.numberParam(p, typ)
+		c.typedParam(p)
+		c.readParam(p)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
 }
@@ -1597,6 +1635,39 @@ func (c *columnChecker) numberParam(p *sqlir.Param, typ string) {
 	} else if !ok {
 		c.paramNumbers[p.Index] = typ
 	}
+}
+
+func (c *columnChecker) typedParam(p *sqlir.Param) {
+	if c.paramTyped == nil {
+		c.paramTyped = map[*sqlir.Param]bool{}
+	}
+	c.paramTyped[p] = true
+}
+
+func (c *columnChecker) readParam(p *sqlir.Param) {
+	if c.paramRead == nil {
+		c.paramRead = map[int]bool{}
+	}
+	c.paramRead[p.Index] = true
+}
+
+// untrackedParam names a parameter whose input is read by a cast to a type
+// before the run while another of its uses, such as an operand of
+// arithmetic or a function's argument, types it in a way the checks do not
+// follow. Postgres gives the parameter one type, which may be that use's,
+// and the read would then fail input Postgres takes, so the statement is
+// refused rather than each such context modeled.
+func (c *columnChecker) untrackedParam() string {
+	var idx []int
+	for p := range c.paramAt {
+		if !c.paramTyped[p] && c.paramRead[p.Index] {
+			idx = append(idx, p.Index)
+		}
+	}
+	if len(idx) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("parameter $%d read as a type beside a use whose type detest does not follow", slices.Min(idx)+1)
 }
 
 // untypedValue is the text of a string literal, or the value bound to a
@@ -1689,6 +1760,9 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 			// statement, in VALUES too, whose input checkTypes reads.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.numberParam(p, typ)
+			if c.paramTypeFamily(typ) != "" {
+				c.typedParam(p)
+			}
 		}
 	}
 }
