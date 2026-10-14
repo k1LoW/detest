@@ -21,6 +21,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE DOMAIN span AS interval`)
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -82,6 +83,11 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// A CASE or COALESCE of literals only is text, beside a bytea.
 		`SELECT coalesce(s.payload, coalesce('x', 'y')) FROM (SELECT * FROM b) s`,
 		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.payload END FROM (SELECT * FROM b) s`,
+		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,
+		// Postgres fails a date that is none whichever branch a row
+		// takes, or with no rows.
+		`SELECT coalesce(s.d, '2025-02-30') FROM (SELECT * FROM d) s WHERE false`,
+		`SELECT CASE WHEN false THEN '2025-02-30' ELSE s.d END FROM (SELECT * FROM d) s`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -106,6 +112,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.n, $1), coalesce(s.name, $1) FROM (SELECT * FROM t) s`, "5"},
 		{`SELECT coalesce(n, $1) FROM t WHERE $1 = '8'::text`, "8"},
 		{`SELECT coalesce($1, 'x'), coalesce(s.n, $1) FROM (SELECT * FROM t) s`, "5"},
+		// Postgres binds it as the number, whose text another use reads.
+		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s WHERE $1::text = '5'`, "05"},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
 		{`SELECT coalesce(n, $1) FROM t`, 1.5},
 	} {

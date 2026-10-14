@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -661,8 +662,23 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 // among them as that type, failing on one that is none of it as Postgres
 // does when it parses or binds the statement, whichever branch a row takes.
 func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if timeRank[typ] > 0 {
+		// toTimeType converts the branch a row takes; text in an
+		// untaken one, or with no rows, is read here.
+		for _, b := range exprs {
+			if s, ok := x.untypedText(b); ok {
+				if _, err := x.toTimeType(s, typ); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	k := x.tx.db.branchKind(typ)
-	if k == "" || x.tx.db.kind.InnoDB() {
+	if k == "" {
 		return nil
 	}
 	if x.branchTypes == nil {
@@ -728,6 +744,15 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 				continue
 			case string:
 				s = v
+				if m := canonicalNumberText.FindStringSubmatch(v); m == nil || k == "integer" && m[2] != "" {
+					// Postgres binds the parameter as the number, so
+					// another use of it, such as $1::text, reads the
+					// number's text, which detest does not give it.
+					if _, err := x.branchNumber(s, k == "numeric"); err != nil {
+						return err
+					}
+					return x.unsupported(fmt.Sprintf("the parameter text %q among number branches, which the number renders otherwise", v))
+				}
 			default:
 				// The driver sends the value as the number's input,
 				// which detest does not model for another type, or for
@@ -817,6 +842,26 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 	}
 	return nil
 }
+
+// untypedText is the text of a string literal or of a parameter bound to a
+// string.
+func (x *sqlExec) untypedText(e sqlir.Expr) (string, bool) {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		s, ok := e.Value.(string)
+		return s, ok
+	case *sqlir.Param:
+		if e.Index >= 0 && e.Index < len(x.args) {
+			s, ok := derefValue(x.args[e.Index]).(string)
+			return s, ok
+		}
+	}
+	return "", false
+}
+
+// canonicalNumberText matches number text that Postgres renders back as
+// it is, as an integer or, with a fraction, as a numeric.
+var canonicalNumberText = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 
 // numberBranchType is the number kind noteNumberBranches recorded for e,
 // "" for any other.

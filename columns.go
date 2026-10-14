@@ -774,6 +774,12 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
+	for _, t := range sel.Targets {
+		if _, local := sc.items[t.Table]; t.Star && t.Table != "" && !local {
+			// The projection expands a * over the query's own items only.
+			return nil, c.x.unsupported(fmt.Sprintf("%s.* of an outer query", t.Table))
+		}
+	}
 	return starColumns(sel, sc), nil
 }
 

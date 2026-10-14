@@ -76,6 +76,16 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(s.payload, '\xZZ') FROM (SELECT * FROM b) s WHERE false`),
 		},
 	},
+	{
+		Name:   "a literal beside a date column of a *",
+		Schema: []string{`CREATE TABLE d (id int PRIMARY KEY, d date)`},
+		Seed:   []string{`INSERT INTO d VALUES (1, '2025-01-01'), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (coalesce(s.d, '2025-01-02') = '2025-01-02'::date)::text FROM (SELECT * FROM d) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT (CASE WHEN s.id = 2 THEN '2025-01-02' ELSE s.d END = '2025-01-01'::date)::text FROM (SELECT * FROM d) s ORDER BY s.id`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {
