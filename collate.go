@@ -657,16 +657,39 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 }
 
 // noteBranchType records the kind of type the column check resolved the
-// branches of e to.
-func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string) {
+// branches exprs of e to, and reads a string literal or a bound parameter
+// among them as that type, failing on one that is none of it as Postgres
+// does when it parses or binds the statement, whichever branch a row takes.
+func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) error {
 	k := x.tx.db.branchKind(typ)
 	if k == "" || x.tx.db.kind.InnoDB() {
-		return
+		return nil
 	}
 	if x.branchTypes == nil {
 		x.branchTypes = map[sqlir.Expr]string{}
 	}
 	x.branchTypes[e] = k
+	if k == "text" {
+		return nil
+	}
+	for _, b := range exprs {
+		var v any
+		switch b := b.(type) {
+		case *sqlir.Const:
+			v = b.Value
+		case *sqlir.Param:
+			if b.Index < 0 || b.Index >= len(x.args) {
+				continue
+			}
+			v = x.args[b.Index]
+		default:
+			continue
+		}
+		if _, err := x.asBranchType(k, b, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // noteNumberBranches records the branches of e, a COALESCE, GREATEST,
@@ -750,24 +773,37 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
 		}
-		if untypedBranch(e) {
+		if untypedExpr(e) {
 			untyped = true
 			continue
 		}
 		typ := expressionTypeIn(e, column, subquery)
+		if untypedBranch(e) {
+			// A CASE or COALESCE of those only is text already.
+			typ = "text"
+		}
 		if typ == "" || typ == "unresolved column type" {
 			continue
 		}
 		base := x.tx.db.baseType(typ)
 		switch k := x.tx.db.branchKind(typ); {
-		case numberRank[base] > 0:
-			kinds["number"] = true
 		case k != "":
 			kinds[k] = true
+		case numberRank[base] > 0:
+			kinds["number"] = true
+			if base != typ {
+				// numberBranchKind and branchNumber read the type's own
+				// name, not a domain's base.
+				unconverted = typ
+			}
 		case timeRank[base] > 0:
 			// date, timestamp and timestamptz cast to one another, and
-			// timeParams and castTime read a literal beside them.
+			// timeParams and castTime read a literal beside them, by the
+			// type's own name.
 			kinds["time"] = true
+			if base != typ {
+				unconverted = typ
+			}
 		default:
 			kinds[base] = true
 			unconverted = base

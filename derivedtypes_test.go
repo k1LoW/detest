@@ -19,6 +19,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, flag boolean, u uuid)`)
 	mustExec(t, db, `INSERT INTO f VALUES (1, NULL, NULL)`)
 	mustExec(t, db, `CREATE DOMAIN span AS interval`)
+	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
+	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -76,6 +78,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT CASE WHEN true THEN s.u ELSE 'x'::text END FROM (SELECT * FROM f) s`,
 		`SELECT CASE WHEN true THEN u ELSE 'x'::text END FROM f`,
 		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::span AS v UNION ALL SELECT NULL::span) u`,
+		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::amount AS v UNION ALL SELECT NULL::amount) u`,
+		// A CASE or COALESCE of literals only is text, beside a bytea.
+		`SELECT coalesce(s.payload, coalesce('x', 'y')) FROM (SELECT * FROM b) s`,
+		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.payload END FROM (SELECT * FROM b) s`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -99,6 +105,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	}{
 		{`SELECT coalesce(s.n, $1), coalesce(s.name, $1) FROM (SELECT * FROM t) s`, "5"},
 		{`SELECT coalesce(n, $1) FROM t WHERE $1 = '8'::text`, "8"},
+		{`SELECT coalesce($1, 'x'), coalesce(s.n, $1) FROM (SELECT * FROM t) s`, "5"},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
 		{`SELECT coalesce(n, $1) FROM t`, 1.5},
 	} {

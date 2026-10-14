@@ -1440,7 +1440,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				typ := expressionType(e, sc.columnType)
 				c.timeParams(typ, caseBranches(e)...)
 				c.x.noteType(e, typ)
-				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
+				if err = c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)), caseBranches(e)); err != nil {
+					return
+				}
 				c.branchParams(caseBranches(e), typ)
 				if err = c.x.unconvertedBranches(caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
 					return
@@ -1474,7 +1476,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
-					c.x.noteBranchType(e, resolvedType(typ, e.Args))
+					if err = c.x.noteBranchType(e, resolvedType(typ, e.Args), e.Args); err != nil {
+						return
+					}
 					c.branchParams(e.Args, typ)
 					// NULLIF returns its first argument, which the equality
 					// promotes to a numeric beside a numeric.
@@ -1491,8 +1495,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				case "lag", "lead":
 					// The value and the default take one type, as the
 					// arguments of COALESCE do.
-					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
-					c.branchParams(branchArgs(e), commonType(branchArgs(e), sc.columnType, nil))
+					typ := commonType(branchArgs(e), sc.columnType, nil)
+					c.x.noteType(e, typ)
+					if err = c.x.noteBranchType(e, resolvedType(typ, branchArgs(e)), branchArgs(e)); err != nil {
+						return
+					}
+					c.branchParams(branchArgs(e), typ)
 					if err = c.x.unconvertedBranches(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
 						return
 					}
@@ -1546,6 +1554,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 // the branches resolve to, which Postgres gives each of them, so that one
 // also used as another type is refused as one compared with both.
 func (c *columnChecker) branchParams(exprs []sqlir.Expr, typ string) {
+	typ = resolvedType(typ, exprs)
 	for _, e := range exprs {
 		if p, ok := e.(*sqlir.Param); ok {
 			c.params.comparedWith(p.Index, typ)

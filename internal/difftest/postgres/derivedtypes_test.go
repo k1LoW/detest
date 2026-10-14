@@ -64,6 +64,18 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT (coalesce(nullif(NULL, m), 1) / 2 = 0.5)::text FROM t ORDER BY id`),
 		},
 	},
+	{
+		Name:   "a literal beside a bytea column of a *",
+		Schema: []string{`CREATE TABLE b (id int PRIMARY KEY, payload bytea)`},
+		Seed:   []string{`INSERT INTO b VALUES (1, '\x42'), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (lag(s.payload, 1, '\x41') OVER (ORDER BY s.id) = '\x41'::bytea)::text FROM (SELECT * FROM b) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT (coalesce(s.payload, '\x41') = '\x41'::bytea)::text FROM (SELECT * FROM b) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT lag(payload, 1, '\xZZ') OVER (ORDER BY id) FROM b WHERE false`),
+			difftest.Q(0, `SELECT coalesce(s.payload, '\xZZ') FROM (SELECT * FROM b) s WHERE false`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {

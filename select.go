@@ -1326,7 +1326,7 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				return err
 			}
 			if from < len(w.Func.Args) {
-				if v, err = x.asBranchType(x.numberBranchType(w.Func), w.Func.Args[from], v); err != nil {
+				if v, err = x.asBranchType(x.branchType(w.Func), w.Func.Args[from], v); err != nil {
 					return err
 				}
 			}
