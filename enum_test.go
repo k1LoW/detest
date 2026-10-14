@@ -174,5 +174,8 @@ func TestEnumSchemaChanges(t *testing.T) {
 	if _, err := db.Exec(`BEGIN; INSERT INTO f VALUES (1, 'x'); ALTER TYPE fresh RENAME VALUE 'x' TO 'y'; COMMIT`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a label renamed under a row its own transaction wrote: %v", err)
 	}
+	// SET SCHEMA moves the enum, which an ALTER of the new name then finds.
+	mustExec(t, db, `CREATE SCHEMA other; ALTER TYPE public.spare SET SCHEMA other; ALTER TYPE other.spare ADD VALUE 'e'`)
+	mustExec(t, db, `INSERT INTO keyless VALUES (2, 'e')`)
 }
 }

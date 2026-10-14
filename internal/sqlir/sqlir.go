@@ -257,6 +257,8 @@ type SchemaChange struct {
 	// name. ALTER TYPE ... ADD VALUE gives AddLabel, put BEFORE Neighbor,
 	// or AFTER it with AfterNeighbor, or last without one, and skipped
 	// when it exists with IfNotExists; RENAME VALUE gives RenameLabel.
+	// NewSchema is ALTER TYPE ... SET SCHEMA of the enum.
+	NewSchema     string
 	Labels        []string
 	AddLabel      string
 	Neighbor      string

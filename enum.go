@@ -125,11 +125,15 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 		}
 		delete(db.enums, name)
 		return nil
+	case ch.NewSchema != "":
+		t.qualified = ch.NewSchema + "." + name
+		return nil
 	case ch.RenameLabel != [2]string{}:
-		if table := db.enumKeyedRows(name); table != "" {
-			// A row is stored under its key's text, which the rename
+		if table := db.enumRows(t, tx); table != "" {
+			// A row may be stored under its values' text, by its key or by
+			// all its values in a table without one, which the rename
 			// would leave at the old label.
-			return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME VALUE while %s, whose primary key is of it, holds rows", name, relname(table)), "")
+			return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME VALUE while %s holds a value of it", name, relname(table)), "")
 		}
 		l := t.lookup(ch.RenameLabel[0])
 		if l == nil {

@@ -603,6 +603,18 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		}
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name}}, Labels: nodeNames(s.CreateEnumStmt.Vals)}}, true, nil
+	case *pg.Node_AlterObjectSchemaStmt:
+		// An enum keeps the schema it is in; other objects keep none.
+		a := s.AlterObjectSchemaStmt
+		if a.ObjectType != pg.ObjectType_OBJECT_TYPE {
+			return nil, true, nil
+		}
+		parts := nodeNames(a.Object.GetList().GetItems())
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", NewSchema: a.Newschema,
+			Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}}, true, nil
 	case *pg.Node_AlterEnumStmt:
 		a := s.AlterEnumStmt
 		parts := nodeNames(a.TypeName)
@@ -622,7 +634,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		*pg.Node_AlterDefaultPrivilegesStmt,
 		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
 		*pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
-		*pg.Node_CreateStatsStmt, *pg.Node_AlterObjectSchemaStmt:
+		*pg.Node_CreateStatsStmt:
 		return nil, true, nil
 	}
 	return nil, false, nil
