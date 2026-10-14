@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 
@@ -842,7 +843,7 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			}
 			continue
 		}
-		typ := expressionType(t.Expr, sc.columnType)
+		typ := expressionTypeIn(t.Expr, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 		if typ == "unresolved column type" {
 			typ = ""
 		}
@@ -991,6 +992,15 @@ func untypedColumn(q *sqlir.SelectStmt, i int) bool {
 	return slices.ContainsFunc(setOpColumnExprs(q, i), untypedExpr)
 }
 
+// recordedSubqueryType is the type of a scalar subquery's one column as the
+// walk recorded it, "" where it recorded none.
+func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
+	if t := c.outTypes[q.Select]; len(t) == 1 {
+		return t[0]
+	}
+	return ""
+}
+
 // setOpBranchType is the type of the i-th column of q, a query of a set
 // operation, before the set operation resolves it with the other: a nested
 // set operation's own, text when every query of it is untyped there, and ""
@@ -1070,7 +1080,7 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 		// untyped rows alone untyped, where a set operation makes it text.
 		out := make([]string, len(sel.Values[0]))
 		for i := range out {
-			out[i] = commonType(setOpColumnExprs(sel, i), nil, nil)
+			out[i] = commonType(setOpColumnExprs(sel, i), nil, c.recordedSubqueryType)
 		}
 		return out
 	}
@@ -1699,8 +1709,15 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 		return
 	}
 	c.untyped = append(c.untyped, func() error {
-		if _, ok := c.untypedValue(e.X); !ok {
+		v, ok := c.untypedValue(e.X)
+		if !ok {
 			return nil
+		}
+		if f, isFloat := derefValue(v).(float64); isFloat && numberRank[c.x.tx.db.baseType(e.Type)] > 0 && numberRank[c.x.tx.db.baseType(e.Type)] <= numberRank["int8"] && f != math.Trunc(f) {
+			// A cast rounds the float, where the driver sends its digits
+			// as integer input, which Postgres fails, with a message that
+			// depends on the driver.
+			return c.x.unsupported(fmt.Sprintf("a float with a fraction bound to a parameter taken as %s", e.Type))
 		}
 		if _, err := c.x.eval(e, nil); err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
@@ -2015,6 +2032,11 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		}
 		if err := c.setOpInsert(ins); err != nil {
 			return err
+		}
+		if starQuery(ins.Select) && slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
+			// The check does not place the targets beside a * by position,
+			// which Postgres reads their input by the column of.
+			return c.x.unsupported("INSERT ... SELECT of a * beside a string literal or a parameter")
 		}
 		if ins.Select.SetOp == "" && len(ins.Select.Values) == 0 && !slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return t.Star }) {
 			exprs := make([]sqlir.Expr, len(ins.Select.Targets))

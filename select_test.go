@@ -911,6 +911,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT * FROM t WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k' WHERE false`, nil},
 		{`VALUES (1) UNION SELECT 'bad' WHERE false`, nil},
 		{`VALUES (1) UNION VALUES (2) UNION SELECT 'bad' WHERE false`, nil},
+		{`SELECT (SELECT u FROM t) WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES ((SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 	} {
@@ -940,6 +942,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce(coalesce('bad', NULL), NULL) END`,
 		`SELECT coalesce('1', NULL) WHERE false UNION SELECT 1 WHERE false`,
+		`INSERT INTO t (id, u) SELECT *, 'bad' FROM (SELECT 1) s WHERE false`,
 		`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
@@ -996,6 +999,14 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 	if want := time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC); !day.Equal(want) {
 		t.Errorf("a time bound where a set operation takes a date: got %v, want %v", day, want)
+	}
+	// The driver sends a float's digits as integer input, which a cast
+	// would round instead.
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 1.25); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a float with a fraction for an integer column: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
+		t.Errorf("a whole float for an integer column: got %v, want no error", err)
 	}
 	if _, err := db.Exec(`SELECT NULLIF(1::smallint, '40000') FROM t`); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("NULLIF of a smallint and 40000: got %v, want 22003", err)
