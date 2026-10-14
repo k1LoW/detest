@@ -1435,7 +1435,7 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Targets = append(out.Targets, sqlir.Target{Expr: e, Alias: rt.Name})
+		out.Targets = append(out.Targets, sqlir.Target{Expr: e, Alias: rt.Name, Name: columnName(rt.Val)})
 	}
 	switch len(s.FromClause) {
 	case 0:
@@ -1700,7 +1700,7 @@ func (c *pgConv) targets(list []*pg.Node) ([]sqlir.Target, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, sqlir.Target{Expr: e, Alias: rt.Name})
+		out = append(out, sqlir.Target{Expr: e, Alias: rt.Name, Name: columnName(rt.Val)})
 	}
 	return out, nil
 }
@@ -2555,24 +2555,24 @@ var builtinTypes = func() map[string]bool {
 	// The types of pg_catalog in Postgres 18, other than arrays and the
 	// catalogs' row types, which an unqualified name finds first.
 	for t := range map[string]bool{
-	"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
-	"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
-	"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
-	"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
-	"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
-	"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
-	"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
-	"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
-	"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
-	"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
-	"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
-	"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
-	"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
-	"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
-	"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
-	"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
-	"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
-	"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
+		"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
+		"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
+		"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
+		"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
+		"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
+		"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
+		"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
+		"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
+		"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
+		"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
+		"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
+		"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
+		"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
+		"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
+		"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
+		"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
+		"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
+		"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
 	} {
 		m[t] = true
 	}
@@ -2586,4 +2586,128 @@ func nodeNames(nodes []*pg.Node) []string {
 		out = append(out, n.GetString_().GetSval())
 	}
 	return out
+}
+
+// columnName is the name Postgres gives a select list item without an
+// alias, which ORDER BY finds an output column by, and which the client
+// reads it under: FigureColname in parse_target.c, empty for ?column?.
+func columnName(n *pg.Node) string {
+	name, _ := figureColname(n)
+	return name
+}
+
+// figureColname is FigureColnameInternal: the name and how strongly the
+// expression gives it, 2 for a name of its own, 1 for one a cast or CASE
+// falls back to, and 0 for none.
+func figureColname(n *pg.Node) (string, int) {
+	switch v := n.GetNode().(type) {
+	case *pg.Node_ColumnRef:
+		if f := v.ColumnRef.Fields; len(f) > 0 {
+			if s := f[len(f)-1].GetString_(); s != nil {
+				return s.Sval, 2
+			}
+		}
+	case *pg.Node_AIndirection:
+		for _, ind := range slices.Backward(v.AIndirection.Indirection) {
+			if s := ind.GetString_(); s != nil {
+				return s.Sval, 2
+			}
+		}
+		return figureColname(v.AIndirection.Arg)
+	case *pg.Node_FuncCall:
+		if f := v.FuncCall.Funcname; len(f) > 0 {
+			return f[len(f)-1].GetString_().GetSval(), 2
+		}
+	case *pg.Node_AExpr:
+		if v.AExpr.Kind == pg.A_Expr_Kind_AEXPR_NULLIF {
+			return "nullif", 2
+		}
+	case *pg.Node_TypeCast:
+		name, strength := figureColname(v.TypeCast.Arg)
+		if strength <= 1 {
+			if t := v.TypeCast.TypeName.GetNames(); len(t) > 0 {
+				return t[len(t)-1].GetString_().GetSval(), 1
+			}
+		}
+		return name, strength
+	case *pg.Node_CollateClause:
+		return figureColname(v.CollateClause.Arg)
+	case *pg.Node_GroupingFunc:
+		return "grouping", 2
+	case *pg.Node_SubLink:
+		switch v.SubLink.SubLinkType {
+		case pg.SubLinkType_EXISTS_SUBLINK:
+			return "exists", 2
+		case pg.SubLinkType_ARRAY_SUBLINK:
+			return "array", 2
+		case pg.SubLinkType_EXPR_SUBLINK:
+			if name, ok := subselectName(v.SubLink.Subselect.GetSelectStmt()); ok {
+				return name, 2
+			}
+		}
+	case *pg.Node_CaseExpr:
+		name, strength := figureColname(v.CaseExpr.Defresult)
+		if strength <= 1 {
+			return "case", 1
+		}
+		return name, strength
+	case *pg.Node_AArrayExpr:
+		return "array", 2
+	case *pg.Node_RowExpr:
+		return "row", 2
+	case *pg.Node_CoalesceExpr:
+		return "coalesce", 2
+	case *pg.Node_MinMaxExpr:
+		if v.MinMaxExpr.Op == pg.MinMaxOp_IS_LEAST {
+			return "least", 2
+		}
+		return "greatest", 2
+	case *pg.Node_SqlvalueFunction:
+		if name, ok := sqlValueFunctionNames[v.SqlvalueFunction.Op]; ok {
+			return name, 2
+		}
+	}
+	return "", 0
+}
+
+// subselectName is the name of the column a scalar subquery gives, which
+// Postgres reads off the subquery once it has transformed it: the name of
+// its first item, of the leftmost query of a set operation, or column1 of
+// VALUES. ok is false for a *, whose columns the parser does not know.
+func subselectName(sel *pg.SelectStmt) (string, bool) {
+	for sel != nil && sel.Op != pg.SetOperation_SETOP_NONE {
+		sel = sel.Larg
+	}
+	switch {
+	case sel == nil:
+		return "", false
+	case len(sel.ValuesLists) > 0:
+		return "column1", true
+	case len(sel.TargetList) == 0:
+		return "", false
+	}
+	rt := sel.TargetList[0].GetResTarget()
+	if rt.Name != "" {
+		return rt.Name, true
+	}
+	if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
+		return "", false
+	}
+	if name := columnName(rt.Val); name != "" {
+		return name, true
+	}
+	return "?column?", true
+}
+
+// sqlValueFunctionNames are the names of the SQL value functions, as
+// FigureColnameInternal gives them.
+var sqlValueFunctionNames = map[pg.SQLValueFunctionOp]string{
+	pg.SQLValueFunctionOp_SVFOP_CURRENT_DATE: "current_date", pg.SQLValueFunctionOp_SVFOP_CURRENT_TIME: "current_time",
+	pg.SQLValueFunctionOp_SVFOP_CURRENT_TIME_N: "current_time", pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP: "current_timestamp",
+	pg.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP_N: "current_timestamp", pg.SQLValueFunctionOp_SVFOP_LOCALTIME: "localtime",
+	pg.SQLValueFunctionOp_SVFOP_LOCALTIME_N: "localtime", pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP: "localtimestamp",
+	pg.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP_N: "localtimestamp", pg.SQLValueFunctionOp_SVFOP_CURRENT_ROLE: "current_role",
+	pg.SQLValueFunctionOp_SVFOP_CURRENT_USER: "current_user", pg.SQLValueFunctionOp_SVFOP_USER: "user",
+	pg.SQLValueFunctionOp_SVFOP_SESSION_USER: "session_user", pg.SQLValueFunctionOp_SVFOP_CURRENT_CATALOG: "current_catalog",
+	pg.SQLValueFunctionOp_SVFOP_CURRENT_SCHEMA: "current_schema",
 }
