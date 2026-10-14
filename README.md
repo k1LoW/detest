@@ -175,7 +175,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - An array parameter is bound as a Go slice, which pgx's `stdlib` driver takes, or as the array text `pq.Array` sends. Each element is compared with `x` as `x = $1` compares a parameter holding it, and the array is read before the statement runs, so a malformed one fails with 22P02 on an empty table too
 - Expressions follow SQL's three-valued logic
 - `bytea` is held as its bytes, whether a literal in the hex (`'\x6162'`) or the escape format, a cast or a `[]byte` parameter wrote it, so all of them compare and order as one value, byte by byte, under any collation, a domain over `bytea` included. `DROP DOMAIN ... CASCADE` of a domain that exists fails with `detest.ErrUnsupportedSQL`, as detest does not record the columns it would drop. A `CREATE TABLE AS` column is `bytea` when its query or its rows show it to be; a value other than `NULL` written to a column whose type neither shows, such as one of an empty result of a subquery over a set operation, fails with `detest.ErrUnsupportedSQL`, as Postgres converts it to the column's type, `bytea` or text, which decides how it compares and orders
-- Enums (`CREATE TYPE ... AS ENUM`) order their values by their labels, in `ORDER BY`, the comparisons, `min`, `max`, `greatest` and `least`, also through a domain over one, with labels `ALTER TYPE ... ADD VALUE` puts `BEFORE` or `AFTER` another and `RENAME VALUE` renames. A literal or a parameter compared with an enum, written to a column of one or cast to one is read by the enum's input, so text that is no label fails with 22P02. The driver, the transaction API and `State` read a value as its label
+- Enums (`CREATE TYPE ... AS ENUM`) order their values by their labels, in `ORDER BY`, the comparisons, `min`, `max`, `greatest` and `least`, also through a domain over one, with labels `ALTER TYPE ... ADD VALUE` puts `BEFORE` or `AFTER` another and `RENAME VALUE` renames before any row holds a value of the enum. A literal or a parameter compared with an enum, written to a column of one or cast to one is read by the enum's input, so text that is no label fails with 22P02. The driver, the transaction API and `State` read a value as its label
 - Column references are resolved against the schema before a statement runs, so a column none of the tables in scope has fails with 42703 as on the server. A name is let through when an item in scope has columns detest does not know, such as a function or a table no schema declared
 
 **Schema**
@@ -254,7 +254,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Schema*
 
 - `CREATE TABLE ... LIKE`, `ADD CONSTRAINT ... USING INDEX`, `CREATE TEMPORARY TABLE`, and, on a table that holds rows, `ALTER COLUMN ... TYPE ... USING` and adding a generated column
-- `DROP TYPE` of an enum a column is of or with `CASCADE`, `ALTER TYPE ... RENAME TO` of an enum, and a second enum of a name another schema has an enum of, as detest knows an enum by its bare name
+- `DROP TYPE` of an enum a column is of or with `CASCADE`, `ALTER TYPE ... RENAME TO` of an enum, and an enum of a name another schema has a type of, as detest knows an enum by its bare name. `ALTER TYPE ... RENAME VALUE` while a row holds a value of the enum, or of a label a default, a `CHECK`, a generated column, an index or a view names as text, as detest does not rewrite either
 - The system catalogs and `information_schema`, which are not there, so a query of them fails as of an undefined table
 
 *Statements*
