@@ -191,6 +191,32 @@ func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	return first
 }
 
+// numberBranchKind is "integer" or "numeric" when every branch among exprs
+// that has a type of its own is a number of that kind, a numeric or a float
+// making them all numeric, as Postgres resolves them; "" otherwise. A NULL,
+// a string literal or a parameter takes that type, which branchValue cannot
+// tell from the values: a NULL numeric column leaves an integer literal an
+// integer there, and text beside an integer column stays text.
+func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+	kind := ""
+	for _, e := range exprs {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil || untypedExpr(e) {
+			continue
+		}
+		switch expressionTypeIn(e, column, subquery) {
+		case "int", "int2", "int4", "int8", "integer", "smallint", "bigint":
+			if kind == "" {
+				kind = "integer"
+			}
+		case "numeric", "decimal", "float4", "float8", "real", "double precision":
+			kind = "numeric"
+		default:
+			return ""
+		}
+	}
+	return kind
+}
+
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
 	if f.Name == "left" && len(f.Args) == 2 {
 		switch typ := expressionType(f.Args[1], column); typ {

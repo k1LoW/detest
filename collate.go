@@ -587,11 +587,15 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 				case "coalesce", "greatest", "least", "nullif":
 					if k := db.branchKind(resolvedType(commonType(f.Args, column, nil), f.Args)); k != "" {
 						m[f] = k
+					} else if k := numberBranchKind(f.Args, column, nil); k != "" && f.Name != "nullif" {
+						m[f] = k
 					}
 				}
 			}
 			for _, c := range sqlir.CaseExprs(e) {
 				if k := db.branchKind(resolvedType(expressionType(c, column), caseBranches(c))); k != "" {
+					m[c] = k
+				} else if k := numberBranchKind(caseBranches(c), column, nil); k != "" {
 					m[c] = k
 				}
 			}
@@ -663,6 +667,37 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string) {
 		x.branchTypes = map[sqlir.Expr]string{}
 	}
 	x.branchTypes[e] = k
+}
+
+// noteNumberBranches records the branches of e, a COALESCE, GREATEST, LEAST
+// or CASE, as of the number kind numberBranchKind gives, when branchKind
+// gives none, and fails a string literal among them that reads as no number
+// of it, as Postgres does whichever branch a row takes, or with no rows.
+func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if _, ok := x.branchTypes[e]; ok {
+		return nil
+	}
+	k := numberBranchKind(exprs, column, subquery)
+	if k == "" {
+		return nil
+	}
+	for _, b := range exprs {
+		if c, ok := b.(*sqlir.Const); ok {
+			if s, ok := c.Value.(string); ok {
+				if _, err := x.branchNumber(s, k == "numeric"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if x.branchTypes == nil {
+		x.branchTypes = map[sqlir.Expr]string{}
+	}
+	x.branchTypes[e] = k
+	return nil
 }
 
 // branchType is the kind of type the branches of e resolve to, in the

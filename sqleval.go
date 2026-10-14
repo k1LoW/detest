@@ -835,6 +835,14 @@ func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
 		return x.untyped(e, v, []byte{})
 	case "text":
 		return paramText(e, v), nil
+	case "integer", "numeric":
+		if s, ok := derefValue(v).(string); ok && untypedExpr(e) {
+			return x.branchNumber(s, kind == "numeric")
+		}
+		if _, ok := integer(derefValue(v)); ok && kind == "numeric" {
+			return numericValue(derefValue(v)), nil
+		}
+		return v, nil
 	}
 	if t := x.tx.db.enumOf(kind); t != nil {
 		return x.untyped(e, v, enumValue{typ: t})

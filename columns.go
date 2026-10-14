@@ -1441,6 +1441,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				c.timeParams(typ, caseBranches(e)...)
 				c.x.noteType(e, typ)
 				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
+				if err = c.x.noteNumberBranches(e, caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+					return
+				}
 				if e.Arg != nil {
 					for _, w := range e.Whens {
 						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
@@ -1468,6 +1471,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
 					c.x.noteBranchType(e, resolvedType(typ, e.Args))
+					if e.Name != "nullif" {
+						// NULLIF returns its first argument, of its own type.
+						if err = c.x.noteNumberBranches(e, e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+							return
+						}
+					}
 				case "date_trunc":
 					if len(e.Args) == 2 {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))

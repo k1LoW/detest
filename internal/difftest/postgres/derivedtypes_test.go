@@ -32,6 +32,24 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT s.nope FROM (SELECT * FROM t) s`),
 		},
 	},
+	{
+		Name:   "a number branch beside a NULL column of another number type, or beside text",
+		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY, n int, m numeric)`},
+		Seed:   []string{`INSERT INTO t VALUES (1, NULL, NULL), (2, 3, 1)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (coalesce(m, 1) / 2 = 0.5)::text FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (coalesce(s.m, 1) / 2 = 0.5)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT (CASE WHEN id = 1 THEN 1 ELSE m END / 2 = 0.5)::text FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (coalesce(n, m) / 2 * 2 = 3)::text FROM t WHERE id = 2`),
+			difftest.Q(0, `SELECT coalesce(n, '5') / 2 FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT CASE WHEN id = 1 THEN '7' ELSE n END FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT coalesce(n, 'bogus') FROM t WHERE id = 2`),
+			difftest.Q(0, `SELECT coalesce(n, 'bogus') FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN false THEN 'bogus' ELSE n END FROM t`),
+			difftest.Q(0, `SELECT coalesce(s.n, 'bogus') FROM (SELECT * FROM t) s`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {
