@@ -87,14 +87,22 @@ func TestStatementAtYieldCanceledBySibling(t *testing.T) {
 			ctx, cancel := context.WithCancel(p.Context())
 			defer cancel()
 			work := func(fail bool) error {
+				// The failing goroutine first calls something else than the
+				// worker's BeginTx: two goroutines with the same first call
+				// are named by goroutine id, which does not always follow the
+				// order they were started in (see takeAdopted), and the
+				// replay would take them for each other.
+				if fail {
+					if _, err := db.ExecContext(ctx, `SELECT 1`); err != nil {
+						return err
+					}
+					return errors.New("boom")
+				}
 				tx, err := db.BeginTx(ctx, nil)
 				if err != nil {
 					return err
 				}
 				defer func() { _ = tx.Rollback() }()
-				if fail {
-					return errors.New("boom")
-				}
 				for range 3 {
 					if _, err := tx.ExecContext(ctx, `UPDATE "counters" SET "n" = "n" + 1 WHERE "id" = 'c'`); err != nil {
 						return err
