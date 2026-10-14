@@ -84,6 +84,7 @@ func TestEnumTransactionAPI(t *testing.T) {
 		db, store := s.DB("app", postgres.New())
 		mustExec(t, db, `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`)
 		mustExec(t, db, `CREATE TABLE p (id text PRIMARY KEY, m mood)`)
+		s.Seed(func() { store.SeedRow("p", Row{"id": "s", "m": "sad"}) })
 		s.Manual("writer", 1, func(p *Proc) error {
 			return store.Tx(p, func(tx *Tx) error {
 				if err := tx.Insert("p", Row{"id": "x", "m": "glad"}); !errors.Is(err, ErrInvalidTextRepresentation) {
@@ -100,6 +101,11 @@ func TestEnumTransactionAPI(t *testing.T) {
 				if r, ok := tx.Get("p", "y"); !ok || r["m"] != "happy" {
 					return fmt.Errorf("Tx.Get of an enum: %#v, %v", r, ok)
 				}
+				// A seeded label is the enum's value, which CAS compares
+				// with and SQL orders by its labels.
+				if ok, err := tx.CAS("p", "s", "m", "sad", "ok"); err != nil || !ok {
+					return fmt.Errorf("CAS of a seeded enum: %v, %w", ok, err)
+				}
 				return nil
 			})
 		})
@@ -110,6 +116,9 @@ func TestEnumTransactionAPI(t *testing.T) {
 			}
 			if v, _ := r.Get("m"); v != "happy" {
 				return fmt.Errorf("State of an enum: %#v", v)
+			}
+			if r, _ := st.Row(store, "p", "s"); r.Str("m") != "ok" {
+				return fmt.Errorf("the seeded row after CAS: %q", r.Str("m"))
 			}
 			return nil
 		})
