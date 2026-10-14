@@ -201,11 +201,24 @@ func (tx *Tx) beginUpdate(lk lockKey, row Row) {
 	tx.updating[lk] = row
 }
 
-// endUpdate records that the update of the row under lk is written.
-func (tx *Tx) endUpdate(lk lockKey) { delete(tx.updating, lk) }
+// endUpdate records that the update of the row under lk is written, or
+// failed, which a duplicate check waiting for it as written wakes on.
+func (tx *Tx) endUpdate(lk lockKey) {
+	if _, ok := tx.updating[lk]; ok {
+		delete(tx.updating, lk)
+		tx.wakeWriterWaits(map[lockKey]bool{lk: true})
+	}
+}
 
-// endUpdates records that the statement's updates are written.
-func (tx *Tx) endUpdates() { tx.updating = nil }
+// endUpdates records that the statement's updates are written, or failed.
+func (tx *Tx) endUpdates() {
+	keys := map[lockKey]bool{}
+	for lk := range tx.updating {
+		keys[lk] = true
+	}
+	tx.updating = nil
+	tx.wakeWriterWaits(keys)
+}
 
 // entryWrite is a secondary index entry an update wrote.
 type entryWrite struct {

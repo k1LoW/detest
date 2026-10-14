@@ -2498,14 +2498,22 @@ func (tx *Tx) savepoint(op, name string) error {
 // ROLLBACK: those taken since the innermost savepoint, or all of them.
 func (tx *Tx) abort() {
 	tx.aborted = true
-	tx.updating = nil // the failed statement's updates are not written
+	// The failed statement's updates are not written. A duplicate check
+	// waiting on one counted it as written, so it is woken below with
+	// the rows the subtransaction undid.
+	updating := tx.updating
+	tx.updating = nil
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}
 	tx.depRelease()
 	if n := len(tx.saves); n > 0 {
 		tx.rollbackLocks(&tx.saves[n-1])
-		tx.wakeWriterWaits(tx.undoneSince(&tx.saves[n-1]))
+		undone := tx.undoneSince(&tx.saves[n-1])
+		for lk := range updating {
+			undone[lk] = true
+		}
+		tx.wakeWriterWaits(undone)
 		return
 	}
 	tx.releaseLocks(tx.locks)

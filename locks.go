@@ -125,11 +125,11 @@ func (tx *Tx) undoneSince(sp *savepoint) map[lockKey]bool {
 	return undone
 }
 
-// wakeWriterWaits makes ready the processes whose duplicate check waits for
-// tx as the writer of one of keys, rows tx no longer writes once their
-// subtransaction aborted, as Postgres wakes a wait for the subtransaction.
-// The row's lock may stay with tx, taken before the savepoint, so no
-// release wakes them.
+// wakeWriterWaits makes ready the processes whose duplicate check waits on
+// one of keys and has no writer left there, rows tx may no longer write once
+// a statement failed or a subtransaction aborted, as Postgres wakes a wait
+// for the subtransaction. The row's lock may stay with tx, taken before the
+// savepoint, so no release wakes them.
 func (tx *Tx) wakeWriterWaits(keys map[lockKey]bool) {
 	if tx.p == nil || len(keys) == 0 {
 		return
@@ -143,7 +143,7 @@ func (tx *Tx) wakeWriterWaits(keys map[lockKey]bool) {
 
 func (tx *Tx) wakeWriterWaitsNow(keys map[lockKey]bool) {
 	for _, p := range tx.p.r.procs {
-		if p.state == stateBlockedLock && p.waitRow != nil && p.waitRow.writers && keys[p.waitRow.key] {
+		if p.state == stateBlockedLock && p.waitRow != nil && p.waitRow.writers && keys[p.waitRow.key] && len(p.waitRow.blockers()) == 0 {
 			p.state = stateReady
 			p.waitRow = nil
 		}

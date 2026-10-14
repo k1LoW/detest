@@ -351,6 +351,27 @@ var writeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "a duplicate check stops waiting when the update it waits for fails in a savepoint",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 'a')`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(2, `BEGIN`),
+			difftest.S(2, `INSERT INTO u VALUES (5, 'x')`),
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM u WHERE id = 1 FOR UPDATE`),
+			difftest.S(0, `SAVEPOINT s`),
+			difftest.S(0, `UPDATE u SET email = 'x' WHERE id = 1`),
+			difftest.S(1, `INSERT INTO u VALUES (3, 'a')`),
+			difftest.S(2, `COMMIT`),
+			difftest.Q(1, `SELECT id, email FROM u ORDER BY id`),
+			difftest.S(0, `ROLLBACK TO SAVEPOINT s`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
 		Name: "a duplicate check stops waiting when the write it waits for is rolled back to a savepoint",
 		Schema: []string{
 			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,
