@@ -919,8 +919,23 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT 'x' UNION SELECT 'y' UNION SELECT 1`,
 		`SELECT '1' WHERE false UNION SELECT NULL WHERE false UNION SELECT 1 WHERE false`,
 		`SELECT k FROM t WHERE false UNION SELECT u FROM t WHERE false`,
+		// A pair valueFamily does not group is refused, whether or not
+		// Postgres resolves it.
+		`SELECT k FROM t WHERE false UNION SELECT now()::date WHERE false`,
+		`SELECT now()::date WHERE false UNION SELECT now()::timestamp WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	// Postgres gives a parameter one type for the statement, so one
+	// written to columns of two families fails whatever is bound to it.
+	for _, q := range []string{
+		`UPDATE t SET b = $1, n = $1 WHERE false`,
+		`UPDATE t SET n = $1 WHERE k = $1`,
+		`SELECT coalesce(u, $1), coalesce(n, $1) FROM t`,
+	} {
+		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
@@ -942,6 +957,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
 		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
 		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
+		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
+		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
 		// The branches widen to an integer, which takes 40000.
 		{`SELECT CASE WHEN true THEN 1::smallint WHEN false THEN 2 ELSE '40000' END`, nil},
 		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},
@@ -969,6 +986,10 @@ func TestEnumInputReadBeforeAnyRow(t *testing.T) {
 		if _, err := db.Exec(q, "ok"); err != nil {
 			t.Errorf("%s with a label: got %v, want no error", q, err)
 		}
+	}
+	// An enum resolves with no other type in a set operation.
+	if _, err := db.Exec(`SELECT m FROM p WHERE false UNION SELECT 1 WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an enum and an integer in a set operation: got %v, want unsupported", err)
 	}
 }
 

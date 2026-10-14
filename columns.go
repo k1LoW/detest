@@ -134,18 +134,20 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 
 // paramUses records how a statement uses each parameter. Postgres gives a
 // parameter one type for the whole statement, taken from where it first
-// stands, so one used as the array of = ANY and elsewhere as a scalar, or as
-// the array of = ANY against operands of other types, fails before it runs,
-// whatever value is bound to it.
+// stands, so one used as the array of = ANY and elsewhere as a scalar, as
+// the array of = ANY against operands of other types, or as a scalar of two
+// families, such as a boolean column's value and an integer column's, fails
+// before it runs, whatever value is bound to it.
 type paramUses struct {
 	scalars  map[int]bool
 	arrays   map[int][]string // the types of the operands compared with it
-	compared map[int]string   // the family of the first operand compared with it as a scalar
-	mixed    map[int]bool     // compared as a scalar with operands of two families
+	compared map[int]string   // the family of the first type it takes as a scalar
+	mixed    map[int]bool     // taken as a scalar of two families
 }
 
-// comparedWith records the type of an operand the scalar parameter i is
-// compared with.
+// comparedWith records a type the scalar parameter i takes, from an operand
+// it is compared with or from where it stands, as the column it is written
+// to.
 func (u *paramUses) comparedWith(i int, typ string) {
 	f := paramFamily(typ)
 	if f == "" {
@@ -197,7 +199,7 @@ func (u *paramUses) array(i int, operand string) {
 // the operand types are left to the run.
 func (u *paramUses) conflict(checking bool) string {
 	if len(u.mixed) > 0 {
-		return fmt.Sprintf("parameter $%d compared with operands of different types", slices.Min(slices.Collect(maps.Keys(u.mixed)))+1)
+		return fmt.Sprintf("parameter $%d taken as values of different types", slices.Min(slices.Collect(maps.Keys(u.mixed)))+1)
 	}
 	for i, types := range u.arrays {
 		if u.scalars[i] {
@@ -832,8 +834,11 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 		lt, rt := c.setOpBranchType(sel.Larg, i), c.setOpBranchType(sel.Rarg, i)
 		// Postgres fails a pair it cannot resolve to one type when it plans
 		// the statement (42804), which the run refuses only once it has
-		// rows of both.
-		if fl, fr := valueFamily(lt), valueFamily(rt); fl != "" && fr != "" && fl != fr {
+		// rows of both. Two types are taken as one only where valueFamily
+		// groups them, so a pair it does not group is refused even where
+		// Postgres resolves it, such as a date with a timestamp, rather
+		// than modeled pair by pair.
+		if lt != "" && rt != "" && lt != rt && (valueFamily(lt) == "" || valueFamily(lt) != valueFamily(rt)) {
 			return c.x.unsupported("a set operation over a column of values of two types")
 		}
 		pair := lt
@@ -1439,6 +1444,11 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 	if typ == "" || typ == "unresolved column type" || !untypedExpr(e) {
 		return
+	}
+	if p, ok := e.(*sqlir.Param); ok {
+		// Postgres gives the parameter this type for the whole statement,
+		// as it does where the parameter is compared.
+		c.params.comparedWith(p.Index, typ)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
 }
