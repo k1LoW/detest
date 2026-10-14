@@ -56,6 +56,9 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT (lead(m, 1, 1) OVER (ORDER BY id) / 2 = 0.5)::text FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT lag(n, 1, '4') OVER (ORDER BY id) / 2 FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT lag(n, 1, 'bogus') OVER (ORDER BY id) FROM t WHERE false`),
+			difftest.Q(0, `SELECT (coalesce(nullif(1, s.m), '0.5') = 1)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT (CASE WHEN true THEN 1 WHEN false THEN '0.5' ELSE s.m END = 1)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT (CASE WHEN id = 1 THEN '0.5' ELSE m END = 0.5)::text FROM t ORDER BY id`),
 		},
 	},
 }

@@ -700,11 +700,20 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 			if b.Index < 0 || b.Index >= len(x.args) {
 				continue
 			}
-			t, ok := derefValue(x.args[b.Index]).(string)
-			if !ok {
+			switch v := derefValue(x.args[b.Index]).(type) {
+			case nil:
+				continue
+			case string:
+				s = v
+			default:
+				// The driver sends the value as the number's input,
+				// which detest does not model for another type, or for
+				// a float bound as an integer.
+				if _, isInt := integer(v); !isInt && (k == "integer" || !isNumber(v)) {
+					return x.unsupported(fmt.Sprintf("a %T parameter among number branches", v))
+				}
 				continue
 			}
-			s = t
 		default:
 			continue
 		}

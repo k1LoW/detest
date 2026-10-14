@@ -62,6 +62,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// rows.
 		`SELECT coalesce(u.v, 0) FROM (SELECT NULL AS v UNION ALL SELECT NULL) u`,
 		`SELECT CASE WHEN false THEN s.name ELSE s.n END FROM (SELECT * FROM t) s`,
+		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.n END FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(g, 0) FROM generate_series($1, 2) AS g`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -76,6 +77,21 @@ func TestDerivedColumnTypes(t *testing.T) {
 	} {
 		if _, err := db.Query(q, "bogus"); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s with bogus: got %v, want 22P02", q, err)
+		}
+	}
+	// A parameter Postgres gives a number type is not also text, nor a
+	// value the driver sends as other than a number.
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		{`SELECT coalesce(s.n, $1), coalesce(s.name, $1) FROM (SELECT * FROM t) s`, "5"},
+		{`SELECT coalesce(n, $1) FROM t WHERE $1 = '8'::text`, "8"},
+		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
+		{`SELECT coalesce(n, $1) FROM t`, 1.5},
+	} {
+		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
 		}
 	}
 	if got := rowsOf(t, db, `SELECT coalesce(n, $1) / 2 FROM t ORDER BY id`, "8"); !reflect.DeepEqual(got, []string{"2", "4"}) {

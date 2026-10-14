@@ -103,9 +103,18 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		case "nullif":
 			// NULLIF returns its first argument, of its own type: a
 			// timestamp compared with a timestamptz by the cross-type =
-			// stays a timestamp.
+			// stays a timestamp, and so does an integer compared with
+			// another. A number beside a numeric or a float has no = of
+			// the two types, so it is promoted to the wider.
 			if len(e.Args) > 0 {
-				return expressionTypeIn(e.Args[0], column, subquery)
+				typ := expressionTypeIn(e.Args[0], column, subquery)
+				if len(e.Args) == 2 && numberRank[typ] > 0 {
+					other := expressionTypeIn(e.Args[1], column, subquery)
+					if numberRank[other] > numberRank[typ] && numberRank[other] >= numberRank["numeric"] {
+						return other
+					}
+				}
+				return typ
 			}
 		case "lower", "upper", "left", "concat":
 			return "text"
@@ -228,6 +237,11 @@ func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, 
 	other, unknown := false, false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil || untypedExpr(e) {
+			continue
+		}
+		if untypedBranch(e) {
+			// A CASE or COALESCE of those only is text already.
+			other = true
 			continue
 		}
 		typ := expressionTypeIn(e, column, subquery)
