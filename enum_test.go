@@ -174,6 +174,12 @@ func TestEnumSchemaChanges(t *testing.T) {
 	if _, err := db.Exec(`BEGIN; INSERT INTO f VALUES (1, 'x'); ALTER TYPE fresh RENAME VALUE 'x' TO 'y'; COMMIT`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a label renamed under a row its own transaction wrote: %v", err)
 	}
+	// A label a kept expression names as text is not renamed under it.
+	mustExec(t, db, `CREATE TYPE tone AS ENUM ('low', 'high'); CREATE TABLE tt (id int PRIMARY KEY, x tone DEFAULT 'low')`)
+	if _, err := db.Exec(`ALTER TYPE tone RENAME VALUE 'low' TO 'soft'`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a label a default names, renamed: %v", err)
+	}
+	mustExec(t, db, `ALTER TYPE tone RENAME VALUE 'high' TO 'loud'`)
 	// SET SCHEMA moves the enum, which an ALTER of the new name then finds.
 	mustExec(t, db, `CREATE SCHEMA other; ALTER TYPE public.spare SET SCHEMA other; ALTER TYPE other.spare ADD VALUE 'e'`)
 	mustExec(t, db, `INSERT INTO keyless VALUES (2, 'e')`)

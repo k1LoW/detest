@@ -3,6 +3,7 @@ package detest
 import (
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -129,6 +130,11 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 		t.qualified = ch.NewSchema + "." + name
 		return nil
 	case ch.RenameLabel != [2]string{}:
+		if db.keepsText(ch.RenameLabel[0]) {
+			// An expression the schema keeps holds the label as text, as
+			// it was written, which the rename would leave at the old one.
+			return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME VALUE %q, which an expression of the schema names", name, ch.RenameLabel[0]), "")
+		}
 		if table := db.enumRows(t, tx); table != "" {
 			// A row may be stored under its values' text, by its key or by
 			// all its values in a table without one, which the rename
@@ -220,4 +226,67 @@ func (db *DB) enumUsed(name string) bool {
 		}
 	}
 	return false
+}
+
+// keepsText reports whether an expression the schema keeps, a default, a
+// CHECK, a generated column, an index or a view's query, holds the string
+// constant s.
+func (db *DB) keepsText(s string) bool {
+	for _, v := range db.views {
+		if hasText(v.View, s) {
+			return true
+		}
+	}
+	if hasText(db.matviews, s) {
+		return true
+	}
+	for _, def := range db.defs {
+		if hasText(def, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasText reports whether n holds a string constant s.
+func hasText(n any, s string) bool {
+	constType := reflect.TypeFor[*sqlir.Const]()
+	found := false
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		if found || !v.IsValid() {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			if v.Type() == constType {
+				if c := v.Elem().FieldByName("Value"); !c.IsNil() && c.Elem().Kind() == reflect.String && c.Elem().String() == s {
+					found = true
+				}
+				return
+			}
+			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			for _, f := range v.Fields() {
+				walk(f)
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		case reflect.Map:
+			for it := v.MapRange(); it.Next(); {
+				walk(it.Value())
+			}
+		}
+	}
+	walk(reflect.ValueOf(n))
+	return found
 }
