@@ -933,6 +933,26 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 }
 
+func TestEnumInputReadBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TYPE mood AS ENUM ('ok')`)
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY, m mood)`)
+	for _, q := range []string{
+		`UPDATE p SET m = $1 WHERE false`,
+		`SELECT $1::mood FROM p`,
+		`SELECT CASE WHEN true THEN m ELSE $1 END FROM p`,
+		`SELECT m FROM p WHERE false UNION SELECT $1 WHERE false`,
+	} {
+		if _, err := db.Exec(q, "bogus"); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", q, err)
+		}
+		if _, err := db.Exec(q, "ok"); err != nil {
+			t.Errorf("%s with a label: got %v, want no error", q, err)
+		}
+	}
+}
+
 func TestRowComparison(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())

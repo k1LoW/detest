@@ -1397,7 +1397,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 // compared with a number. Here the type is known, so a float takes that
 // text and an integer fails on it.
 func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
-	sample := typeSample(typ)
+	sample := c.x.tx.db.typeSample(typ)
 	if sample == nil || !untypedExpr(e) {
 		return
 	}
