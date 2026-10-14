@@ -230,6 +230,7 @@ func TestEnumSchemaChanges(t *testing.T) {
 		`CREATE TYPE mood2 AS ENUM ('a'); ALTER TABLE p RENAME TO mood2`,
 		`CREATE TYPE other3.tint AS (r int); DROP TYPE IF EXISTS public.tint; CREATE TYPE tint AS ENUM ('a')`,
 		`CREATE TYPE other3.old AS (r int); ALTER TYPE other3.old RENAME TO fresh2; CREATE TYPE fresh2 AS ENUM ('a')`,
+		`CREATE DOMAIN feeling2 AS text; ALTER DOMAIN feeling2 RENAME TO state2; CREATE TYPE feeling2 AS ENUM ('ok')`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: want unsupported, got %v", q, err)

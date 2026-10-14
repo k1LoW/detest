@@ -94,8 +94,12 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 		if t != nil {
 			return unsupported(fmt.Sprintf("a second enum named %q", name), "")
 		}
-		if _, ok := db.domainBases[name]; ok {
-			return unsupported(fmt.Sprintf("an enum named %q, as a domain is", name), "")
+		_, domain := db.domainBases[name]
+		_, alias := db.domainAliases[name]
+		if domain || alias {
+			// A renamed domain's old name stays the base type's, for the
+			// casts stored before the rename.
+			return unsupported(fmt.Sprintf("an enum named %q, as a domain is or was", name), "")
 		}
 		if db.otherTypes[name] {
 			// The mark stays once another type had the name, as detest
