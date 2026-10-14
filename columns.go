@@ -972,9 +972,10 @@ func (c *columnChecker) setOpBranchType(q *sqlir.SelectStmt, i int) string {
 		return ""
 	}
 	if len(q.Values) > 0 {
-		// VALUES resolves each column over its rows, and leaves one of
-		// untyped rows alone untyped, where a set operation makes it text.
-		return commonType(setOpColumnExprs(q, i), nil, nil)
+		if t := c.setOpTypes(q); i < len(t) {
+			return t[i]
+		}
+		return ""
 	}
 	if q.SetOp == "" {
 		if t := c.outTypes[q]; i < len(t) {
@@ -1036,6 +1037,15 @@ func (s setOpColumns) kind(j int, name string) string {
 // Postgres resolves the others to it or fails, and the first type one
 // gives otherwise.
 func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
+	if len(sel.Values) > 0 {
+		// VALUES resolves each column over its rows, and leaves one of
+		// untyped rows alone untyped, where a set operation makes it text.
+		out := make([]string, len(sel.Values[0]))
+		for i := range out {
+			out[i] = commonType(setOpColumnExprs(sel, i), nil, nil)
+		}
+		return out
+	}
 	if sel.SetOp == "" || sel.Larg == nil || sel.Rarg == nil {
 		return c.outTypes[sel]
 	}
@@ -1470,6 +1480,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			case *sqlir.Cast:
 				c.castInput(e)
 				c.timeParams(e.Type, e.X)
+				if p, ok := e.X.(*sqlir.Param); ok {
+					// A cast of a parameter types it as well, so one cast
+					// to two types is refused, as Postgres reads it by one
+					// and casts it to the other at each row.
+					c.params.comparedWith(p.Index, c.paramTypeFamily(e.Type))
+					c.numberParam(p, e.Type)
+				}
 				if typeCollation(e.Type) != "" {
 					// A cast to name brings name's C collation in, as a
 					// COLLATE does.
@@ -1739,12 +1756,32 @@ func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope) error {
 	first := ""
 	for _, e := range exprs {
 		typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+		if inner := nestedBranches(e); typ == "" && inner != nil {
+			// Postgres resolves a nested CASE or COALESCE of untyped
+			// branches alone to text before the branches around it.
+			typ = resolvedType("", inner)
+		}
 		switch {
 		case typ == "" || typ == "unresolved column type":
 		case first == "":
 			first = typ
 		case typ != first && (family(typ) == "" || family(typ) != family(first)):
 			return c.x.unsupported(fmt.Sprintf("branches of a %s and a %s, which Postgres does not resolve to one type", first, typ))
+		}
+	}
+	return nil
+}
+
+// nestedBranches are the branches of e when it is a CASE, or the arguments
+// when it is a COALESCE, a GREATEST, a LEAST or a NULLIF, nil otherwise.
+func nestedBranches(e sqlir.Expr) []sqlir.Expr {
+	switch e := e.(type) {
+	case *sqlir.CaseExpr:
+		return caseBranches(e)
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "coalesce", "greatest", "least", "nullif":
+			return e.Args
 		}
 	}
 	return nil

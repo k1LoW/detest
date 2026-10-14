@@ -910,6 +910,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT 'bad' WHERE false UNION ALL SELECT u FROM t`, nil},
 		{`SELECT * FROM t WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k' WHERE false`, nil},
 		{`VALUES (1) UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES (1) UNION VALUES (2) UNION SELECT 'bad' WHERE false`, nil},
 		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 	} {
@@ -935,6 +936,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN true THEN 1 ELSE false END FROM t`,
 		`SELECT coalesce(n, b) FROM t`,
 		`SELECT greatest(u, k) FROM t`,
+		// A nested COALESCE of untyped arguments alone is text.
+		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
@@ -959,6 +962,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT coalesce(u, $1), coalesce(n, $1) FROM t`,
 		`UPDATE t SET id = $1 WHERE false AND $1 = 1::smallint`,
 		`SELECT coalesce(n, $1), coalesce(1::bigint, $1) FROM t`,
+		`SELECT $1::text, CASE WHEN true THEN 0 ELSE $1::int END`,
+		`SELECT $1::int, CASE WHEN false THEN $1::smallint END`,
 	} {
 		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -1001,6 +1006,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT CASE WHEN true THEN now()::date ELSE now() END, coalesce(n, 1.5, 2::bigint) FROM t`, nil},
 		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
 		{`INSERT INTO t (id, k) SELECT 1, 'x' WHERE false UNION ALL SELECT 2, 'y' WHERE false`, nil},
+		{`VALUES (1) UNION SELECT 2::smallint UNION SELECT '40000' WHERE false`, nil},
+		{`SELECT $1::int, $1::integer`, []any{"1"}},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
 		// The inner pair widens to an integer, which takes 40000.
 		{`SELECT 1::smallint WHERE false UNION SELECT 2 WHERE false UNION SELECT '40000' WHERE false`, nil},
