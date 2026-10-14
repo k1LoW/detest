@@ -205,6 +205,19 @@ func TestSchemaSearchPath(t *testing.T) {
 
 // Migrations evolve a schema: views, renames, dropped constraints, indexes
 // and columns, all of which must leave detest's definitions as Postgres's.
+func TestRenamedTableKeepsNoLockOfItsWriter(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `
+CREATE TABLE exports (id text PRIMARY KEY);
+INSERT INTO exports (id) VALUES ('e1');
+ALTER TABLE exports RENAME TO exporters;
+`)
+	if _, err := db.Exec(`INSERT INTO exporters (id) VALUES ('e1')`); !errors.Is(err, ErrUniqueViolation) {
+		t.Fatalf("a duplicate of a row written before the rename must fail without waiting: %v", err)
+	}
+}
+
 func TestSchemaEvolution(t *testing.T) {
 	s := newSim(t)
 	db, store := s.DB("app", postgres.New())

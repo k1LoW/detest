@@ -2135,6 +2135,12 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 		if holders, ok := tx.db.locks[lk]; ok {
 			delete(tx.db.locks, lk)
 			tx.db.locks[lockKey{to, lk.key}] = holders
+			// Each holder releases the locks it lists, at its end.
+			for h := range holders {
+				if i := slices.Index(h.locks, lk); i >= 0 {
+					h.locks[i] = lockKey{to, lk.key}
+				}
+			}
 		}
 	})
 	if def, ok := db.defs[table]; ok {
