@@ -94,6 +94,11 @@ type columnChecker struct {
 	// by a cast to a type before the run.
 	paramAt, paramTyped map[*sqlir.Param]bool
 	paramRead           map[int]bool
+	// subTypes are the types subqueryType resolved, shared with the
+	// checkers it starts, so that the branch checks, which resolve a
+	// subquery before the walk reaches it, resolve each one once rather
+	// than again at every level of nesting above it.
+	subTypes map[*sqlir.SubQuery]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -1000,7 +1005,19 @@ func isParam(e sqlir.Expr) bool {
 // recordedSubqueryType is the type of a scalar subquery's one column as the
 // walk recorded it, "" where it recorded none.
 func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
-	if t := c.outTypes[q.Select]; len(t) == 1 {
+	sel := q.Select
+	switch {
+	case sel == nil:
+		return ""
+	case sel.SetOp != "":
+		if t := c.setOpTypes(sel); len(t) == 1 {
+			return resolvedType(t[0], setOpColumnExprs(sel, 0))
+		}
+		return ""
+	case len(sel.Targets) == 1 && untypedBranch(sel.Targets[0].Expr):
+		return "text" // as subqueryType resolves it
+	}
+	if t := c.outTypes[sel]; len(t) == 1 {
 		return t[0]
 	}
 	return ""
@@ -1156,6 +1173,20 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if untypedBranch(q.Select.Targets[0].Expr) {
 		return "text"
 	}
+	if typ, ok := c.subTypes[q]; ok {
+		return typ
+	}
+	typ := c.checkedSubqueryType(q, sc)
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	c.subTypes[q] = typ
+	return typ
+}
+
+// checkedSubqueryType is subqueryType's type of q, a subquery of one
+// target, from the walk's record or from checking q.
+func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if _, walked := c.outNamed[q.Select]; walked {
 		// The walk has checked the subquery already, in this scope, and
 		// checking it again here would double the work at each level of
@@ -1169,7 +1200,10 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 		}
 		return ""
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes}
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -1737,6 +1771,11 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 			// as integer input, which Postgres fails, with a message that
 			// depends on the driver.
 			return c.x.unsupported(fmt.Sprintf("a float with a fraction bound to a parameter taken as %s", e.Type))
+		}
+		if c.x.tx.db.baseType(e.Type) == "uuid" && isParam(e.X) && derefValue(v) != nil && !isText(v) {
+			// The cast leaves a value of another type to the run, where the
+			// driver refuses it or sends text Postgres fails as uuid input.
+			return c.x.unsupported(fmt.Sprintf("a %T bound to a parameter taken as a uuid", derefValue(v)))
 		}
 		if _, isBool := derefValue(v).(bool); isBool && rank > 0 && isParam(e.X) {
 			// A cast makes a boolean 1 or 0, where the driver sends it as

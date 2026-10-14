@@ -914,6 +914,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT (SELECT u FROM t) WHERE false UNION SELECT 'bad' WHERE false`, nil},
 		{`VALUES ((SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`SELECT (SELECT (SELECT (SELECT u FROM t))) WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES ((SELECT u FROM t UNION ALL SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 	} {
@@ -943,6 +944,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce(coalesce('bad', NULL), NULL) END`,
 		`SELECT coalesce('1', NULL) WHERE false UNION SELECT 1 WHERE false`,
+		`VALUES ((SELECT 'bad' WHERE false)) UNION SELECT 1 WHERE false`,
 		`INSERT INTO t (id, u) SELECT *, 'bad' FROM (SELECT 1) s WHERE false`,
 		`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`,
 		// Postgres resolves a column of untyped queries alone to text,
@@ -1009,6 +1011,14 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, true); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a boolean for an integer column: got %v, want unsupported", err)
 	}
+	for _, v := range []any{int64(1), true} {
+		if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("a %T for a uuid column: got %v, want unsupported", v, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, nil); err != nil {
+		t.Errorf("NULL for a uuid column: got %v, want no error", err)
+	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)
 	}
@@ -1050,6 +1060,17 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want no error", tc.query, err)
 		}
 	}
+}
+
+// The branch checks resolve a scalar subquery's type before the walk
+// reaches it, so each level must resolve its subqueries once: resolving
+// them again at every level above took minutes at this depth.
+func TestNestedSubqueryTypesResolvedOnce(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	q := "SELECT " + strings.Repeat("coalesce((SELECT ", 16) + "id FROM t" + strings.Repeat("), 0)", 16) + " FROM t"
+	mustExec(t, db, q)
 }
 
 func TestEnumInputReadBeforeAnyRow(t *testing.T) {
