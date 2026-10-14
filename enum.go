@@ -97,6 +97,9 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 		if _, ok := db.domainBases[name]; ok {
 			return unsupported(fmt.Sprintf("an enum named %q, as a domain is", name), "")
 		}
+		if db.otherTypes[name] {
+			return unsupported(fmt.Sprintf("an enum named %q, as another type is", name), "")
+		}
 		t = &enumType{name: name, qualified: db.qualifyDomain(ch.Table, name)}
 		for _, l := range ch.Labels {
 			if t.lookup(l) != nil {
@@ -108,6 +111,9 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 			db.enums = map[string]*enumType{}
 		}
 		db.enums[name] = t
+		return nil
+	case t == nil && ch.Drop:
+		delete(db.otherTypes, name)
 		return nil
 	case t == nil || !db.namesEnum(t, ch.Table, name):
 		// Another kind of type, which detest does not keep, or an enum of

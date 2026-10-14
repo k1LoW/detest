@@ -603,6 +603,26 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		}
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name}}, Labels: nodeNames(s.CreateEnumStmt.Vals)}}, true, nil
+	case *pg.Node_CompositeTypeStmt, *pg.Node_CreateRangeStmt, *pg.Node_DefineStmt:
+		// detest keeps no other kind of type than an enum, but knows the
+		// name, which an enum of it in another schema would be taken for.
+		var name string
+		switch s := n.Node.(type) {
+		case *pg.Node_CompositeTypeStmt:
+			name = s.CompositeTypeStmt.GetTypevar().GetRelname()
+		case *pg.Node_CreateRangeStmt:
+			if parts := nodeNames(s.CreateRangeStmt.TypeName); len(parts) > 0 {
+				name = parts[len(parts)-1]
+			}
+		case *pg.Node_DefineStmt:
+			if parts := nodeNames(s.DefineStmt.Defnames); s.DefineStmt.Kind == pg.ObjectType_OBJECT_TYPE && len(parts) > 0 {
+				name = parts[len(parts)-1]
+			}
+		}
+		if name == "" {
+			return nil, true, nil
+		}
+		return []sqlir.SchemaChange{{Table: name, Object: "type", Create: true, Columns: []sqlir.ColumnDef{{Name: name}}}}, true, nil
 	case *pg.Node_AlterObjectSchemaStmt:
 		// An enum keeps the schema it is in; other objects keep none.
 		a := s.AlterObjectSchemaStmt
@@ -632,7 +652,6 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
 		*pg.Node_AlterDefaultPrivilegesStmt,
-		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
 		*pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
 		*pg.Node_CreateStatsStmt:
 		return nil, true, nil

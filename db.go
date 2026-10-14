@@ -170,8 +170,11 @@ type DB struct {
 	// domainAliases are the base types of the names domains were renamed
 	// from, which the casts stored before the rename still name.
 	domainAliases map[string]string
-	// enums are the Postgres enums, by their bare name.
-	enums map[string]*enumType
+	// enums are the Postgres enums, by their bare name, and otherTypes the
+	// bare names of the other types a schema declares, which detest does
+	// not keep but which share the names of enums.
+	enums      map[string]*enumType
+	otherTypes map[string]bool
 	// declaredCache is declaresCollations, keptCache keptCollations and
 	// keptBranchCache keptBranchTypes, dropped by every schema change.
 	declaredCache   *bool
@@ -1250,6 +1253,17 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	switch {
 	case ch.Object == "enum":
 		return db.applyEnum(ch, tx)
+	case ch.Object == "type":
+		name := ch.Columns[0].Name
+		if db.enumOf(name) != nil {
+			// detest knows a type by its bare name, which the enum has.
+			return unsupported(fmt.Sprintf("a type named %q, as an enum is", name), "")
+		}
+		if db.otherTypes == nil {
+			db.otherTypes = map[string]bool{}
+		}
+		db.otherTypes[name] = true
+		return nil
 	case ch.Object == "domain" && ch.RenameTo != "" && db.enumOf(ch.Columns[0].Name) != nil:
 		// A column of the enum keeps the type's old name.
 		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO", ch.Columns[0].Name), "")

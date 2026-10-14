@@ -180,6 +180,16 @@ func TestEnumSchemaChanges(t *testing.T) {
 		t.Errorf("a label a default names, renamed: %v", err)
 	}
 	mustExec(t, db, `ALTER TYPE tone RENAME VALUE 'high' TO 'loud'`)
+	// A type of another kind shares the bare name an enum is known by.
+	for _, q := range []string{
+		`CREATE TYPE other2.shade AS (r int); CREATE TYPE shade AS ENUM ('a')`,
+		`CREATE TYPE hue AS ENUM ('a'); CREATE TYPE other2.hue AS (r int)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: want unsupported, got %v", q, err)
+		}
+	}
+	mustExec(t, db, `CREATE TYPE tint AS (r int); DROP TYPE tint; CREATE TYPE tint AS ENUM ('a')`)
 	// SET SCHEMA moves the enum, which an ALTER of the new name then finds.
 	mustExec(t, db, `CREATE SCHEMA other; ALTER TYPE public.spare SET SCHEMA other; ALTER TYPE other.spare ADD VALUE 'e'`)
 	mustExec(t, db, `INSERT INTO keyless VALUES (2, 'e')`)
