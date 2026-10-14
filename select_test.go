@@ -932,6 +932,12 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
+	// A cast detest refuses is refused over no row too, as it would run
+	// with other semantics.
+	mustExec(t, db, `CREATE DOMAIN positive AS int CHECK (VALUE > 0)`)
+	if _, err := db.Exec(`SELECT 'abc'::positive FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a cast to a constrained domain over no row: got %v, want unsupported", err)
+	}
 	// Postgres gives a parameter one type for the statement, so one
 	// written to columns of two families fails whatever is bound to it.
 	for _, q := range []string{
@@ -993,6 +999,11 @@ func TestEnumInputReadBeforeAnyRow(t *testing.T) {
 		if _, err := db.Exec(q, "ok"); err != nil {
 			t.Errorf("%s with a label: got %v, want no error", q, err)
 		}
+	}
+	// A parameter takes one type for the statement, which an enum shares
+	// with no other.
+	if _, err := db.Exec(`SELECT CASE WHEN true THEN m ELSE $1 END, CASE WHEN true THEN id ELSE $1 END FROM p WHERE false`, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a parameter taken as an enum and an integer: got %v, want unsupported", err)
 	}
 	// An enum resolves with no other type in a set operation.
 	if _, err := db.Exec(`SELECT m FROM p WHERE false UNION SELECT 1 WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {

@@ -145,11 +145,10 @@ type paramUses struct {
 	mixed    map[int]bool     // taken as a scalar of two families
 }
 
-// comparedWith records a type the scalar parameter i takes, from an operand
-// it is compared with or from where it stands, as the column it is written
-// to.
-func (u *paramUses) comparedWith(i int, typ string) {
-	f := paramFamily(typ)
+// comparedWith records the family f, by paramTypeFamily, of a type the
+// scalar parameter i takes, from an operand it is compared with or from
+// where it stands, as the column it is written to.
+func (u *paramUses) comparedWith(i int, f string) {
 	if f == "" {
 		return
 	}
@@ -161,6 +160,16 @@ func (u *paramUses) comparedWith(i int, typ string) {
 	} else if first != f {
 		u.mixed[i] = true
 	}
+}
+
+// paramTypeFamily is paramFamily, with an enum a family of its own, as
+// Postgres gives a parameter one type for the statement and an enum casts
+// implicitly to no other type.
+func (c *columnChecker) paramTypeFamily(typ string) string {
+	if t := c.x.tx.db.enumOf(typ); t != nil {
+		return "enum " + t.qualified
+	}
+	return paramFamily(typ)
 }
 
 // paramFamily groups the types whose values detest reads a parameter
@@ -1468,7 +1477,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	}
 	typ := expressionType(b, sc.columnType)
 	if p, ok := a.(*sqlir.Param); ok {
-		c.params.comparedWith(p.Index, typ)
+		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
 	}
 	sample := c.x.tx.db.typeSample(typ)
@@ -1504,7 +1513,7 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 	if p, ok := e.(*sqlir.Param); ok {
 		// Postgres gives the parameter this type for the whole statement,
 		// as it does where the parameter is compared.
-		c.params.comparedWith(p.Index, typ)
+		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
 }
@@ -1529,8 +1538,10 @@ func (c *columnChecker) untypedValue(e sqlir.Expr) (any, bool) {
 // the statement runs, as Postgres converts a literal when it plans the
 // statement and a parameter when it binds it, so that 'bad'::uuid fails
 // over an empty table too. The cast is evaluated as the run evaluates it,
-// and only the server's errors are raised here; a form detest does not read
-// is left to the run, which refuses it if a row reaches it.
+// and its errors are raised here, the server's and the refusals of a form
+// detest cannot run alike, as a refused cast would run with other semantics
+// whether or not a row reaches it. An expression detest does not evaluate
+// is left to the run, which refuses it where a row reaches it.
 func (c *columnChecker) castInput(e *sqlir.Cast) {
 	if !untypedExpr(e.X) {
 		return
@@ -1539,7 +1550,7 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 		if _, ok := c.untypedValue(e.X); !ok {
 			return nil
 		}
-		if _, err := c.x.eval(e, nil); errors.As(err, new(*sqlir.DBError)) {
+		if _, err := c.x.eval(e, nil); err != nil && !errors.As(err, new(errUnknownExpr)) {
 			return err
 		}
 		return nil
