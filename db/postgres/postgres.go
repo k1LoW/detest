@@ -2641,10 +2641,8 @@ func figureColname(n *pg.Node) (string, int) {
 		case pg.SubLinkType_ARRAY_SUBLINK:
 			return "array", 2
 		case pg.SubLinkType_EXPR_SUBLINK:
-			if t := v.SubLink.Subselect.GetSelectStmt().GetTargetList(); len(t) > 0 {
-				if name := t[0].GetResTarget().GetName(); name != "" {
-					return name, 2
-				}
+			if name, ok := subselectName(v.SubLink.Subselect.GetSelectStmt()); ok {
+				return name, 2
 			}
 		}
 	case *pg.Node_CaseExpr:
@@ -2670,6 +2668,35 @@ func figureColname(n *pg.Node) (string, int) {
 		}
 	}
 	return "", 0
+}
+
+// subselectName is the name of the column a scalar subquery gives, which
+// Postgres reads off the subquery once it has transformed it: the name of
+// its first item, of the leftmost query of a set operation, or column1 of
+// VALUES. ok is false for a *, whose columns the parser does not know.
+func subselectName(sel *pg.SelectStmt) (string, bool) {
+	for sel != nil && sel.Op != pg.SetOperation_SETOP_NONE {
+		sel = sel.Larg
+	}
+	switch {
+	case sel == nil:
+		return "", false
+	case len(sel.ValuesLists) > 0:
+		return "column1", true
+	case len(sel.TargetList) == 0:
+		return "", false
+	}
+	rt := sel.TargetList[0].GetResTarget()
+	if rt.Name != "" {
+		return rt.Name, true
+	}
+	if cr := rt.Val.GetColumnRef(); cr != nil && len(cr.Fields) > 0 && cr.Fields[len(cr.Fields)-1].GetAStar() != nil {
+		return "", false
+	}
+	if name := columnName(rt.Val); name != "" {
+		return name, true
+	}
+	return "?column?", true
 }
 
 // sqlValueFunctionNames are the names of the SQL value functions, as
