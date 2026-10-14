@@ -908,6 +908,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT greatest(n, $1) FROM t`, []any{"abc"}},
 		{`SELECT u FROM t WHERE false UNION SELECT 'bad' WHERE false`, nil},
 		{`SELECT 'bad' WHERE false UNION ALL SELECT u FROM t`, nil},
+		{`SELECT * FROM t WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k' WHERE false`, nil},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -923,6 +924,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// Postgres resolves it.
 		`SELECT k FROM t WHERE false UNION SELECT now()::date WHERE false`,
 		`SELECT now()::date WHERE false UNION SELECT now()::timestamp WHERE false`,
+		// The check knows a *'s column types by position only over one
+		// declared table.
+		`SELECT * FROM t JOIN t t2 ON true WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k', 1, 'bad', 1, true, 1.5, 'k' WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -959,6 +963,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
 		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
+		// The inner pair widens to an integer, which takes 40000.
+		{`SELECT 1::smallint WHERE false UNION SELECT 2 WHERE false UNION SELECT '40000' WHERE false`, nil},
+		{`SELECT * FROM t UNION SELECT * FROM t`, nil},
 		// The branches widen to an integer, which takes 40000.
 		{`SELECT CASE WHEN true THEN 1::smallint WHEN false THEN 2 ELSE '40000' END`, nil},
 		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},

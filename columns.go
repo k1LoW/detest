@@ -784,10 +784,15 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		seen[name] = true
 		named[name] = typ
 	}
-	star := false
+	star, starKnown := false, true
 	for _, t := range sel.Targets {
 		if t.Star {
 			star = true
+			if cols := c.starColumns(sel, t); cols != nil {
+				types = append(types, cols...)
+			} else {
+				starKnown = false
+			}
 			for alias, cols := range sc.items {
 				if t.Table != "" && alias != t.Table {
 					continue
@@ -813,10 +818,38 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes = map[*sqlir.SelectStmt][]string{}
 		c.outNamed = map[*sqlir.SelectStmt]map[string]string{}
 	}
-	if !star {
+	if !star || starKnown {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
+}
+
+// starColumns are the types of the columns the * t of sel gives, in order,
+// when its one FROM item is a table the schema declares, the order of whose
+// columns the check knows, and nil otherwise.
+func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+	from := sel.From
+	if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || len(from.Columns) > 0 {
+		return nil
+	}
+	if t.Table != "" && t.Table != targetAlias(from.Name, from.Alias) {
+		return nil
+	}
+	db := c.x.tx.db
+	if _, cte := c.cteTypesOf(from.Name); cte || db.views[db.resolve(from.Name)] != nil {
+		return nil
+	}
+	def := db.defs[db.resolve(from.Name)]
+	if def == nil {
+		return nil
+	}
+	types := make([]string, len(def.columns))
+	for i, col := range def.columns {
+		if typ := def.types[col]; typ != "unresolved column type" {
+			types[i] = typ
+		}
+	}
+	return types
 }
 
 // noteSetOpColumns records the columns of the set operation sel its
@@ -844,6 +877,11 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 		pair := lt
 		if pair == "" || rt == "bytea" && rt != "" {
 			pair = rt
+		}
+		if pair == "" && (starQuery(sel.Larg) || starQuery(sel.Rarg)) && (untypedColumn(sel.Larg, i) || untypedColumn(sel.Rarg, i)) {
+			// The column of a * has a type the check does not know by
+			// position, which Postgres reads the other query's input by.
+			return c.x.unsupported("a set operation of a * against a string literal or a parameter")
 		}
 		// Only the queries of this pair are read by its type. Those of a
 		// nested set operation took that one's, as Postgres resolves the
@@ -873,6 +911,20 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	}
 	c.x.setOpColumns[sel] = cols
 	return nil
+}
+
+// starQuery reports whether q is a query whose select list has a *.
+func starQuery(q *sqlir.SelectStmt) bool {
+	return q != nil && q.SetOp == "" && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star })
+}
+
+// untypedColumn reports whether the i-th column of q, a query that is no set
+// operation, is a string literal or a parameter.
+func untypedColumn(q *sqlir.SelectStmt, i int) bool {
+	if q == nil || q.SetOp != "" {
+		return false
+	}
+	return slices.ContainsFunc(setOpColumnExprs(q, i), untypedExpr)
 }
 
 // setOpBranchType is the type of the i-th column of q, a query of a set
@@ -960,6 +1012,10 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 			if t != "" {
 				out[i] = t
 			}
+		case numberRank[out[i]] > 0 && numberRank[t] > numberRank[out[i]], timeRank[out[i]] > 0 && timeRank[t] > timeRank[out[i]]:
+			// Numbers, and dates and timestamps, meet at the widest, as
+			// they do in commonType.
+			out[i] = t
 		}
 	}
 	return out
