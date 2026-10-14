@@ -112,8 +112,9 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.n, $1), coalesce(s.name, $1) FROM (SELECT * FROM t) s`, "5"},
 		{`SELECT coalesce(n, $1) FROM t WHERE $1 = '8'::text`, "8"},
 		{`SELECT coalesce($1, 'x'), coalesce(s.n, $1) FROM (SELECT * FROM t) s`, "5"},
-		// Postgres binds it as the number, whose text another use reads.
+		// Postgres binds it as the number, which another use reads.
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s WHERE $1::text = '5'`, "05"},
+		{`SELECT coalesce(s.n, $1), $1 / 2 FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},
 		{`SELECT coalesce(n, $1) FROM t`, 1.5},
 	} {

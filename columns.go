@@ -84,6 +84,8 @@ type columnChecker struct {
 	untyped []func() error
 	// timeConflict names a parameter given two date and time types.
 	timeConflict string
+	// numberParams are the parameters among number branches.
+	numberParams map[int]bool
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -123,6 +125,20 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.timeConflict != "" {
 		return x.unsupported(c.timeConflict)
+	}
+	if len(c.numberParams) > 0 {
+		uses := map[int]int{}
+		for _, p := range sqlir.Params(stmt) {
+			uses[p.Index]++
+		}
+		for i := range c.numberParams {
+			if uses[i] > 1 {
+				// Postgres binds the parameter as the number the branches
+				// resolve to, which every other use then reads, as $1 / 2
+				// or $1::text. detest converts it on the branch only.
+				return x.unsupported(fmt.Sprintf("parameter $%d among number branches and used again", i+1))
+			}
+		}
 	}
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
@@ -1563,6 +1579,12 @@ func (c *columnChecker) branchParams(exprs []sqlir.Expr, typ string) {
 	typ = resolvedType(typ, exprs)
 	for _, e := range exprs {
 		if p, ok := e.(*sqlir.Param); ok {
+			if numberRank[typ] > 0 {
+				if c.numberParams == nil {
+					c.numberParams = map[int]bool{}
+				}
+				c.numberParams[p.Index] = true
+			}
 			c.params.comparedWith(p.Index, typ)
 		}
 	}

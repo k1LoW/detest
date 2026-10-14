@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -744,15 +743,6 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 				continue
 			case string:
 				s = v
-				if m := canonicalNumberText.FindStringSubmatch(v); m == nil || k == "integer" && m[2] != "" {
-					// Postgres binds the parameter as the number, so
-					// another use of it, such as $1::text, reads the
-					// number's text, which detest does not give it.
-					if _, err := x.branchNumber(s, k == "numeric"); err != nil {
-						return err
-					}
-					return x.unsupported(fmt.Sprintf("the parameter text %q among number branches, which the number renders otherwise", v))
-				}
 			default:
 				// The driver sends the value as the number's input,
 				// which detest does not model for another type, or for
@@ -858,10 +848,6 @@ func (x *sqlExec) untypedText(e sqlir.Expr) (string, bool) {
 	}
 	return "", false
 }
-
-// canonicalNumberText matches number text that Postgres renders back as
-// it is, as an integer or, with a fraction, as a numeric.
-var canonicalNumberText = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 
 // numberBranchType is the number kind noteNumberBranches recorded for e,
 // "" for any other.
