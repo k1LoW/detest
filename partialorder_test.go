@@ -465,7 +465,9 @@ func fkParentModel(t *testing.T, s *Sim) {
 
 // uniqueModel declares a table with a unique column holding (1, 'a') and a
 // table the processes record what they were refused in, and returns run,
-// which runs stmts in a transaction and records who was refused.
+// which runs stmts in a transaction and records who was refused. A
+// statement prefixed with "?" is expected to fail, and the transaction goes
+// on after it.
 func uniqueModel(t *testing.T, s *Sim) (run func(p *Proc, who string, stmts ...string) error) {
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, "CREATE TABLE s (id int PRIMARY KEY, tag text UNIQUE)")
@@ -477,7 +479,8 @@ func uniqueModel(t *testing.T, s *Sim) (run func(p *Proc, who string, stmts ...s
 			return err
 		}
 		for _, stmt := range stmts {
-			if _, err := tx.ExecContext(p.Context(), stmt); err != nil {
+			expected, ok := strings.CutPrefix(stmt, "?")
+			if _, err := tx.ExecContext(p.Context(), expected); err != nil && !ok {
 				_ = tx.Rollback()
 				var dbErr *DBError
 				if !errors.As(err, &dbErr) {
@@ -524,7 +527,7 @@ func uniqueSavepointModel(abort bool) func(t *testing.T, s *Sim) {
 		s.Manual("changer", 1, func(p *Proc) error {
 			stmts := []string{"SELECT id FROM s WHERE id = 1 FOR UPDATE", "SAVEPOINT sp", "UPDATE s SET tag = 'b' WHERE id = 1"}
 			if abort {
-				stmts = append(stmts, "SELECT 1 / 0")
+				stmts = append(stmts, "?SELECT 1 / 0")
 			}
 			return run(p, "changer", append(stmts, "ROLLBACK TO SAVEPOINT sp", "UPDATE s SET tag = 'c' WHERE id = 1")...)
 		})
