@@ -151,6 +151,11 @@ func TestEnumSchemaChanges(t *testing.T) {
 		t.Error("a label added twice must fail")
 	}
 	mustExec(t, db, `ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok'`)
+	// A name in another schema is another type, which detest does not keep.
+	mustExec(t, db, `DROP TYPE IF EXISTS other.mood`)
+	if _, err := db.Exec(`INSERT INTO p VALUES (9, 'glad')`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("the enum after a DROP of another schema's type of its name: %v", err)
+	}
 	mustExec(t, db, `ALTER TYPE mood ADD VALUE 'meh' AFTER 'sad'`)
 	if got := queryIDs(t, db, `SELECT id FROM p WHERE m > 'meh' ORDER BY m`); !reflect.DeepEqual(got, []int64{3, 1}) {
 		t.Errorf("after the added label: %v", got)

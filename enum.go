@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -13,8 +14,9 @@ import (
 // before it changes the values already stored, as Postgres stores a label's
 // identity rather than its text.
 type enumType struct {
-	name   string
-	labels []*enumLabel
+	name      string
+	qualified string // the schema-qualified name the type was created as
+	labels    []*enumLabel
 }
 
 type enumLabel struct{ name string }
@@ -94,7 +96,7 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
 		if _, ok := db.domainBases[name]; ok {
 			return unsupported(fmt.Sprintf("an enum named %q, as a domain is", name), "")
 		}
-		t = &enumType{name: name}
+		t = &enumType{name: name, qualified: db.qualifyDomain(ch.Table, name)}
 		for _, l := range ch.Labels {
 			if t.lookup(l) != nil {
 				return fmt.Errorf("detest: enum label %q used more than once", l)
@@ -106,8 +108,11 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
 		}
 		db.enums[name] = t
 		return nil
-	case t == nil:
-		// Another kind of type, which detest does not keep.
+	case t == nil || !db.namesEnum(t, ch.Table, name):
+		// Another kind of type, which detest does not keep, or an enum of
+		// the name in another schema than the one detest knows, which
+		// Postgres does not find: DROP TYPE IF EXISTS of it does nothing,
+		// and any other statement on it fails the schema.
 		return nil
 	case ch.Drop:
 		if ch.Cascade {
@@ -155,6 +160,16 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
 	}
 	t.labels = slices.Insert(t.labels, at, &enumLabel{ch.AddLabel})
 	return nil
+}
+
+// namesEnum reports whether table, the name a DROP or an ALTER gives a type
+// named bare, is t: the qualified name t was created as, or a bare name
+// Postgres finds t by, its schema being on the search path.
+func (db *DB) namesEnum(t *enumType, table, bare string) bool {
+	if table != bare && strings.HasSuffix(table, "."+bare) {
+		return table == t.qualified
+	}
+	return slices.Contains(db.searchPath(), strings.TrimSuffix(t.qualified, "."+bare))
 }
 
 // enumKeyedRows is a table that holds rows and has a column of the enum
