@@ -938,6 +938,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT greatest(u, k) FROM t`,
 		// A nested COALESCE of untyped arguments alone is text.
 		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
+		`SELECT CASE WHEN true THEN 1 ELSE coalesce(coalesce('bad', NULL), NULL) END`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
@@ -964,6 +965,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT coalesce(n, $1), coalesce(1::bigint, $1) FROM t`,
 		`SELECT $1::text, CASE WHEN true THEN 0 ELSE $1::int END`,
 		`SELECT $1::int, CASE WHEN false THEN $1::smallint END`,
+		`SELECT coalesce($1, NULL), CASE WHEN true THEN 0 ELSE $1::int END`,
+		`INSERT INTO t (id, n) VALUES (1, $1) RETURNING CASE WHEN true THEN 0 ELSE $1::smallint END`,
+		// Postgres fails a parameter VALUES writes to two types (42P08).
+		`INSERT INTO t (id, k, u) VALUES (1, $1, $1)`,
 	} {
 		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)

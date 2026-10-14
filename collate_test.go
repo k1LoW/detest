@@ -374,7 +374,9 @@ func TestBytesAsText(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, payload bytea)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $1), (2, $2, $2)`, []byte("a"), []byte("B"))
+	// One parameter per column, as Postgres fails one written to a text
+	// and a bytea column (42P08).
+	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $2), (2, $3, $4)`, []byte("a"), []byte("a"), []byte("B"), []byte("B"))
 	// A bytea literal, which detest may hold as a string, and a CREATE
 	// TABLE AS of it keep byte order.
 	mustExec(t, db, `CREATE TABLE lit (id int PRIMARY KEY, payload bytea)`)

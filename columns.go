@@ -917,6 +917,9 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 			// position, which Postgres reads the other query's input by.
 			return c.x.unsupported("a set operation of a * against a string literal or a parameter")
 		}
+		// Untyped queries alone resolve to text, which the parameters among
+		// them take.
+		pair = resolvedType(pair, setOpColumnExprs(sel, i))
 		// Only the queries of this pair are read by its type. Those of a
 		// nested set operation took that one's, as Postgres resolves the
 		// pairs from the inside out.
@@ -1421,7 +1424,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 				c.timeParams(typ, caseBranches(e)...)
 				for _, b := range caseBranches(e) {
-					c.inputAs(b, typ)
+					c.inputAs(b, resolvedType(typ, caseBranches(e)))
 				}
 				c.x.noteType(e, typ)
 				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
@@ -1455,7 +1458,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.timeParams(typ, e.Args...)
 					if e.Name != "nullif" { // read as compared, above
 						for _, a := range e.Args {
-							c.inputAs(a, typ)
+							c.inputAs(a, resolvedType(typ, e.Args))
 						}
 					}
 					c.x.noteType(e, typ)
@@ -1676,8 +1679,16 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 		cols = def.columns
 	}
 	for i, e := range exprs {
-		if i < len(cols) {
-			c.timeParams(def.types[cols[i]], e)
+		if i >= len(cols) {
+			continue
+		}
+		typ := def.types[cols[i]]
+		c.timeParams(typ, e)
+		if p, ok := e.(*sqlir.Param); ok {
+			// A parameter written to a column takes its type for the
+			// statement, in VALUES too, whose input checkTypes reads.
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+			c.numberParam(p, typ)
 		}
 	}
 }
@@ -1756,10 +1767,11 @@ func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope) error {
 	first := ""
 	for _, e := range exprs {
 		typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
-		if inner := nestedBranches(e); typ == "" && inner != nil {
+		if typ == "" && nestedBranches(e) != nil && untypedBranch(e) {
 			// Postgres resolves a nested CASE or COALESCE of untyped
-			// branches alone to text before the branches around it.
-			typ = resolvedType("", inner)
+			// branches alone, at any depth, to text before the branches
+			// around it.
+			typ = "text"
 		}
 		switch {
 		case typ == "" || typ == "unresolved column type":
