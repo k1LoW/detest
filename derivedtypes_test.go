@@ -28,6 +28,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT greatest(s.n, 1) FROM (SELECT * FROM t) s ORDER BY s.id`, []string{"5", "1"}},
 		{`SELECT coalesce(u.name, 'x') FROM (SELECT name FROM t UNION SELECT name FROM t) u ORDER BY 1`, []string{"a", "x"}},
 		{`SELECT coalesce(u.name, 'x') FROM (SELECT name FROM t UNION ALL SELECT NULL) u ORDER BY 1`, []string{"a", "x", "x"}},
+		{`SELECT coalesce(u.n, 0) FROM (SELECT NULL AS n UNION ALL (SELECT NULL UNION ALL SELECT n FROM t)) u ORDER BY 1`, []string{"0", "0", "0", "5"}},
+		{`SELECT coalesce(u.name, 'x') FROM (SELECT 'b' AS name UNION ALL SELECT name FROM t) u ORDER BY 1`, []string{"a", "b", "x"}},
 		{`SELECT coalesce(g, 0) FROM generate_series(1, 2) AS g ORDER BY 1`, []string{"1", "2"}},
 		{`SELECT coalesce(k, 0) FROM generate_series(1, 2) AS g(k) ORDER BY 1`, []string{"1", "2"}},
 		{`SELECT * FROM generate_series(1, 2) g ORDER BY 1 DESC`, []string{"2", "1"}},
@@ -47,8 +49,15 @@ func TestDerivedColumnTypes(t *testing.T) {
 	}
 	// Queries of a set operation that disagree, or one of a type the check
 	// does not know, leave the column unresolved, as it may be an interval.
+	// Postgres resolves a pair of NULLs, or of CASE or COALESCE over them,
+	// to text, which an integer does not join, and converts a string
+	// literal beside an interval, which detest does not.
 	for _, q := range []string{
 		`SELECT coalesce(u.v, 'x') FROM (SELECT id AS v FROM t UNION SELECT n::int8 FROM t) u`,
+		`SELECT coalesce(u.v, 0) FROM (SELECT NULL AS v UNION ALL SELECT NULL UNION ALL SELECT 1) u`,
+		`SELECT coalesce(u.v, 0) FROM (SELECT coalesce(NULL, NULL) AS v UNION ALL SELECT 1) u`,
+		`SELECT coalesce(u.v, interval '0 days') FROM (SELECT NULL::interval AS v UNION ALL SELECT 'bogus') u`,
+		`SELECT coalesce(u.v, 0) FROM (SELECT n AS v FROM t UNION ALL SELECT '5') u`,
 		`SELECT coalesce(g, 0) FROM generate_series($1, 2) AS g`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {

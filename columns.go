@@ -979,50 +979,88 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 }
 
 // agreedTypes are the types of the columns of the set operation sel by
-// position, where every query gives the column the same type or a string
-// literal, a parameter or NULL, which Postgres reads as that type; "" where
-// they give two or one the check does not know. setOpTypes takes the first
-// type one gives instead, which is not the type of int UNION numeric.
+// position, "" where the check does not know one. Postgres resolves a set
+// operation pair by pair, from the innermost, so each pair is resolved as
+// it would be. setOpTypes takes the first type a query gives instead, which
+// is not the type of int UNION numeric.
 func (c *columnChecker) agreedTypes(sel *sqlir.SelectStmt) []string {
-	var leaves []*sqlir.SelectStmt
-	var walk func(*sqlir.SelectStmt)
-	walk = func(s *sqlir.SelectStmt) {
-		if s.SetOp != "" && s.Larg != nil && s.Rarg != nil {
-			walk(s.Larg)
-			walk(s.Rarg)
-			return
-		}
-		leaves = append(leaves, s)
-	}
-	walk(sel)
 	n := len(outputNames(sel))
 	out := make([]string, n)
 	for i := range out {
-		typ, known := "", true
-		for _, l := range leaves {
-			types, ok := c.outTypes[l]
-			if !ok || len(types) != n || len(l.Values) > 0 {
-				return nil
-			}
-			e := l.Targets[i].Expr
-			if k, isConst := e.(*sqlir.Const); isConst && k.Value == nil || untypedBranch(e) {
-				continue
-			}
-			if types[i] == "" || typ != "" && typ != types[i] {
-				known = false
-			}
-			typ = types[i]
+		typ, ok := c.pairType(sel, i, n)
+		if !ok {
+			return nil
 		}
-		switch {
-		case !known:
-		case typ == "":
-			// Postgres resolves a column of nothing but those to text.
-			out[i] = "text"
-		default:
-			out[i] = typ
+		if typ == untypedOperand || typ == nullOperand {
+			typ = "text"
 		}
+		out[i] = typ
 	}
 	return out
+}
+
+// The operands of a set operation Postgres has not given a type yet.
+const (
+	nullOperand    = "\x00null"
+	untypedOperand = "\x00untyped"
+)
+
+// pairType is the type of the i-th of the n columns of sel: a query's own,
+// or nullOperand or untypedOperand for a NULL, or a string literal or a
+// parameter, which take the type of the other side of the pair, and, for a
+// pair, the type Postgres resolves the two sides to. A string literal or a
+// parameter beside a type other than text is left unresolved, as detest
+// keeps it as the text it is where Postgres converts it, and two types
+// that differ are too. false when a query's types are not known by
+// position, as for a * or VALUES.
+func (c *columnChecker) pairType(sel *sqlir.SelectStmt, i, n int) (string, bool) {
+	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
+		l, ok := c.pairType(sel.Larg, i, n)
+		if !ok {
+			return "", false
+		}
+		r, ok := c.pairType(sel.Rarg, i, n)
+		if !ok {
+			return "", false
+		}
+		if l == nullOperand {
+			l, r = r, l
+		}
+		switch {
+		case r == nullOperand:
+			if l == nullOperand || l == untypedOperand {
+				// Postgres resolves the pair to text.
+				return "text", true
+			}
+			return l, true
+		case l == untypedOperand && r == untypedOperand:
+			return "text", true
+		case l == untypedOperand || r == untypedOperand:
+			other := l
+			if other == untypedOperand {
+				other = r
+			}
+			if other == "text" {
+				return "text", true
+			}
+			return "", true
+		case l == r:
+			return l, true
+		}
+		return "", true
+	}
+	types, ok := c.outTypes[sel]
+	if !ok || len(types) != n || len(sel.Values) > 0 {
+		return "", false
+	}
+	e := sel.Targets[i].Expr
+	if k, isConst := e.(*sqlir.Const); isConst && k.Value == nil {
+		return nullOperand, true
+	}
+	if untypedExpr(e) {
+		return untypedOperand, true
+	}
+	return types[i], true
 }
 
 // funcColumn is the name of the one column of the function in FROM t,

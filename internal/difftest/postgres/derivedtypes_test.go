@@ -24,6 +24,8 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT greatest(s.n, 1) FROM (SELECT * FROM t) s ORDER BY s.id`),
 			difftest.Q(0, `SELECT coalesce(u.name, 'x') FROM (SELECT name FROM t UNION SELECT name FROM t) u ORDER BY 1`),
 			difftest.Q(0, `SELECT coalesce(u.name, 'x') FROM (SELECT name FROM t UNION ALL SELECT NULL) u ORDER BY 1`),
+			difftest.Q(0, `SELECT coalesce(u.n, 0) FROM (SELECT NULL AS n UNION ALL (SELECT NULL UNION ALL SELECT n FROM t)) u ORDER BY 1`),
+			difftest.Q(0, `SELECT coalesce(u.name, 'x') FROM (SELECT 'b' AS name UNION ALL SELECT name FROM t) u ORDER BY 1`),
 			difftest.Q(0, `SELECT coalesce(g, 0) FROM generate_series(1, 2) AS g ORDER BY 1`),
 			difftest.Q(0, `SELECT coalesce(k, 0) FROM generate_series(1, 2) AS g(k) ORDER BY 1`),
 			difftest.Q(0, `SELECT * FROM generate_series(1, 2) g ORDER BY 1 DESC`),
