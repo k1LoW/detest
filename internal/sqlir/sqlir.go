@@ -94,6 +94,9 @@ type Join struct {
 type Target struct {
 	Expr  Expr
 	Alias string
+	// Name is the column name the dialect gives an item without an alias,
+	// such as Postgres's id for id::text, empty for targetName's.
+	Name  string
 	Star  bool   // SELECT * or t.*
 	Table string // qualifier of t.*
 }

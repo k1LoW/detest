@@ -2523,6 +2523,9 @@ func targetName(t sqlir.Target) string {
 	if t.Alias != "" {
 		return t.Alias
 	}
+	if t.Name != "" {
+		return t.Name
+	}
 	switch v := t.Expr.(type) {
 	case *sqlir.ColumnRef:
 		return v.Column
