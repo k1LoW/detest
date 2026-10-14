@@ -132,6 +132,29 @@ func (s *session) endTxContext() error {
 	return nil
 }
 
+// awaitTxEnd waits until database/sql has rolled back the transaction whose
+// context endTxContext ended. It does so from a goroutine of its own, and a
+// statement the next step sends before that runs in the transaction still,
+// where detest, which ends the transaction before its next step, refuses it
+// with sql.ErrTxDone. database/sql tells a done transaction only through a
+// statement, so a SELECT 1 is sent until one is refused; one that runs first
+// changes nothing.
+func (s *session) awaitTxEnd(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for {
+		_, err := s.tx.ExecContext(ctx, `SELECT 1`)
+		if errors.Is(err, sql.ErrTxDone) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("difftest: the transaction whose context ended was not rolled back: %w", ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 func (s *session) exec(ctx context.Context, st Step) (string, error) {
 	switch st.kind() {
 	case kindBegin:
@@ -424,6 +447,9 @@ func runReal(t *testing.T, b Backend, c Case, pauses map[int]time.Duration) stri
 		if st.CancelTx {
 			time.Sleep(pauses[k])
 			if err := sessions[st.Conn].endTxContext(); err != nil {
+				t.Fatalf("step %d: %v", k, err)
+			}
+			if err := sessions[st.Conn].awaitTxEnd(ctx); err != nil {
 				t.Fatalf("step %d: %v", k, err)
 			}
 			res[k].text = "OK"
