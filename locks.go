@@ -86,17 +86,23 @@ func (tx *Tx) writersOf(lk lockKey) []*Tx {
 }
 
 // wrote reports whether tx holds a version of what lk stands for as its
-// writer. The writes of a subtransaction an error aborted are dead at
-// once on Postgres, before ROLLBACK TO undoes them in tx, so an aborted
-// transaction is the writer of what it wrote before its last savepoint only.
+// writer, a row it is updating while the update's checks run included. The
+// writes of a subtransaction an error aborted are dead at once on Postgres,
+// before ROLLBACK TO undoes them in tx, so an aborted transaction is the
+// writer of what it wrote before its last savepoint only.
 func (tx *Tx) wrote(lk lockKey) bool {
 	if strings.HasPrefix(lk.table, "\x00unique\x00") {
 		return true
 	}
 	writes, deleted := tx.writes, tx.deleted
-	if tx.aborted && len(tx.saves) > 0 {
+	if tx.aborted {
+		if len(tx.saves) == 0 {
+			return false
+		}
 		sp := &tx.saves[len(tx.saves)-1]
 		writes, deleted = sp.writes, sp.deleted
+	} else if _, updating := tx.updating[lk]; updating {
+		return true
 	}
 	_, written := writes[lk]
 	return written || deleted[lk]

@@ -1950,7 +1950,8 @@ type Tx struct {
 	// other than a savepoint's.
 	started bool
 	// updating is the rows the transaction is updating, by their key, with
-	// their new values, while the checks of their secondary indexes run.
+	// their new values, while the checks of their indexes and foreign keys
+	// run.
 	updating map[lockKey]Row
 	// pendingLockTimeout is a Postgres session SET lock_timeout run in the
 	// transaction, which the session keeps only once the transaction
@@ -2497,6 +2498,7 @@ func (tx *Tx) savepoint(op, name string) error {
 // ROLLBACK: those taken since the innermost savepoint, or all of them.
 func (tx *Tx) abort() {
 	tx.aborted = true
+	tx.updating = nil // the failed statement's updates are not written
 	if tx.p != nil && tx.p.r.over() {
 		return // as release, while the processes of an ended run unwind
 	}

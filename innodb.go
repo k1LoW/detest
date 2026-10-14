@@ -191,11 +191,10 @@ func (tx *Tx) failStatement(m stmtMark, deadlock bool) {
 }
 
 // beginUpdate records that tx is updating the row under lk to row, whose
-// new index entries searches meet as tx writes them.
+// new index entries InnoDB's searches meet as tx writes them, and which a
+// Postgres duplicate check waits for as written, since Postgres writes the
+// new version before it checks the indexes.
 func (tx *Tx) beginUpdate(lk lockKey, row Row) {
-	if !tx.db.kind.InnoDB() {
-		return
-	}
 	if tx.updating == nil {
 		tx.updating = map[lockKey]Row{}
 	}

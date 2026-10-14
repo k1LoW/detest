@@ -318,6 +318,24 @@ var writeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "an insert of a unique value waits for an update of its row still in its own check",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 'a')`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(2, `BEGIN`),
+			difftest.S(2, `INSERT INTO u VALUES (5, 'x')`),
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE u SET email = 'x' WHERE id = 1`),
+			difftest.S(1, `INSERT INTO u VALUES (3, 'a')`),
+			difftest.S(2, `ROLLBACK`),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(1, `SELECT id, email FROM u ORDER BY id`),
+		},
+	},
+	{
 		Name: "a duplicate check stops waiting when the write it waits for is rolled back to a savepoint",
 		Schema: []string{
 			`CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE)`,
