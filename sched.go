@@ -1096,17 +1096,23 @@ func debugStack() string {
 	return string(buf[:n])
 }
 
+var debugSched = os.Getenv("DETEST_DEBUG") != ""
+
 // resume lets p run until its next yield, block or completion. A process that
 // blocks on a primitive detest does not model (a channel, a timer, a
 // WaitGroup) never reports back; resume detects that once the bubble is idle
 // and parks it as blocked outside, so other processes can run.
-var debugSched = os.Getenv("DETEST_DEBUG") != ""
-
 func (r *run) resume(p *Proc) {
 	r.current = p
 	r.began.Store(true)
 	if debugSched {
-		fmt.Fprintf(os.Stderr, "[detest] resume %s (state %d, gid %s)\n", p.name, p.state, p.gid)
+		// The process's goroutine sets its id as it starts, which the first
+		// resume may come before, so the id is read under the lock it is
+		// set under, empty until then.
+		r.gidMu.Lock()
+		gid := p.gid
+		r.gidMu.Unlock()
+		fmt.Fprintf(os.Stderr, "[detest] resume %s (state %d, gid %s)\n", p.name, p.state, gid)
 	}
 	p.resume <- struct{}{}
 	ev, ok := r.awaitEvent(p)
@@ -1699,9 +1705,10 @@ func (p *Proc) main() {
 		}
 		p.send(procEvent{kind: evDone, err: p.err})
 	}()
-	p.gid = goroutineID()
+	gid := goroutineID()
 	p.r.gidMu.Lock()
-	p.r.byGid[p.gid] = p
+	p.gid = gid
+	p.r.byGid[gid] = p
 	p.r.gidMu.Unlock()
 	p.wait() // a run that ends before the process first runs aborts it here
 	switch p.pt.kind {
