@@ -155,4 +155,10 @@ func TestEnumSchemaChanges(t *testing.T) {
 		t.Errorf("after the added label: %v", got)
 	}
 	mustExec(t, db, `CREATE TYPE spare AS ENUM ('a'); DROP TYPE spare; CREATE TYPE spare AS ENUM ('b')`)
+	mustExec(t, db, `CREATE TABLE keyed (m spare PRIMARY KEY)`)
+	mustExec(t, db, `ALTER TYPE spare RENAME VALUE 'b' TO 'c'`)
+	mustExec(t, db, `INSERT INTO keyed VALUES ('c')`)
+	if _, err := db.Exec(`ALTER TYPE spare RENAME VALUE 'c' TO 'd'`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a label renamed under rows keyed by it: %v", err)
+	}
 }

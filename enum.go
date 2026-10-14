@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -120,6 +121,11 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
 		delete(db.enums, name)
 		return nil
 	case ch.RenameLabel != [2]string{}:
+		if table := db.enumKeyedRows(name); table != "" {
+			// A row is stored under its key's text, which the rename
+			// would leave at the old label.
+			return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME VALUE while %s, whose primary key is of it, holds rows", name, relname(table)), "")
+		}
 		l := t.lookup(ch.RenameLabel[0])
 		if l == nil {
 			return fmt.Errorf("detest: %q is not an existing enum label", ch.RenameLabel[0])
@@ -149,6 +155,18 @@ func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
 	}
 	t.labels = slices.Insert(t.labels, at, &enumLabel{ch.AddLabel})
 	return nil
+}
+
+// enumKeyedRows is a table that holds rows and has a column of the enum
+// name in its primary key, or empty when none does.
+func (db *DB) enumKeyedRows(name string) string {
+	for _, table := range slices.Sorted(maps.Keys(db.defs)) {
+		def := db.defs[table]
+		if len(db.committed[table]) > 0 && slices.ContainsFunc(def.pk, func(c string) bool { return def.types[c] == name }) {
+			return table
+		}
+	}
+	return ""
 }
 
 // enumUsed reports whether a column of a table or a domain has the enum
