@@ -152,7 +152,7 @@ Each kind of server has its own package, which parses its SQL dialect with the s
 - Waits on locked rows, with the predicate re-checked on the new version after the wait, as Read Committed does
 - `NOWAIT`, `SKIP LOCKED` and `SET LOCAL lock_timeout`
 - Deadlock detection for cycles of row lock waits (40P01), and reports of waits the database cannot detect, through a mutex or an open transaction of the same process
-- Unique indexes, where a concurrent insert of the same value waits for the first transaction and then conflicts
+- Unique indexes, where an insert of a value waits for a transaction still inserting, updating or deleting a row that holds it, and then conflicts or goes ahead, while a transaction that only locked such a row does not make it wait
 - Savepoints, and a failed statement aborting its transaction (25P02)
 
 **Constraints**

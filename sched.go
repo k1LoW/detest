@@ -2172,7 +2172,11 @@ func (p *Proc) blockOnRow(w rowWait, holder *Tx) {
 	}
 	p.state = stateBlockedLock
 	p.waitRow = &w
-	p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
+	if w.writers {
+		p.r.note(p, "waits for %s, which wrote %s/%s", procName(holder.p), w.key.table, w.key.key)
+	} else {
+		p.r.note(p, "waits for a %s lock on %s/%s held by %s", w.mode, w.key.table, w.key.key, procName(holder.p))
+	}
 	p.send(procEvent{kind: evBlocked})
 	p.wait()
 }

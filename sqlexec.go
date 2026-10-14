@@ -1763,10 +1763,10 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		var existing, cur Row
 		var lk lockKey
 		// Postgres's DO NOTHING only waits for a transaction still writing
-		// the conflicting row or value and locks nothing, so a skipped row
-		// leaves the locks as they were before the conflict check. The
-		// check's lock on the key stays for DO UPDATE and for a plain
-		// insert, where it stands for the write that follows.
+		// the conflicting row or value, which findConflict does, and locks
+		// nothing, so a skipped row leaves the locks as they were before
+		// the conflict check, which took the entries of the arbiters it
+		// passed before the one that conflicted.
 		var heldLocks int
 		var heldModes map[lockKey]lockMode
 		skipUnlocked := ins.OnConflict != nil && ins.OnConflict.DoNothing && !x.tx.db.kind.InnoDB()
@@ -1778,13 +1778,15 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 			if existing, err = x.findConflict(table, ins.OnConflict, row); err != nil {
 				return nil, err
 			}
-			if existing == nil {
+			if existing == nil || skipUnlocked && x.tx.db.defs[table] != nil {
 				break
 			}
 			// The existing row is locked and re-read, following it if it
 			// moved. If it went meanwhile, the insert is tried again, as
-			// Postgres does. DO NOTHING and INSERT IGNORE wait as well, with
-			// the weakest lock that waits for a writer.
+			// Postgres does. INSERT IGNORE waits as well, and so does DO
+			// NOTHING on a table without a declared schema, whose conflict
+			// findConflict finds without waiting, with the weakest lock that
+			// waits for a writer.
 			mode := x.tx.db.updateLock(table, assignedColumns(ins.OnConflict.Set))
 			if ins.OnConflict.DoNothing {
 				mode = lockKeyShare
@@ -1925,6 +1927,16 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 				return nil, err
 			}
 			if dup != nil {
+				return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
+			}
+		}
+		if !noPK && !x.tx.db.kind.InnoDB() {
+			// Postgres's duplicate check waits for the key's writer, not for
+			// a transaction that only locked the row, and locks nothing.
+			if err := x.tx.awaitWriters(lk); err != nil {
+				return nil, err
+			}
+			if _, exists := x.tx.view(table, row.Key()); exists {
 				return nil, x.tx.db.duplicateKey(table, x.tx.db.pkConstraint(table))
 			}
 		}

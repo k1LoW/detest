@@ -158,6 +158,9 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 	if err != nil || !ok {
 		return nil, err
 	}
+	if !x.tx.db.kind.InnoDB() {
+		return x.claimUniquePostgres(table, u, vals, self)
+	}
 	if u.Primary {
 		// The primary key's entry is the row lock itself, which a plain INSERT
 		// of the same key takes too.
@@ -177,31 +180,29 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		}
 		return nil, nil
 	}
-	if x.tx.db.kind.InnoDB() {
-		// InnoDB checks a duplicate under a shared lock on the index record
-		// it finds, not on the row, so two inserts failing on the same value
-		// do not wait for each other, and a writer of the row's other columns
-		// does not wait for either.
-		dup, err := x.uniqueHolder(table, u, vals, self)
-		if err != nil {
+	// InnoDB checks a duplicate under a shared lock on the index record it
+	// finds, not on the row, so two inserts failing on the same value do not
+	// wait for each other, and a writer of the row's other columns does not
+	// wait for either.
+	dup, err := x.uniqueHolder(table, u, vals, self)
+	if err != nil {
+		return nil, err
+	}
+	if dup != nil {
+		if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockShare, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 			return nil, err
 		}
-		if dup != nil {
-			if err := x.tx.lockModeAs(uniqueLock(table, u, vals), lockShare, structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
-				return nil, err
-			}
-			dup, err := x.uniqueHolder(table, u, vals, self)
-			if err != nil || dup != nil {
-				// The shared lock is next-key, at Read Committed too, so it
-				// holds the gap before the duplicate's entry.
-				if def := x.tx.db.defs[table]; dup != nil && def != nil {
-					order := def.indexOrder(true)
-					if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
-						x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
-					}
+		dup, err := x.uniqueHolder(table, u, vals, self)
+		if err != nil || dup != nil {
+			// The shared lock is next-key, at Read Committed too, so it
+			// holds the gap before the duplicate's entry.
+			if def := x.tx.db.defs[table]; dup != nil && def != nil {
+				order := def.indexOrder(true)
+				if i := slices.IndexFunc(order, func(ix secIndex) bool { return ix.unique == u }); i >= 0 {
+					x.tx.gapAround(table, x.tx.indexKey(table, order[i]), dup, false)
 				}
-				return dup, err
 			}
+			return dup, err
 		}
 	}
 	// A writer of the same value that has not finished holds the record
@@ -209,8 +210,8 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 	if err := x.tx.lockImplicit(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key")); err != nil {
 		return nil, err
 	}
-	dup, err := x.uniqueHolder(table, u, vals, self)
-	if dup != nil && x.tx.db.kind.InnoDB() {
+	dup, err = x.uniqueHolder(table, u, vals, self)
+	if dup != nil {
 		// The lock waited for a writer that committed the value: the check
 		// holds the duplicate's record next-key in share mode instead.
 		x.tx.shareDuplicate(uniqueLock(table, u, vals), structKey(table, uniqueIndex(u), lockShare, "next-key"))
@@ -222,6 +223,78 @@ func (x *sqlExec) claimUnique(table string, u *sqlir.UniqueDef, row Row, self st
 		}
 	}
 	return dup, err
+}
+
+// claimUniquePostgres is claimUnique on Postgres, whose check reads the
+// index with a dirty snapshot. It waits for a transaction that inserted,
+// updated or deleted a version holding vals and has not finished, and not
+// for one that only locked such a row, and it takes the value's entry only
+// when no row holds the value, as the check locks nothing.
+func (x *sqlExec) claimUniquePostgres(table string, u *sqlir.UniqueDef, vals []any, self string) (Row, error) {
+	if err := x.tx.check(); err != nil {
+		return nil, err
+	}
+	entry := uniqueLock(table, u, vals)
+	if u.Primary {
+		entry = lockKey{table, encodeKey(vals)} // the primary key's entry is the row lock
+	}
+	if x.tx.p != nil {
+		x.tx.p.r.depLock(x.tx, entry)
+	}
+	for {
+		lk, err := x.uniqueWriter(table, u, vals, entry, self)
+		if err != nil {
+			return nil, err
+		}
+		if lk == nil {
+			break
+		}
+		if err := x.tx.awaitWriters(*lk); err != nil {
+			return nil, err
+		}
+	}
+	var dup Row
+	if u.Primary {
+		if ex, found := x.tx.view(table, entry.key); found && entry.key != self {
+			dup = ex
+		}
+	} else {
+		var err error
+		if dup, err = x.uniqueHolder(table, u, vals, self); err != nil {
+			return nil, err
+		}
+	}
+	if dup != nil {
+		return dup, nil
+	}
+	return nil, x.tx.lockImplicit(entry, lockStruct{})
+}
+
+// uniqueWriter returns a lock another transaction holds as the writer of a
+// version holding vals in the unique index u, nil when there is none: the
+// value's entry, which the transactions that inserted the value or changed
+// a row to it hold, or the lock of a visible row holding the value, which
+// its updater or deleter holds. For the primary key both are the row lock.
+func (x *sqlExec) uniqueWriter(table string, u *sqlir.UniqueDef, vals []any, entry lockKey, self string) (*lockKey, error) {
+	if len(x.tx.writersOf(entry)) > 0 {
+		return &entry, nil
+	}
+	if u.Primary {
+		return nil, nil
+	}
+	for _, r := range x.tx.selectNoYield(table, nil) {
+		if r.Key() == self {
+			continue
+		}
+		rvals, ok, err := x.uniqueValues(table, u, r)
+		if err != nil {
+			return nil, err
+		}
+		if lk := (lockKey{table, r.Key()}); ok && sameValues(rvals, vals) && len(x.tx.writersOf(lk)) > 0 {
+			return &lk, nil
+		}
+	}
+	return nil, nil
 }
 
 // uniqueIndex names the unique index u among a table's indexes.

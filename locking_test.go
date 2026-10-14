@@ -546,6 +546,98 @@ func TestDoNothingDoesNotDeadlockOnSkippedRow(t *testing.T) {
 	})
 }
 
+// A duplicate check waits only for the writers of the key, so an insert of a
+// key another transaction only locked fails or skips at once, and does not
+// deadlock with that transaction when it goes on to insert a key the first
+// one wrote.
+func TestDuplicateCheckDoesNotWaitForLocker(t *testing.T) {
+	for _, q := range []string{
+		`INSERT INTO s VALUES (1, 'z')`,
+		`INSERT INTO s VALUES (1, 'z') ON CONFLICT DO NOTHING`,
+		`INSERT INTO s VALUES (3, 'a')`,
+		`INSERT INTO s VALUES (3, 'a') ON CONFLICT (tag) DO NOTHING`,
+	} {
+		t.Run(q, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE s (id int PRIMARY KEY, tag text UNIQUE)`)
+				s.Seed(func() { mustExec(t, db, `INSERT INTO s VALUES (1, 'a')`) })
+				var deadlocks []error
+				s.Seed(func() { deadlocks = nil })
+				run := func(p *Proc, stmts ...string) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					for _, stmt := range stmts {
+						if _, err := tx.ExecContext(p.Context(), stmt); err != nil {
+							if errors.Is(err, ErrDeadlock) {
+								deadlocks = append(deadlocks, err)
+							}
+							return nil
+						}
+					}
+					return tx.Commit()
+				}
+				s.Manual("locker", 1, func(p *Proc) error {
+					return run(p, `SELECT id FROM s WHERE id = 1 FOR UPDATE`, `INSERT INTO s VALUES (2, 'b')`)
+				})
+				s.Manual("inserter", 1, func(p *Proc) error {
+					return run(p, `INSERT INTO s VALUES (2, 'c')`, q)
+				})
+				s.AtQuiescence(func(*State) error { return errors.Join(deadlocks...) })
+			})
+		})
+	}
+}
+
+// An insert of a unique value another transaction is changing away waits for
+// that transaction, and takes the value once it commits.
+func TestInsertWaitsForUniqueValueUpdatedAway(t *testing.T) {
+	for _, q := range []string{
+		`UPDATE s SET tag = 'b' WHERE id = 1`,
+		`DELETE FROM s WHERE id = 1`,
+	} {
+		t.Run(q, func(t *testing.T) {
+			Explore(t, func(t *testing.T, s *Sim) {
+				db, _ := s.DB("app", postgres.New())
+				mustExec(t, db, `CREATE TABLE s (id int PRIMARY KEY, tag text UNIQUE)`)
+				s.Seed(func() { mustExec(t, db, `INSERT INTO s VALUES (1, 'a')`) })
+				var changed bool
+				var failed error
+				s.Seed(func() { changed, failed = false, nil })
+				s.Manual("changer", 1, func(p *Proc) error {
+					tx, err := db.BeginTx(p.Context(), nil)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = tx.Rollback() }()
+					if _, err := tx.ExecContext(p.Context(), q); err != nil {
+						return err
+					}
+					changed = true
+					p.Step("holds the transaction")
+					return tx.Commit()
+				})
+				s.Manual("inserter", 1, func(p *Proc) error {
+					_, err := db.ExecContext(p.Context(), `INSERT INTO s VALUES (2, 'a')`)
+					if errors.Is(err, ErrUniqueViolation) && changed {
+						failed = err
+					}
+					return nil
+				})
+				s.AtQuiescence(func(*State) error {
+					if failed != nil {
+						return fmt.Errorf("the insert failed after the value was changed away: %w", failed)
+					}
+					return nil
+				})
+			})
+		})
+	}
+}
+
 // A locking read that waited on a row deleted meanwhile keeps no lock on its
 // key, so an insert of that key does not wait for the reader to finish.
 func TestNoLockKeptOnDeletedRow(t *testing.T) {

@@ -2435,6 +2435,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	sp := &tx.saves[i]
 	tx.saves = tx.saves[:i+1] // ROLLBACK TO keeps the savepoint itself
+	undone := tx.undoneSince(sp)
 	var inserted []putRow
 	if tx.db.kind.InnoDB() && sp.inserts <= len(tx.inserts) {
 		for _, p := range tx.inserts[sp.inserts:] {
@@ -2475,6 +2476,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		tx.rollEntries(sp.entries)
 	default:
 		tx.rollbackLocks(sp)
+		tx.wakeWriterWaits(undone)
 	}
 	tx.aborted = false
 	return nil
@@ -2491,6 +2493,7 @@ func (tx *Tx) abort() {
 	tx.depRelease()
 	if n := len(tx.saves); n > 0 {
 		tx.rollbackLocks(&tx.saves[n-1])
+		tx.wakeWriterWaits(tx.undoneSince(&tx.saves[n-1]))
 		return
 	}
 	tx.releaseLocks(tx.locks)
