@@ -105,7 +105,10 @@ func TestEnumTransactionAPI(t *testing.T) {
 		})
 		s.AtQuiescence(func(st *State) error {
 			r, ok := st.Row(store, "p", "y")
-			if v, _ := r.Get("m"); ok && v != "happy" {
+			if !ok {
+				return fmt.Errorf("State lacks the row the reader inserted")
+			}
+			if v, _ := r.Get("m"); v != "happy" {
 				return fmt.Errorf("State of an enum: %#v", v)
 			}
 			return nil
