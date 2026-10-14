@@ -848,6 +848,35 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM z WHERE id = '1' AND u = '00000000-0000-0000-0000-00000000000A'`),
 		},
 	},
+	{
+		// Postgres reads a literal by the type it takes from a column it is
+		// assigned to, a cast or the other branches when it plans the
+		// statement, so a write or a branch no row reaches fails too.
+		Name:   "invalid input typed by assignment, cast or branch over no rows",
+		Schema: []string{`CREATE TABLE z (id int PRIMARY KEY, u uuid, n int, b bool, f float8, k text UNIQUE)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.S(0, `UPDATE z SET u = 'bad' WHERE false`),
+			difftest.S(0, `UPDATE z SET n = 'abc' WHERE false`),
+			difftest.S(0, `UPDATE z SET n = '1.5' WHERE false`),
+			difftest.Q(0, `SELECT coalesce(n, '1e3') FROM z`),
+			difftest.S(0, `UPDATE z SET b = 'maybe' WHERE false`),
+			difftest.S(0, `UPDATE z SET f = 'x' WHERE false`),
+			difftest.Q(0, `SELECT 'bad'::uuid FROM z`),
+			difftest.Q(0, `SELECT 'abc'::int FROM z`),
+			difftest.S(0, `INSERT INTO z (id, u) SELECT 1, 'bad' WHERE false`),
+			difftest.S(0, `INSERT INTO z (id, k) SELECT id, k FROM z WHERE false ON CONFLICT (k) DO UPDATE SET u = 'bad'`),
+			difftest.Q(0, `SELECT CASE WHEN true THEN u ELSE 'bad' END FROM z`),
+			difftest.Q(0, `SELECT coalesce(u, 'bad') FROM z`),
+			difftest.Q(0, `SELECT greatest(n, 'abc') FROM z`),
+			difftest.Q(0, `SELECT u FROM z WHERE false UNION SELECT 'bad' WHERE false`),
+			difftest.Q(0, `SELECT 'bad' WHERE false UNION ALL SELECT u FROM z`),
+			difftest.S(0, `UPDATE z SET u = '00000000-0000-0000-0000-000000000001', n = '7', b = 'yes', f = '1.5' WHERE false`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(f, '2.5') FROM z) s`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT CASE WHEN true THEN k ELSE 'anything' END FROM z) s`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT '{"a": 1}'::jsonb, '10.0.0.1'::inet, 'x'::text FROM z) s`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

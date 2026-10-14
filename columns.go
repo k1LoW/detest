@@ -6,6 +6,8 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -826,7 +828,11 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
-		cols.byPos[i] = db.branchKind(resolvedType(t, setOpColumnExprs(sel, i)))
+		exprs := setOpColumnExprs(sel, i)
+		cols.byPos[i] = db.branchKind(resolvedType(t, exprs))
+		for _, e := range exprs {
+			c.inputAs(e, t)
+		}
 	}
 	first := sel
 	for first.SetOp != "" && first.Larg != nil {
@@ -1260,6 +1266,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				// The branches take the type of the typed ones.
 				typ := expressionType(e, sc.columnType)
 				c.timeParams(typ, caseBranches(e)...)
+				for _, b := range caseBranches(e) {
+					c.inputAs(b, typ)
+				}
 				c.x.noteType(e, typ)
 				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
 				if e.Arg != nil {
@@ -1287,6 +1296,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// The arguments take the type of the typed ones.
 					typ := commonType(e.Args, sc.columnType, nil)
 					c.timeParams(typ, e.Args...)
+					if e.Name != "nullif" { // read as compared, above
+						for _, a := range e.Args {
+							c.inputAs(a, typ)
+						}
+					}
 					c.x.noteType(e, typ)
 					c.x.noteBranchType(e, resolvedType(typ, e.Args))
 				case "date_trunc":
@@ -1362,43 +1376,80 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		return
 	}
 	c.untyped = append(c.untyped, func() error {
-		var v any
-		switch a := a.(type) {
-		case *sqlir.Const:
-			v = a.Value
-		case *sqlir.Param:
-			if a.Index < 0 || a.Index >= len(c.x.args) {
-				return nil
-			}
-			v = paramText(a, c.x.args[a.Index])
+		v, ok := c.untypedValue(a)
+		if !ok {
+			return nil
 		}
 		_, err := c.x.untyped(a, v, sample)
 		return err
 	})
 }
 
-// castInput reads a string literal or a parameter cast to interval or date
-// before the statement runs, as Postgres converts a literal when it plans
-// the statement and a parameter when it binds it, so that 'bad'::interval
-// fails over an empty table too. Only the server's errors are raised here;
-// a form detest does not read is left to the run, which refuses it if a row
-// reaches it.
-func (c *columnChecker) castInput(e *sqlir.Cast) {
-	if e.Type != "interval" && e.Type != "date" || !untypedExpr(e.X) {
+// inputAs reads a string literal or a parameter that takes the type typ
+// from where it stands rather than from a comparison, such as from the
+// column it is assigned to, or from the other branches of a CASE, a
+// COALESCE, a GREATEST, a LEAST or a set operation. Postgres reads it when it plans or binds the
+// statement, as untypedOperands does, while a write that reaches no row or
+// a branch the run does not take never reads it.
+//
+// Only the server's errors are raised. untyped's refusals are those of a
+// comparison, which has only a value to go by, such as text with a fraction
+// compared with a number. Here the type is known, so a float takes that
+// text and an integer fails on it.
+func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
+	sample := typeSample(typ)
+	if sample == nil || !untypedExpr(e) {
 		return
 	}
 	c.untyped = append(c.untyped, func() error {
-		var v any
-		switch src := e.X.(type) {
-		case *sqlir.Const:
-			v = src.Value
-		case *sqlir.Param:
-			if src.Index < 0 || src.Index >= len(c.x.args) {
-				return nil
-			}
-			v = paramText(src, c.x.args[src.Index])
+		v, ok := c.untypedValue(e)
+		if !ok {
+			return nil
 		}
-		if _, err := c.x.cast(paramDate(e, v), e.Type); errors.As(err, new(*sqlir.DBError)) {
+		_, err := c.x.untyped(e, v, sample)
+		if errors.As(err, new(*sqlir.DBError)) {
+			return err
+		}
+		if s, isText := v.(string); err != nil && isText && sample == any(int64(0)) && !isOtherNumberText(s) {
+			if _, perr := strconv.ParseInt(strings.TrimSpace(s), 10, 64); errors.Is(perr, strconv.ErrSyntax) {
+				return c.x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type integer: %q", s), "", "", "")
+			}
+		}
+		return nil
+	})
+}
+
+// untypedValue is the text of a string literal, or the value bound to a
+// parameter, false for a parameter the statement is not given, which the
+// run reports.
+func (c *columnChecker) untypedValue(e sqlir.Expr) (any, bool) {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		return e.Value, true
+	case *sqlir.Param:
+		if e.Index < 0 || e.Index >= len(c.x.args) {
+			return nil, false
+		}
+		return paramText(e, c.x.args[e.Index]), true
+	}
+	return nil, false
+}
+
+// castInput reads a string literal or a parameter cast to a type before
+// the statement runs, as Postgres converts a literal when it plans the
+// statement and a parameter when it binds it, so that 'bad'::uuid fails
+// over an empty table too. The cast is evaluated as the run evaluates it,
+// and only the server's errors are raised here; a form detest does not read
+// is left to the run, which refuses it if a row reaches it.
+func (c *columnChecker) castInput(e *sqlir.Cast) {
+	if !untypedExpr(e.X) {
+		return
+	}
+	c.untyped = append(c.untyped, func() error {
+		if _, ok := c.untypedValue(e.X); !ok {
+			return nil
+		}
+		if _, err := c.x.eval(e, nil); errors.As(err, new(*sqlir.DBError)) {
 			return err
 		}
 		return nil
@@ -1448,6 +1499,26 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 	for i, e := range exprs {
 		if i < len(cols) {
 			c.timeParams(def.types[cols[i]], e)
+		}
+	}
+}
+
+// assignedInput reads the string literals and parameters written to
+// table's columns, cols in order or the table's own without a column list,
+// as the columns' input. It is for the writes a row may never reach, as
+// UPDATE's SET, INSERT ... SELECT and ON CONFLICT DO UPDATE are, and not
+// for VALUES, whose rows are each written and checked by checkTypes.
+func (c *columnChecker) assignedInput(table string, cols []string, exprs []sqlir.Expr) {
+	def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]
+	if def == nil {
+		return
+	}
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	for i, e := range exprs {
+		if i < len(cols) {
+			c.inputAs(e, def.types[cols[i]])
 		}
 	}
 }
@@ -1633,6 +1704,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 				exprs[i] = t.Expr
 			}
 			c.assignedParams(ins.Table, ins.Columns, exprs)
+			c.assignedInput(ins.Table, ins.Columns, exprs)
 		}
 	}
 	if oc := ins.OnConflict; oc != nil {
@@ -1651,6 +1723,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 			return err
 		}
 		c.assignedParams(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
+		c.assignedInput(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
@@ -1683,6 +1756,7 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 		return err
 	}
 	c.assignedParams(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
+	c.assignedInput(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
 	if err := c.exprs(up.Where, sc); err != nil {
 		return err
 	}

@@ -887,6 +887,52 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 
 // Postgres compares rows pair by pair: an ordering by the first pair that is
 // not equal, as keyset pagination relies on, and each pair as two scalars.
+func TestTypedInputReadBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, u uuid, n int, b bool, f float8, k text UNIQUE)`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE t SET u = $1 WHERE false`, []any{"bad"}},
+		{`UPDATE t SET n = 'abc' WHERE false`, nil},
+		{`UPDATE t SET n = $1 WHERE false`, []any{"1.5"}},
+		{`UPDATE t SET b = $1 WHERE false`, []any{"maybe"}},
+		{`SELECT $1::uuid FROM t`, []any{"bad"}},
+		{`SELECT 'abc'::int FROM t`, nil},
+		{`INSERT INTO t (id, u) SELECT 1, $1 WHERE false`, []any{"bad"}},
+		{`INSERT INTO t SELECT 1, 'bad' WHERE false`, nil},
+		{`INSERT INTO t (id, k) SELECT id, k FROM t WHERE false ON CONFLICT (k) DO UPDATE SET u = 'bad'`, nil},
+		{`SELECT CASE WHEN true THEN u ELSE 'bad' END FROM t`, nil},
+		{`SELECT CASE WHEN id > 0 THEN u ELSE $1 END FROM t`, []any{"bad"}},
+		{`SELECT coalesce(u, 'bad') FROM t`, nil},
+		{`SELECT greatest(n, $1) FROM t`, []any{"abc"}},
+		{`SELECT u FROM t WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`SELECT 'bad' WHERE false UNION ALL SELECT u FROM t`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", tc.query, err)
+		}
+	}
+	// Valid input of the type passes, and so does input detest does not
+	// read up front, such as a fraction for a float column.
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE t SET u = $1, n = '7', b = 'yes' WHERE false`, []any{"00000000-0000-0000-0000-000000000001"}},
+		{`UPDATE t SET f = '1.5' WHERE false`, nil},
+		{`SELECT coalesce(f, '2.5') FROM t`, nil},
+		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
+		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); err != nil {
+			t.Errorf("%s: got %v, want no error", tc.query, err)
+		}
+	}
+}
+
 func TestRowComparison(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
