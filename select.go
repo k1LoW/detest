@@ -1312,9 +1312,11 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				at = i + int(off)
 			}
 			var err error
+			from := 0
 			if at >= 0 && at < len(sorted) {
 				v, err = arg(sorted[at], 0)
 			} else {
+				from = 2
 				v, err = arg(it, 2)
 			}
 			if err != nil {
@@ -1322,6 +1324,11 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 			}
 			if v, err = x.toTimeType(v, x.exprTypes[w.Func]); err != nil {
 				return err
+			}
+			if from < len(w.Func.Args) {
+				if v, err = x.asBranchType(x.numberBranchType(w.Func), w.Func.Args[from], v); err != nil {
+					return err
+				}
 			}
 		default:
 			return x.unsupported("window function " + name)

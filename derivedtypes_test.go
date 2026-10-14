@@ -58,10 +58,27 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(u.v, 0) FROM (SELECT coalesce(NULL, NULL) AS v UNION ALL SELECT 1) u`,
 		`SELECT coalesce(u.v, interval '0 days') FROM (SELECT NULL::interval AS v UNION ALL SELECT 'bogus') u`,
 		`SELECT coalesce(u.v, 0) FROM (SELECT n AS v FROM t UNION ALL SELECT '5') u`,
+		// A text column beside a number fails in Postgres whatever the
+		// rows.
+		`SELECT coalesce(u.v, 0) FROM (SELECT NULL AS v UNION ALL SELECT NULL) u`,
+		`SELECT CASE WHEN false THEN s.name ELSE s.n END FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(g, 0) FROM generate_series($1, 2) AS g`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
+	}
+	// Postgres binds a parameter among number branches as that number,
+	// whichever branch a row takes.
+	for _, q := range []string{
+		`SELECT CASE WHEN true THEN s.n ELSE $1 END FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(n, $1) FROM t WHERE false`,
+	} {
+		if _, err := db.Query(q, "bogus"); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s with bogus: got %v, want 22P02", q, err)
+		}
+	}
+	if got := rowsOf(t, db, `SELECT coalesce(n, $1) / 2 FROM t ORDER BY id`, "8"); !reflect.DeepEqual(got, []string{"2", "4"}) {
+		t.Errorf("a parameter's text beside an integer column: got %v", got)
 	}
 }

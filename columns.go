@@ -1471,11 +1471,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.timeParams(typ, e.Args...)
 					c.x.noteType(e, typ)
 					c.x.noteBranchType(e, resolvedType(typ, e.Args))
-					if e.Name != "nullif" {
-						// NULLIF returns its first argument, of its own type.
-						if err = c.x.noteNumberBranches(e, e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
-							return
-						}
+					// NULLIF returns its first argument, which the equality
+					// promotes to a numeric beside a numeric.
+					if err = c.x.noteNumberBranches(e, e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+						return
 					}
 				case "date_trunc":
 					if len(e.Args) == 2 {
@@ -1485,6 +1484,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// The value and the default take one type, as the
 					// arguments of COALESCE do.
 					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
+					if err = c.x.noteNumberBranches(e, branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+						return
+					}
 				}
 			case *sqlir.Collate:
 				// Postgres fails a collation that does not exist when it

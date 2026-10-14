@@ -587,7 +587,7 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 				case "coalesce", "greatest", "least", "nullif":
 					if k := db.branchKind(resolvedType(commonType(f.Args, column, nil), f.Args)); k != "" {
 						m[f] = k
-					} else if k := numberBranchKind(f.Args, column, nil); k != "" && f.Name != "nullif" {
+					} else if k, _ := numberBranchKind(f.Args, column, nil); k != "" {
 						m[f] = k
 					}
 				}
@@ -595,7 +595,7 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 			for _, c := range sqlir.CaseExprs(e) {
 				if k := db.branchKind(resolvedType(expressionType(c, column), caseBranches(c))); k != "" {
 					m[c] = k
-				} else if k := numberBranchKind(caseBranches(c), column, nil); k != "" {
+				} else if k, _ := numberBranchKind(caseBranches(c), column, nil); k != "" {
 					m[c] = k
 				}
 			}
@@ -669,28 +669,47 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string) {
 	x.branchTypes[e] = k
 }
 
-// noteNumberBranches records the branches of e, a COALESCE, GREATEST, LEAST
-// or CASE, as of the number kind numberBranchKind gives, when branchKind
-// gives none, and fails a string literal among them that reads as no number
-// of it, as Postgres does whichever branch a row takes, or with no rows.
+// noteNumberBranches records the branches of e, a COALESCE, GREATEST,
+// LEAST, NULLIF, CASE or the value and default of LAG or LEAD, as of the
+// number kind numberBranchKind gives, when branchKind gives none. It fails
+// a string literal or a parameter's text among them that reads as no number
+// of it, as Postgres does when it parses or binds the statement, whichever
+// branch a row takes, or with no rows, and refuses a number beside a branch
+// of another type.
 func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
-	if _, ok := x.branchTypes[e]; ok {
-		return nil
+	k, mismatch := numberBranchKind(exprs, column, subquery)
+	if mismatch {
+		return x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
 	}
-	k := numberBranchKind(exprs, column, subquery)
-	if k == "" {
+	if _, ok := x.branchTypes[e]; ok || k == "" {
 		return nil
 	}
 	for _, b := range exprs {
-		if c, ok := b.(*sqlir.Const); ok {
-			if s, ok := c.Value.(string); ok {
-				if _, err := x.branchNumber(s, k == "numeric"); err != nil {
-					return err
-				}
+		var s string
+		switch b := b.(type) {
+		case *sqlir.Const:
+			t, ok := b.Value.(string)
+			if !ok {
+				continue
 			}
+			s = t
+		case *sqlir.Param:
+			if b.Index < 0 || b.Index >= len(x.args) {
+				continue
+			}
+			t, ok := derefValue(x.args[b.Index]).(string)
+			if !ok {
+				continue
+			}
+			s = t
+		default:
+			continue
+		}
+		if _, err := x.branchNumber(s, k == "numeric"); err != nil {
+			return err
 		}
 	}
 	if x.branchTypes == nil {
@@ -698,6 +717,16 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 	}
 	x.branchTypes[e] = k
 	return nil
+}
+
+// numberBranchType is the number kind noteNumberBranches recorded for e,
+// "" for any other.
+func (x *sqlExec) numberBranchType(e sqlir.Expr) string {
+	switch k := x.branchTypes[e]; k {
+	case "integer", "numeric":
+		return k
+	}
+	return ""
 }
 
 // branchType is the kind of type the branches of e resolve to, in the

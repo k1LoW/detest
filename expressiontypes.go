@@ -169,10 +169,11 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 // commonType is the type Postgres resolves exprs to together, as the
 // arguments of COALESCE or the branches of CASE: the first one known, except
 // that dates and timestamps meet at the widest of them, a timestamptz over a
-// timestamp over a date.
+// timestamp over a date, and numbers at the widest of them, a float over a
+// numeric over an integer.
 func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
-	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
-	best := ""
+	first, rank := "", timeRank
+	best, all := "", true
 	for _, e := range exprs {
 		typ := expressionTypeIn(e, column, subquery)
 		if typ == "" {
@@ -180,41 +181,76 @@ func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		}
 		if first == "" {
 			first = typ
+			if numberRank[typ] > 0 {
+				rank = numberRank
+			}
+		}
+		if rank[typ] == 0 {
+			all = false
 		}
 		if rank[typ] > rank[best] {
 			best = typ
 		}
 	}
-	if rank[first] > 0 && best != "" {
+	switch {
+	case timeRank[first] > 0:
+		return best
+	case numberRank[first] > 0 && all:
+		// Another type beside a number fails in Postgres; the first is
+		// kept for the check that refuses it.
 		return best
 	}
 	return first
 }
+
+var (
+	timeRank   = map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
+	numberRank = map[string]int{
+		"int2": 1, "smallint": 1,
+		"int4": 2, "int": 2, "integer": 2,
+		"int8": 3, "bigint": 3,
+		"numeric": 4, "decimal": 4,
+		"float4": 5, "real": 5,
+		"float8": 6, "double precision": 6,
+	}
+)
 
 // numberBranchKind is "integer" or "numeric" when every branch among exprs
 // that has a type of its own is a number of that kind, a numeric or a float
 // making them all numeric, as Postgres resolves them; "" otherwise. A NULL,
 // a string literal or a parameter takes that type, which branchValue cannot
 // tell from the values: a NULL numeric column leaves an integer literal an
-// integer there, and text beside an integer column stays text.
-func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
-	kind := ""
+// integer there, and text beside an integer column stays text. mismatch
+// reports a number beside a branch of a type other than a number, which
+// Postgres fails with 42804 whatever the rows, and detest would run on a
+// row whose values do not show it.
+func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (kind string, mismatch bool) {
+	other, unknown := false, false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil || untypedExpr(e) {
 			continue
 		}
-		switch expressionTypeIn(e, column, subquery) {
-		case "int", "int2", "int4", "int8", "integer", "smallint", "bigint":
+		typ := expressionTypeIn(e, column, subquery)
+		switch r := numberRank[typ]; {
+		case r >= numberRank["numeric"]:
+			kind = "numeric"
+		case r > 0:
 			if kind == "" {
 				kind = "integer"
 			}
-		case "numeric", "decimal", "float4", "float8", "real", "double precision":
-			kind = "numeric"
+		case typ == "" || typ == "unresolved column type":
+			unknown = true
 		default:
-			return ""
+			other = true
 		}
 	}
-	return kind
+	if kind != "" && other {
+		return "", true
+	}
+	if unknown || other {
+		return "", false
+	}
+	return kind, false
 }
 
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
