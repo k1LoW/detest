@@ -169,10 +169,12 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 // commonType is the type Postgres resolves exprs to together, as the
 // arguments of COALESCE or the branches of CASE: the first one known, except
 // that dates and timestamps meet at the widest of them, a timestamptz over a
-// timestamp over a date.
+// timestamp over a date, and numbers at the one the others cast to
+// implicitly, a float8 over a float4 over a numeric over the integers from
+// the widest down.
 func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
-	first, rank := "", map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
-	best := ""
+	first, best := "", ""
+	var rank map[string]int
 	for _, e := range exprs {
 		typ := expressionTypeIn(e, column, subquery)
 		if typ == "" {
@@ -180,16 +182,29 @@ func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		}
 		if first == "" {
 			first = typ
+			for _, r := range []map[string]int{timeRank, numberRank} {
+				if r[typ] > 0 {
+					rank = r
+				}
+			}
 		}
 		if rank[typ] > rank[best] {
 			best = typ
 		}
 	}
-	if rank[first] > 0 && best != "" {
+	if rank != nil && best != "" {
 		return best
 	}
 	return first
 }
+
+var (
+	timeRank   = map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
+	numberRank = map[string]int{
+		"int2": 1, "smallint": 1, "int4": 2, "int": 2, "integer": 2, "int8": 3, "bigint": 3,
+		"numeric": 4, "decimal": 4, "float4": 5, "real": 5, "float8": 6, "double precision": 6,
+	}
+)
 
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
 	if f.Name == "left" && len(f.Args) == 2 {

@@ -942,6 +942,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
 		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
 		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
+		// The branches widen to an integer, which takes 40000.
+		{`SELECT CASE WHEN true THEN 1::smallint WHEN false THEN 2 ELSE '40000' END`, nil},
+		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); err != nil {
 			t.Errorf("%s: got %v, want no error", tc.query, err)
