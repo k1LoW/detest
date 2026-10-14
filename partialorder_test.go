@@ -463,6 +463,77 @@ func fkParentModel(t *testing.T, s *Sim) {
 	})
 }
 
+// uniqueModel declares a table with a unique column holding (1, 'a') and a
+// table the processes record what they were refused in, and returns run,
+// which runs stmts in a transaction and records who was refused.
+func uniqueModel(t *testing.T, s *Sim) (run func(p *Proc, who string, stmts ...string) error) {
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, "CREATE TABLE s (id int PRIMARY KEY, tag text UNIQUE)")
+	mustExec(t, db, "CREATE TABLE refused (who text PRIMARY KEY, code text NOT NULL)")
+	s.Seed(func() { mustExec(t, db, "INSERT INTO s VALUES (1, 'a')") })
+	return func(p *Proc, who string, stmts ...string) error {
+		tx, err := db.BeginTx(p.Context(), nil)
+		if err != nil {
+			return err
+		}
+		for _, stmt := range stmts {
+			if _, err := tx.ExecContext(p.Context(), stmt); err != nil {
+				_ = tx.Rollback()
+				var dbErr *DBError
+				if !errors.As(err, &dbErr) {
+					return err
+				}
+				_, err = db.ExecContext(p.Context(), "INSERT INTO refused (who, code) VALUES ($1, $2)", who, dbErr.Code)
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+}
+
+// uniqueLockerModel: a duplicate check does not wait for a transaction that
+// only locked the row, which then inserts a key the checking one wrote.
+func uniqueLockerModel(t *testing.T, s *Sim) {
+	run := uniqueModel(t, s)
+	s.Manual("locker", 1, func(p *Proc) error {
+		return run(p, "locker", "SELECT id FROM s WHERE id = 1 FOR UPDATE", "INSERT INTO s VALUES (2, 'b')")
+	})
+	s.Manual("inserter", 1, func(p *Proc) error {
+		return run(p, "inserter", "INSERT INTO s VALUES (2, 'c')", "INSERT INTO s VALUES (1, 'z') ON CONFLICT DO NOTHING", "INSERT INTO s VALUES (3, 'a')")
+	})
+}
+
+// uniqueAwayModel: an insert of a unique value another transaction changes
+// away waits for it, and takes the value once it commits.
+func uniqueAwayModel(t *testing.T, s *Sim) {
+	run := uniqueModel(t, s)
+	s.Manual("changer", 1, func(p *Proc) error {
+		return run(p, "changer", "UPDATE s SET tag = 'b' WHERE id = 1", "DELETE FROM s WHERE id = 1")
+	})
+	s.Manual("inserter", 1, func(p *Proc) error {
+		return run(p, "inserter", "INSERT INTO s VALUES (2, 'a')")
+	})
+}
+
+// uniqueSavepointModel: an insert waiting for the writer of a value is woken
+// when the write is rolled back to a savepoint, or fails inside one, while
+// the writer keeps the row's lock it took before the savepoint.
+func uniqueSavepointModel(abort bool) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		run := uniqueModel(t, s)
+		s.Manual("changer", 1, func(p *Proc) error {
+			stmts := []string{"SELECT id FROM s WHERE id = 1 FOR UPDATE", "SAVEPOINT sp", "UPDATE s SET tag = 'b' WHERE id = 1"}
+			if abort {
+				stmts = append(stmts, "SELECT 1 / 0")
+			}
+			return run(p, "changer", append(stmts, "ROLLBACK TO SAVEPOINT sp", "UPDATE s SET tag = 'c' WHERE id = 1")...)
+		})
+		s.Manual("inserter", 1, func(p *Proc) error {
+			return run(p, "inserter", "INSERT INTO s VALUES (2, 'a')")
+		})
+	}
+}
+
 // fkDeferredModel: a deferred foreign key is checked at the commit, and
 // the parent is inserted by a consumer the child's inserter signals once
 // its row is in, so the parent lands before the commit or after it, and
@@ -610,6 +681,10 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"fk deferred", fkDeferredModel, []Option{EagerStart(false)}},
 		{"pool wait", poolWaitModel, []Option{EagerStart(false)}},
 		{"session state", sessionStateModel, []Option{EagerStart(false)}},
+		{"unique locker", uniqueLockerModel, []Option{EagerStart(false)}},
+		{"unique away", uniqueAwayModel, []Option{EagerStart(false)}},
+		{"unique savepoint", uniqueSavepointModel(false), []Option{EagerStart(false)}},
+		{"unique savepoint abort", uniqueSavepointModel(true), []Option{EagerStart(false)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
