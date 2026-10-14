@@ -177,5 +177,8 @@ func TestEnumSchemaChanges(t *testing.T) {
 	// SET SCHEMA moves the enum, which an ALTER of the new name then finds.
 	mustExec(t, db, `CREATE SCHEMA other; ALTER TYPE public.spare SET SCHEMA other; ALTER TYPE other.spare ADD VALUE 'e'`)
 	mustExec(t, db, `INSERT INTO keyless VALUES (2, 'e')`)
-}
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, m mood DEFAULT md5('x')::mood)`)
+	if _, err := db.Exec(`INSERT INTO d (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a default detest cannot compute on an enum column: %v", err)
+	}
 }

@@ -84,8 +84,8 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 		return nil, err
 	}
 	if err != nil {
-		if def.reads(col) {
-			return nil, x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint or generated column reads", col))
+		if def.reads(col) || x.tx.db.enumOf(def.types[col]) != nil {
+			return nil, x.unsupported(fmt.Sprintf("the default of column %q, whose expression detest cannot compute and which a key, constraint, generated column or type check reads", col))
 		}
 		v = sqlir.Unknown
 	}
