@@ -1297,6 +1297,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		return nil
 	case ch.Object == "domain":
 		col := ch.Columns[0]
+		if db.enumOf(col.Name) != nil {
+			// detest knows a type by its bare name, which would make a
+			// column of the enum, in another schema, one of the domain.
+			return unsupported(fmt.Sprintf("a domain named %q, as an enum is", col.Name), "")
+		}
 		base := db.baseType(col.Type)
 		if col.Constrained {
 			base = constrainedDomain

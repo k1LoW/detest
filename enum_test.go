@@ -141,6 +141,7 @@ func TestEnumSchemaChanges(t *testing.T) {
 		`DROP TYPE mood`,
 		`ALTER TYPE mood RENAME TO feeling`,
 		`CREATE TYPE other.mood AS ENUM ('a')`,
+		`CREATE DOMAIN other.mood AS text`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: want unsupported, got %v", q, err)
