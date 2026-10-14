@@ -1249,7 +1249,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
 	case ch.Object == "enum":
-		return db.applyEnum(ch)
+		return db.applyEnum(ch, tx)
 	case ch.Object == "domain" && ch.RenameTo != "" && db.enumOf(ch.Columns[0].Name) != nil:
 		// A column of the enum keeps the type's old name.
 		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO", ch.Columns[0].Name), "")

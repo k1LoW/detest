@@ -85,7 +85,7 @@ func (db *DB) enumInput(t *enumType, v any, table, col string) (any, error) {
 // process sees, so it carries no SQLSTATE. Enums are known by their bare name, as a column's type is, so a
 // second enum of a name in another schema is refused rather than taken for
 // the first.
-func (db *DB) applyEnum(ch sqlir.SchemaChange) error {
+func (db *DB) applyEnum(ch sqlir.SchemaChange, tx *Tx) error {
 	name := ch.Columns[0].Name
 	t := db.enums[name]
 	switch {
@@ -172,13 +172,29 @@ func (db *DB) namesEnum(t *enumType, table, bare string) bool {
 	return slices.Contains(db.searchPath(), strings.TrimSuffix(t.qualified, "."+bare))
 }
 
-// enumKeyedRows is a table that holds rows and has a column of the enum
-// name in its primary key, or empty when none does.
-func (db *DB) enumKeyedRows(name string) string {
-	for _, table := range slices.Sorted(maps.Keys(db.defs)) {
-		def := db.defs[table]
-		if len(db.committed[table]) > 0 && slices.ContainsFunc(def.pk, func(c string) bool { return def.types[c] == name }) {
-			return table
+// enumRows is a table with a row, committed or written by tx, that holds a
+// value of t, or empty when none does.
+func (db *DB) enumRows(t *enumType, tx *Tx) string {
+	holds := func(r Row) bool {
+		for _, v := range r {
+			if e, ok := v.(enumValue); ok && e.typ == t {
+				return true
+			}
+		}
+		return false
+	}
+	for _, table := range slices.Sorted(maps.Keys(db.committed)) {
+		for _, r := range db.committed[table] {
+			if holds(r) {
+				return table
+			}
+		}
+	}
+	if tx != nil {
+		for lk, r := range tx.writes {
+			if holds(r) {
+				return lk.table
+			}
 		}
 	}
 	return ""

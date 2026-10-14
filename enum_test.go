@@ -164,10 +164,15 @@ func TestEnumSchemaChanges(t *testing.T) {
 		t.Errorf("after the added label: %v", got)
 	}
 	mustExec(t, db, `CREATE TYPE spare AS ENUM ('a'); DROP TYPE spare; CREATE TYPE spare AS ENUM ('b')`)
-	mustExec(t, db, `CREATE TABLE keyed (m spare PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE keyless (n int, m spare)`)
 	mustExec(t, db, `ALTER TYPE spare RENAME VALUE 'b' TO 'c'`)
-	mustExec(t, db, `INSERT INTO keyed VALUES ('c')`)
+	mustExec(t, db, `INSERT INTO keyless VALUES (1, 'c')`)
 	if _, err := db.Exec(`ALTER TYPE spare RENAME VALUE 'c' TO 'd'`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("a label renamed under rows keyed by it: %v", err)
+		t.Errorf("a label renamed under a row keyed by its values: %v", err)
 	}
+	mustExec(t, db, `CREATE TYPE fresh AS ENUM ('x'); CREATE TABLE f (id int PRIMARY KEY, m fresh)`)
+	if _, err := db.Exec(`BEGIN; INSERT INTO f VALUES (1, 'x'); ALTER TYPE fresh RENAME VALUE 'x' TO 'y'; COMMIT`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a label renamed under a row its own transaction wrote: %v", err)
+	}
+}
 }
