@@ -60,16 +60,23 @@ func dateIn(t time.Time, loc *time.Location) time.Time {
 
 // publicRow is r as the code under test reads it through the transaction
 // API and State: a timestamptz is a time.Time, as before detest told it from
-// a timestamp. r is copied only when it holds one.
+// a timestamp, and an enum is its label. r is copied only when it holds one.
 func publicRow(r Row) Row {
 	var out Row
 	for k, v := range r {
-		if t, ok := v.(instant); ok {
-			if out == nil {
-				out = r.clone()
-			}
-			out[k] = t.Time
+		var pub any
+		switch v := v.(type) {
+		case instant:
+			pub = v.Time
+		case enumValue:
+			pub = v.String()
+		default:
+			continue
 		}
+		if out == nil {
+			out = r.clone()
+		}
+		out[k] = pub
 	}
 	if out == nil {
 		return r

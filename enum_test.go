@@ -1,0 +1,139 @@
+package detest
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"reflect"
+	"testing"
+
+	"github.com/lib/pq"
+
+	"github.com/k1LoW/detest/db/postgres"
+)
+
+func enumDB(t *testing.T) *sql.DB {
+	t.Helper()
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`)
+	mustExec(t, db, `CREATE TABLE p (id bigint PRIMARY KEY, m mood)`)
+	mustExec(t, db, `INSERT INTO p VALUES (1, 'happy'), (2, 'sad'), (3, 'ok')`)
+	return db
+}
+
+// A parameter compared with an enum, or bound as an array of them, is read
+// by the enum's input, as Postgres infers the parameter's type from the
+// column, and a value that is no label fails as that input does.
+func TestEnumParameters(t *testing.T) {
+	db := enumDB(t)
+	for _, c := range []struct {
+		q    string
+		args []any
+		want []int64
+	}{
+		{`SELECT id FROM p WHERE m = $1 ORDER BY id`, []any{"ok"}, []int64{3}},
+		{`SELECT id FROM p WHERE m < $1 ORDER BY id`, []any{"happy"}, []int64{2, 3}},
+		{`SELECT id FROM p WHERE m = ANY($1) ORDER BY id`, []any{pq.Array([]string{"sad", "ok"})}, []int64{2, 3}},
+		{`SELECT id FROM p WHERE m IN ($1, $2) ORDER BY m`, []any{"happy", "sad"}, []int64{2, 1}},
+	} {
+		if got := queryIDs(t, db, c.q, c.args...); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s %v: got %v, want %v", c.q, c.args, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		q    string
+		args []any
+	}{
+		{`SELECT id FROM p WHERE m = $1`, []any{"Happy"}},
+		{`SELECT id FROM p WHERE m = ANY($1)`, []any{pq.Array([]string{"sad", "glad"})}},
+		{`INSERT INTO p VALUES (4, $1)`, []any{"glad"}},
+	} {
+		if _, err := db.Exec(c.q, c.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s %v: want invalid input for the enum, got %v", c.q, c.args, err)
+		}
+	}
+	var m string
+	if err := db.QueryRow(`SELECT m FROM p WHERE id = 1`).Scan(&m); err != nil || m != "happy" {
+		t.Errorf("an enum reads back as its label: %q, %v", m, err)
+	}
+}
+
+// A default and a domain over an enum are of the enum.
+func TestEnumDefaultAndDomain(t *testing.T) {
+	db := enumDB(t)
+	mustExec(t, db, `CREATE DOMAIN feeling AS mood`)
+	mustExec(t, db, `CREATE TABLE q (id bigint PRIMARY KEY, m mood NOT NULL DEFAULT 'ok', f feeling)`)
+	mustExec(t, db, `INSERT INTO q (id, f) VALUES (1, 'happy'), (2, 'sad')`)
+	mustExec(t, db, `INSERT INTO q (id, m, f) VALUES (3, 'sad', 'ok')`)
+	if got := queryIDs(t, db, `SELECT id FROM q ORDER BY m, id`); !reflect.DeepEqual(got, []int64{3, 1, 2}) {
+		t.Errorf("by the default's label: %v", got)
+	}
+	if got := queryIDs(t, db, `SELECT id FROM q ORDER BY f`); !reflect.DeepEqual(got, []int64{2, 3, 1}) {
+		t.Errorf("by the domain's labels: %v", got)
+	}
+	if _, err := db.Exec(`INSERT INTO q (id, f) VALUES (4, 'glad')`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a domain over an enum takes its labels only: %v", err)
+	}
+}
+
+// The transaction API writes an enum by its label, and it and State read
+// one as its label.
+func TestEnumTransactionAPI(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`)
+		mustExec(t, db, `CREATE TABLE p (id text PRIMARY KEY, m mood)`)
+		s.Manual("writer", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if err := tx.Insert("p", Row{"id": "x", "m": "glad"}); !errors.Is(err, ErrInvalidTextRepresentation) {
+					return fmt.Errorf("a value that is no label: %w", err)
+				}
+				return nil
+			})
+		})
+		s.Manual("reader", 1, func(p *Proc) error {
+			return store.Tx(p, func(tx *Tx) error {
+				if err := tx.Insert("p", Row{"id": "y", "m": "happy"}); err != nil {
+					return err
+				}
+				if r, ok := tx.Get("p", "y"); !ok || r["m"] != "happy" {
+					return fmt.Errorf("Tx.Get of an enum: %#v, %v", r, ok)
+				}
+				return nil
+			})
+		})
+		s.AtQuiescence(func(st *State) error {
+			r, ok := st.Row(store, "p", "y")
+			if v, _ := r.Get("m"); ok && v != "happy" {
+				return fmt.Errorf("State of an enum: %#v", v)
+			}
+			return nil
+		})
+	})
+}
+
+// The schema statements on an enum whose effect detest does not record are
+// refused rather than taken for another.
+func TestEnumSchemaChanges(t *testing.T) {
+	db := enumDB(t)
+	for _, q := range []string{
+		`DROP TYPE mood CASCADE`,
+		`DROP TYPE mood`,
+		`ALTER TYPE mood RENAME TO feeling`,
+		`CREATE TYPE other.mood AS ENUM ('a')`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: want unsupported, got %v", q, err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TYPE mood ADD VALUE 'ok'`); err == nil {
+		t.Error("a label added twice must fail")
+	}
+	mustExec(t, db, `ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok'`)
+	mustExec(t, db, `ALTER TYPE mood ADD VALUE 'meh' AFTER 'sad'`)
+	if got := queryIDs(t, db, `SELECT id FROM p WHERE m > 'meh' ORDER BY m`); !reflect.DeepEqual(got, []int64{3, 1}) {
+		t.Errorf("after the added label: %v", got)
+	}
+	mustExec(t, db, `CREATE TYPE spare AS ENUM ('a'); DROP TYPE spare; CREATE TYPE spare AS ENUM ('b')`)
+}

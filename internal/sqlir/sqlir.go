@@ -252,6 +252,16 @@ type SchemaChange struct {
 	// Sequence is CREATE SEQUENCE (Create) or ALTER SEQUENCE of the
 	// sequence Table names, with Object "sequence".
 	Sequence *SequenceOptions
+	// Labels are the labels of CREATE TYPE ... AS ENUM, with Object
+	// "enum", Table the type's qualified name and Columns[0].Name its bare
+	// name. ALTER TYPE ... ADD VALUE gives AddLabel, put BEFORE Neighbor,
+	// or AFTER it with AfterNeighbor, or last without one, and skipped
+	// when it exists with IfNotExists; RENAME VALUE gives RenameLabel.
+	Labels        []string
+	AddLabel      string
+	Neighbor      string
+	AfterNeighbor bool
+	RenameLabel   [2]string
 }
 
 // SequenceOptions are the options of a sequence that decide the values

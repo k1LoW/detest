@@ -52,6 +52,10 @@ func keyString(v any) string {
 		return pgInterval{micros: v.span()}.String()
 	case instant:
 		return v.UTC().Format(time.RFC3339Nano)
+	case enumValue:
+		// As its label, so that a key read through the transaction API,
+		// where an enum is its label, finds its row again.
+		return v.String()
 	case time.Time:
 		// As an instant's, so that a key read through the transaction
 		// API, where a timestamptz is a time.Time, finds its row again.
@@ -166,6 +170,8 @@ type DB struct {
 	// domainAliases are the base types of the names domains were renamed
 	// from, which the casts stored before the rename still name.
 	domainAliases map[string]string
+	// enums are the Postgres enums, by their bare name.
+	enums map[string]*enumType
 	// declaredCache is declaresCollations, keptCache keptCollations and
 	// keptBranchCache keptBranchTypes, dropped by every schema change.
 	declaredCache   *bool
@@ -1242,6 +1248,11 @@ func (db *DB) forgetDomain(name, q string) {
 func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	table := db.resolve(ch.Table)
 	switch {
+	case ch.Object == "enum":
+		return db.applyEnum(ch)
+	case ch.Object == "domain" && ch.RenameTo != "" && db.enumOf(ch.Columns[0].Name) != nil:
+		// A column of the enum keeps the type's old name.
+		return unsupported(fmt.Sprintf("ALTER TYPE %s RENAME TO", ch.Columns[0].Name), "")
 	case ch.Object == "domain" && ch.Drop:
 		// The collated mark stays: a domain of the name created again, or
 		// one of another schema, may still be collated, and refusing is

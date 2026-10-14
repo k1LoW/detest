@@ -2557,6 +2557,8 @@ func toDriverValue(v any) driver.Value {
 		return x.String()
 	case uuidValue:
 		return string(x)
+	case enumValue:
+		return x.String()
 	}
 	if f, ok := toFloat(v); ok {
 		return int64(f)

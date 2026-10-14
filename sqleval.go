@@ -836,6 +836,9 @@ func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
 	case "text":
 		return paramText(e, v), nil
 	}
+	if t := x.tx.db.enumOf(kind); t != nil {
+		return x.untyped(e, v, enumValue{typ: t})
+	}
 	return v, nil
 }
 
@@ -904,6 +907,9 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 			return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type uuid: %q", s), "", "", "")
 		}
 		return uuidValue(c), nil
+	case enumValue:
+		ev, _ := derefValue(other).(enumValue)
+		return x.tx.db.enumInput(ev.typ, s, "", "")
 	case bool:
 		b, ok := parseBool(s)
 		if !ok {

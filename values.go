@@ -85,6 +85,11 @@ func sameValue(a, b any) bool {
 			return ia.span() == ib.span()
 		}
 	}
+	ea, aEnum := a.(enumValue)
+	eb, bEnum := b.(enumValue)
+	if aEnum || bEnum {
+		return aEnum && bEnum && ea == eb
+	}
 	if ba, ok := a.([]byte); ok {
 		a = string(ba)
 	}
@@ -127,6 +132,14 @@ func compareValues(a, b any) (int, bool) {
 			return 0, false
 		}
 		return cmp.Compare(ia.span(), ib.span()), true
+	}
+	ea, aEnum := a.(enumValue)
+	eb, bEnum := b.(enumValue)
+	if aEnum || bEnum {
+		if !aEnum || !bEnum {
+			return 0, false
+		}
+		return compareEnums(ea, eb)
 	}
 	// bytea orders byte by byte; formatted, [10] would sort before [9].
 	if ba, ok := a.([]byte); ok {
@@ -240,6 +253,8 @@ func valueKey(v any) string {
 		return "t" + t.UTC().Format(time.RFC3339Nano)
 	case instant:
 		return "z" + t.UTC().Format(time.RFC3339Nano)
+	case enumValue:
+		return "e" + strconv.Quote(t.typ.name) + strconv.Quote(t.label.name)
 	case pgInterval:
 		// Equal intervals, '1 mon' and '30 days', are one key, as in an
 		// index or a DISTINCT.
@@ -351,6 +366,8 @@ func valueKind(v any) string {
 		// A timestamptz beside a timestamp in a set operation is converted
 		// in the session's TimeZone, which the set operation does not do.
 		return "timestamptz"
+	case enumValue:
+		return "enum"
 	}
 	return "other"
 }

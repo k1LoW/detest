@@ -864,6 +864,17 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if t == untypedCTAS {
 			return x.unsupported(fmt.Sprintf("a value written to column %q, %s", col, untypedCTAS))
 		}
+		if et := x.tx.db.enumOf(t); et != nil {
+			if v == sqlir.Unknown {
+				continue
+			}
+			ev, err := x.tx.db.enumInput(et, v, relname(table), col)
+			if err != nil {
+				return err
+			}
+			row[col] = ev
+			continue
+		}
 		if t == "bytea" && !x.tx.db.kind.InnoDB() {
 			// A bytea is held as its bytes, so that a literal and a []byte
 			// parameter of one value are one value.

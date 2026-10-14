@@ -2053,6 +2053,9 @@ func (v RowView) Get(col string) (any, bool) {
 	if t, isInstant := x.(instant); isInstant {
 		x = t.Time // a timestamptz is a time.Time to the code under test
 	}
+	if e, isEnum := x.(enumValue); isEnum {
+		x = e.String() // and an enum is its label
+	}
 	return x, ok
 }
 

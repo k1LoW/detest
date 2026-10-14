@@ -467,6 +467,19 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		u.Index = true
 		return []sqlir.SchemaChange{{Table: rangeVarName(ix.Relation), Constraints: []sqlir.UniqueDef{u}}}, true, nil
 	case *pg.Node_DropStmt:
+		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_TYPE {
+			// Only an enum is kept among the types DROP TYPE drops; the
+			// database ignores a name that is none.
+			for _, obj := range s.DropStmt.Objects {
+				parts := nodeNames(obj.GetTypeName().GetNames())
+				if len(parts) == 0 {
+					continue
+				}
+				changes = append(changes, sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "enum", Drop: true,
+					Cascade: s.DropStmt.Behavior == pg.DropBehavior_DROP_CASCADE, Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}})
+			}
+			return changes, true, nil
+		}
 		if s.DropStmt.RemoveType == pg.ObjectType_OBJECT_DOMAIN {
 			for _, obj := range s.DropStmt.Objects {
 				var parts []string
@@ -577,12 +590,38 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "domain", Create: true,
 			Columns: []sqlir.ColumnDef{{Name: name, Type: typeName(s.CreateDomainStmt.TypeName), Collation: collationName(s.CreateDomainStmt.CollClause),
 				Constrained: constrainedDomain(s.CreateDomainStmt)}}}}, true, nil
+	case *pg.Node_CreateEnumStmt:
+		// The labels are kept in their order, which orders the values of
+		// the type, and a value written to a column of it must be one.
+		parts := nodeNames(s.CreateEnumStmt.TypeName)
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		name := parts[len(parts)-1]
+		if builtinTypes[name] {
+			return nil, true, c.unsupported(fmt.Sprintf("an enum named %q, as a built-in type is", name))
+		}
+		return []sqlir.SchemaChange{{Table: strings.Join(parts, "."), Object: "enum", Create: true,
+			Columns: []sqlir.ColumnDef{{Name: name}}, Labels: nodeNames(s.CreateEnumStmt.Vals)}}, true, nil
+	case *pg.Node_AlterEnumStmt:
+		a := s.AlterEnumStmt
+		parts := nodeNames(a.TypeName)
+		if len(parts) == 0 {
+			return nil, true, nil
+		}
+		ch := sqlir.SchemaChange{Table: strings.Join(parts, "."), Object: "enum", Columns: []sqlir.ColumnDef{{Name: parts[len(parts)-1]}}}
+		if a.OldVal != "" {
+			ch.RenameLabel = [2]string{a.OldVal, a.NewVal}
+		} else {
+			ch.AddLabel, ch.Neighbor, ch.AfterNeighbor, ch.IfNotExists = a.NewVal, a.NewValNeighbor, a.NewValIsAfter, a.SkipIfNewValExists
+		}
+		return []sqlir.SchemaChange{ch}, true, nil
 	case *pg.Node_CommentStmt, *pg.Node_CreateFunctionStmt, *pg.Node_CreateExtensionStmt,
 		*pg.Node_CreateSchemaStmt, *pg.Node_GrantStmt, *pg.Node_GrantRoleStmt,
 		*pg.Node_AlterOwnerStmt, *pg.Node_CreateTrigStmt,
-		*pg.Node_AlterDefaultPrivilegesStmt, *pg.Node_CreateEnumStmt,
+		*pg.Node_AlterDefaultPrivilegesStmt,
 		*pg.Node_CompositeTypeStmt, *pg.Node_DefineStmt,
-		*pg.Node_AlterEnumStmt, *pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
+		*pg.Node_CreatePolicyStmt, *pg.Node_RuleStmt,
 		*pg.Node_CreateStatsStmt, *pg.Node_AlterObjectSchemaStmt:
 		return nil, true, nil
 	}
@@ -2481,4 +2520,13 @@ var builtinTypes = map[string]bool{
 	"text": true, "varchar": true, "bpchar": true, "char": true, "name": true, "bytea": true, "uuid": true,
 	"date": true, "time": true, "timetz": true, "timestamp": true, "timestamptz": true, "interval": true,
 	"json": true, "jsonb": true, "xml": true, "inet": true, "cidr": true, "macaddr": true, "oid": true,
+}
+
+// nodeNames are the strings of nodes, such as the parts of a qualified name.
+func nodeNames(nodes []*pg.Node) []string {
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.GetString_().GetSval())
+	}
+	return out
 }
