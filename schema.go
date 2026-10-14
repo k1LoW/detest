@@ -267,7 +267,22 @@ func (x *sqlExec) claimUniquePostgres(table string, u *sqlir.UniqueDef, vals []a
 	if dup != nil {
 		return dup, nil
 	}
-	return nil, x.tx.lockImplicit(entry, lockStruct{})
+	_, held := x.tx.db.locks[entry][x.tx]
+	if err := x.tx.lockImplicit(entry, lockStruct{}); err != nil {
+		return nil, err
+	}
+	// The primary key's lock with no row there is held only by an insert
+	// of the key whose checks have not passed, which Postgres has written
+	// already and waits for, so the key may be taken now. The lock goes
+	// again then, as the check takes none.
+	if ex, found := x.tx.view(table, entry.key); u.Primary && found && entry.key != self {
+		if !held {
+			x.tx.releaseLocks(x.tx.locks[len(x.tx.locks)-1:])
+			x.tx.locks = x.tx.locks[:len(x.tx.locks)-1]
+		}
+		return ex, nil
+	}
+	return nil, nil
 }
 
 // uniqueWriter returns a lock another transaction holds as the writer of a
