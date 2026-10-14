@@ -105,9 +105,14 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			// timestamp compared with a timestamptz by the cross-type =
 			// stays a timestamp, and so does an integer compared with
 			// another. A number beside a numeric or a float has no = of
-			// the two types, so it is promoted to the wider.
+			// the two types, so it is promoted to the wider. A NULL, a
+			// string literal or a parameter first takes the other's type,
+			// as the = resolves it.
 			if len(e.Args) > 0 {
 				typ := expressionTypeIn(e.Args[0], column, subquery)
+				if k, ok := e.Args[0].(*sqlir.Const); len(e.Args) == 2 && (ok && k.Value == nil || untypedExpr(e.Args[0])) {
+					return expressionTypeIn(e.Args[1], column, subquery)
+				}
 				if len(e.Args) == 2 && numberRank[typ] > 0 {
 					other := expressionTypeIn(e.Args[1], column, subquery)
 					if numberRank[other] > numberRank[typ] && numberRank[other] >= numberRank["numeric"] {

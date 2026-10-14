@@ -728,6 +728,60 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 	return nil
 }
 
+// unconvertedBranches refuses the branches of a COALESCE, GREATEST, LEAST,
+// NULLIF, CASE or the value and default of LAG or LEAD that Postgres
+// resolves to a type detest does not convert them to. Postgres reads a
+// string literal or a parameter there as that type, failing on text that is
+// none of it whichever branch a row takes, and fails branches of two types
+// with no implicit cast between them with 42804. detest converts branches
+// only to text, bytea, an enum, a number and a date or timestamp, and would
+// keep 'true' beside a
+// boolean as text, which evaluates as false, or return 'bogus' beside a
+// uuid. Converting each other type, with the check of every literal before
+// any row, is the work of a type at a time, so the class is refused.
+func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	untyped := false
+	kinds := map[string]bool{}
+	unconverted := ""
+	for _, e := range exprs {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		if untypedBranch(e) {
+			untyped = true
+			continue
+		}
+		typ := expressionTypeIn(e, column, subquery)
+		if typ == "" || typ == "unresolved column type" {
+			continue
+		}
+		base := x.tx.db.baseType(typ)
+		switch k := x.tx.db.branchKind(typ); {
+		case numberRank[base] > 0:
+			kinds["number"] = true
+		case k != "":
+			kinds[k] = true
+		case timeRank[base] > 0:
+			// date, timestamp and timestamptz cast to one another, and
+			// timeParams and castTime read a literal beside them.
+			kinds["time"] = true
+		default:
+			kinds[base] = true
+			unconverted = base
+		}
+	}
+	switch {
+	case len(kinds) > 1:
+		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them")
+	case untyped && unconverted != "":
+		return x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted))
+	}
+	return nil
+}
+
 // numberBranchType is the number kind noteNumberBranches recorded for e,
 // "" for any other.
 func (x *sqlExec) numberBranchType(e sqlir.Expr) string {

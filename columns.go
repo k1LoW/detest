@@ -1442,6 +1442,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				c.x.noteType(e, typ)
 				c.x.noteBranchType(e, resolvedType(typ, caseBranches(e)))
 				c.branchParams(caseBranches(e), typ)
+				if err = c.x.unconvertedBranches(caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+					return
+				}
 				if err = c.x.noteNumberBranches(e, caseBranches(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
 					return
 				}
@@ -1475,6 +1478,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.branchParams(e.Args, typ)
 					// NULLIF returns its first argument, which the equality
 					// promotes to a numeric beside a numeric.
+					if err = c.x.unconvertedBranches(e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+						return
+					}
 					if err = c.x.noteNumberBranches(e, e.Args, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
 						return
 					}
@@ -1487,6 +1493,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// arguments of COALESCE do.
 					c.x.noteType(e, commonType(branchArgs(e), sc.columnType, nil))
 					c.branchParams(branchArgs(e), commonType(branchArgs(e), sc.columnType, nil))
+					if err = c.x.unconvertedBranches(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
+						return
+					}
 					if err = c.x.noteNumberBranches(e, branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); err != nil {
 						return
 					}

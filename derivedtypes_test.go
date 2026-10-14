@@ -16,6 +16,9 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, n int)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 'a', 5), (2, NULL, NULL)`)
 	mustExec(t, db, `CREATE VIEW tv AS SELECT id, name FROM t UNION ALL SELECT 3, NULL`)
+	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, flag boolean, u uuid)`)
+	mustExec(t, db, `INSERT INTO f VALUES (1, NULL, NULL)`)
+	mustExec(t, db, `CREATE DOMAIN span AS interval`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -64,6 +67,15 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT CASE WHEN false THEN s.name ELSE s.n END FROM (SELECT * FROM t) s`,
 		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.n END FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(g, 0) FROM generate_series($1, 2) AS g`,
+		// detest converts branches to no boolean, uuid or interval, nor
+		// a domain over one, and Postgres fails branches of a uuid and
+		// text with 42804.
+		`SELECT s.id FROM (SELECT * FROM f) s WHERE coalesce(s.flag, 'true')`,
+		`SELECT id FROM f WHERE coalesce(flag, $1)`,
+		`SELECT coalesce(s.u, 'bogus') FROM (SELECT * FROM f) s`,
+		`SELECT CASE WHEN true THEN s.u ELSE 'x'::text END FROM (SELECT * FROM f) s`,
+		`SELECT CASE WHEN true THEN u ELSE 'x'::text END FROM f`,
+		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::span AS v UNION ALL SELECT NULL::span) u`,
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -93,6 +105,9 @@ func TestDerivedColumnTypes(t *testing.T) {
 		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
 		}
+	}
+	if got := rowsOf(t, db, `SELECT s.id FROM (SELECT * FROM f) s WHERE coalesce(s.flag, true)`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("a boolean beside a boolean column: got %v", got)
 	}
 	if got := rowsOf(t, db, `SELECT coalesce(n, $1) / 2 FROM t ORDER BY id`, "8"); !reflect.DeepEqual(got, []string{"2", "4"}) {
 		t.Errorf("a parameter's text beside an integer column: got %v", got)
