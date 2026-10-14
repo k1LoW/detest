@@ -632,17 +632,23 @@ func (x *sqlExec) ctasType(i int, col string, rows []Row) string {
 			// Text, so that bytes written to it later are the text they
 			// hold, which orders by the collation.
 			return base
+		case x.tx.db.enumOf(base) != nil:
+			// The enum, so that a value written to it later is read by the
+			// enum's input and orders by its labels.
+			return base
 		}
 		return ""
 	}
 	seen := false
 	for _, r := range rows {
-		switch derefValue(r[col]).(type) {
+		switch v := derefValue(r[col]).(type) {
 		case nil:
 		case []byte:
 			// A text column turns a []byte written to it into a string, so
 			// a value held as bytes is bytea.
 			seen = true
+		case enumValue:
+			return v.typ.name
 		default:
 			return ""
 		}

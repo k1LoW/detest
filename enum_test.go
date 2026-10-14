@@ -135,6 +135,26 @@ func TestEnumAddedColumnAndCheck(t *testing.T) {
 	mustExec(t, db, `INSERT INTO c VALUES (2, 'ok')`)
 }
 
+// A CREATE TABLE AS column of an enum is of the enum, whether the query or
+// its rows tell it.
+func TestEnumCreateTableAs(t *testing.T) {
+	db := enumDB(t)
+	mustExec(t, db, `CREATE TABLE q AS SELECT m FROM p WHERE false`)
+	mustExec(t, db, `CREATE TABLE r AS SELECT * FROM (SELECT m FROM p) s`)
+	for _, table := range []string{"q", "r"} {
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s VALUES ('bogus')`, table)); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: a value that is no label: %v", table, err)
+		}
+		if table == "q" {
+			mustExec(t, db, `INSERT INTO q VALUES ('happy'), ('sad')`) // r has p's rows
+		}
+		var first string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT m FROM %s ORDER BY m LIMIT 1`, table)).Scan(&first); err != nil || first != "sad" {
+			t.Errorf("%s: ordered by the labels: %q %v", table, first, err)
+		}
+	}
+}
+
 // The schema statements on an enum whose effect detest does not record are
 // refused rather than taken for another.
 func TestEnumSchemaChanges(t *testing.T) {
