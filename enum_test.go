@@ -113,6 +113,25 @@ func TestEnumTransactionAPI(t *testing.T) {
 	})
 }
 
+// A column of an enum added with a default gives the rows already there a
+// value of the enum, and a CHECK over one compares by the enum's input.
+func TestEnumAddedColumnAndCheck(t *testing.T) {
+	db := enumDB(t)
+	mustExec(t, db, `ALTER TABLE p ADD COLUMN n mood NOT NULL DEFAULT 'ok'`)
+	mustExec(t, db, `INSERT INTO p (id, m) VALUES (4, 'sad')`)
+	if got := queryIDs(t, db, `SELECT id FROM p WHERE n = 'ok' ORDER BY n, id`); !reflect.DeepEqual(got, []int64{1, 2, 3, 4}) {
+		t.Errorf("rows of the added column: %v", got)
+	}
+	if got := queryIDs(t, db, `SELECT id FROM p WHERE n < 'happy' ORDER BY id`); !reflect.DeepEqual(got, []int64{1, 2, 3, 4}) {
+		t.Errorf("rows of the added column ordered: %v", got)
+	}
+	mustExec(t, db, `CREATE TABLE c (id bigint PRIMARY KEY, m mood CHECK (m > 'sad'))`)
+	if _, err := db.Exec(`INSERT INTO c VALUES (1, 'sad')`); !errors.Is(err, ErrCheckViolation) {
+		t.Errorf("a CHECK over an enum: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO c VALUES (2, 'ok')`)
+}
+
 // The schema statements on an enum whose effect detest does not record are
 // refused rather than taken for another.
 func TestEnumSchemaChanges(t *testing.T) {

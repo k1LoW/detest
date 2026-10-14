@@ -51,7 +51,8 @@ func TestFromPostgres(t *testing.T) {
 		`ALTER TYPE billing.status ADD VALUE 'draft' BEFORE 'new'`,
 		`CREATE DOMAIN public.state AS billing.status`,
 		`CREATE TYPE public.unused AS ENUM ('x')`,
-		`CREATE TABLE public.tickets (id int PRIMARY KEY, s billing.status, st public.state)`,
+		`CREATE TABLE public.tickets (id int PRIMARY KEY, s billing.status DEFAULT 'new', st public.state, ref text)`,
+		`CREATE UNIQUE INDEX tickets_paid_ref ON public.tickets (ref) WHERE s = 'paid'`,
 	} {
 		if _, err := real.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -134,6 +135,17 @@ func TestFromPostgres(t *testing.T) {
 		}
 		if err := exec(`INSERT INTO tickets VALUES (3, 'bogus', NULL)`); !errors.Is(err, detest.ErrInvalidTextRepresentation) {
 			t.Errorf("a value that is no label: %v", err)
+		}
+		// The default and the index's predicate are written with casts to
+		// the qualified enum.
+		if err := exec(`INSERT INTO tickets (id, ref) VALUES (4, 'r')`); err != nil {
+			t.Fatalf("the enum's default: %v", err)
+		}
+		if err := db.QueryRow(`SELECT id FROM tickets WHERE s = 'new'`).Scan(&first); err != nil || first != 4 {
+			t.Errorf("a row of the enum's default: %d %v", first, err)
+		}
+		if err := exec(`INSERT INTO tickets (id, s, ref) VALUES (5, 'paid', 'r'), (6, 'paid', 'r')`); !errors.Is(err, detest.ErrUniqueViolation) {
+			t.Errorf("a partial index over an enum: %v", err)
 		}
 		var doubled int64
 		if err := db.QueryRow(`INSERT INTO billing.invoices (total) VALUES (10) RETURNING id, doubled`).Scan(&id, &doubled); err != nil || id != 1 || doubled != 20 {
