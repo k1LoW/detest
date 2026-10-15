@@ -21,6 +21,7 @@ func TestViewColumnCheckRefused(t *testing.T) {
 		`CREATE VIEW v2 AS SELECT (SELECT sum(t.n)) AS total FROM t`,
 		`CREATE VIEW v3 AS SELECT total FROM v2`,
 		`CREATE VIEW v4 AS SELECT id FROM t WHERE id IN (SELECT 1 FROM v1)`,
+		`CREATE VIEW v5 AS SELECT t AS w, 1 / 0 AS z FROM t`,
 		`CREATE VIEW ok AS SELECT id, n FROM t`,
 	} {
 		mustExec(t, db, q)
@@ -35,6 +36,9 @@ func TestViewColumnCheckRefused(t *testing.T) {
 		`UPDATE t SET n = 1 FROM v2 WHERE t.id = 1`,
 		`DELETE FROM t USING v3 WHERE t.id = 1`,
 		`SELECT * FROM v1`,
+		// The refusal comes before the constants are folded, so the
+		// view's division by zero does not stand in for it.
+		`SELECT w FROM v5`,
 		`WITH c AS (SELECT w FROM v1) SELECT * FROM c`,
 		`INSERT INTO t SELECT 9, total FROM v2`,
 		`UPDATE t SET n = (SELECT max(total) FROM v3)`,
