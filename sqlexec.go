@@ -1557,7 +1557,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.castTo(v, x.halfToInteger(v, paramBool(v, val)))
+		return x.castTo(v, x.halfToInteger(v, paramBool(v, x.tx.db.baseType(v.Type), val)))
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -1667,6 +1667,17 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		scols, srows, err := x.evalSelect(src, nil)
 		if err != nil {
 			return nil, err
+		}
+		if !x.tx.db.kind.InnoDB() && (len(scols) > len(cols) || len(ins.Columns) > 0 && len(scols) < len(cols)) {
+			// Postgres fails a query of the wrong width when it plans the
+			// statement. The column check fails one whose width it knows;
+			// this catches the rest, such as a * over an item of columns
+			// it does not know, before a row is written.
+			msg := "INSERT has more expressions than target columns"
+			if len(scols) < len(cols) {
+				msg = "INSERT has more target columns than expressions"
+			}
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, msg, relname(ins.Table), "", "")
 		}
 		for _, sr := range srows {
 			row := Row{}

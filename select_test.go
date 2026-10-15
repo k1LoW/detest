@@ -885,6 +885,380 @@ func TestUntypedTextComparedWithUUID(t *testing.T) {
 	}
 }
 
+func TestTypedInputReadBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, u uuid, n int, b bool, f float8, k text UNIQUE)`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE t SET u = $1 WHERE false`, []any{"bad"}},
+		{`UPDATE t SET n = 'abc' WHERE false`, nil},
+		{`UPDATE t SET n = $1 WHERE false`, []any{"1.5"}},
+		{`UPDATE t SET b = $1 WHERE false`, []any{"maybe"}},
+		{`SELECT $1::uuid FROM t`, []any{"bad"}},
+		{`SELECT 'abc'::int FROM t`, nil},
+		{`INSERT INTO t (id, u) SELECT 1, $1 WHERE false`, []any{"bad"}},
+		{`INSERT INTO t SELECT 1, 'bad' WHERE false`, nil},
+		{`INSERT INTO t (id, k) SELECT id, k FROM t WHERE false ON CONFLICT (k) DO UPDATE SET u = 'bad'`, nil},
+		{`SELECT CASE WHEN true THEN u ELSE 'bad' END FROM t`, nil},
+		{`SELECT CASE WHEN id > 0 THEN u ELSE $1 END FROM t`, []any{"bad"}},
+		{`SELECT coalesce(u, 'bad') FROM t`, nil},
+		{`SELECT greatest(n, $1) FROM t`, []any{"abc"}},
+		{`SELECT u FROM t WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`SELECT 'bad' WHERE false UNION ALL SELECT u FROM t`, nil},
+		{`SELECT * FROM t WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k' WHERE false`, nil},
+		{`VALUES (1) UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES (1) UNION VALUES (2) UNION SELECT 'bad' WHERE false`, nil},
+		{`SELECT (SELECT u FROM t) WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES ((SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`SELECT (SELECT (SELECT (SELECT u FROM t))) WHERE false UNION SELECT 'bad' WHERE false`, nil},
+		{`VALUES ((SELECT u FROM t UNION ALL SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
+		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
+		{`VALUES ((VALUES (1))) UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`VALUES (1), ($1) LIMIT 0`, []any{"bad"}},
+		{`SELECT (VALUES (t.u) UNION ALL SELECT 'bad' WHERE false) FROM t`, nil},
+		{`SELECT coalesce((VALUES (1)), 'bad')`, nil},
+		{`SELECT CASE WHEN true THEN 1 ELSE (VALUES (n) UNION SELECT $1) END FROM t`, []any{"bad"}},
+		{`SELECT (SELECT u FROM t UNION ALL SELECT u FROM t) WHERE false UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`SELECT coalesce((SELECT u FROM t UNION ALL SELECT u FROM t), 'bad')`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", tc.query, err)
+		}
+	}
+	// Postgres resolves a set operation pair by pair, so a nested one whose
+	// queries are all untyped is text, which an integer cannot join (42804).
+	for _, q := range []string{
+		`SELECT 'x' UNION SELECT 'y' UNION SELECT 1`,
+		`SELECT '1' WHERE false UNION SELECT NULL WHERE false UNION SELECT 1 WHERE false`,
+		`SELECT k FROM t WHERE false UNION SELECT u FROM t WHERE false`,
+		// A pair valueFamily does not group is refused, whether or not
+		// Postgres resolves it.
+		`SELECT k FROM t WHERE false UNION SELECT now()::date WHERE false`,
+		`SELECT now()::date WHERE false UNION SELECT now()::timestamp WHERE false`,
+		// The check knows a *'s column types by position only over one
+		// declared table.
+		`SELECT * FROM t JOIN t t2 ON true WHERE false UNION SELECT 1, 'bad', 1, true, 1.5, 'k', 1, 'bad', 1, true, 1.5, 'k' WHERE false`,
+		`SELECT *, 'bad' FROM t WHERE false UNION SELECT *, u FROM t WHERE false`,
+		// Postgres resolves no type for a number and a boolean branch.
+		`SELECT CASE WHEN true THEN 1 ELSE false END FROM t`,
+		`SELECT coalesce(n, b) FROM t`,
+		`SELECT greatest(u, k) FROM t`,
+		// A nested COALESCE of untyped arguments alone is text.
+		`SELECT CASE WHEN true THEN 1 ELSE coalesce('bad', NULL) END`,
+		`SELECT CASE WHEN true THEN 1 ELSE coalesce(coalesce('bad', NULL), NULL) END`,
+		`SELECT coalesce('1', NULL) WHERE false UNION SELECT 1 WHERE false`,
+		`VALUES ((SELECT 'bad' WHERE false)) UNION SELECT 1 WHERE false`,
+		`INSERT INTO t (id, u) SELECT *, 'bad' FROM (SELECT 1) s WHERE false`,
+		`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`,
+		// Postgres resolves a column of untyped queries alone to text,
+		// which it does not assign to an integer.
+		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
+		`INSERT INTO t (n) SELECT coalesce('1', NULL) WHERE false UNION ALL SELECT '2' WHERE false`,
+		`INSERT INTO t (n) SELECT k FROM t`,
+		`INSERT INTO t (n) SELECT coalesce('1', NULL)`,
+		// Postgres resolves a VALUES column over its rows, whether or not
+		// a LIMIT drops them.
+		`VALUES (1), (false) LIMIT 0`,
+		`(VALUES (1), (false) LIMIT 0) UNION ALL SELECT 2 WHERE false`,
+		`(VALUES (coalesce('bad', NULL)) LIMIT 0) UNION ALL SELECT 1 WHERE false`,
+		// Postgres reads prefixed and underscored integers, which detest
+		// does not model.
+		`SELECT '0b2'::int FROM t`,
+		`SELECT '1_000'::int FROM t`,
+		// A scalar subquery's bare NULL is text at its output.
+		`SELECT (SELECT NULL) WHERE false UNION ALL SELECT 1 WHERE false`,
+		`SELECT coalesce((SELECT NULL), 1)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	// A cast detest refuses is refused over no row too, as it would run
+	// with other semantics.
+	mustExec(t, db, `CREATE DOMAIN positive AS int CHECK (VALUE > 0)`)
+	if _, err := db.Exec(`SELECT 'abc'::positive FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a cast to a constrained domain over no row: got %v, want unsupported", err)
+	}
+	// Postgres gives a parameter one type for the statement, so one
+	// written to columns of two families fails whatever is bound to it.
+	// One of two number types is refused too, as Postgres reads it by the
+	// first it meets and converts it to the other at each row.
+	for _, q := range []string{
+		`UPDATE t SET b = $1, n = $1 WHERE false`,
+		`UPDATE t SET n = $1 WHERE k = $1`,
+		`SELECT coalesce(u, $1), coalesce(n, $1) FROM t`,
+		`UPDATE t SET id = $1 WHERE false AND $1 = 1::smallint`,
+		`SELECT coalesce(n, $1), coalesce(1::bigint, $1) FROM t`,
+		`SELECT $1::text, CASE WHEN true THEN 0 ELSE $1::int END`,
+		`SELECT $1::int, CASE WHEN false THEN $1::smallint END`,
+		`SELECT coalesce($1, NULL), CASE WHEN true THEN 0 ELSE $1::int END`,
+		`INSERT INTO t (id, n) VALUES (1, $1) RETURNING CASE WHEN true THEN 0 ELSE $1::smallint END`,
+		// Postgres fails a parameter VALUES writes to two types (42P08).
+		`INSERT INTO t (id, k, u) VALUES (1, $1, $1)`,
+		// Postgres fails a parameter it meets first under IS NULL (42P18),
+		// in an order that is not the statement's.
+		`UPDATE t SET n = $1 WHERE $1 IS NOT NULL AND false`,
+		`SELECT $1 IS NULL, $1::int`,
+		// Arithmetic types the parameter where the checks do not follow.
+		`SELECT $1 + 1, CASE WHEN true THEN 0 ELSE $1::smallint END FROM t`,
+	} {
+		if _, err := db.Exec(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT n FROM t WHERE false UNION SELECT 'x' UNION SELECT 1`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a nested set operation over an integer: got %v, want invalid input", err)
+	}
+	// A parameter taken as a type paramFamily does not group, such as a
+	// bytea, and as another type is refused.
+	mustExec(t, db, `CREATE TABLE y (id int PRIMARY KEY, u uuid, bin bytea, d date)`)
+	if _, err := db.Exec(`UPDATE y SET u = $1, bin = $1 WHERE false`, "00000000-0000-0000-0000-000000000001"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a parameter taken as a uuid and a bytea: got %v, want unsupported", err)
+	}
+	// A parameter a set operation types as a date is sent as a date, the
+	// time's own day, as one written to a date column is.
+	at := time.Date(2024, 5, 20, 8, 0, 0, 0, time.FixedZone("JST", 9*3600))
+	var day time.Time
+	if err := db.QueryRow(`SELECT d FROM y WHERE false UNION ALL SELECT $1`, at).Scan(&day); err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC); !day.Equal(want) {
+		t.Errorf("a time bound where a set operation takes a date: got %v, want %v", day, want)
+	}
+	// The driver sends a float's digits as integer input, which a cast
+	// would round instead.
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 1.25); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a float with a fraction for an integer column: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, true); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a boolean for an integer column: got %v, want unsupported", err)
+	}
+	for _, v := range []any{int64(1), true} {
+		if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("a %T for a uuid column: got %v, want unsupported", v, err)
+		}
+	}
+	// A value the cast does not convert as the driver sends it is refused,
+	// as the run refuses it where a row reaches it.
+	for _, tc := range []struct {
+		query string
+		v     any
+	}{
+		{`UPDATE t SET b = $1 WHERE false`, 1.25},
+		{`UPDATE t SET n = $1 WHERE false`, at},
+		{`SELECT $1::int FROM t`, at},
+	} {
+		if _, err := db.Exec(tc.query, tc.v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with a %T: got %v, want unsupported", tc.query, tc.v, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE y SET d = $1 WHERE false`, int64(3)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an integer for a date column: got %v, want unsupported", err)
+	}
+	// An integer is read by its digits, as the driver sends it, for a
+	// boolean domain too.
+	mustExec(t, db, `CREATE DOMAIN flag AS boolean`)
+	for _, q := range []string{`UPDATE t SET b = $1 WHERE false`, `SELECT $1::flag FROM t`} {
+		if _, err := db.Exec(q, int64(5)); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s with 5: got %v, want invalid input", q, err)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE w (id int PRIMARY KEY, ts timestamp, tz timestamptz)`)
+	for _, q := range []string{`UPDATE w SET ts = $1 WHERE false`, `UPDATE w SET tz = $1 WHERE false`} {
+		for _, v := range []any{true, int64(3)} {
+			if _, err := db.Exec(q, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s with a %T: got %v, want unsupported", q, v, err)
+			}
+		}
+		for _, v := range []any{nil, at, "2024-05-20 10:00"} {
+			if _, err := db.Exec(q, v); err != nil {
+				t.Errorf("%s with %v: got %v, want no error", q, v, err)
+			}
+		}
+	}
+	if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, nil); err != nil {
+		t.Errorf("NULL for a uuid column: got %v, want no error", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
+		t.Errorf("a whole float for an integer column: got %v, want no error", err)
+	}
+	// The width fails before the source runs, so its nextval does not
+	// advance the sequence.
+	mustExec(t, db, `CREATE SEQUENCE q`)
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM (SELECT nextval('q') AS id, 2 AS extra) s`); !errors.Is(err, ErrSyntaxError) {
+		t.Errorf("a derived table of two columns into one: got %v, want a syntax error", err)
+	}
+	// One whose width the check does not count, as of a function, is
+	// refused when its query changes state.
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM generate_series(nextval('q'), 1) WITH ORDINALITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a function source with nextval of an unknown width: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT 1 UNION ALL SELECT * FROM generate_series(nextval('q'), 1) WITH ORDINALITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a set operation of a function source with nextval: got %v, want unsupported", err)
+	}
+	if got := rowsOf(t, db, `SELECT nextval('q')`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("nextval after the failed INSERT: got %v, want 1", got)
+	}
+	// An outer query's column in a set operation is not a width mismatch.
+	if _, err := db.Exec(`SELECT (SELECT t.u WHERE false UNION ALL SELECT NULL WHERE false) FROM t`); err != nil {
+		t.Errorf("an outer column in a set operation: got %v, want no error", err)
+	}
+	// The run expands a * over its own query's items only.
+	if _, err := db.Exec(`SELECT (SELECT x.* WHERE false UNION ALL SELECT NULL WHERE false) FROM (SELECT u FROM t) x`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an outer x.* in a set operation: got %v, want unsupported", err)
+	}
+	// Postgres converts an explicitly cast literal where it analyzes it,
+	// before it compares a set operation's widths.
+	if _, err := db.Exec(`SELECT 'bad'::int WHERE false UNION SELECT 1, 2 WHERE false`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a cast literal beside unequal widths: got %v, want invalid input", err)
+	}
+	// INSERT ... VALUES reads every row before it writes one, so a later
+	// row's input fails before an earlier row's duplicate key.
+	mustExec(t, db, `INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001')`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001'), (101, 'bad')`, nil},
+		{`INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001'), (101, $1)`, []any{"bad"}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", tc.query, err)
+		}
+	}
+	mustExec(t, db, `DELETE FROM t WHERE id = 100`)
+	// A derived table of a set operation or VALUES gives its columns'
+	// types, and one whose type the check does not know is refused beside
+	// untyped input.
+	for _, q := range []string{
+		`SELECT column1 FROM (VALUES (1)) v WHERE false UNION ALL SELECT 'bad' WHERE false`,
+		`SELECT s.u FROM (SELECT u FROM t UNION ALL SELECT u FROM t) s WHERE false UNION ALL SELECT 'bad' WHERE false`,
+		`WITH w AS (SELECT u FROM t UNION ALL SELECT u FROM t) SELECT u FROM w WHERE false UNION ALL SELECT 'bad' WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT s.u FROM (SELECT * FROM t, (SELECT 1 AS k) x) s WHERE false UNION ALL SELECT 'bad' WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a column of unresolved type beside a literal: got %v, want unsupported", err)
+	}
+	// Postgres fails a statement of unequal widths before it reads any
+	// input by type.
+	for _, q := range []string{
+		`VALUES (1::smallint), ('40000', 2) LIMIT 0`,
+		`SELECT 1 WHERE false UNION SELECT 'bad', 2 WHERE false`,
+		`SELECT * FROM t WHERE false UNION SELECT 'bad' WHERE false`,
+		`INSERT INTO t (u) SELECT 'bad', 1 WHERE false`,
+		`INSERT INTO t (id, u) SELECT 1 WHERE false`,
+		`INSERT INTO t (id) SELECT 1, 2`,
+		`INSERT INTO t (id, u) VALUES (1, 'bad'), (2)`,
+		`INSERT INTO t (id) VALUES (1, 'bad')`,
+		// A * over a derived table counts the columns the table names.
+		`INSERT INTO t (id) SELECT * FROM (SELECT 1 AS id, 2 AS extra) s`,
+		`INSERT INTO t (id, u) SELECT * FROM (SELECT 1 AS id) s`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
+			t.Errorf("%s: got %v, want a syntax error", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT NULL UNION SELECT 1`); err != nil {
+		t.Errorf("a bare NULL beside an integer: got %v, want no error", err)
+	}
+	if _, err := db.Exec(`VALUES (1::smallint), ('40000') LIMIT 0`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("VALUES of a smallint and 40000: got %v, want 22003", err)
+	}
+	if _, err := db.Exec(`SELECT NULLIF(1::smallint, '40000') FROM t`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("NULLIF of a smallint and 40000: got %v, want 22003", err)
+	}
+	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, "99999999999"); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("an integer out of the column's range: got %v, want 22003", err)
+	}
+	// Valid input of the type passes, and so does input detest does not
+	// read up front, such as a fraction for a float column.
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE t SET u = $1, n = '7', b = 'yes' WHERE false`, []any{"00000000-0000-0000-0000-000000000001"}},
+		{`UPDATE t SET f = '1.5' WHERE false`, nil},
+		{`SELECT coalesce(f, '2.5') FROM t`, nil},
+		{`SELECT CASE WHEN true THEN k ELSE 'anything' END FROM t`, nil},
+		{`INSERT INTO t (id, n) SELECT 1, $1 WHERE false`, []any{int64(3)}},
+		{`SELECT 'a' UNION SELECT 'b' UNION SELECT k FROM t`, nil},
+		{`SELECT CASE WHEN true THEN now()::date ELSE now() END, coalesce(n, 1.5, 2::bigint) FROM t`, nil},
+		{`UPDATE t SET n = $1 WHERE id = $1`, []any{"1"}},
+		{`INSERT INTO t (id, k) SELECT 1, 'x' WHERE false UNION ALL SELECT 2, 'y' WHERE false`, nil},
+		{`VALUES (1) UNION SELECT 2::smallint UNION SELECT '40000' WHERE false`, nil},
+		{`SELECT 1::smallint WHERE false UNION (VALUES (2), ('40000') LIMIT 0)`, nil},
+		{`SELECT 1::smallint WHERE false UNION ALL VALUES ($1), (2)`, []any{int64(40000)}},
+		{`SELECT $1::int, $1::integer`, []any{"1"}},
+		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
+		// The inner pair widens to an integer, which takes 40000.
+		{`SELECT 1::smallint WHERE false UNION SELECT 2 WHERE false UNION SELECT '40000' WHERE false`, nil},
+		{`SELECT * FROM t UNION SELECT * FROM t`, nil},
+		// The branches widen to an integer, which takes 40000.
+		{`SELECT CASE WHEN true THEN 1::smallint WHEN false THEN 2 ELSE '40000' END`, nil},
+		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},
+		// NULLIF promotes an integer compared with a numeric, which then
+		// takes 1.5.
+		// smallint + integer is an integer, which takes 40000.
+		{`SELECT coalesce(1::smallint + 2, '40000')`, nil},
+		{`SELECT coalesce(NULLIF(1, 2.5), '1.5')`, nil},
+		{`SELECT coalesce(NULLIF(n, 2.5), '1.5') FROM t`, nil},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); err != nil {
+			t.Errorf("%s: got %v, want no error", tc.query, err)
+		}
+	}
+}
+
+// The branch checks resolve a scalar subquery's type before the walk
+// reaches it, so each level must resolve its subqueries once: resolving
+// them again at every level above took minutes at this depth.
+func TestNestedSubqueryTypesResolvedOnce(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY)`)
+	q := "SELECT " + strings.Repeat("coalesce((SELECT ", 16) + "id FROM t" + strings.Repeat("), 0)", 16) + " FROM t"
+	mustExec(t, db, q)
+}
+
+func TestEnumInputReadBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TYPE mood AS ENUM ('ok')`)
+	mustExec(t, db, `CREATE TABLE p (id int PRIMARY KEY, m mood)`)
+	for _, q := range []string{
+		`UPDATE p SET m = $1 WHERE false`,
+		`SELECT $1::mood FROM p`,
+		`SELECT CASE WHEN true THEN m ELSE $1 END FROM p`,
+		`SELECT m FROM p WHERE false UNION SELECT $1 WHERE false`,
+	} {
+		if _, err := db.Exec(q, "bogus"); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", q, err)
+		}
+		if _, err := db.Exec(q, "ok"); err != nil {
+			t.Errorf("%s with a label: got %v, want no error", q, err)
+		}
+	}
+	// A parameter takes one type for the statement, which an enum shares
+	// with no other.
+	if _, err := db.Exec(`SELECT CASE WHEN true THEN m ELSE $1 END, CASE WHEN true THEN id ELSE $1 END FROM p WHERE false`, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a parameter taken as an enum and an integer: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`INSERT INTO p (id, m) SELECT 1, 'ok' WHERE false UNION ALL SELECT 2, 'ok' WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a set operation of untyped values written to an enum: got %v, want unsupported", err)
+	}
+	// An enum resolves with no other type in a set operation.
+	if _, err := db.Exec(`SELECT m FROM p WHERE false UNION SELECT 1 WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an enum and an integer in a set operation: got %v, want unsupported", err)
+	}
+}
+
 // Postgres compares rows pair by pair: an ordering by the first pair that is
 // not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestRowComparison(t *testing.T) {
