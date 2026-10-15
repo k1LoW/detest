@@ -1060,10 +1060,9 @@ func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
 	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
 		return c.leavesTyped(sel.Larg) && c.leavesTyped(sel.Rarg)
 	}
-	inherits := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) || untypedBranch(e) }
 	if len(sel.Values) > 0 {
 		for i, typ := range c.setOpTypes(sel) {
-			if typ == "" && !slices.ContainsFunc(sel.Values, func(row []sqlir.Expr) bool { return i < len(row) && !inherits(row[i]) }) {
+			if typ == "" && !slices.ContainsFunc(sel.Values, func(row []sqlir.Expr) bool { return i < len(row) && !takesOtherType(row[i]) }) {
 				continue
 			}
 			if typ == "" {
@@ -1081,7 +1080,7 @@ func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
 		// Only an untyped literal, parameter or NULL takes the other
 		// query's type; an expression the check could not type has one
 		// of its own.
-		if typ == "" && (star || i >= len(sel.Targets) || !inherits(sel.Targets[i].Expr)) {
+		if typ == "" && (star || i >= len(sel.Targets) || !takesOtherType(sel.Targets[i].Expr)) {
 			return false
 		}
 	}
@@ -1703,6 +1702,10 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
+	}
+	if !vc.leavesTyped(q.Select) {
+		// setOpTypes would fill a query of unknown type from another's.
+		return "unresolved column type"
 	}
 	types := vc.setOpTypes(q.Select)
 	if len(types) != 1 {

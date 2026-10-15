@@ -97,6 +97,11 @@ func (t typer) of(e sqlir.Expr) string {
 			case (l == "interval" || r == "interval") && e.Op == "*":
 				return "interval"
 			}
+			if l == unresolvedType || r == unresolvedType {
+				// The operator depends on a type the check cannot show,
+				// which the fallbacks below would take from the other.
+				return unresolvedType
+			}
 			if numberRank[l] > 0 && numberRank[r] > 0 {
 				// The operator takes the wider of two numbers, as
 				// smallint + integer is an integer.
@@ -139,8 +144,10 @@ func (t typer) of(e sqlir.Expr) string {
 					if kind == "" {
 						kind = "float8"
 					}
-				case typ == "" || typ == "unresolved column type":
+				case typ == unresolvedType:
 					// The form depends on a type the check cannot show.
+					return unresolvedType
+				case typ == "":
 					return ""
 				default:
 					kind = "numeric" // no form takes it, which Postgres fails
@@ -156,7 +163,9 @@ func (t typer) of(e sqlir.Expr) string {
 				return "float8"
 			case numberRank[typ] > 0:
 				return "numeric"
-			case typ == "" || typ == "unresolved column type":
+			case typ == unresolvedType:
+				return unresolvedType
+			case typ == "":
 				return ""
 			}
 			return "numeric" // no form takes it, which Postgres fails
@@ -197,6 +206,9 @@ func (t typer) of(e sqlir.Expr) string {
 				return l
 			}
 			r := t.reduce(t.of(e.Args[1]))
+			if l == unresolvedType {
+				return unresolvedType
+			}
 			if l == "" {
 				return r
 			}
@@ -279,6 +291,10 @@ func (t typer) common(exprs []sqlir.Expr) string {
 	same, mixed := "", false
 	for i, e := range exprs {
 		types[i] = t.of(e)
+		if types[i] == unresolvedType {
+			// The branches meet at a type the check cannot show.
+			return unresolvedType
+		}
 		if types[i] != "" {
 			mixed = mixed || same != "" && types[i] != same
 			same = types[i]
@@ -583,6 +599,21 @@ func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 	}
 	return nil
 }
+
+// takesOtherType reports whether e is typed by what stands beside it, as
+// Postgres types an untyped literal, a parameter, a NULL, or a CASE or
+// COALESCE of those alone.
+func takesOtherType(e sqlir.Expr) bool {
+	return untypedExpr(e) || isNullConst(e) || untypedBranch(e)
+}
+
+// unresolvedType is the type of a column, or of an expression over one,
+// that has a type of its own the check does not know, as of a * it cannot
+// expand or a set operation it cannot resolve. An expression over it takes
+// it rather than the other operands' or branches' type, which would be a
+// guess. A column of no declared type is "" instead, and is read by what
+// stands beside it.
+const unresolvedType = "unresolved column type"
 
 func isNullConst(e sqlir.Expr) bool {
 	k, ok := e.(*sqlir.Const)

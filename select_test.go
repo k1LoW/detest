@@ -1762,6 +1762,12 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT avg(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
+		// An expression over a column of unresolved type does not take
+		// the other operand's or branch's type.
+		`SELECT s.v + 0::numeric FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`UPDATE t SET f = f FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s RETURNING s.v + 0::numeric`,
+		`SELECT (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
+		`UPDATE t SET id = id RETURNING (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
@@ -1772,10 +1778,21 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT floor(a) FROM t`,
 		`SELECT avg(b) - 1000000 FROM t`,
 		`SELECT 2000000::numeric UNION ALL SELECT 1::numeric WHERE false`,
+		`SELECT s.v + 1 FROM (SELECT 1999999::numeric AS v) s`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
 			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+	// A branch beside a column of unresolved type is refused, as it may
+	// be an interval.
+	for _, q := range []string{
+		`SELECT coalesce(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT nullif(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
 	// A statement of a script does not read an earlier one's types.
