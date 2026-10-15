@@ -1435,6 +1435,13 @@ func (c *columnChecker) insertWidth(ins *sqlir.InsertStmt) error {
 	}
 	w, ok := c.knownWidth(ins.Select)
 	if !ok {
+		if queryHasEffects(ins.Select) {
+			// The run compares the width only once it has run the
+			// query, which would spend a sequence value or take a lock
+			// Postgres never takes, as it fails the width when it plans
+			// the statement.
+			return c.x.unsupported("INSERT ... SELECT of a * whose width detest does not know, from a query that changes state")
+		}
 		return nil
 	}
 	return c.insertWidthOf(ins, w)

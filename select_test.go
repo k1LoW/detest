@@ -1092,6 +1092,11 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM (SELECT nextval('q') AS id, 2 AS extra) s`); !errors.Is(err, ErrSyntaxError) {
 		t.Errorf("a derived table of two columns into one: got %v, want a syntax error", err)
 	}
+	// One whose width the check does not count, as of a function, is
+	// refused when its query changes state.
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM generate_series(nextval('q'), 1) WITH ORDINALITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a function source with nextval of an unknown width: got %v, want unsupported", err)
+	}
 	if got := rowsOf(t, db, `SELECT nextval('q')`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("nextval after the failed INSERT: got %v, want 1", got)
 	}
