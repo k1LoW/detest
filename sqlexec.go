@@ -342,6 +342,9 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	if err := x.checkColumns(stmt); err != nil {
 		return nil, err
 	}
+	if err := x.foldConstants(stmt); err != nil {
+		return nil, err
+	}
 	// After the column check, which refuses what Postgres refuses when it
 	// plans the statement, as Postgres reads the arrays only at bind time.
 	if err := x.checkArrays(stmt); err != nil {
