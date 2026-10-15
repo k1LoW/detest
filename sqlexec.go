@@ -1360,8 +1360,8 @@ func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
 			case *sqlir.CaseExpr:
 				if n.Arg == nil {
 					for _, w := range n.Whens {
-						if k, ok := w.When.(*sqlir.Const); ok {
-							if b, _ := k.Value.(bool); b {
+						if b, ok := literalCondition(w.When); ok {
+							if b {
 								expr(w.Then)
 								return
 							}
@@ -1389,6 +1389,26 @@ func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
 	}
 	expr(e)
 	return out
+}
+
+// literalCondition is the value of a CASE condition that is a literal: a
+// boolean, NULL as false, or a string literal read as boolean input, as
+// Postgres coerces it. ok is false for any other expression, and for a
+// string that is no boolean input, which Postgres fails.
+func literalCondition(e sqlir.Expr) (b, ok bool) {
+	k, isConst := e.(*sqlir.Const)
+	if !isConst {
+		return false, false
+	}
+	switch v := k.Value.(type) {
+	case nil:
+		return false, true
+	case bool:
+		return v, true
+	case string:
+		return parseBool(v)
+	}
+	return false, false
 }
 
 // isAggregateCall reports a call of an aggregate itself, not of a function

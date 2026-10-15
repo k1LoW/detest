@@ -686,6 +686,8 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(0, sum(1 / n)) FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT coalesce(sum(n), coalesce(0, sum(1 / n))) FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT coalesce(sum(n), CASE WHEN true THEN 0 ELSE sum(1 / n) END) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(sum(n), CASE WHEN 'true' THEN sum(1 / n) ELSE 0 END) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(sum(n), CASE WHEN 'f' THEN sum(1 / n) ELSE 0 END) FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT coalesce(sum(n), CASE WHEN n > 0 THEN sum(1 / n) END) FROM t WHERE id = 1 GROUP BY n`),
 			// The fallback's row lock is not taken, so the row locked by
 			// the other transaction does not block the statement.
