@@ -7,7 +7,7 @@ import (
 )
 
 // parsedStatement caches a dialect's parse result per query string, and the
-// result of checkStatic over it.
+// result of checkNames over it.
 type parsedStatement struct {
 	query      string
 	stmt       sqlir.Statement
@@ -15,9 +15,9 @@ type parsedStatement struct {
 	staticErr  error
 }
 
-// static is checkStatic of the statement, computed once.
+// static is checkNames of the statement, computed once.
 func (s *parsedStatement) static(innodb bool) error {
-	s.staticOnce.Do(func() { s.staticErr = checkStatic(s.stmt, s.query, innodb) })
+	s.staticOnce.Do(func() { s.staticErr = checkNames(s.stmt, s.query, innodb) })
 	return s.staticErr
 }
 

@@ -308,17 +308,17 @@ func (x *sqlExec) aggregateEffects(sel *sqlir.SelectStmt) error {
 		return nil
 	}
 	// Postgres computes the aggregates before any other expression
-	// of the select list, HAVING or ORDER BY, so one that fails does
+	// of the select list, HAVING, ORDER BY or DISTINCT ON, so one that fails does
 	// so before a sequence call or a subquery's lock beside it, where
 	// detest evaluates them in their written order.
-	if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy); err != nil {
+	if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy, sel.DistinctOn); err != nil {
 		return err
 	}
 	ctes := map[string]*sqlir.SelectStmt{}
 	for _, c := range sel.With {
 		ctes[c.Name] = c.Select
 	}
-	for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy} {
+	for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy, sel.DistinctOn} {
 		for _, q := range sqlir.Selects(n) {
 			if x.effectfulQuery(q, ctes, map[string]bool{}) {
 				return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")

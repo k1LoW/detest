@@ -19,6 +19,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (1, 0)`)
 	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('sq') AS n`)
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE TABLE iv (id int PRIMARY KEY, i interval, at timestamptz)`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, NULL), (2, NULL)`)
 	mustExec(t, db, `CREATE VIEW av AS SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) AS v FROM t`)
 	// Creating a view runs no query, so one over av loads.
@@ -36,6 +37,10 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		{`SELECT coalesce(sum(n), -1, sum(1 / n)) FROM t`, []string{"0"}},
 		{`SELECT coalesce(0, sum(1 / n)) FROM t`, []string{"0"}},
 		{`SELECT coalesce(n, (SELECT max(g) FROM generate_series(1, 2) g)) FROM t`, []string{"0"}},
+		// The checks run before every statement leave the column types to
+		// the column check, which knows them.
+		{`SELECT count(coalesce(date_trunc('day', i), interval '0 days')) FROM iv`, []string{"0"}},
+		{`SELECT count(coalesce(at + interval '1 day', now())) FROM iv`, []string{"0"}},
 		{`SELECT coalesce(sum(n), coalesce(0, sum(1 / n))) FROM t`, []string{"0"}},
 		{`SELECT coalesce(sum(n), CASE WHEN true THEN 0 ELSE sum(1 / n) END) FROM t`, []string{"0"}},
 	} {
@@ -66,6 +71,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		`SELECT coalesce(NULL::bigint, (SELECT v FROM av))`,
 		`SELECT v FROM av`,
 		`UPDATE u SET n = av.v FROM av`,
+		`SELECT DISTINCT ON (coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n))) sum(n) FROM t`,
 		`DELETE FROM u USING av WHERE u.n = av.v`,
 		`CREATE TABLE r AS SELECT coalesce(nextval('sq'), max(nextval('sq'))) AS v FROM t`,
 		`UPDATE u SET n = 0 WHERE coalesce(n, (SELECT n FROM seqv)) > 0`,

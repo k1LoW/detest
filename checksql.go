@@ -96,8 +96,8 @@ var knownBinaryOps = map[string]bool{
 // the expressions they evaluate, so a statement over a table with no rows, a
 // CASE branch or a COALESCE argument no row reaches would otherwise pass with
 // an unknown function or a call of another signature, which Postgres fails
-// when it parses the statement. CheckSQL and every run of a statement check
-// it. The schema statements are left alone: an expression in a default or a
+// when it parses the statement. CheckSQL checks it, and every run of a
+// statement checks it through checkNames. The schema statements are left alone: an expression in a default or a
 // CHECK loads unconverted and is refused by the write that reads it, as
 // README's Approximate rules say.
 func checkStatic(st sqlir.Statement, query string, innodb bool) error {
@@ -105,9 +105,19 @@ func checkStatic(st sqlir.Statement, query string, innodb bool) error {
 	return c.statement(st)
 }
 
+// checkNames is checkStatic without the checks that depend on the types of
+// columns, for a run, whose column check knows them.
+func checkNames(st sqlir.Statement, query string, innodb bool) error {
+	c := &staticCheck{query: query, innodb: innodb, namesOnly: true}
+	return c.statement(st)
+}
+
 type staticCheck struct {
 	query  string
 	innodb bool
+	// namesOnly leaves out the checks that guess a column's type, which a
+	// run makes with the schema's types in the column check instead.
+	namesOnly bool
 }
 
 func (c *staticCheck) refuse(what string) error {
@@ -332,7 +342,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		if what := arityMismatch(v); what != "" {
 			return unsupported(what, c.query)
 		}
-		if !c.innodb {
+		if !c.innodb && !c.namesOnly {
 			if what := textArgumentMismatch(v, nil); what != "" {
 				return c.refuse(what)
 			}
@@ -345,7 +355,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		if what := windowArityMismatch(v.Func); what != "" {
 			return unsupported(what, c.query)
 		}
-		if !c.innodb {
+		if !c.innodb && !c.namesOnly {
 			if what := intervalBranchMismatch(branchArgs(v.Func), nil, nil); what != "" {
 				return c.refuse(what)
 			}
@@ -358,7 +368,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		}
 		return c.orderKeys(v.Order)
 	case *sqlir.BinaryExpr:
-		if !c.innodb {
+		if !c.innodb && !c.namesOnly {
 			if what := concatTypeMismatch(v, nil); what != "" {
 				return c.refuse(what)
 			}
@@ -401,7 +411,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 	case *sqlir.Collate:
 		return c.expr(v.X)
 	case *sqlir.CaseExpr:
-		if !c.innodb {
+		if !c.innodb && !c.namesOnly {
 			if what := intervalBranchMismatch(caseBranches(v), nil, nil); what != "" {
 				return c.refuse(what)
 			}
