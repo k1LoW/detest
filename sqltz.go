@@ -292,6 +292,9 @@ func (x *sqlExec) sourceType(e sqlir.Expr) string {
 // noteType records the type the column check resolved for e, for a run to
 // convert e's value by (exprTypes).
 func (x *sqlExec) noteType(e sqlir.Expr, typ string) {
+	// A domain over a time type converts as its base type, which the run
+	// reads by name.
+	typ = x.tx.db.baseType(typ)
 	if typ != "timestamptz" && typ != "timestamp" && typ != "date" {
 		return
 	}

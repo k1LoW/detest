@@ -93,6 +93,8 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`UPDATE t SET n = n + 1, updated_at = now() WHERE id = $1 AND version = $2`,
 			`SELECT * FROM generate_series(1, 3)`,
 			`INSERT INTO t (id, name) VALUES ($1, $2), ($3, $4)`,
+			// A set operation's column has no type without a schema.
+			`SELECT 'a' || (SELECT name FROM t UNION SELECT name FROM t)`,
 		},
 		mysql.New(): {
 			"SELECT LOWER(name), IFNULL(n, 0), UUID() FROM t WHERE created_at > NOW()",
