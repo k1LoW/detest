@@ -1260,6 +1260,61 @@ func TestEnumInputReadBeforeAnyRow(t *testing.T) {
 	}
 }
 
+func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, f float8)`)
+	for _, q := range []string{
+		`SELECT $1 + 0 FROM t WHERE false`,
+		`SELECT id FROM t WHERE n = $1 + 0`,
+		`UPDATE t SET n = $1 * 2 WHERE false`,
+		`SELECT id FROM t WHERE n > 0 AND n < $1 + 1`,
+		`SELECT id FROM t WHERE n = 0 - $1`,
+		`SELECT f / $1 FROM t`,
+		`SELECT coalesce(n, $1 + 0) FROM t`,
+	} {
+		if _, err := db.Exec(q, "bogus"); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", q, err)
+		}
+		if _, err := db.Exec(q, int64(2)); err != nil {
+			t.Errorf("%s with an integer: got %v, want no error", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT 'bogus' + 0 FROM t WHERE false`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a string literal beside an integer: got %v, want invalid input", err)
+	}
+	// The integer's input does not take a fraction.
+	if _, err := db.Exec(`SELECT $1 + 0 FROM t WHERE false`, "1.5"); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a fraction beside an integer: got %v, want invalid input", err)
+	}
+	if _, err := db.Exec(`SELECT $1 + 0.5 FROM t WHERE false`, "1.5"); err != nil {
+		t.Errorf("a fraction beside a numeric: got %v, want no error", err)
+	}
+	// Postgres computes with the integer it binds, 2 for 5.0 / 2, while
+	// the run would compute with the float.
+	mustExec(t, db, `INSERT INTO t VALUES (1, 5, 1)`)
+	for _, q := range []string{`SELECT $1 / 2 FROM t`, `SELECT $1::int, $1 / 2 FROM t`} {
+		if _, err := db.Exec(q, float64(5)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with a float: got %v, want unsupported", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT $1 / 2.0 FROM t`, float64(5)); err != nil {
+		t.Errorf("a float beside a numeric: got %v, want no error", err)
+	}
+	// A domain is reduced to its base type before the operator resolves,
+	// so 1::tiny + 0 is an integer, which detest does not follow.
+	mustExec(t, db, `CREATE DOMAIN tiny AS smallint`)
+	for _, q := range []string{
+		`SELECT $1 + (1::tiny + 0) WHERE false`,
+		`SELECT $1 + s.n FROM (SELECT 1::tiny + 0 AS n) s WHERE false`,
+		`SELECT $1 + 1::tiny WHERE false`,
+	} {
+		if _, err := db.Exec(q, "40000"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
+
 // Postgres compares rows pair by pair: an ordering by the first pair that is
 // not equal, as keyset pagination relies on, and each pair as two scalars.
 func TestRowComparison(t *testing.T) {
