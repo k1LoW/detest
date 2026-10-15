@@ -1025,6 +1025,25 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `INSERT INTO m VALUES (2, 9000000, 1, 1) RETURNING *`),
 		},
 	},
+	{
+		Name: "a derived table over a * with a column alias list",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, a numeric, b text)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2000000, 'x')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT s.zzz FROM (SELECT * FROM t) s(i, n)`),
+			difftest.Q(0, `SELECT s.a FROM (SELECT * FROM t) s(i, n)`),
+			difftest.Q(0, `SELECT s.i, s.n, s.b FROM (SELECT * FROM t) s(i, n)`),
+			difftest.Q(0, `SELECT s.n, s.b FROM (SELECT * FROM t) s(i)`),
+			difftest.Q(0, `SELECT coalesce(s.n, '0') = 2000000, coalesce(s.b, 'y') FROM (SELECT * FROM t) s(i, n)`),
+			difftest.Q(0, `SELECT s.n FROM (SELECT * FROM t UNION ALL SELECT * FROM t WHERE false) s(i, n)`),
+			difftest.Q(0, `SELECT s.q FROM (SELECT id, * FROM t) s(k, i, q)`),
+			difftest.Q(0, `SELECT s.n FROM (SELECT * FROM t) s(i, n, c, d)`),
+			difftest.Q(0, `SELECT s.y FROM (WITH t AS (SELECT 1 AS x, 2 AS y) SELECT * FROM t) s(i)`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

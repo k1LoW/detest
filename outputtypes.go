@@ -328,7 +328,7 @@ func leafColumn(sel *sqlir.SelectStmt, i int) []sqlir.Expr {
 // sel, by name, which names renames by position.
 func (c *columnChecker) certainItem(sel *sqlir.SelectStmt, names []string) map[string]string {
 	out := map[string]string{}
-	cols := outputNames(sel)
+	cols := c.expandedNames(sel)
 	if types := c.certainOutput(sel); types != nil && len(cols) == len(types) {
 		// names renames the first columns by position, and the rest keep
 		// their own.
