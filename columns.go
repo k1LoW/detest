@@ -2118,6 +2118,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
 						return
 					}
+					if e.Name == "coalesce" && slices.ContainsFunc(e.Args, func(a sqlir.Expr) bool {
+						f, ok := a.(*sqlir.FuncCall)
+						return ok && f.Name == "pg_advisory_xact_lock"
+					}) {
+						// Its void result is not NULL in Postgres, which stops
+						// COALESCE there, while the evaluators hold it as NULL.
+						err = c.x.unsupported("COALESCE of pg_advisory_xact_lock, whose void result detest holds as NULL")
+						return
+					}
 					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], c.readsEffectfulCTE) {
 						// The evaluators stop at the first argument that is
 						// not NULL as Postgres does, but run every CTE the

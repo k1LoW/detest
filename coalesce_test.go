@@ -59,6 +59,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		// An uncorrelated subquery runs once in Postgres and for each row
 		// in detest.
 		`SELECT coalesce(n, (SELECT n FROM seqv)) FROM u ORDER BY id`,
+		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
 		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
