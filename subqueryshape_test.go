@@ -22,6 +22,9 @@ func TestSubqueryShapeBeforeAnyRow(t *testing.T) {
 		`SELECT (SELECT * FROM t) FROM t WHERE false`,
 		`SELECT coalesce(n, (SELECT sum(n) FROM t FOR UPDATE)) FROM t`,
 		`SELECT n FROM t WHERE false AND n = (SELECT DISTINCT n FROM t FOR UPDATE)`,
+		`SELECT (1, 2) || (SELECT 3, 4) WHERE false`,
+		`SELECT id FROM t WHERE false AND (id, n) = (SELECT id, n, 1 FROM t)`,
+		`SELECT id FROM t WHERE false AND (id, n) < (SELECT id FROM t)`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

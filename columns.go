@@ -115,9 +115,9 @@ type columnChecker struct {
 	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
-	// rowSubqueries are the subqueries a row is compared with, which take
-	// as many columns as the row rather than one.
-	rowSubqueries map[*sqlir.SubQuery]bool
+	// rowSubqueries are the subqueries a row is compared with, by the
+	// number of columns they must have, which is the row's rather than one.
+	rowSubqueries map[*sqlir.SubQuery]int
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
@@ -2069,12 +2069,19 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.typedParam(p) // IS NULL gives it no type to differ from
 				}
 			case *sqlir.BinaryExpr:
-				if _, row := e.L.(*sqlir.RowExpr); row {
-					if q, ok := e.R.(*sqlir.SubQuery); ok {
-						if c.rowSubqueries == nil {
-							c.rowSubqueries = map[*sqlir.SubQuery]bool{}
+				// Only the operators compareRowSubquery takes compare a row
+				// with a subquery. Postgres fails a row beside a subquery
+				// under any other operator, so that subquery keeps the
+				// scalar width check.
+				switch e.Op {
+				case "=", "<>", "!=", "<", "<=", ">", ">=":
+					if row, ok := e.L.(*sqlir.RowExpr); ok {
+						if q, ok := e.R.(*sqlir.SubQuery); ok {
+							if c.rowSubqueries == nil {
+								c.rowSubqueries = map[*sqlir.SubQuery]int{}
+							}
+							c.rowSubqueries[q] = len(row.Items)
 						}
-						c.rowSubqueries[q] = true
 					}
 				}
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
@@ -2277,11 +2284,18 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if _, err = c.query(e.Select, sc); err != nil {
 					return
 				}
-				// Postgres fails a scalar subquery of other than one column
-				// when it analyzes the statement, which the run refuses only
-				// where a row reaches it. A row compared with a subquery
-				// takes as many columns, and is checked there.
-				if w, ok := c.knownWidth(e.Select); ok && w != 1 && !c.rowSubqueries[e] {
+				// Postgres fails a subquery of other than the width its place
+				// takes when it analyzes the statement, which the run refuses
+				// only where a row reaches it.
+				w, ok := c.knownWidth(e.Select)
+				if !ok {
+					return
+				}
+				if want, row := c.rowSubqueries[e]; row {
+					if w != want {
+						err = c.x.unsupported("a row compared with a subquery of another number of columns")
+					}
+				} else if w != 1 {
 					err = c.x.unsupported("a scalar subquery of other than one column")
 				}
 				return
