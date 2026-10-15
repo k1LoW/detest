@@ -165,3 +165,94 @@ func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 		}
 	}
 }
+
+// Postgres resolves a query output of string literals, parameters or NULLs
+// alone to text where a query around reads it, so a comparison or
+// arithmetic of it with a number fails when it plans the statement (42883),
+// whatever rows the statement reads.
+func TestQueryOutputOfLiteralsIsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT '1' AS x, NULL AS y`)
+	for _, q := range []string{
+		`SELECT x.v = 1 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT (SELECT '1') = 1 WHERE false`,
+		`SELECT (SELECT max('1')) + 1 WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT NULL AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT NULL AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT max(NULL) AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT DISTINCT '1' AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT min(NULL) OVER () AS v) x WHERE false`,
+		`SELECT x.v = 1.5 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT s.a = 1 FROM (SELECT '1') s(a) WHERE false`,
+		`SELECT s.v = 1 FROM (SELECT *, '1' AS v FROM t) s WHERE false`,
+		`SELECT s.v = 1 FROM t, LATERAL (SELECT '1' AS v) s WHERE false`,
+		`WITH c AS (SELECT '1' AS v) SELECT v = 1 FROM c WHERE false`,
+		`SELECT x = 1 FROM v WHERE false`,
+		`SELECT y + 1 FROM v WHERE false`,
+		`SELECT n FROM t WHERE n = (SELECT max('1'))`,
+		// These take anyelement, whose type Postgres cannot determine
+		// from an untyped value (42804).
+		`SELECT first_value('1') OVER ()`,
+		`SELECT last_value(NULL) OVER ()`,
+		`SELECT nth_value('1', 1) OVER ()`,
+		`SELECT lag('1') OVER ()`,
+		`SELECT lead(NULL, 1) OVER ()`,
+		`SELECT x.v || 'a' FROM (SELECT first_value('1') OVER () AS v) x WHERE false`,
+		// Postgres has no sum of text (42883).
+		`SELECT x.v || 'x' FROM (SELECT sum(coalesce('1', NULL)) AS v WHERE false) x`,
+		// Nor nests aggregates (42803).
+		`SELECT x.v || 'a' FROM (SELECT max(min('1')) AS v WHERE false) x`,
+		// Text has no assignment cast to an integer (42804).
+		`INSERT INTO t (id, n) SELECT 1, x.v FROM (SELECT '1' AS v) x`,
+		`INSERT INTO t (id, n) SELECT 1, min(NULL) OVER ()`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		{`SELECT x.v + 1 FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		{`SELECT x.v = 1 FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		// The parameter is text for its other uses too.
+		{`SELECT x.v || 'a' FROM (SELECT $1 AS v) x WHERE false AND $1 = 1`, "1"},
+		{`SELECT x.v FROM (SELECT max($1) AS v) x WHERE $1 = 1`, "1"},
+		{`SELECT (SELECT $1) = 'a', $1 = 1`, "1"},
+		{`SELECT x.v || 'a', $1 + NULL FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		{`SELECT x.v || 'a', abs($1) FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		// The run reads a parameter bound to another value as bound,
+		// where Postgres reads it as text.
+		{`SELECT x.v || '', (x.v = '01')::text FROM (SELECT max($1) AS v) x`, int64(1)},
+		{`SELECT (x.v = '01')::text FROM (SELECT $1 AS v) x`, int64(1)},
+		{`SELECT coalesce($1, NULL) = '01'`, int64(1)},
+		{`SELECT (SELECT $1) = '01'`, int64(1)},
+		// Nor reads bytes there as the text they hold.
+		{`SELECT CASE WHEN x.v = '\x41' THEN 'matched' ELSE x.v || '' END FROM (SELECT $1 AS v) x`, []byte("A")},
+		{`SELECT (SELECT $1) = '\x41'`, []byte("A")},
+		{`SELECT x.v || '' FROM (SELECT max($1) AS v) x`, []byte("A")},
+	} {
+		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
+		}
+	}
+	if got := rowsOf(t, db, `SELECT x.v || 'a', y.w FROM (SELECT $1 AS v) x, (SELECT $1 AS w) y`, "1"); !reflect.DeepEqual(got, []string{"1a,1"}) {
+		t.Errorf("a text parameter read through derived tables: got %v, want [1a,1]", got)
+	}
+	// COALESCE reads bytes as the text they hold.
+	if got := rowsOf(t, db, `SELECT x.v || 'b' FROM (SELECT coalesce($1, NULL) AS v) x`, []byte("A")); !reflect.DeepEqual(got, []string{"Ab"}) {
+		t.Errorf("bytes under COALESCE read through a derived table: got %v, want [Ab]", got)
+	}
+	// An INSERT reads its own query's literals and parameters as the
+	// columns' input.
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 1, '1'`)
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 2, NULL`)
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 3, $1`, int64(3))
+	if got := rowsOf(t, db, `SELECT n FROM t ORDER BY id`); !reflect.DeepEqual(got, []string{"1", "NULL", "3"}) {
+		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL 3]", got)
+	}
+}
