@@ -56,6 +56,7 @@ var (
 	ErrDuplicateColumn           = sqlir.ErrDuplicateColumn
 	ErrStringDataRightTruncation = sqlir.ErrStringDataRightTruncation
 	ErrDataTruncated             = sqlir.ErrDataTruncated
+	ErrInvalidPowerArgument      = sqlir.ErrInvalidPowerArgument
 	ErrUnavailable               = errors.New("detest: external call failed (transport)")
 	ErrNotFound                  = errors.New("detest: not found")
 	ErrFailedPrecondition        = errors.New("detest: failed precondition")

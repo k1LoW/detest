@@ -204,6 +204,26 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT nextval('s')`),
 		},
 	},
+	{
+		Name:   "power of arguments it has no real result for, from rows and folded alike",
+		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY, x float8, y float8, nx numeric, ny numeric)`},
+		Seed:   []string{`INSERT INTO t VALUES (1, 0, -1, 0, -1), (2, -1, 0.5, -1, 0.5), (3, -2, 2, -2, 2)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT power(x, y) > 0 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT power(x, y) > 0 FROM t WHERE id = 2`),
+			difftest.Q(0, `SELECT power(x, y) = 4 FROM t WHERE id = 3`),
+			difftest.Q(0, `SELECT power(nx, ny) > 0 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT pow(nx, ny) > 0 FROM t WHERE id = 2`),
+			difftest.Q(0, `SELECT power(nx, ny) = 4 FROM t WHERE id = 3`),
+			difftest.Q(0, `SELECT power(x, -1.5) > 0 FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT (power(0, -1) > 0)::text`),
+			difftest.Q(0, `SELECT (power(-1, 0.5) > 0)::text`),
+			difftest.Q(0, `SELECT power(0, -1) WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN id > 5 THEN power(-8::float8, 0.5::float8) END FROM t`),
+			difftest.Q(0, `SELECT power(0, 0) = 1 AND power(-1, 'infinity'::float8) = 1`),
+		},
+	},
 }
 
 func TestDiffFold(t *testing.T) {

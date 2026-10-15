@@ -192,6 +192,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "22001", 0
 	case sqlir.DataTruncated:
 		return "22P02", 0 // invalid input value for enum
+	case sqlir.InvalidPowerArgument:
+		return "2201F", 0
 	}
 	return "", 0
 }
