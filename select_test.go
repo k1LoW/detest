@@ -1071,6 +1071,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	for _, q := range []string{
 		`VALUES (1::smallint), ('40000', 2) LIMIT 0`,
 		`SELECT 1 WHERE false UNION SELECT 'bad', 2 WHERE false`,
+		`SELECT * FROM t WHERE false UNION SELECT 'bad' WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
 			t.Errorf("%s: got %v, want a syntax error", q, err)

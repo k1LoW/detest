@@ -940,8 +940,8 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	if db.kind.InnoDB() {
 		return nil
 	}
-	if l, ok := knownWidth(sel.Larg); ok {
-		if r, ok := knownWidth(sel.Rarg); ok && l != r {
+	if l, ok := c.knownWidth(sel.Larg); ok {
+		if r, ok := c.knownWidth(sel.Rarg); ok && l != r {
 			// Postgres fails this before it reads any input by the
 			// columns' types, as the run does once it has both queries.
 			return db.kind.Error(sqlir.SyntaxError, fmt.Sprintf("each %s query must have the same number of columns", strings.ToUpper(sel.SetOp)), "", "", "")
@@ -1367,18 +1367,19 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Ex
 	return nil
 }
 
-// knownWidth is the number of columns q gives, false where a * leaves it to
-// the items the * covers.
-func knownWidth(q *sqlir.SelectStmt) (int, bool) {
+// knownWidth is the number of columns q gives, false for a * whose columns
+// the walk did not record by position.
+func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
 	switch {
 	case q == nil:
 		return 0, false
 	case q.SetOp != "":
-		return knownWidth(q.Larg)
+		return c.knownWidth(q.Larg)
 	case len(q.Values) > 0:
 		return len(q.Values[0]), true
 	case slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star }):
-		return 0, false
+		t, ok := c.outTypes[q]
+		return len(t), ok
 	}
 	return len(q.Targets), true
 }
