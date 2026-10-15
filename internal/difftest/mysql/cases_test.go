@@ -1212,6 +1212,20 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM m WHERE price * 1.1 > 0.2 ORDER BY id`),
 		},
 	},
+	{
+		Name:   "pow with a result that is not a finite number",
+		Schema: []string{`CREATE TABLE p (id INT PRIMARY KEY, x DOUBLE, y DOUBLE)`},
+		Seed:   []string{`INSERT INTO p VALUES (1, 0, -1), (2, -1, 0.5), (3, -2, 2)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT POW(x, y) > 0 FROM p WHERE id = 1`),
+			difftest.Q(0, `SELECT POWER(x, y) > 0 FROM p WHERE id = 2`),
+			difftest.Q(0, `SELECT id FROM p WHERE id = 3 AND POW(x, y) = 4`),
+			difftest.Q(0, `SELECT POW('-1', '0.5') > 0`),
+			difftest.Q(0, `SELECT POW(0, -1) FROM p WHERE false`),
+			difftest.S(0, `UPDATE p SET y = POW(x, y) WHERE id = 1`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
