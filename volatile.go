@@ -140,10 +140,21 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 	if isAggregate(sel) {
 		// Postgres computes the aggregates before any other expression
 		// of the select list, HAVING or ORDER BY, so one that fails does
-		// so before a sequence call beside it runs, where detest
-		// evaluates them in their written order.
+		// so before a sequence call or a subquery's lock beside it, where
+		// detest evaluates them in their written order.
 		if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy); err != nil {
 			return err
+		}
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, c := range sel.With {
+			ctes[c.Name] = c.Select
+		}
+		for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy} {
+			for _, q := range sqlir.Selects(n) {
+				if x.effectfulQuery(q, ctes, map[string]bool{}) {
+					return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")
+				}
+			}
 		}
 	}
 	for _, n := range []any{sel.Values, sel.Targets, sel.From, sel.Joins, sel.Where, sel.GroupBy, sel.Having, sel.OrderBy, sel.Limit, sel.Offset, sel.DistinctOn} {
@@ -287,6 +298,36 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 	}
 	walk(reflect.ValueOf(n))
 	return err
+}
+
+// effectfulQuery reports a query with a locking clause or one of
+// effectFuncs, in it or in a view or one of ctes it reads. seen guards
+// against a view or a CTE read twice.
+func (x *sqlExec) effectfulQuery(sel *sqlir.SelectStmt, ctes map[string]*sqlir.SelectStmt, seen map[string]bool) bool {
+	if queryHasEffects(sel) {
+		return true
+	}
+	for _, q := range sqlir.Selects(sel) {
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" || seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			// A CTE of the name and a view of it are both followed, as
+			// which one the name reads depends on scopes not tracked here.
+			if c := ctes[t.Name]; c != nil && x.effectfulQuery(c, ctes, seen) {
+				return true
+			}
+			if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil && v.View != nil && x.effectfulQuery(v.View, ctes, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // noSequenceCalls refuses a call of the functions anywhere under ns.
