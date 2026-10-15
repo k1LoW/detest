@@ -133,3 +133,35 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		t.Errorf("a cast parameter: got %v, want [-5]", got)
 	}
 }
+
+// The type checks a statement gets before it runs read a scalar subquery's
+// target in the subquery's own scope, not as the outer column of that name.
+func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE DOMAIN day AS date`)
+	mustExec(t, db, `CREATE DOMAIN span AS interval`)
+	mustExec(t, db, `CREATE TABLE dates (id int PRIMARY KEY, n date)`)
+	mustExec(t, db, `CREATE TABLE words (id int PRIMARY KEY, n text)`)
+	mustExec(t, db, `CREATE TABLE nums (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO dates VALUES (1, '2026-01-02')`)
+	mustExec(t, db, `INSERT INTO words VALUES (1, 'A')`)
+	mustExec(t, db, `INSERT INTO nums VALUES (1, 2)`)
+	for _, q := range []string{
+		// Postgres gives an integer of days, where detest would give an
+		// interval.
+		`SELECT (SELECT n FROM dates LIMIT 1) - (SELECT n FROM dates LIMIT 1) FROM words`,
+		// Postgres has no lower of an integer.
+		`SELECT lower((SELECT n FROM nums LIMIT 1)) FROM words WHERE false`,
+		// A domain over a date is a date there.
+		`SELECT n::day - n::day FROM dates`,
+		`WITH x AS (SELECT n::day AS n FROM dates) SELECT (SELECT n FROM x LIMIT 1) - (SELECT n FROM x LIMIT 1) FROM dates`,
+		// date_trunc of an interval domain is an interval, which Postgres
+		// does not compare with a timestamptz.
+		`WITH x AS (SELECT interval '1 day' AS n) SELECT count(*) FROM (SELECT n::span AS n FROM x) y WHERE false AND date_trunc('day', n) = now()`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}

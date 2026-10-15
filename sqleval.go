@@ -1590,7 +1590,7 @@ func (x *sqlExec) checkArity(f *sqlir.FuncCall) error {
 		return x.unsupported(what)
 	}
 	if !x.tx.db.kind.InnoDB() {
-		if what := textArgumentMismatch(f, nil); what != "" {
+		if what := textArgumentMismatch(f, typer{}); what != "" {
 			return x.unsupported(what)
 		}
 	}
