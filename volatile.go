@@ -245,6 +245,13 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 				err = x.noSequenceCalls(sub)
 				return
 			}
+			if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && isAggregateCall(f) {
+				// Postgres computes each aggregate once, before any
+				// expression of the row, where detest computes it at
+				// each reference in the order it evaluates them.
+				err = x.noSequenceCalls(f.Args)
+				return
+			}
 			walk(v.Elem())
 		case reflect.Struct:
 			if t, ok := reflect.TypeAssert[sqlir.TableRef](v); ok && t.Sub != nil && !t.Lateral {

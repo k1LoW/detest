@@ -27,22 +27,26 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		{`SELECT nextval('sq')`, []string{"1"}},
 		{`SELECT coalesce(NULL, nextval('sq'), nextval('sq'))`, []string{"2"}},
 		{`SELECT nextval('sq')`, []string{"3"}},
-		{`SELECT coalesce(n, NULL, -1, 1 / 0) FROM t`, []string{"0"}},
-		{`SELECT coalesce(sum(n), max(nextval('sq'))) FROM t`, []string{"0"}},
-		{`SELECT nextval('sq')`, []string{"5"}},
+		{`SELECT coalesce(sum(n), -1, sum(1 / n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(0, sum(1 / n)) FROM t`, []string{"0"}},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
 		}
 	}
-	// Postgres folds an argument of constants when it plans the statement,
-	// and computes the aggregates before COALESCE picks among them.
+	// Postgres computes the aggregates before COALESCE picks among them.
+	if _, err := db.Query(`SELECT coalesce(sum(n), sum(1 / n)) FROM t`); err == nil || !strings.Contains(err.Error(), "division by zero") {
+		t.Errorf("an aggregate of an argument not reached: got %v, want division by zero", err)
+	}
+	// Postgres computes each aggregate once before the row's expressions,
+	// where detest computes it at each reference, so a sequence call in
+	// one is refused.
 	for _, q := range []string{
-		`SELECT coalesce(n, 1 / 0) FROM t`,
-		`SELECT coalesce(sum(n), sum(1 / n)) FROM t`,
+		`SELECT coalesce(sum(n), max(nextval('sq'))) FROM t`,
+		`SELECT coalesce(nextval('sq'), max(nextval('sq'))) FROM t`,
 	} {
-		if _, err := db.Query(q); err == nil || !strings.Contains(err.Error(), "division by zero") {
-			t.Errorf("%s: got %v, want division by zero", q, err)
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
 	// Postgres reads a literal or a parameter as the arguments' type

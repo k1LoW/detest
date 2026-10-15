@@ -506,28 +506,27 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 // constant, a parameter or a column reference is still read, as it can
 // neither fail nor have an effect, and Postgres reads a literal or a
 // parameter as the arguments' type whatever row it reaches, which the
-// conversions after this check. An argument of constants only is
-// evaluated too, as Postgres folds it when it plans the statement, so
-// 1 / 0 fails there, up to the first such argument that is not NULL,
-// after which it drops the rest. skipped, when not nil, is given each
-// argument left unevaluated.
+// conversions after this check. skipped, when not nil, is given each
+// argument left unevaluated before the first literal that is not NULL,
+// after which Postgres drops the arguments when it plans the statement.
+//
+// Postgres also folds an expression of constants when it plans the
+// statement, so 1 / 0 fails there in an argument no row reaches. detest
+// folds no expression (#98), so it is not modeled for COALESCE alone.
 func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error), skipped func(sqlir.Expr) error) ([]any, error) {
 	args := make([]any, len(v.Args))
-	found, folded := false, false
+	found, dropped := false, false
 	for i, a := range v.Args {
-		fold := v.Name == "coalesce" && foldable(a)
 		if found {
 			switch a.(type) {
 			case *sqlir.Const, *sqlir.Param, *sqlir.ColumnRef:
 			default:
-				if !fold || folded {
-					if skipped != nil {
-						if err := skipped(a); err != nil {
-							return nil, err
-						}
+				if skipped != nil && !dropped {
+					if err := skipped(a); err != nil {
+						return nil, err
 					}
-					continue
 				}
+				continue
 			}
 		}
 		val, err := eval(a)
@@ -537,21 +536,12 @@ func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error)
 		args[i] = val
 		if v.Name == "coalesce" && derefValue(val) != nil {
 			found = true
-			folded = folded || fold
+			if _, ok := a.(*sqlir.Const); ok {
+				dropped = true
+			}
 		}
 	}
 	return args, nil
-}
-
-// foldable reports an expression of constants only, which Postgres
-// evaluates when it plans the statement: no column, parameter, subquery,
-// aggregate or window function, and no function of an effect, which it
-// does not fold.
-func foldable(e sqlir.Expr) bool {
-	if len(sqlir.ColumnRefs(e)) > 0 || len(sqlir.Params(e)) > 0 || len(sqlir.Selects(e)) > 0 || len(sqlir.WindowFuncs(e)) > 0 || hasAggregate(e) {
-		return false
-	}
-	return !slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] })
 }
 
 // untypedPair resolves the operands of a comparison as Postgres resolves an
