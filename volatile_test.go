@@ -43,10 +43,22 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c LIMIT 1`,
 		`SELECT (WITH c AS (SELECT n FROM u FOR UPDATE) SELECT count(*) FROM c)`,
 		`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c UNION ALL SELECT 1 LIMIT 1`,
+		// A reader may ask for no row, which Postgres then never runs.
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c LIMIT 0))`,
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c WHERE false))`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c WHERE false`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c WHERE 1 = 0 AND v > 0`,
+		// Postgres skips the rest of a join when one side has no rows,
+		// which side its planner's choice.
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT c.v FROM u JOIN c ON true`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
+	}
+	q := `WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c LIMIT $1))`
+	if _, err := db.Query(q, 0); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 	}
 	for _, tt := range []struct {
 		q    string
@@ -56,6 +68,7 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		{`WITH c AS (SELECT nextval('sq') AS v FROM u), d AS (SELECT v FROM c) SELECT count(*) FROM d`, []string{"2"}},
 		{`WITH c AS (SELECT nextval('sq') AS v) SELECT (SELECT v FROM c) + (SELECT v FROM c)`, []string{"10"}},
 		{`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c ORDER BY n`, []string{"10", "20"}},
+		{`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c WHERE n > 10`, []string{"20"}},
 		{`SELECT nextval('sq')`, []string{"6"}},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
