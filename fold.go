@@ -57,20 +57,20 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	if def == nil {
 		return nil
 	}
-	cols := st.Columns
+	cols, known := st.Columns, true
 	if len(cols) == 0 {
 		n := len(def.columns)
 		switch {
 		case len(st.Rows) > 0:
 			n = len(st.Rows[0])
-		case st.Select != nil && st.Select.SetOp == "" && !slices.ContainsFunc(st.Select.Targets, func(t sqlir.Target) bool { return t.Star }):
-			n = len(st.Select.Targets)
+		case st.Select != nil:
+			n, known = f.width(st.Select)
 		}
 		cols = def.columns[:min(n, len(def.columns))]
 	}
 	for _, c := range def.columns {
 		if !slices.Contains(cols, c) {
-			if err := f.columnDefault(def, c); err != nil {
+			if err := f.columnDefault(def, c, !known); err != nil {
 				return err
 			}
 		}
@@ -78,7 +78,7 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	for _, row := range st.Rows {
 		for i, e := range row {
 			if _, ok := e.(*sqlir.Default); ok && i < len(cols) {
-				if err := f.columnDefault(def, cols[i]); err != nil {
+				if err := f.columnDefault(def, cols[i], false); err != nil {
 					return err
 				}
 			}
@@ -98,7 +98,7 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 	}
 	for _, a := range set {
 		if _, ok := a.Value.(*sqlir.Default); ok {
-			if err := f.columnDefault(def, a.Column); err != nil {
+			if err := f.columnDefault(def, a.Column, false); err != nil {
 				return err
 			}
 		}
@@ -110,17 +110,54 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 // for sure is kept. A default detest cannot evaluate is written as the
 // Unknown marker rather than refused (columnDefault in schema.go), so
 // refusing one here, or one whose folding detest cannot tell, would make
-// every INSERT that leaves the column out unsupported.
-func (f *folder) columnDefault(def *tableDef, col string) error {
+// every INSERT that leaves the column out unsupported. An error from the
+// default of a column the INSERT may give, doubt being set, is refused.
+func (f *folder) columnDefault(def *tableDef, col string, doubt bool) error {
 	d, ok := def.defaults[col]
 	if !ok || def.generated[col] != nil {
 		return nil
 	}
 	_, err := f.expr(d)
-	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok || err == nil {
 		return nil
 	}
+	if doubt {
+		return f.x.unsupported(foldDoubt)
+	}
 	return err
+}
+
+// width is the number of columns sel gives, and whether detest knows it.
+// It knows a * only over one table the schema declares, and gives the
+// number of the other items when it does not.
+func (f *folder) width(sel *sqlir.SelectStmt) (int, bool) {
+	if names := outputNames(sel); names != nil {
+		return len(names), true
+	}
+	for sel.SetOp != "" && sel.Larg != nil {
+		sel = sel.Larg
+	}
+	n, known := 0, true
+	for _, t := range sel.Targets {
+		if !t.Star {
+			n++
+			continue
+		}
+		from := sel.From
+		db := f.x.tx.db
+		if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || db.views[db.resolve(from.Name)] != nil ||
+			slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == from.Name }) {
+			known = false
+			continue
+		}
+		def := db.defs[db.resolve(from.Name)]
+		if def == nil {
+			known = false
+			continue
+		}
+		n += len(def.columns)
+	}
+	return n, known
 }
 
 type folder struct {
@@ -948,6 +985,7 @@ func (f *folder) whole(e sqlir.Expr, kids []folded, uncertain bool) (folded, err
 	if uncertain {
 		c = maybe
 	}
+	known := true
 	for _, k := range kids {
 		if k.c == varies {
 			if !uncertain {
@@ -956,8 +994,11 @@ func (f *folder) whole(e sqlir.Expr, kids []folded, uncertain bool) (folded, err
 			return folded{c: maybe}, nil
 		}
 		c = max(c, k.c)
+		// A part whose value detest does not know, such as a string
+		// literal under NOT, which the evaluators would read as NULL.
+		known = known && k.e != nil
 	}
-	if !pure(e) {
+	if !known || !pure(e) {
 		return folded{c: c}, nil
 	}
 	return f.eval(e, c)
@@ -988,7 +1029,7 @@ func (f *folder) coalesce(v *sqlir.FuncCall) (folded, error) {
 		if r.c == fixed && r.null() {
 			continue // dropped
 		}
-		if r.c == fixed {
+		if r.c == fixed && r.hasVal {
 			if !kept && !uncertain {
 				return f.reduced(v, r, path...) // the COALESCE is reduced to this argument
 			}

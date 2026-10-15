@@ -74,6 +74,8 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		// (#118), where Postgres reads it as a boolean.
 		`SELECT CASE WHEN ('true' AND true) THEN 0 ELSE 1 / 0 END FROM t WHERE false`,
 		`SELECT CASE WHEN NOT 'false' THEN 0 ELSE 1 / 0 END FROM t WHERE false`,
+		`SELECT CASE WHEN (CASE WHEN NOT 'false' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`,
+		`SELECT coalesce('true' AND NULL, 1 / 0 = 1) WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,
 	} {
