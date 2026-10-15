@@ -1770,6 +1770,8 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`UPDATE t SET id = id RETURNING (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
 		`SELECT (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
 		`UPDATE t SET id = id RETURNING (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
+		`SELECT x.n FROM (SELECT s.v + 0::numeric AS n FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) x`,
+		`SELECT * FROM (VALUES (5000000::numeric), (abs(NULL))) v WHERE false UNION ALL SELECT f FROM t`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
@@ -1795,6 +1797,11 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT length(avg(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT lower(-floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT lower(floor((SELECT f FROM t)))`,
+		`SELECT lower(s.v + 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(floor(s.v) + floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(avg(s.v) OVER ()) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT pg_try_advisory_xact_lock(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT pg_advisory_xact_lock(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT coalesce(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT nullif(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 	} {
@@ -1802,11 +1809,16 @@ func TestNumericReadsBackAsText(t *testing.T) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
+	// abs(NULL) is a float8 the check does not know, so the column is not
+	// certainly a numeric.
+	var sv any
+	if err := db.QueryRow(`VALUES (2000000::numeric), (abs(NULL))`).Scan(&sv); err != nil || sv != float64(2000000) {
+		t.Errorf("VALUES beside abs(NULL): got %#v, %v, want a float64", sv, err)
+	}
 	// A statement of a script does not read an earlier one's types.
 	if _, err := db.Exec(`SELECT 1::numeric; SELECT 2::numeric`); err != nil {
 		t.Fatal(err)
 	}
-	var sv any
 	if err := db.QueryRow(`SELECT 2000000::numeric; SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`).Scan(&sv); err != nil || sv != float64(5000000) {
 		t.Errorf("a script's last statement: got %#v, %v, want a float64", sv, err)
 	}

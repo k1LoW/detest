@@ -97,11 +97,6 @@ func (t typer) of(e sqlir.Expr) string {
 			case (l == "interval" || r == "interval") && e.Op == "*":
 				return "interval"
 			}
-			if l == unresolvedType || r == unresolvedType {
-				// The operator depends on a type the check cannot show,
-				// which the fallbacks below would take from the other.
-				return unresolvedType
-			}
 			if numberRank[l] > 0 && numberRank[r] > 0 {
 				// The operator takes the wider of two numbers, as
 				// smallint + integer is an integer.
@@ -144,13 +139,12 @@ func (t typer) of(e sqlir.Expr) string {
 					if kind == "" {
 						kind = "float8"
 					}
-				case typ == unresolvedType:
-					// The form depends on a type the check cannot show.
-					return unresolvedType
-				case typ == "":
-					return ""
 				default:
-					kind = "numeric" // no form takes it, which Postgres fails
+					// A type the check does not know, or one no form takes,
+					// which Postgres fails; the checks of the arguments go
+					// by numeric, as they did before the forms were told
+					// apart.
+					kind = "numeric"
 				}
 			}
 			if kind == "" && len(e.Args) > 0 {
@@ -166,14 +160,8 @@ func (t typer) of(e sqlir.Expr) string {
 			switch typ := t.reduce(t.of(e.Args[0])); {
 			case numberCategory(typ) == numberCategory("float8"):
 				return "float8"
-			case numberRank[typ] > 0:
-				return "numeric"
-			case typ == unresolvedType:
-				return unresolvedType
-			case typ == "":
-				return ""
 			}
-			return "numeric" // no form takes it, which Postgres fails
+			return "numeric"
 		case "pg_try_advisory_xact_lock":
 			return "bool"
 		case "pg_advisory_xact_lock":
@@ -214,9 +202,6 @@ func (t typer) of(e sqlir.Expr) string {
 				return l
 			}
 			r := t.reduce(t.of(e.Args[1]))
-			if l == unresolvedType {
-				return unresolvedType
-			}
 			if l == "" {
 				return r
 			}
@@ -299,10 +284,6 @@ func (t typer) common(exprs []sqlir.Expr) string {
 	same, mixed := "", false
 	for i, e := range exprs {
 		types[i] = t.of(e)
-		if types[i] == unresolvedType {
-			// The branches meet at a type the check cannot show.
-			return unresolvedType
-		}
 		if types[i] != "" {
 			mixed = mixed || same != "" && types[i] != same
 			same = types[i]
@@ -416,10 +397,6 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 			typ := expressionType(f.Args[0], column)
 			if typ != "" && typ != "unresolved column type" && typ != "text" && typ != "varchar" && typ != "bpchar" {
 				return f.Name + " with a " + typ + " argument"
-			}
-			if (typ == "" || typ == unresolvedType) && alwaysNumber(f.Args[0]) {
-				// Its form is unknown, but every form is a number.
-				return f.Name + " with a number argument"
 			}
 		}
 	case "pg_advisory_xact_lock", "pg_try_advisory_xact_lock":
@@ -618,31 +595,6 @@ func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 func takesOtherType(e sqlir.Expr) bool {
 	return untypedExpr(e) || isNullConst(e) || untypedBranch(e)
 }
-
-// numberFuncs return a number of one form or another whatever their
-// arguments, so a text function over one fails in Postgres even where the
-// check cannot tell which form it is.
-var numberFuncs = map[string]bool{"floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true, "avg": true, "sum": true, "abs": true}
-
-// alwaysNumber reports whether e is a number whatever its form, as a call
-// of one of numberFuncs or its negation.
-func alwaysNumber(e sqlir.Expr) bool {
-	switch e := e.(type) {
-	case *sqlir.FuncCall:
-		return numberFuncs[e.Name]
-	case *sqlir.UnaryExpr:
-		return e.Op == "-" && alwaysNumber(e.X)
-	}
-	return false
-}
-
-// unresolvedType is the type of a column, or of an expression over one,
-// that has a type of its own the check does not know, as of a * it cannot
-// expand or a set operation it cannot resolve. An expression over it takes
-// it rather than the other operands' or branches' type, which would be a
-// guess. A column of no declared type is "" instead, and is read by what
-// stands beside it.
-const unresolvedType = "unresolved column type"
 
 func isNullConst(e sqlir.Expr) bool {
 	k, ok := e.(*sqlir.Const)

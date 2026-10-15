@@ -32,6 +32,10 @@ func (s colSet) has(name string) (found, once bool) {
 type colScope struct {
 	items map[string]colSet
 	types map[string]map[string]string
+	// certain are the types of the columns a statement shows without a
+	// guess, by item: a table's declared ones and a derived table's
+	// certainItem, which the output goes by.
+	certain map[string]map[string]string
 	// colls are the collations the columns of the base tables in scope
 	// declare, by alias. A derived item has no entry, as detest does not
 	// carry the collation of its query's columns.
@@ -118,6 +122,10 @@ type columnChecker struct {
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
+	// outCertain are the certain types of a query's output columns by
+	// position, and outCertainNamed by name (noteCertain).
+	outCertain      map[*sqlir.SelectStmt][]string
+	outCertainNamed map[*sqlir.SelectStmt]map[string]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -139,13 +147,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 			for first.SetOp != "" && first.Larg != nil {
 				first = first.Larg
 			}
+			x.selectTypes = c.certainOutput(st)
 			if st.SetOp == "" {
-				x.selectTypes, x.selectNamed = c.setOpTypes(st), c.outNamed[first]
-			} else if c.leavesTyped(st) {
-				// setOpTypes fills a query of unknown types from the other
-				// one's, which the readers of input go by but the output
-				// cannot, as the pair may meet at another type.
-				x.selectTypes = c.setOpTypes(st)
+				x.selectNamed = c.outCertainNamed[first]
 			}
 		}
 	case *sqlir.InsertStmt:
@@ -526,6 +530,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 	case t.Sub != nil:
 		sc.types[alias] = c.derivedTypes(t.Sub, t.Columns)
+		sc.noteCertain(alias, c.certainItem(t.Sub, t.Columns))
 	default:
 		db := c.x.tx.db
 		if types, ok := c.cteTypesOf(t.Name); ok {
@@ -542,6 +547,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
+			sc.noteCertain(alias, def.types)
 			sc.noteCollations(alias, def)
 		}
 	}
@@ -946,6 +952,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	c.noteOutputTypes(sel, sc)
+	c.noteCertain(sel, sc)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1051,40 +1058,6 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
-}
-
-// leavesTyped reports whether every query of the set operation sel has its
-// output types by position, apart from untyped literals, parameters and
-// NULLs, which take the other queries' type.
-func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
-	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
-		return c.leavesTyped(sel.Larg) && c.leavesTyped(sel.Rarg)
-	}
-	if len(sel.Values) > 0 {
-		for i, typ := range c.setOpTypes(sel) {
-			if typ == "" && !slices.ContainsFunc(sel.Values, func(row []sqlir.Expr) bool { return i < len(row) && !takesOtherType(row[i]) }) {
-				continue
-			}
-			if typ == "" {
-				return false
-			}
-		}
-		return true
-	}
-	types, ok := c.outTypes[sel]
-	if !ok || len(c.outUnresolved[sel]) > 0 {
-		return false
-	}
-	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
-	for i, typ := range types {
-		// Only an untyped literal, parameter or NULL takes the other
-		// query's type; an expression the check could not type has one
-		// of its own.
-		if typ == "" && (star || i >= len(sel.Targets) || !takesOtherType(sel.Targets[i].Expr)) {
-			return false
-		}
-	}
-	return true
 }
 
 // starColumns are the types of the columns the * t of sel gives, in order,
@@ -1270,9 +1243,6 @@ func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
 		return ""
 	case len(sel.Targets) == 1 && untypedOutput(sel.Targets[0].Expr):
 		return "text" // as subqueryType resolves it
-	}
-	if c.outUnresolved[sel][0] {
-		return unresolvedType
 	}
 	if t := c.outTypes[sel]; len(t) == 1 {
 		return t[0]
@@ -1671,8 +1641,8 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		// nesting.
 		types, ok := c.outTypes[q.Select]
 		switch {
-		case !ok || c.outUnresolved[q.Select][0]:
-			return unresolvedType
+		case !ok:
+			return "unresolved column type"
 		case len(types) == 1:
 			return types[0]
 		}
@@ -1686,9 +1656,9 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		return ""
 	}
 	types, ok := vc.outTypes[q.Select]
-	if !ok || vc.outUnresolved[q.Select][0] {
+	if !ok {
 		// A set operation's or a *'s column may be an interval.
-		return unresolvedType
+		return "unresolved column type"
 	}
 	if len(types) == 1 {
 		return types[0]
@@ -1705,10 +1675,6 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
-	}
-	if !vc.leavesTyped(q.Select) {
-		// setOpTypes would fill a query of unknown type from another's.
-		return "unresolved column type"
 	}
 	types := vc.setOpTypes(q.Select)
 	if len(types) != 1 {
@@ -2826,6 +2792,7 @@ func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
 	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
 		sc.types[targetAlias(table, alias)] = def.types
+		sc.noteCertain(targetAlias(table, alias), def.types)
 		sc.noteCollations(targetAlias(table, alias), def)
 	}
 	return sc, cols
@@ -2888,13 +2855,13 @@ func (c *columnChecker) assigned(table string, cols colSet, names []string, inse
 // for, so a * of another item, which UPDATE ... FROM and DELETE ... USING
 // may name, is refused.
 func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string) error {
-	c.x.returningTypes, c.x.returningStar = make([]string, len(ts)), sc.types[target]
+	c.x.returningTypes, c.x.returningStar = make([]string, len(ts)), sc.certain[target]
 	for i, t := range ts {
 		if !t.Star {
 			if err := c.exprs(t.Expr, sc); err != nil {
 				return err
 			}
-			c.x.returningTypes[i] = c.typer(sc).of(t.Expr)
+			c.x.returningTypes[i] = c.certainType(t.Expr, sc)
 			continue
 		}
 		// With FROM or USING items, Postgres's RETURNING * gives their columns
@@ -2988,6 +2955,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		c.assignedInput(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
+		up.noteCertain("excluded", sc.certain[targetAlias(ins.Table, ins.Alias)])
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
@@ -3086,6 +3054,7 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 		}
 		sc.items[alias] = cols
 		sc.types[alias] = own.types[alias]
+		sc.noteCertain(alias, own.certain[alias])
 		if colls, ok := own.colls[alias]; ok {
 			if sc.colls == nil {
 				sc.colls = map[string]map[string]string{}
