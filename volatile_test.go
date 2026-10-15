@@ -58,6 +58,11 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c WHERE u.n = 1)) FROM u`,
 		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c WHERE (SELECT count(id) FROM e) > 0))`,
 		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c WHERE (SELECT count(id) FROM e) > 0`,
+		// A derived table or a set operation's arm is read as far as the
+		// query around it asks.
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT 1 UNION ALL SELECT v FROM c LIMIT 1`,
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT * FROM e JOIN (SELECT v FROM c) s ON true`,
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT 1 UNION ALL SELECT v FROM c LIMIT 1))`,
 		// So does a view's, whose rows a statement may read in part.
 		`SELECT id FROM lv`,
 		`WITH c AS (SELECT (SELECT id FROM lv) AS n) SELECT coalesce(NULL::int, (SELECT n FROM c))`,
