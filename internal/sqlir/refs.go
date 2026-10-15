@@ -15,6 +15,10 @@ func FuncCalls(e Expr) []*FuncCall { return find[*FuncCall](e) }
 // itself included.
 func Selects(n any) []*SelectStmt { return find[*SelectStmt](n) }
 
+// IsNullsIn returns the IS NULL tests under n, a statement or an
+// expression, in the order they appear.
+func IsNullsIn(n any) []*IsNull { return find[*IsNull](n) }
+
 // FuncCallsIn is FuncCalls for any node, a statement or a query included.
 func FuncCallsIn(n any) []*FuncCall { return find[*FuncCall](n) }
 

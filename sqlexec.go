@@ -363,6 +363,15 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	if err := x.checkColumns(stmt); err != nil {
 		return nil, err
 	}
+	if tx.db.kind.InnoDB() {
+		for _, n := range sqlir.IsNullsIn(stmt) {
+			if _, row := n.X.(*sqlir.RowExpr); row {
+				// MySQL fails it when it parses the statement, whether
+				// or not a row reaches it (1241).
+				return nil, x.unsupported("IS NULL over a row")
+			}
+		}
+	}
 	if err := x.foldConstants(stmt); err != nil {
 		return nil, err
 	}
