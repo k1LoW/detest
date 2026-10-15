@@ -197,6 +197,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.v, 'x') = '01' FROM (SELECT t.*, $1 COLLATE "C" AS v FROM t) s`, int64(1)},
 		{`SELECT coalesce((SELECT $1 COLLATE "C"), 'x') = '01' FROM t`, int64(1)},
 		{`SELECT coalesce(s.name, $1 COLLATE "C") FROM (SELECT * FROM t) s WHERE s.n = $1`, "5"},
+		{`SELECT coalesce(s.name, coalesce(coalesce(NULL, NULL), $1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		{`SELECT coalesce(s.name, coalesce(CASE WHEN false THEN NULL END, $1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		// generate_series and a LAG offset type the parameter as int4.
 		{`SELECT * FROM generate_series(1, $1) g WHERE $1 = '1'::text ORDER BY 1`, int64(1)},
 		{`SELECT lag(s.n, $1, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s WHERE $1 = '1'::text`, int64(1)},
@@ -219,6 +221,19 @@ func TestDerivedColumnTypes(t *testing.T) {
 	}
 	if _, err := db.Query(`SELECT lag(n, $1, 0) OVER () FROM t WHERE $1 = 1`, int64(1)); err != nil {
 		t.Errorf("a LAG offset parameter compared with an integer: %v", err)
+	}
+	// An int4 bound or offset parameter is read as an int4.
+	for _, q := range []string{
+		`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`,
+		`SELECT lag(s.n, $1, 0) OVER () FROM (SELECT * FROM t) s WHERE false`,
+		`SELECT lead(s.n, $1, 0) OVER () FROM (SELECT * FROM t) s WHERE false`,
+	} {
+		if _, err := db.Query(q, int64(3000000000)); err == nil {
+			t.Errorf("%s with 3000000000: got no error, want out of range", q)
+		}
+	}
+	if _, err := db.Query(`SELECT * FROM generate_series(NULL::bigint, $1) g ORDER BY 1`, int64(3000000000)); err != nil {
+		t.Errorf("a bigint series bound parameter: %v", err)
 	}
 	// The refusal leaves the sequence where it was.
 	if got := rowsOf(t, db, `SELECT nextval('seq')`); !reflect.DeepEqual(got, []string{"1"}) {

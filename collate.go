@@ -637,8 +637,8 @@ func (db *DB) branchKind(typ string) string {
 }
 
 // resolvedType is typ, the type the branches exprs resolve to, or text when
-// every branch is a literal or a parameter of no type, as Postgres
-// resolves them.
+// every branch is a literal or a parameter of no type, or a CASE or
+// COALESCE of those, as Postgres resolves them.
 func resolvedType(typ string, exprs []sqlir.Expr) string {
 	if typ != "" || len(exprs) == 0 {
 		return typ
@@ -651,7 +651,9 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 				return typ
 			}
 		default:
-			return typ
+			if !untypedBranch(e) {
+				return typ
+			}
 		}
 	}
 	return "text"

@@ -437,8 +437,9 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 							return c.x.unsupported(fmt.Sprintf("generate_series over a %T parameter", v))
 						}
 					}
-					// The integer overload types it, for its other uses.
-					c.params.comparedWith(p.Index, c.paramTypeFamily("int4"))
+					// The integer overload types it, int8 beside a bigint
+					// bound and int4 otherwise, and reads its value as that.
+					c.inputAs(p, seriesOverload(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
 				}
 			}
 			if !typed {
@@ -1492,6 +1493,18 @@ func funcColumn(t sqlir.TableRef, alias string) string {
 	return alias
 }
 
+// seriesOverload is the integer type of the generate_series overload
+// Postgres picks for f: int8 where a bound is a bigint, int4 otherwise.
+func seriesOverload(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+	for _, a := range f.Args {
+		switch expressionTypeIn(a, column, subquery) {
+		case "int8", "bigint":
+			return "int8"
+		}
+	}
+	return "int4"
+}
+
 // seriesType is the type of the values generate_series gives over the
 // integers f's arguments are: bigint where one is a bigint, as Postgres
 // picks the bigint form, and "" where one is of a type the check does not
@@ -2150,7 +2163,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 									return
 								}
 							}
-							c.params.comparedWith(p.Index, c.paramTypeFamily("int4"))
+							c.inputAs(p, "int4")
 						}
 					}
 					// The value and the default take one type, as the
