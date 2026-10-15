@@ -35,7 +35,7 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 			return c.certainType(e.X, sc)
 		}
 	case *sqlir.ColumnRef:
-		return sc.certainColumn(e)
+		return db.baseType(sc.certainColumn(e))
 	case *sqlir.BinaryExpr:
 		switch e.Op {
 		case "+", "-", "*", "/", "%":
@@ -48,7 +48,7 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 	case *sqlir.WindowFunc:
 		return c.certainType(e.Func, sc)
 	case *sqlir.SubQuery:
-		if t := c.outCertain[e.Select]; len(t) == 1 {
+		if t := c.certainOutput(e.Select); len(t) == 1 {
 			return t[0]
 		}
 	case *sqlir.CaseExpr:
@@ -78,6 +78,11 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 			}
 			kind := ""
 			for _, a := range e.Args {
+				if p, ok := a.(*sqlir.Param); ok && c.paramCount[p.Index] > 1 {
+					// Postgres types it at the use it meets first, whose
+					// form may be another than this call's.
+					return ""
+				}
 				if takesOtherType(a) {
 					continue // it takes the form the other arguments pick
 				}
@@ -276,17 +281,18 @@ func leafColumn(sel *sqlir.SelectStmt, i int) []sqlir.Expr {
 // sel, by name, which names renames by position.
 func (c *columnChecker) certainItem(sel *sqlir.SelectStmt, names []string) map[string]string {
 	out := map[string]string{}
-	if types := c.certainOutput(sel); types != nil {
-		cols := names
-		if len(cols) == 0 {
-			cols = outputNames(sel)
-		}
+	cols := outputNames(sel)
+	if types := c.certainOutput(sel); types != nil && len(cols) == len(types) {
+		// names renames the first columns by position, and the rest keep
+		// their own.
+		cols = slices.Clone(cols)
+		copy(cols, names)
 		seen := map[string]int{}
 		for _, n := range cols {
 			seen[n]++
 		}
 		for i, typ := range types {
-			if i < len(cols) && seen[cols[i]] == 1 {
+			if seen[cols[i]] == 1 {
 				out[cols[i]] = typ
 			}
 		}
@@ -295,6 +301,7 @@ func (c *columnChecker) certainItem(sel *sqlir.SelectStmt, names []string) map[s
 	if len(names) > 0 || sel.SetOp != "" {
 		return out
 	}
+	// A select list with a * has its columns by name.
 	maps.Copy(out, c.outCertainNamed[sel])
 	return out
 }

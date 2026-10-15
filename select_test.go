@@ -1783,6 +1783,14 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT avg(b) - 1000000 FROM t`,
 		`SELECT 2000000::numeric UNION ALL SELECT 1::numeric WHERE false`,
 		`SELECT s.v + 1 FROM (SELECT 1999999::numeric AS v) s`,
+		`SELECT floor(c) FROM t`,
+		`SELECT c + 0 FROM t`,
+		`SELECT sum(c) FROM t`,
+		`SELECT (SELECT 2000000::numeric UNION ALL SELECT 0::numeric WHERE false)`,
+		`SELECT (VALUES (2000000::numeric))`,
+		`UPDATE t SET id = id RETURNING (VALUES (2000000::numeric))`,
+		`SELECT s.a FROM (SELECT * FROM t) s`,
+		`SELECT s.a FROM (SELECT id, a FROM t) s(other_id)`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
@@ -1836,6 +1844,20 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	if err := db.QueryRow(`SELECT s.v / (SELECT sum(b) FROM t) > 0 FROM (SELECT 1::bigint AS v UNION ALL SELECT sum(b) FROM t WHERE false) s WHERE s.v IS NOT NULL`).Scan(&sv); err != nil || sv != true {
 		t.Errorf("division by a numeric beside an unresolved column: got %#v, %v, want true", sv, err)
 	}
+	// A parameter used again takes the type of the use Postgres meets
+	// first, which may be another form than this call's, so the output is
+	// left as it was: floor($1) makes it a float8 here.
+	rows2, err := db.Query(`SELECT floor($1), power($1, 1::numeric)`, int64(2000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows2.Next() {
+		var a, b any
+		if err := rows2.Scan(&a, &b); err != nil || b != float64(2000000) {
+			t.Errorf("power of a reused parameter: got %#v, %v, want a float64", b, err)
+		}
+	}
+	rows2.Close()
 	// An untyped parameter takes the form the other argument picks.
 	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {
 		var v any
