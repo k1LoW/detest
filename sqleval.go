@@ -215,7 +215,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
 			return out, err
 		}
-		res, err := x.binary(v.Op, l, r)
+		res, err := x.binary(v.Op, x.numericDividend(v, l, r), r)
 		if err != nil {
 			return nil, err
 		}
@@ -960,6 +960,21 @@ func (x *sqlExec) untyped(e sqlir.Expr, v, other any) (any, error) {
 		typ = "double precision"
 	}
 	return nil, x.tx.db.kind.Error(sqlir.InvalidTextRepresentation, fmt.Sprintf("invalid input syntax for type %s: %q", typ, s), "", "", "")
+}
+
+// numericDividend is l as a float where the column check typed the division
+// e as a numeric or a float while l and r are integers, such as by the sum
+// of a bigint, which the fold gives as an integer, so that it does not
+// divide as integers.
+func (x *sqlExec) numericDividend(e *sqlir.BinaryExpr, l, r any) any {
+	if !x.numericDivs[e] {
+		return l
+	}
+	il, ok := integer(derefValue(l))
+	if _, rok := integer(derefValue(r)); !ok || !rok {
+		return l
+	}
+	return float64(il)
 }
 
 func (x *sqlExec) binary(op string, l, r any) (any, error) {

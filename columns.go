@@ -2067,6 +2067,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if e.Op == "/" && numberRank[c.x.tx.db.baseType(expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))] > numberRank["int8"] {
+					if c.x.numericDivs == nil {
+						c.x.numericDivs = map[*sqlir.BinaryExpr]bool{}
+					}
+					c.x.numericDivs[e] = true
+				}
 				switch e.Op {
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
