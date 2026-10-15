@@ -1903,7 +1903,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		a, oka := toFloat(d(0))
 		b, okb := toFloat(d(1))
 		if oka && okb {
-			return math.Pow(a, b), nil
+			return x.power(a, b)
 		}
 	case "current_date":
 		ts := x.tx.start
@@ -2084,6 +2084,27 @@ func (x *sqlExec) exprString(e sqlir.Expr) string {
 		return "(" + strings.Join(items, ", ") + ")"
 	}
 	return "..."
+}
+
+// power is power(a, b) with the server's errors for a result that is not a
+// real number.
+func (x *sqlExec) power(a, b float64) (any, error) {
+	if x.tx.db.kind.InnoDB() {
+		v := math.Pow(a, b)
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return nil, x.tx.db.kind.Error(sqlir.ArithmeticOutOfRange, "DOUBLE value is out of range in 'pow'", "", "", "")
+		}
+		return v, nil
+	}
+	// Postgres checks the arguments in dpow and in power_var alike, so the
+	// numeric version, which detest computes in float64 too, fails the same.
+	if a == 0 && b < 0 {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidPowerArgument, "zero raised to a negative power is undefined", "", "", "")
+	}
+	if a < 0 && math.Floor(b) != b {
+		return nil, x.tx.db.kind.Error(sqlir.InvalidPowerArgument, "a negative number raised to a non-integer power yields a complex result", "", "", "")
+	}
+	return math.Pow(a, b), nil
 }
 
 // kindError is a database error raised where the server is not at hand, such

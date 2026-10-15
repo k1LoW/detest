@@ -36,6 +36,8 @@ CREATE VIEW item_names AS SELECT name FROM items;
 		{`DROP TABLE nope`, nil, "42P01", ErrUndefinedTable},
 		{`ALTER TABLE nope ADD COLUMN x text`, nil, "42P01", ErrUndefinedTable},
 		{`ALTER TABLE nope RENAME TO other`, nil, "42P01", ErrUndefinedTable},
+		{`SELECT power(0, -1)`, nil, "2201F", ErrInvalidPowerArgument},
+		{`SELECT pow(-1::numeric, 0.5)`, nil, "2201F", ErrInvalidPowerArgument},
 	} {
 		_, err := db.Exec(tc.query, tc.args...)
 		var se *DBError
