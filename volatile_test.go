@@ -146,6 +146,15 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id < s.id`,
 		`UPDATE u SET n = 1 FROM (SELECT id FROM u FOR UPDATE) s, sv WHERE u.id = s.id`,
 		`UPDATE u SET n = 1 FROM sv WHERE u.id > 0`,
+		// A LATERAL subquery runs again for each row, as far as the query
+		// reading it asks.
+		`SELECT s.id FROM LATERAL (SELECT id FROM u FOR UPDATE) s LIMIT 1`,
+		`DELETE FROM u USING LATERAL (SELECT id FROM u FOR UPDATE) s WHERE u.id = s.id`,
+		// A view read in full by one reference is not by another.
+		`SELECT v FROM sv UNION ALL (SELECT v FROM sv LIMIT 1)`,
+		// A write computes SET for a row between the rows of its FROM.
+		`UPDATE u SET n = s.v + nextval('sq') FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id`,
+		`WITH c AS (SELECT id, nextval('sq') AS v FROM u) UPDATE u SET n = c.v + nextval('sq') FROM c WHERE u.id = c.id`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

@@ -87,7 +87,7 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		if err := x.rowSequenceCalls(assignedValues(st.Set)); err != nil {
 			return err
 		}
-		if err := x.writeItems(st.With, st.From, st.Table, st.Alias, st.Where); err != nil {
+		if err := x.writeItems(st.With, st.From, st.Table, st.Alias, st.Where, []any{st.Set, st.Where, st.Returning}); err != nil {
 			return err
 		}
 		if err := x.rowSequenceCalls([]any{st.From, st.OrderBy, st.Limit}); err != nil {
@@ -103,7 +103,7 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		if err := x.cteSequenceCalls(st.With, &body); err != nil {
 			return err
 		}
-		if err := x.writeItems(st.With, st.Using, st.Table, st.Alias, st.Where); err != nil {
+		if err := x.writeItems(st.With, st.Using, st.Table, st.Alias, st.Where, []any{st.Where, st.Returning}); err != nil {
 			return err
 		}
 		if err := x.rowSequenceCalls([]any{st.Using, st.OrderBy, st.Limit}); err != nil {
@@ -207,9 +207,9 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 	// sole reports a read that is the only FROM item of a block reading
 	// all of its rows.
 	sole := func(b *sqlir.SelectStmt) bool { return len(b.Joins) == 0 && readsAll(b) }
-	full := map[*sqlir.SelectStmt]bool{}  // blocks whose rows are all read
-	whole := map[*sqlir.SelectStmt]bool{} // item queries whose rows are all read
-	paced := map[*sqlir.SelectStmt]bool{} // item queries read by a block with effects
+	full := map[*sqlir.SelectStmt]bool{} // blocks whose rows are all read
+	whole := map[any]bool{}              // items whose rows are all read
+	paced := map[any]bool{}              // items read by a block with effects
 	var visit func(q *sqlir.SelectStmt, effects bool)
 	visit = func(q *sqlir.SelectStmt, effects bool) {
 		if q == nil || !readsAll(q) {
@@ -223,13 +223,18 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 		}
 		effects = effects || own(q)
 		if f := q.From; f != nil && len(q.Joins) == 0 && !f.Lateral {
+			// A view's query is shared by every reference to it, so it is
+			// the reference that is read in full.
+			var key any
 			item := f.Sub
-			if item == nil && ctes[f.Name] == nil {
-				item = view(f)
+			if item != nil {
+				key = item
+			} else if ctes[f.Name] == nil {
+				item, key = view(f), f
 			}
 			if item != nil {
-				whole[item] = true
-				paced[item] = paced[item] || effects
+				whole[key] = true
+				paced[key] = paced[key] || effects
 				visit(item, effects)
 			}
 		}
@@ -264,11 +269,11 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 			visit(cte.Select, false)
 		}
 	}
-	check := func(what string, def *sqlir.SelectStmt) error {
-		if (whole[def] && !paced[def]) || !x.effectfulQuery(def, ctes, map[string]bool{}) {
+	check := func(what string, def *sqlir.SelectStmt, key any) error {
+		if (whole[key] && !paced[key]) || !x.effectfulQuery(def, ctes, map[string]bool{}) {
 			return nil
 		}
-		if whole[def] {
+		if whole[key] {
 			return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read by a query with effects of its own, which Postgres computes between its rows", what))
 		}
 		return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read where Postgres may run only part of it", what))
@@ -279,7 +284,7 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 			if !read[cte.Name] {
 				continue
 			}
-			if err := check(fmt.Sprintf("CTE %q", cte.Name), cte.Select); err != nil {
+			if err := check(fmt.Sprintf("CTE %q", cte.Name), cte.Select, cte.Select); err != nil {
 				return err
 			}
 		}
@@ -288,17 +293,17 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 			items = append(items, &q.Joins[i].Table)
 		}
 		for _, t := range items {
-			// A LATERAL subquery runs again for each row, which
-			// rowSequenceCalls refuses for a call of effectFuncs.
-			if t == nil || t.Lateral {
+			// A LATERAL subquery is never read in full, as it runs again
+			// for each row and stops where the query reading it does.
+			if t == nil {
 				continue
 			}
 			if t.Sub != nil {
-				if err := check("a derived table", t.Sub); err != nil {
+				if err := check("a derived table", t.Sub, t.Sub); err != nil {
 					return err
 				}
 			} else if v := view(t); v != nil {
-				if err := check(fmt.Sprintf("view %q", t.Name), v); err != nil {
+				if err := check(fmt.Sprintf("view %q", t.Name), v, t); err != nil {
 					return err
 				}
 			}
@@ -310,27 +315,44 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 // writeItems refuses a derived table or a view of a write's FROM or USING
 // that locks rows or has effects, unless it has the shape partlyRunItem
 // lets through, as Postgres reads it on demand like a CTE there, which
-// writeWith checks.
-func (x *sqlExec) writeItems(with []sqlir.CTE, items []sqlir.TableRef, target, alias string, where sqlir.Expr) error {
+// writeWith checks. A LATERAL one runs again for each row, so it is never
+// read in full. And as Postgres computes SET and RETURNING for a row as
+// soon as the join gives it, an item with effects, a CTE too, is refused
+// beside effects of the write's own in rest.
+func (x *sqlExec) writeItems(with []sqlir.CTE, items []sqlir.TableRef, target, alias string, where sqlir.Expr, rest any) error {
 	ctes := map[string]*sqlir.SelectStmt{}
 	for _, c := range with {
 		ctes[c.Name] = c.Select
 	}
 	isCTE := func(name string) bool { return ctes[name] != nil }
+	own := slices.ContainsFunc(sqlir.FuncCallsIn(rest), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) ||
+		slices.ContainsFunc(sqlir.Selects(rest), func(q *sqlir.SelectStmt) bool { return x.effectfulQuery(q, ctes, map[string]bool{}) })
 	for _, t := range items {
-		if t.Lateral || t.Func != nil {
+		if t.Func != nil {
 			continue
 		}
 		sel, cols, what := t.Sub, t.Columns, "a derived table"
 		if sel == nil {
+			if def := ctes[t.Name]; def != nil {
+				if own && x.effectfulQuery(def, ctes, map[string]bool{}) {
+					return x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read by a write with effects of its own", t.Name))
+				}
+				continue
+			}
 			v := x.tx.db.views[x.tx.db.resolve(t.Name)]
-			if isCTE(t.Name) || v == nil || v.View == nil {
+			if v == nil || v.View == nil {
 				continue
 			}
 			sel, cols, what = v.View, v.ViewColumns, fmt.Sprintf("view %q", t.Name)
 		}
 		if !x.effectfulQuery(sel, ctes, map[string]bool{}) {
 			continue
+		}
+		switch {
+		case t.Lateral:
+			return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, LATERAL in a write", what))
+		case own:
+			return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read by a write with effects of its own", what))
 		}
 		names := outputNames(sel)
 		if len(cols) > 0 {
