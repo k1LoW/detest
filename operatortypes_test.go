@@ -35,6 +35,12 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT b + 'true' FROM t WHERE false`,
 		`SELECT 'true' + b FROM t WHERE false`,
 		`SELECT u - 'x' FROM t WHERE false`,
+		// Nor whatever type a bare NULL beside it would take.
+		`SELECT b + NULL FROM t`,
+		`SELECT NULL - u FROM t WHERE false`,
+		// Postgres picks no prefix minus for an operand of no type.
+		`SELECT -NULL FROM t WHERE false`,
+		`SELECT -'1' FROM t WHERE false`,
 		// A domain has the operators of its base type.
 		`SELECT -fb FROM d WHERE false`,
 		`SELECT fu - fu FROM d WHERE false`,
@@ -47,8 +53,17 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	if _, err := db.Query(`SELECT b + $1 FROM t WHERE false`, "true"); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("a parameter beside a boolean: got %v, want ErrUnsupportedSQL", err)
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		{`SELECT b + $1 FROM t WHERE false`, "true"},
+		{`SELECT -$1 FROM t`, int64(5)},
+		{`SELECT n + -$1 FROM t`, int64(5)},
+	} {
+		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
+		}
 	}
 	// Numbers, and a literal that takes the other operand's type, run.
 	for _, tt := range []struct {
@@ -59,6 +74,7 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT -n FROM t`, []string{"0"}},
 		{`SELECT coalesce(n, n + 1.5) FROM t`, []string{"0"}},
 		{`SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags WHERE false`, nil},
+		{`SELECT n + NULL FROM t`, []string{"NULL"}},
 		// '{}' - s resolves to jsonb - text.
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {

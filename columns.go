@@ -2730,13 +2730,13 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // operator takes either whatever type the literal would take, but beside
 // text it is left alone, as '{}' - s resolves to jsonb - text. Text beside
 // a type whose operators detest does not list, such as jsonb's -, is left
-// alone too.
+// alone too. A bare NULL has no type either, and counts as a literal.
 func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) error {
 	t := c.typer(sc)
 	var known []string
 	untyped := false
 	for _, o := range operands {
-		if untypedExpr(o) {
+		if untypedExpr(o) || isNullConst(o) {
 			untyped = true
 			continue
 		}
@@ -2746,6 +2746,12 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 			return nil
 		}
 		known = append(known, f)
+	}
+	if untyped && len(operands) == 1 {
+		// Several prefix operators take a number, and Postgres picks
+		// none for an operand of no type (42725), while the run would
+		// negate the value bound.
+		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
 	}
 	for _, f := range known {
 		if f == "bool" || f == "boolean" || f == "uuid" || f == "text" && !untyped {
