@@ -113,6 +113,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
 		`SELECT coalesce(s.n, NULL COLLATE "C", 0) FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, abs(NULL)) / 2 FROM (SELECT * FROM t) s`,
+		`SELECT lag(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
+		`SELECT lead(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
@@ -208,11 +210,17 @@ func TestDerivedNullifDate(t *testing.T) {
 	db, _ := s.DB("app", postgres.New(postgres.TimeZone("Asia/Tokyo")))
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, '2025-01-02')`)
-	var at time.Time
-	if err := db.QueryRow(`SELECT date_trunc('day', nullif(s.d, NULL::timestamp)) FROM (SELECT * FROM d) s`).Scan(&at); err != nil {
-		t.Fatal(err)
-	}
-	if want := time.Date(2025, 1, 1, 15, 0, 0, 0, time.UTC); !at.Equal(want) {
-		t.Errorf("got %v, want %v", at, want)
+	for _, q := range []string{
+		`SELECT date_trunc('day', nullif(s.d, NULL::timestamp)) FROM (SELECT * FROM d) s`,
+		// A scalar subquery is typed in its own scope.
+		`SELECT date_trunc('day', (SELECT coalesce(s.d, '2025-01-02') FROM (SELECT * FROM d) s))`,
+	} {
+		var at time.Time
+		if err := db.QueryRow(q).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		if want := time.Date(2025, 1, 1, 15, 0, 0, 0, time.UTC); !at.Equal(want) {
+			t.Errorf("%s: got %v, want %v", q, at, want)
+		}
 	}
 }

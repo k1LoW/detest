@@ -1570,7 +1570,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				case "date_trunc":
 					if len(e.Args) == 2 {
-						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
+						c.x.noteType(e.Args[1], expressionTypeIn(e.Args[1], sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
 					}
 				case "lag", "lead":
 					if len(e.Args) > 1 {
@@ -1583,6 +1583,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						}
 						if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int4"]) {
 							err = c.x.unsupported(fmt.Sprintf("%s with a %s offset", e.Name, typ))
+							return
+						}
+						if _, isParam := off.(*sqlir.Param); typ == "" && !isParam && !isNullConst(off) && !c.x.tx.checking {
+							// Postgres takes an int4 offset only, which the
+							// check cannot show of an expression it cannot type.
+							err = c.x.unsupported(e.Name + " with an offset of a type detest does not know")
 							return
 						}
 						if _, ok := c.x.untypedText(off); ok {
