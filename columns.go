@@ -439,7 +439,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 					}
 					// The integer overload types it, int8 beside a bigint
 					// bound and int4 otherwise, and reads its value as that.
-					c.inputAs(p, seriesOverload(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
+					c.inputAs(p, seriesOverload(t.Func, c.typer(sc)))
 				}
 			}
 			if !typed {
@@ -449,7 +449,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			for _, a := range t.Func.Args {
 				// functionRows runs the integer overload only, and would
 				// read whole numeric bounds as integers.
-				typ := c.typer(sc).of(a)
+				typ := c.typer(sc).reduce(c.typer(sc).of(a))
 				if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int8"]) {
 					return c.x.unsupported("generate_series over a " + typ)
 				}
@@ -504,7 +504,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	case t.Func != nil:
 		sc.types[alias] = map[string]string{}
 		if name := funcColumn(t, alias); name != "" {
-			if typ := seriesType(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); typ != "" {
+			if typ := seriesType(t.Func, c.typer(sc)); typ != "" {
 				sc.types[alias][name] = typ
 			}
 		}
@@ -1495,9 +1495,9 @@ func funcColumn(t sqlir.TableRef, alias string) string {
 
 // seriesOverload is the integer type of the generate_series overload
 // Postgres picks for f: int8 where a bound is a bigint, int4 otherwise.
-func seriesOverload(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+func seriesOverload(f *sqlir.FuncCall, t typer) string {
 	for _, a := range f.Args {
-		switch expressionTypeIn(a, column, subquery) {
+		switch t.reduce(t.of(a)) {
 		case "int8", "bigint":
 			return "int8"
 		}
@@ -1509,10 +1509,10 @@ func seriesOverload(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, sub
 // integers f's arguments are: bigint where one is a bigint, as Postgres
 // picks the bigint form, and "" where one is of a type the check does not
 // know, as of a parameter.
-func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+func seriesType(f *sqlir.FuncCall, t typer) string {
 	typ := "int4"
 	for _, a := range f.Args {
-		switch expressionTypeIn(a, column, subquery) {
+		switch t.reduce(t.of(a)) {
 		case "int", "int2", "int4", "integer", "smallint":
 		case "int8", "bigint":
 			typ = "int8"

@@ -1320,6 +1320,12 @@ func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`SELECT $1 + 1::tiny WHERE false`, "40000"); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("beside a smallint domain: got %v, want out of range", err)
 	}
+	// generate_series over a bigint domain takes the bigint overload, so
+	// a bound beside it is read as a bigint.
+	mustExec(t, db, `CREATE DOMAIN big AS bigint`)
+	if _, err := db.Exec(`SELECT * FROM generate_series(NULL::big + 0, $1)`, int64(3000000000)); err != nil {
+		t.Errorf("generate_series beside a bigint domain: got %v, want no error", err)
+	}
 }
 
 // Postgres compares rows pair by pair: an ordering by the first pair that is
