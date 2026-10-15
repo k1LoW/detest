@@ -2329,11 +2329,22 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						}
 					}
 				}
-				if what := concatTypeMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
+				subquery := func(q *sqlir.SubQuery) string {
+					typ := c.subqueryType(q, sc)
+					if typ == "unresolved column type" && c.x.tx.checking {
+						// CheckSQL has no schema to type a set operation's
+						// column by, so it is left to the run, which
+						// refuses it beside || as it may be a jsonb or an
+						// array.
+						return ""
+					}
+					return typ
+				}
+				if what := concatTypeMismatch(e, sc.columnType, subquery); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
-				if what := dateDifferenceMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
+				if what := dateDifferenceMismatch(e, sc.columnType, subquery); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
