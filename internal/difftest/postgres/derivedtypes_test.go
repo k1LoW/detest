@@ -96,6 +96,8 @@ var derivedTypeCases = []difftest.Case{
 		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT coalesce((SELECT n FROM b), s.m, 'bogus') FROM (SELECT * FROM a) s`),
+			difftest.Q(0, `SELECT coalesce(s.v, 'bogus') FROM (SELECT a.*, (SELECT n FROM b) AS v FROM a) s`),
+			difftest.Q(0, `SELECT coalesce(u.v, 'bogus') FROM (SELECT v FROM (SELECT (SELECT n FROM b) AS v FROM a) s UNION ALL SELECT m FROM a) u`),
 		},
 	},
 }

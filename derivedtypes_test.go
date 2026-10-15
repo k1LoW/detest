@@ -23,6 +23,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
+	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
 	mustExec(t, db, `CREATE TABLE ts (id int PRIMARY KEY, ts timestamp)`)
 	mustExec(t, db, `INSERT INTO ts VALUES (1, '2024-01-01 00:00')`)
 	for _, tt := range []struct {
@@ -88,6 +89,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.payload END FROM (SELECT * FROM b) s`,
 		// Postgres fails the branches' types before it reads the literal.
 		`SELECT coalesce(s.payload, '\xZZ', 'x'::text) FROM (SELECT * FROM b) s`,
+		// functionRows runs the integer overload only.
+		`SELECT *, g / 2 AS half FROM generate_series(1.0, 2.0) g ORDER BY 1`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,
 		// Postgres fails a date that is none whichever branch a row
 		// takes, or with no rows.
@@ -135,9 +138,13 @@ func TestDerivedColumnTypes(t *testing.T) {
 			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
 		}
 	}
+	var at time.Time
+	// NULLIF of a string literal and a date is a date.
+	if err := db.QueryRow(`SELECT nullif('2025-01-02', s.d) FROM (SELECT * FROM d) s`).Scan(&at); err != nil || at.Format("2006-01-02") != "2025-01-02" {
+		t.Errorf("NULLIF of a literal and a NULL date: got %v, %v", at, err)
+	}
 	// A time parameter beside a timestamp is its own clock, as Postgres
 	// types it, in LAG's default as in COALESCE.
-	var at time.Time
 	if err := db.QueryRow(`SELECT lag(s.ts, 1, $1) OVER (ORDER BY s.id) FROM (SELECT * FROM ts) s`, time.Date(2024, 5, 20, 0, 30, 0, 0, time.FixedZone("", 9*60*60))).Scan(&at); err != nil {
 		t.Fatal(err)
 	}

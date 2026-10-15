@@ -358,6 +358,16 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		if err := c.exprs(t.Func, sc); err != nil {
 			return err
 		}
+		if t.Func.Name == "generate_series" {
+			for _, a := range t.Func.Args {
+				// functionRows runs the integer overload only, and would
+				// read whole numeric bounds as integers.
+				typ := expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+				if r := numberRank[typ]; typ != "" && typ != "unresolved column type" && (r == 0 || r > numberRank["int8"]) {
+					return c.x.unsupported("generate_series over a " + typ)
+				}
+			}
+		}
 		if alias == "" {
 			alias = t.Func.Name
 		}
@@ -860,7 +870,7 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			}
 			continue
 		}
-		typ := expressionType(t.Expr, sc.columnType)
+		typ := expressionTypeIn(t.Expr, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 		if typ == "unresolved column type" {
 			typ = ""
 		}
