@@ -1788,8 +1788,11 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		}
 	}
 	// A branch beside a column of unresolved type is refused, as it may
-	// be an interval.
+	// be an interval, and a text function of a number function over one,
+	// whose every form is a number.
 	for _, q := range []string{
+		`SELECT lower(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT length(avg(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT coalesce(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT nullif(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 	} {

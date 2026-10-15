@@ -417,6 +417,10 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 			if typ != "" && typ != "unresolved column type" && typ != "text" && typ != "varchar" && typ != "bpchar" {
 				return f.Name + " with a " + typ + " argument"
 			}
+			if g, ok := f.Args[0].(*sqlir.FuncCall); ok && typ == unresolvedType && numberFuncs[g.Name] {
+				// Its form is unresolved, but every form is a number.
+				return f.Name + " with a number argument"
+			}
 		}
 	case "pg_advisory_xact_lock", "pg_try_advisory_xact_lock":
 		// The one-bigint and two-integer overloads are the only signatures
@@ -614,6 +618,11 @@ func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 func takesOtherType(e sqlir.Expr) bool {
 	return untypedExpr(e) || isNullConst(e) || untypedBranch(e)
 }
+
+// numberFuncs return a number of one form or another whatever their
+// arguments, so a text function over one fails in Postgres even where the
+// check cannot tell which form it is.
+var numberFuncs = map[string]bool{"floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true, "avg": true, "sum": true, "abs": true}
 
 // unresolvedType is the type of a column, or of an expression over one,
 // that has a type of its own the check does not know, as of a * it cannot
