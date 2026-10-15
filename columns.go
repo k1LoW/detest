@@ -131,6 +131,9 @@ type columnChecker struct {
 	outCertainNamed map[*sqlir.SelectStmt]map[string]string
 	// paramCount is the number of uses of each parameter in the statement.
 	paramCount map[int]int
+	// outExpanded are the names of a query's columns with its * expanded
+	// (noteExpanded).
+	outExpanded map[*sqlir.SelectStmt][]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -969,6 +972,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	}
 	c.noteOutputTypes(sel, sc)
 	c.noteCertain(sel, sc)
+	c.noteExpanded(sel)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1104,6 +1108,21 @@ func (c *columnChecker) expandedNames(sel *sqlir.SelectStmt) []string {
 	for sel.SetOp != "" && sel.Larg != nil {
 		sel = sel.Larg
 	}
+	// A query's own CTEs are out of scope once it is walked, where a name
+	// may resolve to a table they shadow, so the walk records them.
+	return c.outExpanded[sel]
+}
+
+// noteExpanded records expandedNames' names of sel while its CTEs are in
+// scope, nil where a * gives columns of no known order.
+func (c *columnChecker) noteExpanded(sel *sqlir.SelectStmt) {
+	if c.outExpanded == nil {
+		c.outExpanded = map[*sqlir.SelectStmt][]string{}
+	}
+	c.outExpanded[sel] = c.expandNames(sel)
+}
+
+func (c *columnChecker) expandNames(sel *sqlir.SelectStmt) []string {
 	var out []string
 	for _, t := range sel.Targets {
 		if !t.Star {

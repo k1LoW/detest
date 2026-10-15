@@ -1013,6 +1013,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT s.n FROM (SELECT * FROM t UNION ALL SELECT * FROM t WHERE false) s(i, n)`),
 			difftest.Q(0, `SELECT s.q FROM (SELECT id, * FROM t) s(k, i, q)`),
 			difftest.Q(0, `SELECT s.n FROM (SELECT * FROM t) s(i, n, c, d)`),
+			difftest.Q(0, `SELECT s.y FROM (WITH t AS (SELECT 1 AS x, 2 AS y) SELECT * FROM t) s(i)`),
 		},
 	},
 }
