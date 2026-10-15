@@ -1132,6 +1132,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`INSERT INTO t (id) SELECT 1, 2`,
 		`INSERT INTO t (id, u) VALUES (1, 'bad'), (2)`,
 		`INSERT INTO t (id) VALUES (1, 'bad')`,
+		// A * over a derived table has a width the check does not know,
+		// which the run compares before it writes.
+		`INSERT INTO t (id) SELECT * FROM (SELECT 1 AS id, 2 AS extra) s`,
+		`INSERT INTO t (id, u) SELECT * FROM (SELECT 1 AS id) s`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
 			t.Errorf("%s: got %v, want a syntax error", q, err)

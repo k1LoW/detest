@@ -895,6 +895,8 @@ var valueCases = []difftest.Case{
 			difftest.S(0, `INSERT INTO z (id, k) VALUES (100, 'dup')`),
 			difftest.S(0, `INSERT INTO z (id, k) VALUES (100, 'dup'), (101, 'bad', 'x')`),
 			difftest.S(0, `INSERT INTO z (id, u) VALUES (100, NULL), (101, 'bad')`),
+			difftest.S(0, `INSERT INTO z (id) SELECT * FROM (SELECT 102 AS id, 2 AS extra) s`),
+			difftest.Q(0, `SELECT count(*) FROM z WHERE id = 102`),
 			difftest.S(0, `INSERT INTO z (u) SELECT 'bad', 1 WHERE false`),
 			difftest.S(0, `INSERT INTO z (id, u) SELECT 1 WHERE false`),
 			difftest.S(0, `INSERT INTO z SELECT 1, 'bad' WHERE false`),

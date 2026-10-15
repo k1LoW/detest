@@ -1668,6 +1668,17 @@ func (x *sqlExec) execInsert(ins *sqlir.InsertStmt) (*sqlResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !x.tx.db.kind.InnoDB() && (len(scols) > len(cols) || len(ins.Columns) > 0 && len(scols) < len(cols)) {
+			// Postgres fails a query of the wrong width when it plans the
+			// statement. The column check fails one whose width it knows;
+			// this catches the rest, such as a * over a derived table,
+			// before a row is written.
+			msg := "INSERT has more expressions than target columns"
+			if len(scols) < len(cols) {
+				msg = "INSERT has more target columns than expressions"
+			}
+			return nil, x.tx.db.kind.Error(sqlir.SyntaxError, msg, relname(ins.Table), "", "")
+		}
 		for _, sr := range srows {
 			row := Row{}
 			for i, c := range cols {
