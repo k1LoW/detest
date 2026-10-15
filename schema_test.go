@@ -312,3 +312,20 @@ func TestSchemaDefaultTypes(t *testing.T) {
 		t.Fatalf("got %d rows with the defaults Postgres computes, want 2", n)
 	}
 }
+
+// A default the column check refuses is not computed, so one with an effect
+// is refused rather than stored as the Unknown marker without advancing its
+// sequence.
+func TestSchemaDefaultWithEffectRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE s`)
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, n numeric DEFAULT coalesce(nextval('s'), abs(NULL)))`)
+	if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("got %v, want ErrUnsupportedSQL", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("nextval = %d, %v, want 1", n, err)
+	}
+}

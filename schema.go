@@ -97,9 +97,13 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 // plan with the statement, so that a division by a numeric divides as one.
 // A default the check refuses is one detest cannot compute, as evaluated
 // without the types the check would have noted it could give a value the
-// server never produces.
+// server never produces. One with an effect, such as nextval, is refused
+// instead, as the marker would skip the effect a later statement observes.
 func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
 	if err := x.checkDefault(d); err != nil {
+		if hasEffects(d) {
+			return nil, x.unsupported("a default with an effect whose expression detest cannot type: " + err.Error())
+		}
 		return nil, errUnknownExpr{err.Error()}
 	}
 	return x.eval(d, &env{})
