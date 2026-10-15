@@ -925,6 +925,31 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(NULLIF(n, 1::bigint), '1.5') FROM z) s`),
 		},
 	},
+	{
+		Name: "division by the sum of a bigint",
+		Schema: []string{
+			`CREATE TABLE b (id int PRIMARY KEY, g int, n bigint, i int)`,
+			`CREATE VIEW bv AS SELECT g, sum(n) AS s FROM b GROUP BY g`,
+			`CREATE TABLE r (id int PRIMARY KEY, q numeric)`,
+		},
+		Seed:  []string{`INSERT INTO b VALUES (1, 1, 2, 2), (2, 2, 3, 3), (3, 2, 1, 1)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT 5 / sum(n) > 2, 5 / sum(i) > 2 FROM b WHERE id = 1`),
+			difftest.Q(0, `SELECT sum(n) / 4 > 0, sum(i) / 4 > 0 FROM b WHERE id = 1`),
+			difftest.Q(0, `SELECT g FROM b GROUP BY g HAVING 5 / sum(n) > 1 ORDER BY g`),
+			difftest.Q(0, `SELECT id FROM b WHERE 5 / (SELECT sum(n) FROM b WHERE id = 1) > 2 ORDER BY id`),
+			difftest.Q(0, `SELECT id, 5 / sum(n) OVER (PARTITION BY g) > 1 FROM b ORDER BY id`),
+			difftest.Q(0, `SELECT g, 5 / s > 1 FROM bv ORDER BY g`),
+			difftest.Q(0, `SELECT g, 5 / x.s > 1 FROM (SELECT g, sum(n) AS s FROM b GROUP BY g) x ORDER BY g`),
+			difftest.Q(0, `SELECT g FROM b GROUP BY g ORDER BY 7 / sum(n), g LIMIT 1`),
+			difftest.Q(0, `SELECT sum(n) = 6 FROM b`),
+			difftest.S(0, `INSERT INTO r SELECT 1, 5 / sum(n) FROM b WHERE id = 1`),
+			difftest.S(0, `INSERT INTO r VALUES (2, 0)`),
+			difftest.S(0, `UPDATE r SET q = 5 / (SELECT sum(n) FROM b WHERE id = 1) WHERE id = 2`),
+			difftest.Q(0, `SELECT id, q = 2.5 FROM r ORDER BY id`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

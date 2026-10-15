@@ -94,7 +94,11 @@ type sqlExec struct {
 	// column check resolved to bytea or to text (branchKind), which a
 	// literal or a string parameter among them is bytea input of, or a
 	// []byte parameter the text of.
-	branchTypes  map[sqlir.Expr]string
+	branchTypes map[sqlir.Expr]string
+	// numericDivs are the divisions the column check typed as a numeric
+	// or a float, such as one by the sum of a bigint, which Postgres
+	// returns as a numeric where the fold gives an integer.
+	numericDivs  map[*sqlir.BinaryExpr]bool
 	setOpColumns map[*sqlir.SelectStmt]setOpColumns
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
@@ -1525,7 +1529,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
 			return out, err
 		}
-		res, err := x.binary(v.Op, l, r)
+		res, err := x.binary(v.Op, x.numericDividend(v, l, r), r)
 		if err != nil {
 			return nil, err
 		}
