@@ -787,6 +787,11 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 				if _, ok := sc.lookupItem(t.Table); !ok {
 					return nil, c.missingItem(t.Table)
 				}
+				if _, local := sc.items[t.Table]; !local {
+					// The run expands a * over this query's items only, so
+					// an outer query's would give no columns.
+					return nil, c.x.unsupported(fmt.Sprintf("%s.* of an outer query's item", t.Table))
+				}
 			}
 			continue
 		}
@@ -1519,7 +1524,12 @@ func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
 	case q == nil:
 		return 0, false
 	case q.SetOp != "":
-		return c.knownWidth(q.Larg)
+		// Both queries' widths, as a width taken from the left alone
+		// would leave an unknown right one to the run, which runs it
+		// before it compares them.
+		l, lok := c.knownWidth(q.Larg)
+		r, rok := c.knownWidth(q.Rarg)
+		return l, lok && rok && l == r
 	case len(q.Values) > 0:
 		return len(q.Values[0]), true
 	case slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star }):
@@ -1541,6 +1551,13 @@ func starWidth(sel *sqlir.SelectStmt, sc *colScope) (int, bool) {
 		if !t.Star {
 			width++
 			continue
+		}
+		if t.Table != "" {
+			if _, local := sc.items[t.Table]; !local {
+				// An outer query's item, whose columns this scope does
+				// not hold.
+				return 0, false
+			}
 		}
 		for alias, cols := range sc.items {
 			if t.Table != "" && alias != t.Table {

@@ -1097,8 +1097,19 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM generate_series(nextval('q'), 1) WITH ORDINALITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("a function source with nextval of an unknown width: got %v, want unsupported", err)
 	}
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT 1 UNION ALL SELECT * FROM generate_series(nextval('q'), 1) WITH ORDINALITY`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a set operation of a function source with nextval: got %v, want unsupported", err)
+	}
 	if got := rowsOf(t, db, `SELECT nextval('q')`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("nextval after the failed INSERT: got %v, want 1", got)
+	}
+	// An outer query's column in a set operation is not a width mismatch.
+	if _, err := db.Exec(`SELECT (SELECT t.u WHERE false UNION ALL SELECT NULL WHERE false) FROM t`); err != nil {
+		t.Errorf("an outer column in a set operation: got %v, want no error", err)
+	}
+	// The run expands a * over its own query's items only.
+	if _, err := db.Exec(`SELECT (SELECT x.* WHERE false UNION ALL SELECT NULL WHERE false) FROM (SELECT u FROM t) x`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an outer x.* in a set operation: got %v, want unsupported", err)
 	}
 	// Postgres converts an explicitly cast literal where it analyzes it,
 	// before it compares a set operation's widths.
