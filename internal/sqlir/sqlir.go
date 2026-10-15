@@ -878,6 +878,9 @@ const (
 	// InvalidDatetimeFormat is text that does not read as a date, a time or
 	// an interval.
 	InvalidDatetimeFormat
+	// InvalidPowerArgument is zero raised to a negative power or a negative
+	// number raised to a non-integer one.
+	InvalidPowerArgument
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -909,6 +912,7 @@ var (
 	ErrUndefinedColumn           = errors.New("detest: column does not exist")
 	ErrAmbiguousColumn           = errors.New("detest: column reference is ambiguous")
 	ErrDuplicateColumn           = errors.New("detest: column specified more than once")
+	ErrInvalidPowerArgument      = errors.New("detest: invalid argument for power function")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -918,7 +922,8 @@ var (
 		ArithmeticOutOfRange: ErrNumericValueOutOfRange, ForeignKeyParentViolation: ErrForeignKeyViolation,
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
 		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
-		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn, InvalidDatetimeFormat: ErrInvalidDatetimeFormat}
+		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn, InvalidDatetimeFormat: ErrInvalidDatetimeFormat,
+		InvalidPowerArgument: ErrInvalidPowerArgument}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers
