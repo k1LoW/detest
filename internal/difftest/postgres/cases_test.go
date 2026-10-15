@@ -783,6 +783,27 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A view's query is checked as a part of the statement that reads
+		// it, which lets through what the statement's own check would.
+		Name: "a view holding a subquery aggregate of its own query's columns",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, m int)`,
+			`CREATE VIEW v1 AS SELECT id, (SELECT sum(u.m + t.n) FROM u) AS total FROM t`,
+			`CREATE VIEW v2 AS SELECT id, total FROM v1 WHERE total > 12`,
+			`CREATE VIEW v3 AS SELECT id, n + '1'::int AS m FROM t WHERE id < '2'::int`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 3)`, `INSERT INTO u VALUES (1, 10)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, total FROM v1 ORDER BY id`),
+			difftest.Q(0, `SELECT id, total FROM v2`),
+			difftest.Q(0, `SELECT id FROM t WHERE id IN (SELECT id FROM v2)`),
+			difftest.Q(0, `SELECT id, m FROM v3`),
+			difftest.Q(0, `UPDATE t SET n = v2.total FROM v2 WHERE t.id = v2.id RETURNING t.id, t.n`),
+		},
+	},
+	{
 		Name: "FOR KEY SHARE locks the snapshot's version past a non-key update",
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, v int, k int UNIQUE, e text, el text GENERATED ALWAYS AS (lower(e)) STORED UNIQUE)`,

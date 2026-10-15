@@ -613,11 +613,14 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 			sc.types[alias] = types
 		} else if v := db.views[db.resolve(t.Name)]; v != nil {
-			if len(t.Columns) > 0 {
-				sc.types[alias] = map[string]string{}
-			} else {
-				sc.types[alias] = c.viewTypes(v)
+			types, err := c.viewTypes(v)
+			if err != nil {
+				return err
 			}
+			if len(t.Columns) > 0 {
+				types = map[string]string{}
+			}
+			sc.types[alias] = types
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
 			sc.noteCertain(alias, def.types)
@@ -1954,13 +1957,35 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 }
 
 // viewTypes are the output types of a view's query, checked apart from the
-// statement that reads the view.
-func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) map[string]string {
+// statement that reads the view, or the check's refusal of the query, as
+// Postgres expands the view into the statement and runs the query as one of
+// its own. The checks the statement makes after its walk apply too, apart
+// from those of parameters, which a view's query cannot hold.
+func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, error) {
 	vc := &columnChecker{x: c.x}
-	if _, err := vc.query(v.View, nil); err != nil {
-		return map[string]string{}
+	_, err := vc.query(v.View, nil)
+	switch {
+	case err != nil:
+	case vc.timeConflict != "":
+		err = c.x.unsupported(vc.timeConflict)
+	case vc.numberConflict != "":
+		err = c.x.unsupported(vc.numberConflict)
+	default:
+		for _, read := range vc.untyped {
+			if err = read(); err != nil {
+				break
+			}
+		}
 	}
-	return vc.derivedTypes(v.View, v.ViewColumns)
+	if err != nil {
+		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+			return nil, err
+		}
+		// Any other failure is one Postgres makes when the view is created,
+		// so it cannot be the answer to a statement reading the view.
+		return map[string]string{}, nil
+	}
+	return vc.derivedTypes(v.View, v.ViewColumns), nil
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that

@@ -21,6 +21,7 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, fb flag, fu uid, fw word)`)
 	mustExec(t, db, `CREATE TABLE nums (n int)`)
 	mustExec(t, db, `CREATE TABLE flags (n boolean)`)
+	mustExec(t, db, `CREATE TABLE docs (j jsonb)`)
 	for _, q := range []string{
 		`SELECT coalesce(n, n + true) FROM t`,
 		`SELECT CASE WHEN n = 0 THEN 1 ELSE n + true END FROM t`,
@@ -113,7 +114,7 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags WHERE false`, nil},
 		{`SELECT n + NULL FROM t`, []string{"NULL"}},
 		// '{}' - s resolves to jsonb - text.
-		{`SELECT '{}'::jsonb - 'a'::bpchar WHERE false`, nil},
+		{`SELECT j - 'a'::bpchar FROM docs WHERE false`, nil},
 		{`SELECT ('{}' - s) - 'b'::text FROM t WHERE false`, nil},
 		{`SELECT coalesce('{}' - s, NULL) - 'b'::text FROM t WHERE false`, nil},
 		{`SELECT (SELECT '{}' - s) - 'b'::text FROM t WHERE false`, nil},
@@ -121,7 +122,7 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		// abs of no type takes float8, the preferred number type.
 		{`SELECT abs(NULL) + 1`, []string{"NULL"}},
 		{`SELECT -abs(NULL) FROM t WHERE false`, nil},
-		{`SELECT '{}'::jsonb - coalesce('a', NULL) WHERE false`, nil},
+		{`SELECT j - coalesce('a', NULL) FROM docs WHERE false`, nil},
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
