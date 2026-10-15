@@ -225,6 +225,22 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if fields, ok := derefValue(val).([]any); ok {
+			if x.tx.db.kind.InnoDB() {
+				// MySQL fails it, as a row where one value is wanted (1241).
+				return nil, x.unsupported("IS NULL over a row")
+			}
+			// Postgres tests every field: a row is NULL when all of them
+			// are, and NOT NULL when none is, so one with a NULL field
+			// among others is neither.
+			want := !v.Not
+			for _, f := range fields {
+				if (derefValue(f) == nil) != want {
+					return false, nil
+				}
+			}
+			return true, nil
+		}
 		isNull := derefValue(val) == nil
 		if v.Not {
 			return !isNull, nil

@@ -5069,3 +5069,24 @@ func TestMySQLDecimalScale(t *testing.T) {
 		t.Errorf("out of range: %v", err)
 	}
 }
+
+// MySQL fails IS NULL over a row as a row where one value is wanted
+// (1241), which detest does not raise, so it is refused.
+func TestMySQLRowIsNullRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE r (id int PRIMARY KEY, a int, b int)`)
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, a int, b int)`)
+	mustExec(t, db, `INSERT INTO r VALUES (1, NULL, NULL)`)
+	for _, q := range []string{
+		`SELECT (a, b) IS NULL FROM r`,
+		`SELECT id FROM r WHERE (a, b) IS NOT NULL`,
+		// It fails over an empty table too, before any row.
+		`SELECT id FROM e WHERE (a, b) IS NULL`,
+		`SELECT id FROM e WHERE (a, b) IS NOT NULL`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+}
