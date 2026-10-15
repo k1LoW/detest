@@ -977,6 +977,19 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM generate_series(NULL::big + 0, 3000000000)`),
 		},
 	},
+	{
+		Name: "arithmetic over a scalar subquery types its target in its own scope",
+		Schema: []string{
+			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,
+			`CREATE TABLE nums (id int PRIMARY KEY, n int)`,
+		},
+		Seed:  []string{`INSERT INTO flags VALUES (1, true)`, `INSERT INTO nums VALUES (1, 2)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags WHERE false) s`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

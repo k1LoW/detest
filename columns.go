@@ -2724,17 +2724,23 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // arithmeticTypes refuses arithmetic over a boolean, a uuid or text, for
 // which Postgres has no operator and fails when it plans the statement
 // (42883), while the evaluators check the operands only where a row
-// reaches them. A string literal or a parameter takes the other operand's
-// type and is left to arithmeticOperand, and text beside a type whose
-// operators detest does not list, such as jsonb's -, is left alone.
+// reaches them. A domain counts as its base type, as Postgres finds no
+// operator for a domain over a boolean either. A string literal or a
+// parameter beside a boolean or a uuid is refused as well, since no
+// operator takes either whatever type the literal would take, but beside
+// text it is left alone, as '{}' - s resolves to jsonb - text. Text beside
+// a type whose operators detest does not list, such as jsonb's -, is left
+// alone too.
 func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) error {
-	t := typer{column: sc.columnType, base: c.x.tx.db.baseType}
+	t := c.typer(sc)
 	var known []string
+	untyped := false
 	for _, o := range operands {
 		if untypedExpr(o) {
-			return nil
+			untyped = true
+			continue
 		}
-		typ := t.of(o)
+		typ := t.reduce(t.of(o))
 		f := valueFamily(typ)
 		if f == "" && typ != "date" {
 			return nil
@@ -2742,8 +2748,7 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 		known = append(known, f)
 	}
 	for _, f := range known {
-		switch f {
-		case "bool", "boolean", "uuid", "text":
+		if f == "bool" || f == "boolean" || f == "uuid" || f == "text" && !untyped {
 			return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", f))
 		}
 	}
