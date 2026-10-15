@@ -70,6 +70,11 @@ func (x *sqlExec) eval(e sqlir.Expr, en *env) (any, error) {
 
 // evalRaw is eval, giving a numRange as it is, for a caller that resolves it.
 func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
+	if x.foldValues != nil {
+		if v, ok := x.foldValues[e]; ok {
+			return v, nil
+		}
+	}
 	switch v := e.(type) {
 	case nil:
 		return true, nil

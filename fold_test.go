@@ -22,7 +22,6 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT n + 1 / 0 FROM t WHERE false`,
 		`SELECT coalesce(n, 1 / 0) FROM t`,
 		`SELECT sum(1 / 0) FROM t WHERE false`,
-		`SELECT n + (SELECT 1 / 0) FROM t WHERE false`,
 		`SELECT 1 FROM t WHERE 1 / 0 = 1 AND false`,
 		`SELECT coalesce(n, extract(year FROM now()), 1 / 0) FROM t`,
 		`SELECT n FROM t LIMIT 1 / 0`,
@@ -74,7 +73,14 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT 1 FROM (SELECT n FROM t WHERE 1 / 0 = 1 LIMIT 1) q WHERE false`,
 		`SELECT 1 FROM (SELECT n FROM t WHERE 1 / 0 = 1) q WHERE false`,
 		// A row comparison of constants, which detest cannot tell Postgres
-		// folds.
+		// folds, and one Postgres expands into comparisons of its items.
+		`SELECT (1, 1 / 0) = (2, 0) WHERE false`,
+		// A subquery Postgres plans only when folding the expression
+		// around it does not drop it.
+		`SELECT n + (SELECT 1 / 0) FROM t WHERE false`,
+		`SELECT NULL::int + (SELECT 1 / 0) WHERE false`,
+		`SELECT (SELECT 1 / 0) = 1 AND false`,
+		`SELECT CASE WHEN NULL::int IN (1, (SELECT 2)) THEN 1 / 0 ELSE 0 END WHERE false`,
 		`SELECT CASE WHEN (NOT 'false', 1) = (true, 1) THEN 0 ELSE 1 / 0 END WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,

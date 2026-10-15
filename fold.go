@@ -22,6 +22,8 @@ func (x *sqlExec) foldConstants(stmt sqlir.Statement) error {
 		return nil // MySQL gives NULL for a division by zero in a query
 	}
 	f := &folder{x: x, views: map[string]bool{}}
+	x.foldValues = map[sqlir.Expr]any{}
+	defer func() { x.foldValues = nil }()
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
 		return f.query(st)
@@ -174,6 +176,16 @@ type folder struct {
 	// doubted is set by a refusal for what detest does not model, which a
 	// default keeps, unlike one for an expression detest cannot evaluate.
 	doubted bool
+	// depth is how deep in an expression of the query being folded expr
+	// is, 1 at its root.
+	depth int
+}
+
+// stand records that Postgres reduces e to v without evaluating its
+// operands, so that the expressions around it are evaluated with v for it.
+func (f *folder) stand(e sqlir.Expr, v any) folded {
+	f.x.foldValues[e] = v
+	return folded{c: fixed, e: e, val: v, hasVal: true}
 }
 
 func (f *folder) doubtful() error {
@@ -401,6 +413,30 @@ func existsNeedsTargets(sel *sqlir.SelectStmt) bool {
 // expr folds e. A branch Postgres drops because of a constant before it,
 // in AND, OR, CASE or COALESCE, is not folded, as it is not there.
 func (f *folder) expr(e sqlir.Expr) (folded, error) {
+	f.depth++
+	defer func() { f.depth-- }()
+	return f.fold(e)
+}
+
+// subquery folds sel, a subquery of an expression. Postgres plans it only
+// when it is still there after it folds the expression around it, which
+// may drop it by more rules than detest models, such as NULL + (SELECT
+// ...) or (SELECT ...) = 1 AND false, so one that is not the whole
+// expression is folded in doubt.
+func (f *folder) subquery(sel *sqlir.SelectStmt, exists bool) error {
+	if f.depth > 1 {
+		defer f.enter()()
+	}
+	depth := f.depth
+	f.depth = 0
+	defer func() { f.depth = depth }()
+	if exists {
+		return f.exists(sel)
+	}
+	return f.query(sel)
+}
+
+func (f *folder) fold(e sqlir.Expr) (folded, error) {
 	switch v := e.(type) {
 	case nil:
 		return folded{c: fixed, e: &sqlir.Const{}, hasVal: true}, nil
@@ -409,14 +445,14 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 	case *sqlir.ColumnRef, *sqlir.Param, *sqlir.Default, *sqlir.Unconverted:
 		return folded{}, nil
 	case *sqlir.SubQuery:
-		return folded{}, f.query(v.Select)
+		return folded{}, f.subquery(v.Select, false)
 	case *sqlir.Exists:
-		return folded{}, f.exists(v.Select)
+		return folded{}, f.subquery(v.Select, true)
 	case *sqlir.BinaryExpr:
 		if v.Op == "AND" || v.Op == "OR" {
 			return f.logic(v)
 		}
-		kids, err := f.exprs(v.L, v.R)
+		kids, err := f.rowExprs(v.L, v.R)
 		if err != nil {
 			return folded{}, err
 		}
@@ -486,20 +522,18 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 			if _, err := f.expr(v.X); err != nil {
 				return folded{}, err
 			}
-			return folded{}, f.query(v.Sub)
+			return folded{}, f.subquery(v.Sub, false)
 		}
-		kids, err := f.exprs(append([]sqlir.Expr{v.X}, v.List...)...)
+		kids, err := f.rowExprs(append([]sqlir.Expr{v.X}, v.List...)...)
 		if err != nil {
 			return folded{}, err
 		}
-		s := notStrict
-		if !v.Array && (kids[0].null() || len(v.List) == 1 && kids[1].null()) {
-			// Postgres compares the left operand with such a list by =,
-			// each of which a NULL reduces to NULL, and a list of one item
-			// is that comparison alone. It folds the array comparison only
-			// when every operand is a constant, so a NULL reduces nothing
-			// there.
-			s = strict
+		s, err := f.inStrictness(v, kids)
+		if err != nil {
+			return folded{}, err
+		}
+		if s == maybeStrict {
+			return folded{c: maybe}, nil
 		}
 		return f.apply(v, kids, plainOperands(kids...), s)
 	case *sqlir.ArrayCmp:
@@ -548,6 +582,57 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 	return folded{}, f.node(reflect.ValueOf(e).Elem())
 }
 
+// inStrictness is whether a NULL folds v, an IN list whose operands are
+// kids, to NULL. Postgres's parser compares X with the items that read no
+// column as one array when there are two or more of them, and with each
+// other item by = (transformAExprIn). A NULL X reduces each = to NULL,
+// and the array comparison only when every item in it is a constant, as
+// Postgres folds that comparison only then. A NULL item reduces the =
+// of a list of one item. Which items a subquery in the list reads is not
+// modeled, so a NULL with one is maybeStrict.
+func (f *folder) inStrictness(v *sqlir.InExpr, kids []folded) (strictness, error) {
+	if v.Array {
+		return notStrict, nil
+	}
+	if len(v.List) == 1 && kids[1].null() {
+		return strict, nil
+	}
+	if !kids[0].null() {
+		return notStrict, nil
+	}
+	var array []folded
+	for i, item := range v.List {
+		if len(sqlir.Selects(item)) > 0 {
+			return maybeStrict, nil
+		}
+		if len(sqlir.ColumnRefs(item)) == 0 {
+			array = append(array, kids[i+1])
+		}
+	}
+	if len(array) >= 2 {
+		for _, k := range array {
+			if k.c == varies || k.e == nil {
+				return notStrict, nil
+			}
+		}
+	}
+	return strict, nil
+}
+
+// rowExprs is exprs for the operands of a comparison, which Postgres
+// expands into comparisons of the items when they are rows, with pruning
+// of its own (1 = 2 AND 1 / 0 = 0 for (1, 1 / 0) = (2, 0)), so the
+// operands are folded in doubt then.
+func (f *folder) rowExprs(es ...sqlir.Expr) ([]folded, error) {
+	for _, e := range es {
+		if _, ok := e.(*sqlir.RowExpr); ok {
+			defer f.enter()()
+			break
+		}
+	}
+	return f.exprs(es...)
+}
+
 func (f *folder) exprs(es ...sqlir.Expr) ([]folded, error) {
 	out := make([]folded, len(es))
 	for i, e := range es {
@@ -573,24 +658,16 @@ const (
 // apply folds e, whose operands are kids. When every one is a constant, it
 // evaluates e as c, or as maybe when an operand is one.
 func (f *folder) apply(e sqlir.Expr, kids []folded, c constness, s strictness) (folded, error) {
-	constant := true
-	for _, k := range kids {
-		if k.c == varies || k.e == nil {
-			constant = false
-		}
-	}
 	if s != notStrict {
 		// Postgres returns NULL without calling a strict operator or
 		// function, so nothing about the other operands, nor what detest
 		// can evaluate, matters.
 		for _, k := range kids {
 			if k.null() {
-				r := folded{c: k.c, hasVal: true}
+				r := f.stand(e, nil)
+				r.c = k.c
 				if s == maybeStrict {
 					r.c = maybe
-				}
-				if constant || harmless(e) {
-					r.e = e
 				}
 				return r, nil
 			}
@@ -696,21 +773,6 @@ func pure(e sqlir.Expr) bool {
 	return true
 }
 
-// harmless reports that evaluating e, which a NULL operand reduces to
-// NULL, gives NULL and runs nothing Postgres does not. It may read a
-// column or a parameter, which with no row is NULL, beside the NULL.
-func harmless(e sqlir.Expr) bool {
-	if len(sqlir.Selects(e)) > 0 || len(sqlir.WindowFuncs(e)) > 0 {
-		return false
-	}
-	for _, c := range sqlir.FuncCalls(e) {
-		if isAggregateCall(c) || effectFuncs[c.Name] || sessionFuncs[c.Name] {
-			return false
-		}
-	}
-	return true
-}
-
 func sameKind(a, b folded) bool {
 	if derefValue(a.val) == nil || derefValue(b.val) == nil {
 		return true
@@ -768,7 +830,9 @@ func (f *folder) call(v *sqlir.FuncCall) (folded, error) {
 		// without calling it, its volatility notwithstanding.
 		for _, k := range kids {
 			if k.null() {
-				return folded{c: k.c, hasVal: true}, nil
+				r := f.stand(v, nil)
+				r.c = k.c
+				return r, nil
 			}
 		}
 		return folded{}, nil
@@ -776,10 +840,8 @@ func (f *folder) call(v *sqlir.FuncCall) (folded, error) {
 	if v.Name == "nullif" && len(kids) == 2 && kids[0].null() && (kids[1].c == varies || kids[1].e == nil) {
 		// Postgres reduces a NULLIF of a NULL to NULL whatever the other
 		// argument is.
-		r := folded{c: kids[0].c, hasVal: true}
-		if harmless(v) {
-			r.e = v
-		}
+		r := f.stand(v, nil)
+		r.c = kids[0].c
 		return r, nil
 	}
 	c, s := plainOperands(kids...), strict
@@ -883,7 +945,7 @@ func (f *folder) logic(v *sqlir.BinaryExpr) (folded, error) {
 		c := condOf(r, decides)
 		if c.take && !c.uncertain() {
 			// Postgres reduces the whole AND to false, or the OR to true.
-			return f.reduced(v, folded{c: fixed, val: decides, hasVal: true}, kids...)
+			return f.stand(v, decides), nil
 		}
 		uncertain = uncertain || c.uncertain()
 		if c.take {

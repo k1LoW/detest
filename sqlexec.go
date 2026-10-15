@@ -111,7 +111,12 @@ type sqlExec struct {
 	// numericDivs are the divisions the column check typed as a numeric
 	// or a float, such as one by the sum of a bigint, which Postgres
 	// returns as a numeric where the fold gives an integer.
-	numericDivs  map[*sqlir.BinaryExpr]bool
+	numericDivs map[*sqlir.BinaryExpr]bool
+	// foldValues are the values foldConstants found Postgres reduces
+	// expressions to without evaluating their operands, which evaluating
+	// them while it folds gives instead, so that an operand Postgres drops
+	// is not evaluated. It is nil outside foldConstants.
+	foldValues   map[sqlir.Expr]any
 	setOpColumns map[*sqlir.SelectStmt]setOpColumns
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
