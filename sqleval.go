@@ -237,7 +237,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		in, sawNull := false, false
 		if v.Sub != nil {
-			cols, rows, err := x.evalSelect(v.Sub, en)
+			cols, rows, err := x.subquery(v.Sub, en)
 			if err != nil {
 				return nil, err
 			}
@@ -366,7 +366,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		return v.All, nil
 	case *sqlir.Exists:
-		_, rows, err := x.evalSelect(v.Select, en)
+		_, rows, err := x.subquery(v.Select, en)
 		if err != nil {
 			return nil, err
 		}
@@ -375,7 +375,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		return len(rows) > 0, nil
 	case *sqlir.SubQuery:
-		cols, rows, err := x.evalSelect(v.Select, en)
+		cols, rows, err := x.subquery(v.Select, en)
 		if err != nil {
 			return nil, err
 		}
@@ -545,6 +545,37 @@ func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error)
 	return args, nil
 }
 
+// subqueryResult is what a subquery run as an expression gave.
+type subqueryResult struct {
+	cols []string
+	rows []Row
+}
+
+// subquery runs sel, a subquery in an expression. One reading no column of
+// a query around it runs once for the statement, as Postgres runs it as an
+// InitPlan, so a lock wait or a write between two rows reaching it does not
+// give the later row another result, and its locks are taken once.
+func (x *sqlExec) subquery(sel *sqlir.SelectStmt, en *env) ([]string, []Row, error) {
+	if x.uncertain[sel] {
+		return nil, nil, x.unsupported("subquery reading a column that an item of unknown columns inside it or a query around it may have")
+	}
+	if !x.uncorrelated[sel] {
+		return x.evalSelect(sel, en)
+	}
+	if r, ok := x.subqueries[sel]; ok {
+		return r.cols, r.rows, nil
+	}
+	cols, rows, err := x.evalSelect(sel, en)
+	if err != nil {
+		return nil, nil, err
+	}
+	if x.subqueries == nil {
+		x.subqueries = map[*sqlir.SelectStmt]subqueryResult{}
+	}
+	x.subqueries[sel] = subqueryResult{cols, rows}
+	return cols, rows, nil
+}
+
 // untypedPair resolves the operands of a comparison as Postgres resolves an
 // untyped string literal or a parameter: to the type of the other operand
 // when that is a number, so '01' = 1 holds. Any other text compared with a
@@ -655,7 +686,7 @@ func (x *sqlExec) compareRowSubquery(v *sqlir.BinaryExpr, en *env) (_ any, ok bo
 	if err != nil {
 		return nil, true, err
 	}
-	cols, rows, err := x.evalSelect(sub.Select, en)
+	cols, rows, err := x.subquery(sub.Select, en)
 	if err != nil {
 		return nil, true, err
 	}
