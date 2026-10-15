@@ -115,6 +115,9 @@ type columnChecker struct {
 	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
+	// cteDefs are the queries of the CTEs in scope, as ctes holds their
+	// names, which the COALESCE effect check follows.
+	cteDefs []map[string]*sqlir.SelectStmt
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -435,7 +438,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 						}
 					}
 					// The integer overload types it, for its other uses.
-					c.params.comparedWith(p.Index, "int4")
+					c.params.comparedWith(p.Index, c.paramTypeFamily("int4"))
 				}
 			}
 			if !typed {
@@ -732,14 +735,17 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	if len(with) == 0 {
 		return func() {}, nil
 	}
-	m, tm := map[string]colSet{}, map[string]map[string]string{}
+	m, tm, dm := map[string]colSet{}, map[string]map[string]string{}, map[string]*sqlir.SelectStmt{}
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
+	c.cteDefs = append(c.cteDefs, dm)
 	pop = func() {
 		c.ctes = c.ctes[:len(c.ctes)-1]
 		c.cteTypes = c.cteTypes[:len(c.cteTypes)-1]
+		c.cteDefs = c.cteDefs[:len(c.cteDefs)-1]
 	}
 	for _, cte := range with {
+		dm[cte.Name] = cte.Select
 		s, err := c.query(cte.Select, outer)
 		if err != nil {
 			pop()
@@ -2144,7 +2150,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 									return
 								}
 							}
-							c.params.comparedWith(p.Index, "int4")
+							c.params.comparedWith(p.Index, c.paramTypeFamily("int4"))
 						}
 					}
 					// The value and the default take one type, as the
@@ -3011,6 +3017,18 @@ func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
 			if t == nil || t.Name == "" {
 				continue
 			}
+			if def, ok := c.cteDef(t.Name); ok {
+				// withCTEs runs a CTE a query reads before the query,
+				// where Postgres runs it only when the fallback is
+				// demanded.
+				if !seen["cte "+t.Name] {
+					seen["cte "+t.Name] = true
+					if def == nil || c.effectful(def, seen) {
+						return true
+					}
+				}
+				continue
+			}
 			name := db.resolve(t.Name)
 			if v := db.views[name]; v != nil && !seen[name] {
 				seen[name] = true
@@ -3021,6 +3039,17 @@ func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
 		}
 	}
 	return slices.ContainsFunc(sqlir.FuncCallsIn(e), isEffectCall)
+}
+
+// cteDef is the query of the CTE name, the innermost of that name, and
+// whether a CTE of the name is in scope.
+func (c *columnChecker) cteDef(name string) (*sqlir.SelectStmt, bool) {
+	for _, defs := range slices.Backward(c.cteDefs) {
+		if q, ok := defs[name]; ok {
+			return q, true
+		}
+	}
+	return nil, false
 }
 
 func isEffectCall(f *sqlir.FuncCall) bool {

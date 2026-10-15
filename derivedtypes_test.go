@@ -126,6 +126,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(u.v / 2, 0) FROM (SELECT 1 AS v UNION ALL SELECT m FROM nm) u`,
 		// A view's sequence call is an effect too.
 		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
+		`WITH c AS (SELECT nextval('seq') AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
@@ -202,6 +203,14 @@ func TestDerivedColumnTypes(t *testing.T) {
 		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
 		}
+	}
+	// generate_series and a LAG offset type a parameter as an integer,
+	// which an integer comparison of it agrees with.
+	if got := rowsOf(t, db, `SELECT g FROM generate_series(1, $1) g WHERE $1 = 2 ORDER BY 1`, int64(2)); !reflect.DeepEqual(got, []string{"1", "2"}) {
+		t.Errorf("a series bound parameter compared with an integer: got %v", got)
+	}
+	if _, err := db.Query(`SELECT lag(n, $1, 0) OVER () FROM t WHERE $1 = 1`, int64(1)); err != nil {
+		t.Errorf("a LAG offset parameter compared with an integer: %v", err)
 	}
 	// The refusal leaves the sequence where it was.
 	if got := rowsOf(t, db, `SELECT nextval('seq')`); !reflect.DeepEqual(got, []string{"1"}) {
