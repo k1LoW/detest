@@ -24,6 +24,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE DOMAIN wall AS timestamp`)
 	mustExec(t, db, `CREATE SEQUENCE seq`)
 	mustExec(t, db, `CREATE TABLE ch (id int PRIMARY KEY, c char(3))`)
+	mustExec(t, db, `CREATE TABLE t2 (a int, b int)`)
+	mustExec(t, db, `CREATE TABLE big (n bigint)`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -209,6 +211,15 @@ func TestDerivedColumnTypes(t *testing.T) {
 	}
 	if at.Hour() != 0 || at.Minute() != 30 {
 		t.Errorf("a time parameter as LAG's default beside a timestamp: got %v", at)
+	}
+	// A * in a set operation gives more columns than targets.
+	if got := rowsOf(t, db, `SELECT u.b FROM (SELECT 1 AS a, 2 AS b UNION ALL SELECT * FROM t2) u`); !reflect.DeepEqual(got, []string{"2"}) {
+		t.Errorf("a set operation with a *: got %v", got)
+	}
+	// generate_series takes a scalar subquery's type in its own scope, a
+	// bigint here beside an outer integer column of the same name.
+	if got := rowsOf(t, db, `SELECT coalesce(g, '3000000000') FROM t CROSS JOIN generate_series((SELECT n FROM big WHERE false), 1) g`); len(got) != 0 {
+		t.Errorf("generate_series over a bigint subquery: got %v", got)
 	}
 	if got := rowsOf(t, db, `SELECT s.id FROM (SELECT * FROM f) s WHERE coalesce(s.flag, true)`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a boolean beside a boolean column: got %v", got)

@@ -500,7 +500,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	case t.Func != nil:
 		sc.types[alias] = map[string]string{}
 		if name := funcColumn(t, alias); name != "" {
-			if typ := seriesType(t.Func, sc.columnType); typ != "" {
+			if typ := seriesType(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); typ != "" {
 				sc.types[alias][name] = typ
 			}
 		}
@@ -1452,6 +1452,10 @@ func (c *columnChecker) pairType(sel *sqlir.SelectStmt, i, n int) (string, bool)
 	if !ok || len(types) != n || len(sel.Values) > 0 {
 		return "", false
 	}
+	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		// A * gives more columns than targets, of the table's own types.
+		return types[i], true
+	}
 	e := sel.Targets[i].Expr
 	if k, isConst := e.(*sqlir.Const); isConst && k.Value == nil {
 		return nullOperand, true
@@ -1489,10 +1493,10 @@ func funcColumn(t sqlir.TableRef, alias string) string {
 // integers f's arguments are: bigint where one is a bigint, as Postgres
 // picks the bigint form, and "" where one is of a type the check does not
 // know, as of a parameter.
-func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
+func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	typ := "int4"
 	for _, a := range f.Args {
-		switch expressionType(a, column) {
+		switch expressionTypeIn(a, column, subquery) {
 		case "int", "int2", "int4", "integer", "smallint":
 		case "int8", "bigint":
 			typ = "int8"
