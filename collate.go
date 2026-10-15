@@ -836,6 +836,11 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		}
 		base := x.tx.db.baseType(typ)
 		switch k := x.tx.db.branchKind(typ); {
+		case k != "" && (base == "bpchar" || base == "char" || base == "character"):
+			// A literal beside it takes its trailing-space semantics,
+			// which the text conversion does not give.
+			kinds[k] = true
+			unconverted = typ
 		case k != "":
 			kinds[k] = true
 		case numberRank[base] > 0:
@@ -863,12 +868,12 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		}
 	}
 	switch {
-	case unknown && kinds["number"] && !x.tx.checking:
-		// The branches meet at a number type the unknown one decides, such
-		// as abs(NULL)'s float8, which branchValue would take from the
-		// row's values instead. CheckSQL has no schema, so a column's type
-		// is unknown there.
-		return x.unsupported("a number beside a branch of a type detest does not know among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD")
+	case unknown && len(kinds) > 0 && !x.tx.checking:
+		// The branches meet at a type the unknown one decides, such as
+		// abs(NULL)'s float8, or fail beside it, which branchValue cannot
+		// tell from the row's values. CheckSQL has no schema, so a
+		// column's type is unknown there.
+		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD")
 	case domain != "" && len(names) > 1:
 		// commonType and the time and number readers take the type's own
 		// name, so a domain beside another type resolves to neither.

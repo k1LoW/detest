@@ -397,6 +397,11 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 				if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int8"]) {
 					return c.x.unsupported("generate_series over a " + typ)
 				}
+				if _, isParam := a.(*sqlir.Param); typ == "" && !isParam && !isNullConst(a) && !untypedExpr(a) && !c.x.tx.checking {
+					// The overload Postgres picks depends on the type the
+					// check cannot show, as abs(NULL)'s float8.
+					return c.x.unsupported("generate_series over a bound of a type detest does not know")
+				}
 			}
 		}
 		if alias == "" {

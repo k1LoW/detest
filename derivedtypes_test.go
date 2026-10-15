@@ -23,6 +23,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
 	mustExec(t, db, `CREATE DOMAIN wall AS timestamp`)
 	mustExec(t, db, `CREATE SEQUENCE seq`)
+	mustExec(t, db, `CREATE TABLE ch (id int PRIMARY KEY, c char(3))`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -115,6 +116,11 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.n, abs(NULL)) / 2 FROM (SELECT * FROM t) s`,
 		`SELECT lag(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(s.name, abs(NULL), 'x') FROM (SELECT * FROM t) s`,
+		`SELECT * FROM generate_series(abs(NULL), 2) g ORDER BY 1`,
+		// The text conversion does not give a char's trailing-space
+		// semantics to a literal beside it.
+		`SELECT coalesce(s.c, 'a ') = 'a' FROM (SELECT * FROM ch) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
