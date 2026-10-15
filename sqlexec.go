@@ -1332,8 +1332,9 @@ type aggEnv struct {
 // plannedAggregates are the aggregates of e's own query block that Postgres
 // computes: not those it drops with the arguments of a COALESCE after a
 // literal that is not NULL, or with a CASE branch behind a literal
-// condition, when it plans the statement. A condition it folds from an
-// expression is not followed, as detest folds none (#98).
+// condition, when it plans the statement. An argument or a condition it
+// folds from an expression of constants, such as 1 = 1, is not followed:
+// foldConstants raises what folding it raises, not where it cuts off.
 func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
 	var out []*sqlir.FuncCall
 	var walk func(v reflect.Value)

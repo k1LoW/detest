@@ -511,8 +511,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 // after which Postgres drops the arguments when it plans the statement.
 //
 // Postgres also folds an expression of constants when it plans the
-// statement, so 1 / 0 fails there in an argument no row reaches. detest
-// folds no expression (#98), so it is not modeled for COALESCE alone.
+// statement, so 1 / 0 fails there in an argument no row reaches.
+// foldConstants raises that before the statement runs, for every
+// expression alike.
 func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error), skipped func(sqlir.Expr) error) ([]any, error) {
 	args := make([]any, len(v.Args))
 	found, dropped := false, false
