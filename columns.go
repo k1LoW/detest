@@ -713,6 +713,17 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return out, nil
 	}
 	sc := &colScope{items: map[string]colSet{}, outer: outer}
+	if len(sel.Values) > 1 {
+		// Postgres resolves each column of a VALUES query over its rows
+		// when it plans the statement, and fails one of two types (42804)
+		// whether or not a LIMIT drops the rows. INSERT ... VALUES, whose
+		// rows each take the column's type, is checked in insert.
+		for i := range sel.Values[0] {
+			if err := c.branchTypes(setOpColumnExprs(sel, i), sc, "VALUES rows"); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
 			return nil, err
@@ -1512,7 +1523,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
-				if err = c.branchTypes(caseBranches(e), sc); err != nil {
+				if err = c.branchTypes(caseBranches(e), sc, "branches"); err != nil {
 					return
 				}
 				// The branches take the type of the typed ones.
@@ -1545,7 +1556,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
-					if err = c.branchTypes(e.Args, sc); err != nil {
+					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
 						return
 					}
 					// The arguments take the type of the typed ones.
@@ -1782,8 +1793,16 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 			// boolean text or refuses it, neither of which a number reads.
 			return c.x.unsupported(fmt.Sprintf("a boolean bound to a parameter taken as %s", e.Type))
 		}
-		if _, err := c.x.eval(e, nil); err != nil && !errors.As(err, new(errUnknownExpr)) {
-			return err
+		if _, err := c.x.eval(e, nil); err != nil {
+			if u, unknown := errors.AsType[errUnknownExpr](err); !unknown {
+				return err
+			} else if isParam(e.X) && derefValue(v) != nil && !isText(v) {
+				// A conversion the cast does not model leaves a value the
+				// driver encodes in its own way, which the run refuses
+				// where a row reaches it. Text, such as a date in a format
+				// detest does not parse, stays unchecked as before.
+				return c.x.unsupported(u.what)
+			}
 		}
 		return nil
 	})
@@ -1905,13 +1924,13 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
 }
 
-// branchTypes refuses branches of CASE, or arguments of COALESCE,
-// GREATEST, LEAST or NULLIF, of two types Postgres does not resolve to one,
+// branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,
+// LEAST or NULLIF, or rows of a VALUES column, of two types Postgres does not resolve to one,
 // which it fails when it plans the statement (42804) and the run would
 // return one of. Two types are taken as one only where valueFamily groups
 // them, or as dates and timestamps, which commonType widens; another pair
 // is refused even where Postgres resolves it, as for a set operation.
-func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope) error {
+func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope, of string) error {
 	family := func(typ string) string {
 		if timeRank[typ] > 0 {
 			return "time"
@@ -1932,7 +1951,7 @@ func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope) error {
 		case first == "":
 			first = typ
 		case typ != first && (family(typ) == "" || family(typ) != family(first)):
-			return c.x.unsupported(fmt.Sprintf("branches of a %s and a %s, which Postgres does not resolve to one type", first, typ))
+			return c.x.unsupported(fmt.Sprintf("%s of a %s and a %s, which Postgres does not resolve to one type", of, first, typ))
 		}
 	}
 	return nil

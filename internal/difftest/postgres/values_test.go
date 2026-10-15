@@ -900,6 +900,8 @@ var valueCases = []difftest.Case{
 			difftest.S(0, `UPDATE z SET ts = '2024-05-20' WHERE false`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT CASE WHEN true THEN k ELSE 'anything' END FROM z) s`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT '{"a": 1}'::jsonb, '10.0.0.1'::inet, 'x'::text FROM z) s`),
+			difftest.Q(0, `SELECT coalesce(NULLIF(1, 2.5), '1.5') = 1, coalesce(NULLIF(1, 2.5::float8), '1.5') = 1`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(NULLIF(n, 1::bigint), '1.5') FROM z) s`),
 		},
 	},
 }

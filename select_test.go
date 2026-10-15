@@ -950,6 +950,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
+		// Postgres resolves a VALUES column over its rows, whether or not
+		// a LIMIT drops them.
+		`VALUES (1), (false) LIMIT 0`,
+		`(VALUES (1), (false) LIMIT 0) UNION ALL SELECT 2 WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -1016,6 +1020,27 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 			t.Errorf("a %T for a uuid column: got %v, want unsupported", v, err)
 		}
 	}
+	// A value the cast does not convert as the driver sends it is refused,
+	// as the run refuses it where a row reaches it.
+	for _, tc := range []struct {
+		query string
+		v     any
+	}{
+		{`UPDATE t SET b = $1 WHERE false`, 1.25},
+		{`UPDATE t SET n = $1 WHERE false`, at},
+		{`SELECT $1::int FROM t`, at},
+	} {
+		if _, err := db.Exec(tc.query, tc.v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with a %T: got %v, want unsupported", tc.query, tc.v, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE y SET d = $1 WHERE false`, int64(3)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("an integer for a date column: got %v, want unsupported", err)
+	}
+	// An integer is read by its digits, as the driver sends it.
+	if _, err := db.Exec(`UPDATE t SET b = $1 WHERE false`, int64(5)); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("5 for a boolean column: got %v, want invalid input", err)
+	}
 	if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, nil); err != nil {
 		t.Errorf("NULL for a uuid column: got %v, want no error", err)
 	}
@@ -1055,6 +1080,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// The branches widen to an integer, which takes 40000.
 		{`SELECT CASE WHEN true THEN 1::smallint WHEN false THEN 2 ELSE '40000' END`, nil},
 		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},
+		// NULLIF promotes an integer compared with a numeric, which then
+		// takes 1.5.
+		{`SELECT coalesce(NULLIF(1, 2.5), '1.5')`, nil},
+		{`SELECT coalesce(NULLIF(n, 2.5), '1.5') FROM t`, nil},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); err != nil {
 			t.Errorf("%s: got %v, want no error", tc.query, err)

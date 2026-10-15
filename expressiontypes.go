@@ -101,12 +101,29 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		case "min", "max", "abs", "coalesce", "greatest", "least":
 			return commonType(e.Args, column, subquery)
 		case "nullif":
-			// NULLIF returns its first argument, of its own type: a
-			// timestamp compared with a timestamptz by the cross-type =
-			// stays a timestamp.
-			if len(e.Args) > 0 {
-				return expressionTypeIn(e.Args[0], column, subquery)
+			// NULLIF returns its first argument as the = it is compared by
+			// takes it: a timestamp compared with a timestamptz, or an
+			// integer with another, by a cross-type = stays as it is, while
+			// an integer compared with a numeric, or either with a float,
+			// is promoted, as no = takes the pair.
+			if len(e.Args) == 0 {
+				break
 			}
+			l := expressionTypeIn(e.Args[0], column, subquery)
+			if len(e.Args) != 2 {
+				return l
+			}
+			r := expressionTypeIn(e.Args[1], column, subquery)
+			if l == "" {
+				return r
+			}
+			if lc, rc := numberCategory(l), numberCategory(r); lc > 0 && rc > lc {
+				if rc == numberCategory("numeric") {
+					return "numeric"
+				}
+				return "float8"
+			}
+			return l
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -205,6 +222,21 @@ var (
 		"numeric": 4, "decimal": 4, "float4": 5, "real": 5, "float8": 6, "double precision": 6,
 	}
 )
+
+// numberCategory groups the number types Postgres compares by a cross-type
+// =: integers 1, numeric 2 and floats 3, 0 for any other type.
+func numberCategory(typ string) int {
+	switch r := numberRank[typ]; {
+	case r == 0:
+		return 0
+	case r <= numberRank["int8"]:
+		return 1
+	case r == numberRank["numeric"]:
+		return 2
+	default:
+		return 3
+	}
+}
 
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
 	if f.Name == "left" && len(f.Args) == 2 {
