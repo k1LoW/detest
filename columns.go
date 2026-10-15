@@ -3017,17 +3017,17 @@ func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
 			if t == nil || t.Name == "" {
 				continue
 			}
-			if def, ok := c.cteDef(t.Name); ok {
-				// withCTEs runs a CTE a query reads before the query,
-				// where Postgres runs it only when the fallback is
-				// demanded.
-				if !seen["cte "+t.Name] {
-					seen["cte "+t.Name] = true
+			// A CTE resolves in the scope it was declared in and a view in
+			// none, which this check does not track, so every CTE of the
+			// name in scope and the view of the name are followed alike.
+			for _, def := range c.cteDefsOf(t.Name) {
+				key := fmt.Sprintf("cte %s %p", t.Name, def)
+				if !seen[key] {
+					seen[key] = true
 					if def == nil || c.effectful(def, seen) {
 						return true
 					}
 				}
-				continue
 			}
 			name := db.resolve(t.Name)
 			if v := db.views[name]; v != nil && !seen[name] {
@@ -3041,15 +3041,16 @@ func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
 	return slices.ContainsFunc(sqlir.FuncCallsIn(e), isEffectCall)
 }
 
-// cteDef is the query of the CTE name, the innermost of that name, and
-// whether a CTE of the name is in scope.
-func (c *columnChecker) cteDef(name string) (*sqlir.SelectStmt, bool) {
-	for _, defs := range slices.Backward(c.cteDefs) {
+// cteDefsOf are the queries of the CTEs of the name in scope, at every
+// level.
+func (c *columnChecker) cteDefsOf(name string) []*sqlir.SelectStmt {
+	var out []*sqlir.SelectStmt
+	for _, defs := range c.cteDefs {
 		if q, ok := defs[name]; ok {
-			return q, true
+			out = append(out, q)
 		}
 	}
-	return nil, false
+	return out
 }
 
 func isEffectCall(f *sqlir.FuncCall) bool {

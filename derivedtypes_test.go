@@ -28,6 +28,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE big (n bigint)`)
 	mustExec(t, db, `CREATE TABLE nm (m numeric)`)
 	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('seq') AS n`)
+	mustExec(t, db, `CREATE VIEW seqw AS SELECT n FROM seqv`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -127,6 +128,11 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// A view's sequence call is an effect too.
 		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
 		`WITH c AS (SELECT nextval('seq') AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
+		// A CTE of a view's name does not hide the view from a CTE
+		// declared before it, nor from another view.
+		`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
+		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
+		`WITH c AS (SELECT n FROM seqv) SELECT (WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s LIMIT 1)`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
