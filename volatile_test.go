@@ -33,6 +33,8 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 	mustExec(t, db, `CREATE SEQUENCE sq`)
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, 10), (2, 20)`)
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY)`)
+	mustExec(t, db, `CREATE VIEW lv AS WITH d AS (SELECT id FROM u FOR UPDATE) SELECT id FROM d LIMIT 1`)
 	for _, q := range []string{
 		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT coalesce(NULL::bigint, (SELECT v FROM c LIMIT 1))`,
 		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT (SELECT v FROM c LIMIT 1)`,
@@ -51,6 +53,14 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		// Postgres skips the rest of a join when one side has no rows,
 		// which side its planner's choice.
 		`WITH c AS (SELECT nextval('sq') AS v) SELECT c.v FROM u JOIN c ON true`,
+		// A condition on a query around the reader, or on a subquery,
+		// reads none of the reader's rows.
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c WHERE u.n = 1)) FROM u`,
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(NULL::bigint, (SELECT v FROM c WHERE (SELECT count(id) FROM e) > 0))`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c WHERE (SELECT count(id) FROM e) > 0`,
+		// So does a view's, whose rows a statement may read in part.
+		`SELECT id FROM lv`,
+		`WITH c AS (SELECT (SELECT id FROM lv) AS n) SELECT coalesce(NULL::int, (SELECT n FROM c))`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
