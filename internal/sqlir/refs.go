@@ -63,6 +63,45 @@ func BlockFuncCalls(e Expr) []*FuncCall {
 	return out
 }
 
+// BlockColumnRefs returns the column references of e's own query block,
+// not those in a subquery.
+func BlockColumnRefs(e Expr) []*ColumnRef {
+	var out []*ColumnRef
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			switch n := v.Interface().(type) {
+			case *SelectStmt:
+				return
+			case *ColumnRef:
+				out = append(out, n)
+				return
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(e))
+	return out
+}
+
 // ArrayCmps returns the comparisons with an array value under n, a statement
 // or an expression, subqueries included.
 func ArrayCmps(n any) []*ArrayCmp { return find[*ArrayCmp](n) }

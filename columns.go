@@ -1941,6 +1941,46 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	return nil, false
 }
 
+// outerAggregate reports an aggregate whose arguments read columns, all of
+// them of a query outside sc's, which Postgres makes an aggregate of the
+// innermost such query (agglevelsup). A column whose query is not known,
+// as an item of unknown columns may have it, is taken as sc's.
+func outerAggregate(f *sqlir.FuncCall, sc *colScope) bool {
+	refs := sqlir.BlockColumnRefs(f)
+	if len(refs) == 0 {
+		return false
+	}
+	for _, r := range refs {
+		if level(r, sc) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// level is the number of queries out from sc the column r resolves in, 0
+// for sc's own or one not found.
+func level(r *sqlir.ColumnRef, sc *colScope) int {
+	n := 0
+	for s := sc; s != nil; s, n = s.outer, n+1 {
+		if r.Table != "" {
+			if _, ok := s.items[r.Table]; ok || r.Table == "excluded" && s.hasExcluded {
+				return n
+			}
+			continue
+		}
+		for _, cols := range s.items {
+			if cols == nil {
+				return n
+			}
+			if has, _ := cols.has(r.Column); has {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
 // resolve reports a column reference no FROM item in scope has.
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	if r.Table != "" {
@@ -2112,6 +2152,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				}
 			case *sqlir.FuncCall:
+				if isAggregateCall(e) && sc.outer != nil && outerAggregate(e, sc) {
+					// Postgres computes an aggregate whose arguments read
+					// only outer columns in the outer query, which then
+					// aggregates, while the evaluators compute it over the
+					// subquery's rows.
+					err = c.x.unsupported("an aggregate of only outer columns in a subquery, which Postgres computes in the outer query")
+					return
+				}
 				if what := textArgumentMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
