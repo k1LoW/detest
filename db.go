@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -3083,6 +3084,23 @@ func (db *DB) updateLock(table string, cols []string) lockMode {
 		}
 	}
 	return lockNoKeyUpdate
+}
+
+// keyChanged reports whether row new differs from old in a key column, as
+// updateLock tells one, which an update takes FOR UPDATE for.
+func (db *DB) keyChanged(table string, old, new Row) bool {
+	var cols []string
+	for c, v := range new {
+		if !reflect.DeepEqual(old[c], v) {
+			cols = append(cols, c)
+		}
+	}
+	for c := range old {
+		if _, ok := new[c]; !ok {
+			cols = append(cols, c)
+		}
+	}
+	return db.updateLock(table, cols) == lockUpdate
 }
 
 // pkConstraint is the name of table's primary key constraint.

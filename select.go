@@ -734,7 +734,7 @@ rows:
 		changed := false
 		for _, a := range targets {
 			table := from.tables[a]
-			_, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
+			at, cur, ok, err := x.tx.lockLatest(table, r.by[a].Key(), func(lk lockKey) error {
 				if x.skipped[lk] && sel.Lock.SkipLocked {
 					return errSkipLocked
 				}
@@ -756,6 +756,13 @@ rows:
 			}
 			if !ok {
 				continue rows // deleted while waited for
+			}
+			if mode == lockKeyShare && !x.tx.db.kind.InnoDB() && at == r.by[a].Key() && !x.tx.db.keyChanged(table, r.by[a], cur) {
+				// An update that changed no key column takes FOR NO KEY
+				// UPDATE, which FOR KEY SHARE does not conflict with, so
+				// Postgres locks the version the snapshot sees and does not
+				// follow the update chain to the newest one.
+				cur = r.by[a]
 			}
 			latest[a] = cur
 			changed = changed || !reflect.DeepEqual(cur, r.by[a])
