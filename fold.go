@@ -538,9 +538,8 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		r := folded{c: maybe, e: v}
 		for _, k := range kids {
 			if k.e == nil {
-				// An item whose value detest does not know, such as a
-				// string literal under NOT (#118), so the row's is not
-				// known either.
+				// An item whose value detest does not know, so the
+				// row's is not known either.
 				r.e = nil
 			}
 		}
@@ -819,9 +818,10 @@ func condOf(r folded, take bool) cond {
 	return out
 }
 
-// boolean is r read as a boolean. A constant whose value is not one, a
-// string literal Postgres reads as a boolean when it parses the statement
-// and the evaluators read as NULL (#118), has a value detest does not know.
+// boolean is r read as a boolean. The converter casts a string literal
+// where a boolean is wanted to bool (#118), so a constant whose value is
+// not one is a string that reached here otherwise, whose value as a
+// boolean detest does not know.
 func boolean(r folded) folded {
 	if r.c != varies && r.hasVal && !boolOrNull(r) {
 		return folded{c: r.c}
@@ -885,9 +885,8 @@ func (f *folder) logic(v *sqlir.BinaryExpr) (folded, error) {
 	}
 	for _, k := range kids {
 		if k.c != varies && !boolOrNull(k) {
-			// Postgres reads a string literal operand as a boolean when it
-			// parses the statement, and the evaluators read it as NULL
-			// (#118), so the value is not known.
+			// A string the converter did not cast to bool (#118), whose
+			// value as a boolean is not known.
 			c := fixed
 			for _, k := range kids {
 				c = max(c, k.c)

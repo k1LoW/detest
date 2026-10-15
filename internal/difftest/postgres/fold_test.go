@@ -123,6 +123,21 @@ var foldCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a string literal where a boolean is wanted, which Postgres reads as one when it parses the statement",
+		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY, n int)`},
+		Seed:   []string{`INSERT INTO t VALUES (1, 0)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT CASE WHEN 'true' THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT 'false' AND 1 / 0 = 1 FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN ('true' AND true) THEN 0 ELSE 1 / 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN NOT 'false' THEN 0 ELSE 1 / 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN (CASE WHEN NOT 'false' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`),
+			difftest.Q(0, `SELECT coalesce('true' AND NULL, 1 / 0 = 1) WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN (CASE WHEN 'true' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`),
+		},
+	},
+	{
 		Name: "a function with effects in a branch folding drops, called no more often than Postgres calls it",
 		Schema: []string{
 			`CREATE SEQUENCE s`,
