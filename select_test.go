@@ -1083,6 +1083,41 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)
 	}
+	// Postgres converts an explicitly cast literal where it analyzes it,
+	// before it compares a set operation's widths.
+	if _, err := db.Exec(`SELECT 'bad'::int WHERE false UNION SELECT 1, 2 WHERE false`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a cast literal beside unequal widths: got %v, want invalid input", err)
+	}
+	// INSERT ... VALUES reads every row before it writes one, so a later
+	// row's input fails before an earlier row's duplicate key.
+	mustExec(t, db, `INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001')`)
+	for _, tc := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001'), (101, 'bad')`, nil},
+		{`INSERT INTO t (id, u) VALUES (100, '00000000-0000-0000-0000-000000000001'), (101, $1)`, []any{"bad"}},
+	} {
+		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", tc.query, err)
+		}
+	}
+	mustExec(t, db, `DELETE FROM t WHERE id = 100`)
+	// A derived table of a set operation or VALUES gives its columns'
+	// types, and one whose type the check does not know is refused beside
+	// untyped input.
+	for _, q := range []string{
+		`SELECT column1 FROM (VALUES (1)) v WHERE false UNION ALL SELECT 'bad' WHERE false`,
+		`SELECT s.u FROM (SELECT u FROM t UNION ALL SELECT u FROM t) s WHERE false UNION ALL SELECT 'bad' WHERE false`,
+		`WITH w AS (SELECT u FROM t UNION ALL SELECT u FROM t) SELECT u FROM w WHERE false UNION ALL SELECT 'bad' WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want invalid input", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT s.u FROM (SELECT * FROM t, (SELECT 1 AS k) x) s WHERE false UNION ALL SELECT 'bad' WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("a column of unresolved type beside a literal: got %v, want unsupported", err)
+	}
 	// Postgres fails a statement of unequal widths before it reads any
 	// input by type.
 	for _, q := range []string{
@@ -1092,6 +1127,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`INSERT INTO t (u) SELECT 'bad', 1 WHERE false`,
 		`INSERT INTO t (id, u) SELECT 1 WHERE false`,
 		`INSERT INTO t (id) SELECT 1, 2`,
+		`INSERT INTO t (id, u) VALUES (1, 'bad'), (2)`,
+		`INSERT INTO t (id) VALUES (1, 'bad')`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
 			t.Errorf("%s: got %v, want a syntax error", q, err)
