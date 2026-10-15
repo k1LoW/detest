@@ -248,7 +248,13 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 			if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && isAggregateCall(f) {
 				// Postgres computes each aggregate once, before any
 				// expression of the row, where detest computes it at
-				// each reference in the order it evaluates them.
+				// each reference in the order it evaluates them, so an
+				// effect in one, or in a subquery or the view it reads,
+				// happens another number of times or in another order.
+				if len(sqlir.Selects(f.Args)) > 0 {
+					err = x.unsupported("a subquery in an aggregate's argument")
+					return
+				}
 				err = x.noSequenceCalls(f.Args)
 				return
 			}

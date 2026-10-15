@@ -17,6 +17,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
 	mustExec(t, db, `CREATE SEQUENCE sq`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 0)`)
+	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('sq') AS n`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -29,6 +30,8 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		{`SELECT nextval('sq')`, []string{"3"}},
 		{`SELECT coalesce(sum(n), -1, sum(1 / n)) FROM t`, []string{"0"}},
 		{`SELECT coalesce(0, sum(1 / n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(sum(n), coalesce(0, sum(1 / n))) FROM t`, []string{"0"}},
+		{`SELECT coalesce(sum(n), CASE WHEN true THEN 0 ELSE sum(1 / n) END) FROM t`, []string{"0"}},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
@@ -44,10 +47,15 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	for _, q := range []string{
 		`SELECT coalesce(sum(n), max(nextval('sq'))) FROM t`,
 		`SELECT coalesce(nextval('sq'), max(nextval('sq'))) FROM t`,
+		`SELECT coalesce(nextval('sq'), max((SELECT n FROM seqv))) FROM t`,
+		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
+	}
+	if got := rowsOf(t, db, `SELECT nextval('sq')`); !reflect.DeepEqual(got, []string{"4"}) {
+		t.Errorf("nextval after the refusals: got %v, want [4]", got)
 	}
 	// Postgres reads a literal or a parameter as the arguments' type
 	// whatever argument a row stops at.

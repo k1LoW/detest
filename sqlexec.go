@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -1314,6 +1315,82 @@ type aggEnv struct {
 	x    *sqlExec
 }
 
+// plannedAggregates are the aggregates of e's own query block that Postgres
+// computes: not those it drops with the arguments of a COALESCE after a
+// literal that is not NULL, or with a CASE branch behind a literal
+// condition, when it plans the statement. A condition it folds from an
+// expression is not followed, as detest folds none (#98).
+func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
+	var out []*sqlir.FuncCall
+	var walk func(v reflect.Value)
+	expr := func(e sqlir.Expr) { walk(reflect.ValueOf(&e).Elem()) }
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			switch n := v.Interface().(type) {
+			case *sqlir.SelectStmt:
+				return
+			case *sqlir.WindowFunc:
+				// The window's function is no aggregate of the block.
+				walk(reflect.ValueOf(n.Func.Args))
+				walk(reflect.ValueOf(n.Partition))
+				walk(reflect.ValueOf(n.Order))
+				return
+			case *sqlir.FuncCall:
+				if isAggregateCall(n) {
+					out = append(out, n)
+					return
+				}
+				if n.Name == "coalesce" {
+					for _, a := range n.Args {
+						expr(a)
+						if k, ok := a.(*sqlir.Const); ok && k.Value != nil {
+							return
+						}
+					}
+					return
+				}
+			case *sqlir.CaseExpr:
+				if n.Arg == nil {
+					for _, w := range n.Whens {
+						if k, ok := w.When.(*sqlir.Const); ok {
+							if b, _ := k.Value.(bool); b {
+								expr(w.Then)
+								return
+							}
+							continue // false or NULL
+						}
+						expr(w.When)
+						expr(w.Then)
+					}
+					expr(n.Else)
+					return
+				}
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	expr(e)
+	return out
+}
+
 // isAggregateCall reports a call of an aggregate itself, not of a function
 // over one.
 func isAggregateCall(f *sqlir.FuncCall) bool {
@@ -1449,11 +1526,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		// expression over them, so those of an argument COALESCE does not
 		// reach still fail or run their effects.
 		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.evalAgg(a, g) }, func(a sqlir.Expr) error {
-			for _, f := range sqlir.BlockFuncCalls(a) {
-				if isAggregateCall(f) {
-					if _, err := x.evalAgg(f, g); err != nil {
-						return err
-					}
+			for _, f := range plannedAggregates(a) {
+				if _, err := x.evalAgg(f, g); err != nil {
+					return err
 				}
 			}
 			return nil
