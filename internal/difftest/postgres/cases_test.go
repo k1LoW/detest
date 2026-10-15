@@ -718,6 +718,31 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(u.n, (SELECT v FROM t WHERE id = 1)) FROM u ORDER BY u.id`),
 		},
 	},
+	{
+		Name: "a subquery over a view of unknown columns reads the outer column",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY)`,
+			`CREATE TABLE v (n int)`,
+			`CREATE VIEW vv AS SELECT * FROM v`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1), (2)`, `INSERT INTO v VALUES (7)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT id FROM vv) FROM u ORDER BY u.id`),
+			difftest.Q(0, `SELECT (SELECT n FROM vv) FROM u ORDER BY u.id`),
+		},
+	},
+	{
+		Name:   "a subquery reading a CTE of a correlated subquery runs for each row",
+		Schema: []string{`CREATE TABLE u (id int PRIMARY KEY)`},
+		Seed:   []string{`INSERT INTO u VALUES (1), (2)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v) SELECT (SELECT v FROM c)) FROM u ORDER BY u.id`),
+			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v), d AS (SELECT v FROM c) SELECT (SELECT v FROM d)) FROM u ORDER BY u.id`),
+			difftest.Q(0, `SELECT (WITH c AS (SELECT 5 AS v) SELECT (SELECT v FROM c) + u.id) FROM u ORDER BY u.id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

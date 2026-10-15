@@ -126,6 +126,9 @@ type columnChecker struct {
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
+	// cteOwners are the queries declaring each level of cteDefs, nil for
+	// a write's.
+	cteOwners []*sqlir.SelectStmt
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -494,6 +497,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			alias = relname(t.Name)
 		}
 		cols = c.tableColumns(t.Name)
+		c.noteCTERead(t.Name)
 	}
 	if len(t.Columns) > 0 && t.Func == nil {
 		// AS alias(a, b) renames the first columns, which needs them in
@@ -756,10 +760,16 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
 	c.cteDefs = append(c.cteDefs, dm)
+	var owner *sqlir.SelectStmt
+	if len(c.queries) > 0 {
+		owner = c.queries[len(c.queries)-1]
+	}
+	c.cteOwners = append(c.cteOwners, owner)
 	pop = func() {
 		c.ctes = c.ctes[:len(c.ctes)-1]
 		c.cteTypes = c.cteTypes[:len(c.cteTypes)-1]
 		c.cteDefs = c.cteDefs[:len(c.cteDefs)-1]
+		c.cteOwners = c.cteOwners[:len(c.cteOwners)-1]
 	}
 	for _, cte := range with {
 		dm[cte.Name] = cte.Select
@@ -1961,28 +1971,58 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 }
 
 // noteCorrelation marks the queries being checked that r reads outside of:
-// those inside the query whose scope has its column. A column whose scope
-// is not known, as an item of unknown columns may have it, marks them all,
-// as does one of a write's target, which is around every query.
+// those inside the query whose scope has its column. One of a write's
+// target, which is around every query, marks them all.
 func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
 	var owner *sqlir.SelectStmt
 	found := false
-	for s := sc; s != nil && !found; s = s.outer {
-		if r.Table != "" {
+	if r.Table != "" {
+		for s := sc; s != nil && !found; s = s.outer {
 			_, ok := s.items[r.Table]
 			found = ok || r.Table == "excluded" && s.hasExcluded
-		} else {
-			for _, cols := range s.items {
-				if has, _ := cols.has(r.Column); cols == nil || has {
-					found = true
-					break
-				}
+			if found {
+				owner = s.query
 			}
 		}
-		if found {
-			owner = s.query
+	} else {
+		// An item whose columns are not known, as a view or a derived table
+		// over a *, may or may not have the column. It owns the column only
+		// when no other scope could, as the server would fail a name it
+		// finds nowhere. Otherwise the owner is not known, and every query
+		// counts as correlated rather than be run once on a guess.
+		unknown := false
+		for s := sc; s != nil; s = s.outer {
+			has, maybe := false, false
+			for _, cols := range s.items {
+				if cols == nil {
+					maybe = true
+				} else if h, _ := cols.has(r.Column); h {
+					has = true
+				}
+			}
+			if !has && !maybe {
+				continue
+			}
+			if found || unknown {
+				found, unknown = false, false
+				break
+			}
+			if has {
+				found, owner = true, s.query
+				break
+			}
+			unknown, owner = true, s.query
+		}
+		if unknown && owner != nil {
+			found = true
 		}
 	}
+	c.markCorrelated(found, owner)
+}
+
+// markCorrelated marks the queries being checked inside owner, all of them
+// when owner is not found.
+func (c *columnChecker) markCorrelated(found bool, owner *sqlir.SelectStmt) {
 	if c.correlated == nil {
 		c.correlated = map[*sqlir.SelectStmt]bool{}
 	}
@@ -1991,6 +2031,27 @@ func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
 			return
 		}
 		c.correlated[q] = true
+	}
+}
+
+// noteCTERead marks the queries being checked inside the one declaring the
+// CTE name when the CTE's own query reads a column around that one. Each
+// run of the declaring query computes the CTE anew, so a subquery reading
+// it gives each run its own rows even though it reads no outer column
+// itself.
+func (c *columnChecker) noteCTERead(name string) {
+	if len(c.cteDefs) != len(c.cteOwners) {
+		return
+	}
+	for i, defs := range slices.Backward(c.cteDefs) {
+		def, ok := defs[name]
+		if !ok {
+			continue
+		}
+		if c.correlated[def] {
+			c.markCorrelated(c.cteOwners[i] != nil, c.cteOwners[i])
+		}
+		return
 	}
 }
 
