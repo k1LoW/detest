@@ -265,7 +265,7 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 		}
 	}
 	check := func(what string, def *sqlir.SelectStmt) error {
-		if whole[def] && !paced[def] || !x.effectfulQuery(def, ctes, map[string]bool{}) {
+		if (whole[def] && !paced[def]) || !x.effectfulQuery(def, ctes, map[string]bool{}) {
 			return nil
 		}
 		if whole[def] {
@@ -293,13 +293,12 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 			if t == nil || t.Lateral {
 				continue
 			}
-			switch {
-			case t.Sub != nil:
+			if t.Sub != nil {
 				if err := check("a derived table", t.Sub); err != nil {
 					return err
 				}
-			case view(t) != nil:
-				if err := check(fmt.Sprintf("view %q", t.Name), view(t)); err != nil {
+			} else if v := view(t); v != nil {
+				if err := check(fmt.Sprintf("view %q", t.Name), v); err != nil {
 					return err
 				}
 			}
