@@ -131,6 +131,9 @@ type columnChecker struct {
 	outCertainNamed map[*sqlir.SelectStmt]map[string]string
 	// paramCount is the number of uses of each parameter in the statement.
 	paramCount map[int]int
+	// outExpanded are the names of a query's columns with its * expanded
+	// (noteExpanded).
+	outExpanded map[*sqlir.SelectStmt][]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -510,7 +513,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	if len(t.Columns) > 0 && t.Func == nil {
 		// AS alias(a, b) renames the first columns, which needs them in
 		// order.
-		names := outputNames(t.Sub)
+		names := c.expandedNames(t.Sub)
 		cols = nil
 		if names != nil {
 			cols = namesSet(renamedCols(names, t.Columns))
@@ -969,6 +972,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	}
 	c.noteOutputTypes(sel, sc)
 	c.noteCertain(sel, sc)
+	c.noteExpanded(sel)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1076,10 +1080,10 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	c.outNamed[sel] = named
 }
 
-// starColumns are the types of the columns the * t of sel gives, in order,
-// when its one FROM item is a table the schema declares, the order of whose
-// columns the check knows, and nil otherwise.
-func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+// starTable is the table the * t of sel expands when its one FROM item is
+// a table the schema declares, the order of whose columns the check knows,
+// and nil otherwise.
+func (c *columnChecker) starTable(sel *sqlir.SelectStmt, t sqlir.Target) *tableDef {
 	from := sel.From
 	if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || len(from.Columns) > 0 {
 		return nil
@@ -1091,7 +1095,54 @@ func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []str
 	if _, cte := c.cteTypesOf(from.Name); cte || db.views[db.resolve(from.Name)] != nil {
 		return nil
 	}
-	def := db.defs[db.resolve(from.Name)]
+	return db.defs[db.resolve(from.Name)]
+}
+
+// expandedNames are the names of sel's columns in order, as outputNames
+// gives them, with a * over a table starTable finds expanded to its
+// columns, and nil where a * gives columns of no known order.
+func (c *columnChecker) expandedNames(sel *sqlir.SelectStmt) []string {
+	if names := outputNames(sel); names != nil {
+		return names
+	}
+	for sel.SetOp != "" && sel.Larg != nil {
+		sel = sel.Larg
+	}
+	// A query's own CTEs are out of scope once it is walked, where a name
+	// may resolve to a table they shadow, so the walk records them.
+	return c.outExpanded[sel]
+}
+
+// noteExpanded records expandedNames' names of sel while its CTEs are in
+// scope, nil where a * gives columns of no known order.
+func (c *columnChecker) noteExpanded(sel *sqlir.SelectStmt) {
+	if c.outExpanded == nil {
+		c.outExpanded = map[*sqlir.SelectStmt][]string{}
+	}
+	c.outExpanded[sel] = c.expandNames(sel)
+}
+
+func (c *columnChecker) expandNames(sel *sqlir.SelectStmt) []string {
+	var out []string
+	for _, t := range sel.Targets {
+		if !t.Star {
+			out = append(out, targetName(t))
+			continue
+		}
+		def := c.starTable(sel, t)
+		if def == nil {
+			return nil
+		}
+		out = append(out, def.columns...)
+	}
+	return out
+}
+
+// starColumns are the types of the columns the * t of sel gives, in order,
+// when its one FROM item is a table the schema declares, the order of whose
+// columns the check knows, and nil otherwise.
+func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+	def := c.starTable(sel, t)
 	if def == nil {
 		return nil
 	}
@@ -1391,14 +1442,16 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 // renaming, and a set operation's by the types its queries agree on.
 func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[string]string {
 	if sel.SetOp != "" {
-		return namedTypes(sel, c.agreedTypes(sel), names)
+		return c.namedTypes(sel, c.agreedTypes(sel), names)
 	}
 	if len(sel.Values) > 0 {
-		return namedTypes(sel, c.itemTypes(sel), names)
+		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
 	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
-	if types, ok := c.outTypes[sel]; ok && !star {
-		return namedTypes(sel, types, names)
+	if types, ok := c.outTypes[sel]; ok && (!star || len(names) > 0) {
+		// A * the check expands has its types by position too, which an
+		// alias list renames.
+		return c.namedTypes(sel, types, names)
 	}
 	out := map[string]string{}
 	if len(names) > 0 {
@@ -1580,11 +1633,11 @@ func (c *columnChecker) itemTypes(sel *sqlir.SelectStmt) []string {
 // namedTypes are the output types of sel by the names its columns have,
 // under those an AS alias(a, b) or a view's column list gives the first
 // ones. A name two columns have is left unresolved, as its type is either.
-func namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
+func (c *columnChecker) namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
 	out := map[string]string{}
 	// Without types, as of VALUES, the item's columns are of unresolved
 	// type rather than unknown.
-	cols := outputNames(sel)
+	cols := c.expandedNames(sel)
 	if types == nil || len(cols) != len(types) {
 		return out
 	}
