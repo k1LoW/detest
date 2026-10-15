@@ -813,6 +813,7 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 	kinds := map[string]bool{}
 	unconverted := ""
 	names, domain := map[string]bool{}, ""
+	unknown := false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
@@ -826,7 +827,11 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 			// A CASE or COALESCE of those only is text already.
 			typ = "text"
 		}
-		if typ == "" || typ == "unresolved column type" {
+		if typ == "" {
+			unknown = true
+			continue
+		}
+		if typ == "unresolved column type" {
 			continue
 		}
 		base := x.tx.db.baseType(typ)
@@ -858,6 +863,12 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		}
 	}
 	switch {
+	case unknown && kinds["number"] && !x.tx.checking:
+		// The branches meet at a number type the unknown one decides, such
+		// as abs(NULL)'s float8, which branchValue would take from the
+		// row's values instead. CheckSQL has no schema, so a column's type
+		// is unknown there.
+		return x.unsupported("a number beside a branch of a type detest does not know among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD")
 	case domain != "" && len(names) > 1:
 		// commonType and the time and number readers take the type's own
 		// name, so a domain beside another type resolves to neither.

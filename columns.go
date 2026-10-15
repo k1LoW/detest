@@ -1220,7 +1220,7 @@ func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
 	if e := q.Select.Targets[0].Expr; untypedBranch(e) || isNullConst(e) {
 		if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
 			switch derefValue(c.x.args[p.Index]).(type) {
-			case nil, string, []byte:
+			case nil, string:
 			default:
 				// The subquery returns the value as bound, not the text
 				// Postgres reads it as.
@@ -1613,6 +1613,16 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				c.x.collates = true
+				if p, ok := e.X.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) && !c.x.tx.db.kind.InnoDB() {
+					switch v := derefValue(c.x.args[p.Index]).(type) {
+					case nil, string, []byte:
+					default:
+						// COLLATE makes it text, which the driver sends and
+						// detest does not convert the bound value to.
+						err = c.x.unsupported(fmt.Sprintf("a %T parameter under COLLATE", v))
+						return
+					}
+				}
 			case *sqlir.Cast:
 				c.castInput(e)
 				c.timeParams(e.Type, e.X)
