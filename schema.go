@@ -79,7 +79,7 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 	// table's own key, NOT NULL, constraints and generated columns are
 	// readers too, and would be decided from the marker, so a column one
 	// of them reads is refused instead.
-	v, err := x.eval(d, &env{})
+	v, err := x.evalDefault(d)
 	if err != nil && !errors.As(err, new(errUnknownExpr)) {
 		return nil, err
 	}
@@ -90,6 +90,19 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 		v = sqlir.Unknown
 	}
 	return v, nil
+}
+
+// evalDefault evaluates a column default with the types the column check
+// resolves in it, as Postgres plans a default it writes into a statement's
+// plan with the statement, so that a division by a numeric divides as one.
+// A default the check refuses is one detest cannot compute, as evaluated
+// without the types the check would have noted it could give a value the
+// server never produces.
+func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
+	if err := x.checkDefault(d); err != nil {
+		return nil, errUnknownExpr{err.Error()}
+	}
+	return x.eval(d, &env{})
 }
 
 // assignedValue evaluates the value a SET assigns, computing the column's
