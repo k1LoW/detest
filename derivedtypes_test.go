@@ -22,6 +22,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE DOMAIN span AS interval`)
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
 	mustExec(t, db, `CREATE DOMAIN wall AS timestamp`)
+	mustExec(t, db, `CREATE SEQUENCE seq`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -105,6 +106,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT lag(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
 		`SELECT lead(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
 		`SELECT lag(s.n, 'bogus', 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
+		`SELECT lag(s.n, coalesce('bogus', 'x'), 0) OVER () FROM (SELECT * FROM t) s`,
+		`SELECT lead(s.n, coalesce('bogus', 'x'), 0) OVER () FROM (SELECT * FROM t) s`,
+		// The evaluators would run the fallback, which Postgres skips.
+		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
@@ -160,6 +165,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s with %v: got %v, want ErrUnsupportedSQL", tt.q, tt.arg, err)
 		}
+	}
+	// The refusal leaves the sequence where it was.
+	if got := rowsOf(t, db, `SELECT nextval('seq')`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("nextval after a refused COALESCE: got %v", got)
 	}
 	var at time.Time
 	// NULLIF of a string literal and a date is a date.

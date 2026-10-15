@@ -6,6 +6,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -1554,6 +1555,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
+					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], effectful) {
+						// Postgres stops at the first argument that is not
+						// NULL, while the evaluators evaluate them all (#90),
+						// so the effect would happen where it does not.
+						err = c.x.unsupported("COALESCE with a function of an effect after its first argument")
+						return
+					}
 					// The arguments take the type of the typed ones.
 					if err = c.branches(e, e.Args, sc); err != nil {
 						return
@@ -1568,6 +1576,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						// where Postgres takes an int4 only.
 						off := e.Args[1]
 						typ := expressionTypeIn(off, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+						if untypedBranch(off) && !untypedExpr(off) {
+							typ = "text" // a CASE or COALESCE of literals only
+						}
 						if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int4"]) {
 							err = c.x.unsupported(fmt.Sprintf("%s with a %s offset", e.Name, typ))
 							return
@@ -2075,4 +2086,16 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 		return err
 	}
 	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
+}
+
+// effectful reports an expression that calls a function with an effect
+// another statement observes: a sequence's or an advisory lock's.
+func effectful(e sqlir.Expr) bool {
+	return slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool {
+		switch f.Name {
+		case "nextval", "setval":
+			return true
+		}
+		return strings.HasPrefix(f.Name, "pg_advisory") || strings.HasPrefix(f.Name, "pg_try_advisory")
+	})
 }
