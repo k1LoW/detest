@@ -382,6 +382,8 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 							return c.x.unsupported(fmt.Sprintf("generate_series over a %T parameter", v))
 						}
 					}
+					// The integer overload types it, for its other uses.
+					c.params.comparedWith(p.Index, "int4")
 				}
 			}
 			if !typed {
@@ -1594,6 +1596,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 									return
 								}
 							}
+							c.params.comparedWith(p.Index, "int4")
 						}
 					}
 					// The value and the default take one type, as the
@@ -2088,9 +2091,12 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
 }
 
-// effectful reports an expression that calls a function with an effect
-// another statement observes: a sequence's or an advisory lock's.
+// effectful reports an expression with an effect another statement
+// observes: a sequence's, an advisory lock's, or a subquery's row locks.
 func effectful(e sqlir.Expr) bool {
+	if slices.ContainsFunc(sqlir.Selects(e), func(q *sqlir.SelectStmt) bool { return q.Lock != nil }) {
+		return true
+	}
 	return slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool {
 		switch f.Name {
 		case "nextval", "setval":

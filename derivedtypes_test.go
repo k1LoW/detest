@@ -110,6 +110,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT lead(s.n, coalesce('bogus', 'x'), 0) OVER () FROM (SELECT * FROM t) s`,
 		// The evaluators would run the fallback, which Postgres skips.
 		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
+		`SELECT coalesce(s.n, NULL COLLATE "C", 0) FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
@@ -155,6 +157,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.name, lag($1) OVER (ORDER BY s.id), 'x') = '01' FROM (SELECT * FROM t) s ORDER BY s.id`, int64(1)},
 		{`SELECT coalesce(s.name, $1 COLLATE "C", 'x') = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.name, (SELECT $1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		// generate_series and a LAG offset type the parameter as int4.
+		{`SELECT * FROM generate_series(1, $1) g WHERE $1 = '1'::text ORDER BY 1`, int64(1)},
+		{`SELECT lag(s.n, $1, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s WHERE $1 = '1'::text`, int64(1)},
+		{`SELECT lead(s.n, $1, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s WHERE $1 = '1'::text`, int64(1)},
 		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, true},
 		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, 1.5},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, []byte("bogus")},
