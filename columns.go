@@ -2073,6 +2073,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						return
 					}
 					c.untypedOperands(sc, e.L, e.R)
+				case "+", "-", "*", "/", "%":
+					c.arithmeticOperand(sc, e)
 				}
 			case *sqlir.InExpr:
 				for _, item := range e.List {
@@ -2345,6 +2347,29 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 		_, err := c.x.untyped(a, v, sample)
 		return err
 	})
+}
+
+// arithmeticOperand reads a string literal or a parameter beside a number
+// in arithmetic as that number's type, which Postgres gives it, as $1 + 0
+// makes $1 an integer, so that text of no number fails before any row as
+// it does on the server. Beside an operand of another type, such as a
+// timestamp or an interval, Postgres picks among several operators, which
+// is left to the run.
+func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) {
+	a, b := e.L, e.R
+	if untypedExpr(a) == untypedExpr(b) {
+		return
+	}
+	if untypedExpr(b) {
+		a, b = b, a
+	}
+	typ := c.x.tx.db.baseType(expressionTypeIn(b, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
+	if numberRank[typ] == 0 || e.Op == "%" && numberRank[typ] > numberRank["numeric"] {
+		// Postgres has no % of floats, so it does not take the
+		// operand's type there.
+		return
+	}
+	c.inputAs(a, typ)
 }
 
 // inputAs reads a string literal or a parameter that takes the type typ
