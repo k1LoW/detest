@@ -2382,7 +2382,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.insertWidth(ins); err != nil {
 			return err
 		}
-		if err := c.setOpInsert(ins); err != nil {
+		if err := c.textInsert(ins); err != nil {
 			return err
 		}
 		if starQuery(ins.Select) && slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
@@ -2428,31 +2428,45 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 	return c.returning(ins.Returning, sc, targetAlias(ins.Table, ins.Alias))
 }
 
-// setOpInsert refuses INSERT ... SELECT of a set operation with a column of
-// untyped queries alone, which Postgres resolves to text and fails to
-// assign to a column of another type (42804) when it plans the statement,
-// and which the run would read as the column's input instead.
-func (c *columnChecker) setOpInsert(ins *sqlir.InsertStmt) error {
+// textInsert refuses INSERT ... SELECT of a column of text into a column of
+// another type, which Postgres fails when it plans the statement (42804),
+// as text has no assignment cast to it, while the run would convert the
+// text as input at each row and write nothing over no rows. A column of
+// text is one of a text type, a CASE or COALESCE of untyped branches alone,
+// or one of a set operation of untyped queries alone. An untyped literal is
+// not: Postgres converts it as the column's input.
+func (c *columnChecker) textInsert(ins *sqlir.InsertStmt) error {
 	sel := ins.Select
-	if sel.SetOp == "" {
-		return nil
-	}
 	def := c.x.tx.db.defs[c.x.tx.db.resolve(ins.Table)]
-	if def == nil {
+	if def == nil || c.x.tx.db.kind.InnoDB() {
 		return nil
 	}
 	cols := ins.Columns
 	if len(cols) == 0 {
 		cols = def.columns
 	}
-	types := c.setOpTypes(sel)
+	var types []string
+	switch {
+	case sel.SetOp != "":
+		types = c.setOpTypes(sel)
+	case len(sel.Values) > 0:
+		types = c.valuesTypes[sel]
+	default:
+		types = c.outTypes[sel]
+	}
 	for i, col := range cols {
-		exprs := setOpColumnExprs(sel, i)
-		if i < len(types) && types[i] != "" || exprs == nil || resolvedType("", exprs) != "text" {
+		typ := ""
+		if i < len(types) {
+			typ = types[i]
+		}
+		if sel.SetOp != "" {
+			typ = resolvedType(typ, setOpColumnExprs(sel, i))
+		}
+		if typ == "" || c.paramTypeFamily(typ) != "text" {
 			continue
 		}
-		if typ := def.types[col]; typ != "" && c.paramTypeFamily(typ) != "text" {
-			return c.x.unsupported(fmt.Sprintf("INSERT ... SELECT of a set operation of untyped values into the %s column %q", typ, col))
+		if target := def.types[col]; target != "" && c.paramTypeFamily(target) != "text" {
+			return c.x.unsupported(fmt.Sprintf("INSERT ... SELECT of a %s column into the %s column %q", typ, target, col))
 		}
 	}
 	return nil

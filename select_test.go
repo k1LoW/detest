@@ -957,6 +957,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
+		`INSERT INTO t (n) SELECT coalesce('1', NULL) WHERE false UNION ALL SELECT '2' WHERE false`,
+		`INSERT INTO t (n) SELECT k FROM t`,
+		`INSERT INTO t (n) SELECT coalesce('1', NULL)`,
 		// Postgres resolves a VALUES column over its rows, whether or not
 		// a LIMIT drops them.
 		`VALUES (1), (false) LIMIT 0`,
