@@ -2124,7 +2124,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
-				if e.Op == "/" && numberRank[c.x.tx.db.baseType(c.typer(sc).of(e))] > numberRank["int8"] {
+				if e.Op == "/" && slices.ContainsFunc([]sqlir.Expr{e, e.L, e.R}, func(x sqlir.Expr) bool {
+					// A numeric or a float operand divides as one whatever the
+					// other is, even where the result's type is unresolved.
+					return numberRank[c.x.tx.db.baseType(c.typer(sc).of(x))] > numberRank["int8"]
+				}) {
 					if c.x.numericDivs == nil {
 						c.x.numericDivs = map[*sqlir.BinaryExpr]bool{}
 					}

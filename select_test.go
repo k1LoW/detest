@@ -1810,8 +1810,14 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		t.Errorf("beside a NULL: got %#v, %v, want the text 2000000", sv, err)
 	}
 	// Untyped arguments alone take the float8 form.
-	if err := db.QueryRow(`SELECT floor($1) + 0::numeric`, int64(5000000)).Scan(&sv); err != nil || sv != float64(5000000) {
-		t.Errorf("floor of a parameter: got %#v, %v, want a float64", sv, err)
+	for _, q := range []string{`SELECT floor($1) + 0::numeric`, `SELECT floor(abs($1)) + 0::numeric`} {
+		if err := db.QueryRow(q, int64(5000000)).Scan(&sv); err != nil || sv != float64(5000000) {
+			t.Errorf("%s: got %#v, %v, want a float64", q, sv, err)
+		}
+	}
+	// A numeric operand divides as one beside a column of unresolved type.
+	if err := db.QueryRow(`SELECT s.v / (SELECT sum(b) FROM t) > 0 FROM (SELECT 1::bigint AS v UNION ALL SELECT sum(b) FROM t WHERE false) s WHERE s.v IS NOT NULL`).Scan(&sv); err != nil || sv != true {
+		t.Errorf("division by a numeric beside an unresolved column: got %#v, %v, want true", sv, err)
 	}
 	// An untyped parameter takes the form the other argument picks.
 	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {

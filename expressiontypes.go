@@ -194,6 +194,9 @@ func (t typer) of(e sqlir.Expr) string {
 				}
 			}
 		case "min", "max", "abs":
+			if e.Name == "abs" && len(e.Args) == 1 && untypedExpr(e.Args[0]) {
+				return "float8" // the preferred number type's form
+			}
 			return t.reduce(t.common(e.Args))
 		case "coalesce", "greatest", "least":
 			return t.common(e.Args)

@@ -943,6 +943,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT g, 5 / s > 1 FROM bv ORDER BY g`),
 			difftest.Q(0, `SELECT g, 5 / x.s > 1 FROM (SELECT g, sum(n) AS s FROM b GROUP BY g) x ORDER BY g`),
 			difftest.Q(0, `SELECT g FROM b GROUP BY g ORDER BY 7 / sum(n), g LIMIT 1`),
+			difftest.Q(0, `SELECT s.v / (SELECT sum(n) FROM b WHERE id = 1) > 2 FROM (SELECT 5::bigint AS v UNION ALL SELECT sum(n) FROM b WHERE false) s WHERE s.v IS NOT NULL`),
 			difftest.Q(0, `SELECT sum(n) = 6 FROM b`),
 			difftest.S(0, `INSERT INTO r SELECT 1, 5 / sum(n) FROM b WHERE id = 1`),
 			difftest.S(0, `INSERT INTO r VALUES (2, 0)`),
