@@ -41,6 +41,17 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		// Postgres picks no prefix minus for an operand of no type.
 		`SELECT -NULL FROM t WHERE false`,
 		`SELECT -'1' FROM t WHERE false`,
+		// Nor beside a type detest does not classify.
+		`SELECT b + '{}'::jsonb FROM t WHERE false`,
+		`SELECT '{}'::jsonb - u FROM t WHERE false`,
+		// Postgres resolves a CASE or a COALESCE of literals to text.
+		`SELECT -coalesce('1', NULL) WHERE false`,
+		`SELECT coalesce('1', NULL) + 1 WHERE false`,
+		`SELECT CASE WHEN true THEN '1' END + 1 WHERE false`,
+		// A character type other than text has no operator either.
+		`SELECT '1'::bpchar + 1 WHERE false`,
+		`SELECT -'1'::bpchar WHERE false`,
+		`SELECT 1 * '1'::varchar WHERE false`,
 		// A domain has the operators of its base type.
 		`SELECT -fb FROM d WHERE false`,
 		`SELECT fu - fu FROM d WHERE false`,
@@ -76,6 +87,8 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags WHERE false`, nil},
 		{`SELECT n + NULL FROM t`, []string{"NULL"}},
 		// '{}' - s resolves to jsonb - text.
+		{`SELECT '{}'::jsonb - 'a'::bpchar WHERE false`, nil},
+		{`SELECT '{}'::jsonb - coalesce('a', NULL) WHERE false`, nil},
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
