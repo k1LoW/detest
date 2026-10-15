@@ -3017,12 +3017,7 @@ func (tx *Tx) commit() {
 		}
 		if prev, ok := t[lk.key]; !ok || !sameRow(prev, r) {
 			changed = true
-			if ok && (tx.keyMoved[lk] || tx.db.keyChanged(lk.table, prev, r)) {
-				if tx.db.keyUpdated == nil {
-					tx.db.keyUpdated = map[lockKey]uint64{}
-				}
-				tx.db.keyUpdated[lk] = tx.db.commits
-			}
+
 		}
 		t[lk.key] = r
 		tx.db.touched[lk.table] = true
@@ -3033,6 +3028,15 @@ func (tx *Tx) commit() {
 		}
 		delete(tx.db.committed[lk.table], lk.key)
 		tx.db.touched[lk.table] = true
+	}
+	// Every row an update gave new key values to, even one the commit
+	// leaves as it was, as a later update undid it, keeps that in its
+	// update chain.
+	for lk := range tx.keyMoved {
+		if tx.db.keyUpdated == nil {
+			tx.db.keyUpdated = map[lockKey]uint64{}
+		}
+		tx.db.keyUpdated[lk] = tx.db.commits
 	}
 	for _, fn := range tx.deferred {
 		fn()
@@ -3107,14 +3111,18 @@ func (db *DB) updateLock(table string, cols []string) lockMode {
 	return lockNoKeyUpdate
 }
 
-// noteKeyMove records that an update gave the row at lk new key values, as
-// keyMoved holds them.
-func (tx *Tx) noteKeyMove(table string, lk lockKey, updated Row) {
+// noteKeyMove records that an update of the row at lk, which it moves to
+// nlk, gave it new key values, as keyMoved holds them, under both keys, as
+// a row may come back to the key it left.
+func (tx *Tx) noteKeyMove(table string, lk, nlk lockKey, updated Row) {
+	if tx.db.kind.InnoDB() {
+		return
+	}
 	if old, ok := tx.view(table, lk.key); ok && tx.db.keyChanged(table, old, updated) {
 		if tx.keyMoved == nil {
 			tx.keyMoved = map[lockKey]bool{}
 		}
-		tx.keyMoved[lockKey{lk.table, updated.Key()}] = true
+		tx.keyMoved[lk], tx.keyMoved[nlk] = true, true
 	}
 }
 
