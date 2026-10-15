@@ -110,9 +110,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT lag(s.n, 'bogus', 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT lag(s.n, coalesce('bogus', 'x'), 0) OVER () FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, coalesce('bogus', 'x'), 0) OVER () FROM (SELECT * FROM t) s`,
-		// The evaluators would run the fallback, which Postgres skips.
-		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
-		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
+		// A collated branch, or one of a type detest does not know,
+		// beside a number.
 		`SELECT coalesce(s.n, NULL COLLATE "C", 0) FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, 1 COLLATE "C") FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, abs(NULL)) / 2 FROM (SELECT * FROM t) s`,
@@ -126,13 +125,17 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.c, 'a '::bpchar) = 'a'::bpchar FROM (SELECT * FROM ch) s`,
 		// evalSetOp does not convert the integer side to a numeric.
 		`SELECT coalesce(u.v / 2, 0) FROM (SELECT 1 AS v UNION ALL SELECT m FROM nm) u`,
-		// A view's sequence call is an effect too.
+		// A subquery runs for each row, where Postgres runs an
+		// uncorrelated one once, so a view's sequence call in one is
+		// refused.
 		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
+		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
+		// The evaluators run a CTE the fallback reads before any row,
+		// where Postgres runs it only when a row reaches the fallback.
 		`WITH c AS (SELECT nextval('seq') AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
 		// A CTE of a view's name does not hide the view from a CTE
 		// declared before it, nor from another view.
 		`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
-		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
 		`WITH c AS (SELECT n FROM seqv) SELECT (WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s LIMIT 1)`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
@@ -235,7 +238,17 @@ func TestDerivedColumnTypes(t *testing.T) {
 	if _, err := db.Query(`SELECT * FROM generate_series(NULL::bigint, $1) g ORDER BY 1`, int64(3000000000)); err != nil {
 		t.Errorf("a bigint series bound parameter: %v", err)
 	}
-	// The refusal leaves the sequence where it was.
+	// Postgres stops at the first argument that is not NULL, so the
+	// fallback's sequence call and row lock never happen.
+	for _, q := range []string{
+		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
+	} {
+		if _, err := db.Query(q, 1); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// Neither the fallbacks nor the refusals advance the sequence.
 	if got := rowsOf(t, db, `SELECT nextval('seq')`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("nextval after a refused COALESCE: got %v", got)
 	}

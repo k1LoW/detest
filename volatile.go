@@ -3,6 +3,7 @@ package detest
 import (
 	"maps"
 	"reflect"
+	"slices"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -39,7 +40,17 @@ func queryHasEffects(sel *sqlir.SelectStmt) bool {
 // uncorrelated and detest for every row. Elsewhere both evaluate them as
 // often.
 func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
+	switch stmt.(type) {
+	case *sqlir.SelectStmt, *sqlir.InsertStmt, *sqlir.UpdateStmt, *sqlir.DeleteStmt, *sqlir.CreateTableAsStmt:
+		// Creating a view runs no query, so its views are checked when a
+		// statement that runs it reads them.
+		if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
+			return err
+		}
+	}
 	switch st := stmt.(type) {
+	case *sqlir.CreateTableAsStmt:
+		return x.topSequenceCalls(st.Select)
 	case *sqlir.SelectStmt:
 		return x.topSequenceCalls(st)
 	case *sqlir.InsertStmt:
@@ -136,6 +147,9 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 		if err := x.noSequenceCalls(sel.Targets); err != nil {
 			return err
 		}
+	}
+	if err := x.aggregateEffects(sel); err != nil {
+		return err
 	}
 	for _, n := range []any{sel.Values, sel.Targets, sel.From, sel.Joins, sel.Where, sel.GroupBy, sel.Having, sel.OrderBy, sel.Limit, sel.Offset, sel.DistinctOn} {
 		if err := x.rowSequenceCalls(n); err != nil {
@@ -242,7 +256,27 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 				return
 			}
 			if sub, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok {
-				err = x.noSequenceCalls(sub)
+				if err = x.noSequenceCalls(sub); err != nil {
+					return
+				}
+				for _, q := range sqlir.Selects(sub) {
+					if err = x.aggregateEffects(q); err != nil {
+						return
+					}
+				}
+				return
+			}
+			if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && isAggregateCall(f) {
+				// Postgres computes each aggregate once, before any
+				// expression of the row, where detest computes it at
+				// each reference in the order it evaluates them, so an
+				// effect in one, or in a subquery or the view it reads,
+				// happens another number of times or in another order.
+				if len(sqlir.Selects(f.Args)) > 0 {
+					err = x.unsupported("a subquery in an aggregate's argument")
+					return
+				}
+				err = x.noSequenceCalls(f.Args)
 				return
 			}
 			walk(v.Elem())
@@ -265,6 +299,134 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 	}
 	walk(reflect.ValueOf(n))
 	return err
+}
+
+// aggregateEffects refuses what runs beside the aggregates of sel when it
+// aggregates.
+func (x *sqlExec) aggregateEffects(sel *sqlir.SelectStmt) error {
+	if !isAggregate(sel) {
+		return nil
+	}
+	// Postgres computes the aggregates before any other expression
+	// of the select list, HAVING, ORDER BY or DISTINCT ON, so one that fails does
+	// so before a sequence call or a subquery's lock beside it, where
+	// detest evaluates them in their written order.
+	if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy, sel.DistinctOn); err != nil {
+		return err
+	}
+	ctes := map[string]*sqlir.SelectStmt{}
+	for _, c := range sel.With {
+		ctes[c.Name] = c.Select
+	}
+	for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy, sel.DistinctOn} {
+		for _, q := range sqlir.Selects(n) {
+			if x.effectfulQuery(q, ctes, map[string]bool{}) {
+				return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")
+			}
+		}
+	}
+	return nil
+}
+
+// viewSequenceChecks checks the query of every view n reads, through other
+// views too, as a derived table of the statement, since Postgres expands
+// a view into the statement before it plans it. seen guards against a view
+// checked twice.
+func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
+	var refs []*sqlir.TableRef
+	// The FROM of an UPDATE and the USING of a DELETE name tables outside
+	// any query.
+	switch st := n.(type) {
+	case *sqlir.UpdateStmt:
+		for i := range st.From {
+			refs = append(refs, &st.From[i])
+		}
+	case *sqlir.DeleteStmt:
+		for i := range st.Using {
+			refs = append(refs, &st.Using[i])
+		}
+	}
+	for _, q := range sqlir.Selects(n) {
+		refs = append(refs, q.From)
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+	}
+	for _, t := range refs {
+		if t == nil || t.Name == "" {
+			continue
+		}
+		name := x.tx.db.resolve(t.Name)
+		v := x.tx.db.views[name]
+		if v == nil || v.View == nil || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if err := x.topSequenceCalls(v.View); err != nil {
+			return err
+		}
+		if err := x.viewSequenceChecks(v.View, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// viewSequenceCalls reports a node reading a view, directly or through
+// another, whose query calls one of effectFuncs. seen guards against a view
+// read twice.
+func (x *sqlExec) viewSequenceCalls(sel any, seen map[string]bool) bool {
+	for _, q := range sqlir.Selects(sel) {
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" {
+				continue
+			}
+			name := x.tx.db.resolve(t.Name)
+			v := x.tx.db.views[name]
+			if v == nil || v.View == nil || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if slices.ContainsFunc(sqlir.FuncCallsIn(v.View), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) || x.viewSequenceCalls(v.View, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// effectfulQuery reports a query with a locking clause or one of
+// effectFuncs, in it or in a view or one of ctes it reads. seen guards
+// against a view or a CTE read twice.
+func (x *sqlExec) effectfulQuery(sel *sqlir.SelectStmt, ctes map[string]*sqlir.SelectStmt, seen map[string]bool) bool {
+	if queryHasEffects(sel) {
+		return true
+	}
+	for _, q := range sqlir.Selects(sel) {
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" || seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			// A CTE of the name and a view of it are both followed, as
+			// which one the name reads depends on scopes not tracked here.
+			if c := ctes[t.Name]; c != nil && x.effectfulQuery(c, ctes, seen) {
+				return true
+			}
+			if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil && v.View != nil && x.effectfulQuery(v.View, ctes, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // noSequenceCalls refuses a call of the functions anywhere under ns.
@@ -301,6 +463,9 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 		walk(reflect.ValueOf(n))
 		if found != "" {
 			return x.unsupported(found + " where detest evaluates it another number of times than Postgres, such as a subquery or the WHERE of an UPDATE or a DELETE")
+		}
+		if x.viewSequenceCalls(n, map[string]bool{}) {
+			return x.unsupported("a view with a sequence call where detest evaluates it another number of times than Postgres, such as a subquery or the WHERE of an UPDATE or a DELETE")
 		}
 	}
 	return nil

@@ -467,13 +467,9 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			// a function such as UUID() answers with another value.
 			return nil, x.unsupported("NULLIF of a function that returns another value each time")
 		}
-		args := make([]any, len(v.Args))
-		for i, a := range v.Args {
-			val, err := x.eval(a, en)
-			if err != nil {
-				return nil, err
-			}
-			args[i] = val
+		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.eval(a, en) }, nil)
+		if err != nil {
+			return nil, err
 		}
 		if v.Name == "nullif" {
 			var err error
@@ -502,6 +498,50 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		return out, err
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
+}
+
+// callArgs evaluates the arguments of v in order. Those of COALESCE after
+// the first that is not NULL are left nil, as Postgres stops there, so
+// their errors and effects (nextval, a subquery's locks) never happen. A
+// constant, a parameter or a column reference is still read, as it can
+// neither fail nor have an effect, and Postgres reads a literal or a
+// parameter as the arguments' type whatever row it reaches, which the
+// conversions after this check. skipped, when not nil, is given each
+// argument left unevaluated before the first literal that is not NULL,
+// after which Postgres drops the arguments when it plans the statement.
+//
+// Postgres also folds an expression of constants when it plans the
+// statement, so 1 / 0 fails there in an argument no row reaches. detest
+// folds no expression (#98), so it is not modeled for COALESCE alone.
+func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error), skipped func(sqlir.Expr) error) ([]any, error) {
+	args := make([]any, len(v.Args))
+	found, dropped := false, false
+	for i, a := range v.Args {
+		if found {
+			switch a.(type) {
+			case *sqlir.Const, *sqlir.Param, *sqlir.ColumnRef:
+			default:
+				if skipped != nil && !dropped {
+					if err := skipped(a); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
+		}
+		val, err := eval(a)
+		if err != nil {
+			return nil, err
+		}
+		args[i] = val
+		if v.Name == "coalesce" && derefValue(val) != nil {
+			found = true
+			if _, ok := a.(*sqlir.Const); ok {
+				dropped = true
+			}
+		}
+	}
+	return args, nil
 }
 
 // untypedPair resolves the operands of a comparison as Postgres resolves an

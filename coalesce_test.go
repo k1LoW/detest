@@ -1,0 +1,121 @@
+package detest
+
+import (
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/k1LoW/detest/db/postgres"
+)
+
+// COALESCE stops at the first argument that is not NULL, so an argument
+// after it neither fails the statement nor has its effect.
+func TestCoalesceStopsAtFirstValue(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 0)`)
+	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('sq') AS n`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE TABLE iv (id int PRIMARY KEY, i interval, at timestamptz)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, NULL), (2, NULL)`)
+	mustExec(t, db, `CREATE VIEW av AS SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) AS v FROM t`)
+	// Creating a view runs no query, so one over av loads.
+	mustExec(t, db, `CREATE VIEW avw AS SELECT v FROM av`)
+	for _, tt := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT coalesce(n, 1 / n) FROM t`, []string{"0"}},
+		{`SELECT coalesce(sum(n), 1 / min(n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(id, nextval('sq')) FROM t`, []string{"1"}},
+		{`SELECT nextval('sq')`, []string{"1"}},
+		{`SELECT coalesce(NULL, nextval('sq'), nextval('sq'))`, []string{"2"}},
+		{`SELECT nextval('sq')`, []string{"3"}},
+		{`SELECT coalesce(sum(n), -1, sum(1 / n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(0, sum(1 / n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(n, (SELECT max(g) FROM generate_series(1, 2) g)) FROM t`, []string{"0"}},
+		// The checks run before every statement leave the column types to
+		// the column check, which knows them.
+		{`SELECT count(coalesce(date_trunc('day', i), interval '0 days')) FROM iv`, []string{"0"}},
+		{`SELECT count(coalesce(at + interval '1 day', now())) FROM iv`, []string{"0"}},
+		{`SELECT coalesce(sum(n), coalesce(0, sum(1 / n))) FROM t`, []string{"0"}},
+		{`SELECT coalesce(sum(n), CASE WHEN true THEN 0 ELSE sum(1 / n) END) FROM t`, []string{"0"}},
+	} {
+		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+	// Postgres computes the aggregates before COALESCE picks among them.
+	if _, err := db.Query(`SELECT coalesce(sum(n), sum(1 / n)) FROM t`); err == nil || !strings.Contains(err.Error(), "division by zero") {
+		t.Errorf("an aggregate of an argument not reached: got %v, want division by zero", err)
+	}
+	// Postgres computes each aggregate once before the row's expressions,
+	// where detest computes it at each reference, so a sequence call in
+	// one is refused.
+	for _, q := range []string{
+		`SELECT coalesce(sum(n), max(nextval('sq'))) FROM t`,
+		`SELECT coalesce(nextval('sq'), max(nextval('sq'))) FROM t`,
+		`SELECT coalesce(nextval('sq'), max((SELECT n FROM seqv))) FROM t`,
+		`SELECT coalesce(nextval('sq'), sum(1 / n) + nextval('sq')) FROM t`,
+		`SELECT coalesce(sum(NULL::int), nextval('sq') + sum(1 / n)) FROM t`,
+		`SELECT coalesce(sum(NULL::int), (SELECT n FROM seqv) + sum(1 / n)) FROM t`,
+		`SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) FROM t`,
+		`WITH c AS (SELECT n FROM seqv) SELECT coalesce(sum(NULL::int), (SELECT n FROM c) + sum(1 / n)) FROM t`,
+		`SELECT (SELECT coalesce(sum(NULL::int), (SELECT n FROM seqv) + sum(1 / n)) FROM t)`,
+		// An uncorrelated subquery runs once in Postgres and for each row
+		// in detest.
+		`SELECT coalesce(n, (SELECT n FROM seqv)) FROM u ORDER BY id`,
+		`SELECT coalesce(NULL::bigint, (SELECT v FROM av))`,
+		`SELECT v FROM av`,
+		`UPDATE u SET n = av.v FROM av`,
+		`SELECT DISTINCT ON (coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n))) sum(n) FROM t`,
+		`DELETE FROM u USING av WHERE u.n = av.v`,
+		`CREATE TABLE r AS SELECT coalesce(nextval('sq'), max(nextval('sq'))) AS v FROM t`,
+		`UPDATE u SET n = 0 WHERE coalesce(n, (SELECT n FROM seqv)) > 0`,
+		`DELETE FROM u WHERE coalesce(n, (SELECT n FROM seqv)) > 0`,
+		// Postgres resolves every call when it parses the statement.
+		`SELECT coalesce(n, abs(n, n)) FROM t`,
+		`SELECT coalesce(n, nosuchfn(n)) FROM t`,
+		`SELECT coalesce(n, (SELECT abs(n, n)::int)) FROM t`,
+		`SELECT coalesce(n, (SELECT nosuchfn(n)::int)) FROM t`,
+		`SELECT coalesce(nextval('sq'), abs(nextval('sq'), 1))`,
+		`SELECT coalesce(n, (SELECT count(*) FROM generate_series(1))) FROM t`,
+		`SELECT coalesce(n, (SELECT rank(1) OVER ())) FROM t`,
+		`SELECT coalesce(pg_advisory_xact_lock(1)::text, pg_advisory_xact_lock(2)::text)`,
+		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
+		`SELECT coalesce(CASE WHEN true THEN pg_advisory_xact_lock(1) END, CASE WHEN true THEN pg_advisory_xact_lock(2) END)`,
+		`SELECT coalesce(l.v, NULL) FROM (SELECT pg_advisory_xact_lock(1) AS v) l`,
+		`SELECT coalesce((SELECT pg_advisory_xact_lock(1)), NULL)`,
+		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	if got := rowsOf(t, db, `SELECT nextval('sq')`); !reflect.DeepEqual(got, []string{"4"}) {
+		t.Errorf("nextval after the refusals: got %v, want [4]", got)
+	}
+	// Postgres reads a literal or a parameter as the arguments' type
+	// whatever argument a row stops at.
+	for _, tt := range []struct {
+		q    string
+		args []any
+	}{
+		{`SELECT coalesce(n, 'bogus') FROM t`, nil},
+		{`SELECT coalesce(n, $1) FROM t`, []any{"bogus"}},
+	} {
+		_, err := db.Query(tt.q, tt.args...)
+		if err == nil || !strings.Contains(err.Error(), "invalid input syntax for type integer") {
+			t.Errorf("%s: got %v, want the integer input error", tt.q, err)
+		}
+	}
+	// The evaluators run a CTE the statement reads before its rows, where
+	// Postgres runs it only when a row reaches it.
+	q := `WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`
+	if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+	}
+}

@@ -116,7 +116,7 @@ type columnChecker struct {
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
-	// names, which the COALESCE effect check follows.
+	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
 }
 
@@ -2128,11 +2128,21 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
 						return
 					}
-					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], func(a sqlir.Expr) bool { return c.effectful(a, map[string]bool{}) }) {
-						// Postgres stops at the first argument that is not
-						// NULL, while the evaluators evaluate them all (#90),
-						// so the effect would happen where it does not.
-						err = c.x.unsupported("COALESCE with a function of an effect after its first argument")
+					if e.Name == "coalesce" && slices.ContainsFunc(e.Args, func(a sqlir.Expr) bool {
+						return expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }) == "void"
+					}) {
+						// A void value is not NULL in Postgres, which stops
+						// COALESCE there, while the evaluators hold it as NULL.
+						err = c.x.unsupported("COALESCE of a void value, which detest holds as NULL")
+						return
+					}
+					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], c.readsEffectfulCTE) {
+						// The evaluators stop at the first argument that is
+						// not NULL as Postgres does, but run every CTE the
+						// statement reads before its rows, where Postgres
+						// runs one only when a row reaches it, so the
+						// effect would happen where it does not.
+						err = c.x.unsupported("COALESCE reading a CTE of an effect after its first argument")
 						return
 					}
 					// The arguments take the type of the typed ones.
@@ -2212,6 +2222,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
 				}
 			case *sqlir.Cast:
+				if expressionTypeIn(e.X, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }) == "void" {
+					// Postgres casts a void value to the empty string,
+					// which is not NULL, while the evaluators hold it as
+					// NULL.
+					err = c.x.unsupported("a cast of a void value, which detest holds as NULL")
+					return
+				}
 				if err = c.literalInput(e); err != nil {
 					return
 				}
@@ -3118,6 +3135,29 @@ func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
 		}
 	}
 	return slices.ContainsFunc(sqlir.FuncCallsIn(e), isEffectCall)
+}
+
+// readsEffectfulCTE reports an expression reading a CTE in scope whose
+// query has an effect, as effectful finds one.
+func (c *columnChecker) readsEffectfulCTE(e sqlir.Expr) bool {
+	seen := map[string]bool{}
+	for _, q := range sqlir.Selects(e) {
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" {
+				continue
+			}
+			for _, def := range c.cteDefsOf(t.Name) {
+				if def == nil || c.effectful(def, seen) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // cteDefsOf are the queries of the CTEs of the name in scope, at every
