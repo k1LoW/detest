@@ -307,6 +307,9 @@ func TestSchemaDefaultTypes(t *testing.T) {
 	// ADD COLUMN fills the rows already there with the default as an
 	// INSERT does.
 	mustExec(t, db, `ALTER TABLE e ADD COLUMN m numeric DEFAULT (3 / (extract(year FROM interval '1 year') * 2))`)
+	// A default the check cannot type loads as it does for an INSERT,
+	// with the Unknown marker in the rows already there.
+	mustExec(t, db, `ALTER TABLE e ADD COLUMN k numeric DEFAULT coalesce(1, abs(NULL))`)
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM e WHERE n = 2 AND m = 1.5 AND at IS NOT NULL AND u IS NOT NULL AND j = '{}'::jsonb`).Scan(&n); err != nil {
 		t.Fatal(err)

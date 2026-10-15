@@ -99,6 +99,9 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 // without the types the check would have noted it could give a value the
 // server never produces. One with an effect, such as nextval, is refused
 // instead, as the marker would skip the effect a later statement observes.
+// The marker also skips an error the default would raise, but a default of
+// immutable parts raises it on every write that leaves the column out, a
+// write path no application under test has.
 func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
 	if err := x.checkDefault(d); err != nil {
 		if hasEffects(d) {

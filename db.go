@@ -1768,7 +1768,7 @@ func (db *DB) backfill(table string, cols []sqlir.ColumnDef, redefined bool, tx 
 			v, seen := vals[c.Name]
 			if !seen {
 				var err error
-				if v, err = x.evalDefault(c.Default); err != nil {
+				if v, err = x.columnDefault(table, c.Name); err != nil {
 					return nil, err
 				}
 				vals[c.Name] = v
