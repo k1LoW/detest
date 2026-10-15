@@ -685,8 +685,14 @@ func (c *columnChecker) writeWith(with []sqlir.CTE, target, alias string, items 
 		readElsewhere[name] = true
 	}
 	effects := map[string]bool{}
+	defs := map[string]*sqlir.SelectStmt{}
 	for _, cte := range with {
-		if !queryHasEffects(cte.Select) {
+		defs[cte.Name] = cte.Select
+	}
+	for _, cte := range with {
+		// Through the views and the earlier CTEs it reads too, whose
+		// effects run as far as it is read.
+		if !c.x.effectfulQuery(cte.Select, defs, map[string]bool{}) {
 			continue
 		}
 		if readElsewhere[cte.Name] {

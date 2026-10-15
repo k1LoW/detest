@@ -112,28 +112,21 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 			t.Errorf("%s: got %v, want the integer input error", tt.q, err)
 		}
 	}
-	// A CTE runs when a row first reaches it, and once for the statement.
-	for _, tt := range []struct {
-		q    string
-		want []string
-	}{
-		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`, []string{"0"}},
-		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM u ORDER BY id`, []string{"5", "5"}},
-		{`SELECT nextval('sq')`, []string{"6"}},
-	} {
-		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
-		}
-	}
-	// A CTE with an effect that a subquery reads may run in part
-	// (partlyReadCTEs), here through a view. A CTE does not see one
-	// declared after it, so c reads the view in the second.
+	// Whether Postgres reaches a fallback, and with it a CTE the fallback
+	// reads, depends on the rows, so a CTE with an effect read there is
+	// refused (partlyReadCTEs). A CTE does not see one declared after it,
+	// so c reads the view in the last.
 	for _, q := range []string{
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`,
+		`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM u ORDER BY id`,
 		`WITH c AS (SELECT n FROM seqv) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`,
 		`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
+	}
+	if got := rowsOf(t, db, `SELECT nextval('sq')`); !reflect.DeepEqual(got, []string{"5"}) {
+		t.Errorf("nextval after the CTE refusals: got %v, want [5]", got)
 	}
 }

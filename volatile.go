@@ -126,12 +126,11 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 // block that reads all of its rows: the query itself or a later CTE read
 // in full, with no LIMIT, OFFSET or condition of no column of its own.
 // These blocks have no query around them, so a column of the block is one
-// of its own rows. One with no FROM has a row at most, which a read takes
-// in full when it is the only FROM item of a subquery of an expression
-// with no WHERE, HAVING, LIMIT or OFFSET, as a scalar subquery: such a
-// block may be nested, where a condition may read the rows of a query
-// around it only. The CTEs
-// of a write are checked by writeWith.
+// of its own rows. A CTE of one row read by a subquery is refused too, as
+// whether Postgres reaches the subquery at all depends on more than the
+// subquery: the select list of an EXISTS is never computed, and a join or
+// a LIMIT around it may stop first. The CTEs of a write are checked by
+// writeWith.
 func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
 	readsAll := func(b *sqlir.SelectStmt) bool {
 		if b.Limit != nil || b.Offset != nil {
@@ -170,23 +169,8 @@ func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
 		return out
 	}
 	// sole reports a read that is the only FROM item of a block reading
-	// all of its rows, and plain one of a block that tests no condition.
+	// all of its rows.
 	sole := func(b *sqlir.SelectStmt) bool { return len(b.Joins) == 0 && readsAll(b) }
-	// A derived table or an arm of a set operation is read as far as the
-	// query around it asks, which a join or a LIMIT there may stop before
-	// any row, so only a subquery of an expression is a plain reader.
-	nested := map[*sqlir.SelectStmt]bool{}
-	for _, q := range sqlir.Selects(stmt) {
-		nested[q.Larg], nested[q.Rarg] = true, true
-		for _, t := range append([]*sqlir.TableRef{q.From}, refsOf(q.Joins)...) {
-			if t != nil && t.Sub != nil {
-				nested[t.Sub] = true
-			}
-		}
-	}
-	plain := func(b *sqlir.SelectStmt) bool {
-		return !nested[b] && len(b.Joins) == 0 && b.Where == nil && b.Having == nil && b.Limit == nil && b.Offset == nil
-	}
 	full := map[*sqlir.SelectStmt]bool{}  // blocks whose rows are all read
 	whole := map[*sqlir.SelectStmt]bool{} // CTE queries whose rows are all read
 	var visit func(q *sqlir.SelectStmt)
@@ -237,12 +221,9 @@ func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
 		for _, cte := range q.With {
 			ctes[cte.Name] = cte.Select
 		}
-		for i, cte := range q.With {
+		for _, cte := range q.With {
 			def := cte.Select
 			if !read[cte.Name] || whole[def] {
-				continue
-			}
-			if def.From == nil && def.SetOp == "" && def.Values == nil && !slices.ContainsFunc(readers(q, i), func(b *sqlir.SelectStmt) bool { return !plain(b) }) {
 				continue
 			}
 			if x.effectfulQuery(def, ctes, map[string]bool{}) {
@@ -251,14 +232,6 @@ func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
 		}
 	}
 	return nil
-}
-
-func refsOf(joins []sqlir.Join) []*sqlir.TableRef {
-	out := make([]*sqlir.TableRef, len(joins))
-	for i := range joins {
-		out[i] = &joins[i].Table
-	}
-	return out
 }
 
 // cteSequenceCalls checks the CTEs of a write that body reads, which run
