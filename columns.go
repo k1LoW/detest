@@ -99,6 +99,10 @@ type columnChecker struct {
 	// subquery before the walk reaches it, resolve each one once rather
 	// than again at every level of nesting above it.
 	subTypes map[*sqlir.SubQuery]string
+	// valuesTypes are the column types of a VALUES query, resolved over
+	// its rows in the scope the walk checked them in, which setOpTypes has
+	// no other way to see for a correlated column.
+	valuesTypes map[*sqlir.SelectStmt][]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -713,11 +717,12 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return out, nil
 	}
 	sc := &colScope{items: map[string]colSet{}, outer: outer}
-	if len(sel.Values) > 1 {
+	if len(sel.Values) > 0 {
 		// Postgres resolves each column of a VALUES query over its rows
 		// when it plans the statement, and fails one of two types (42804)
 		// whether or not a LIMIT drops the rows. INSERT ... VALUES, whose
 		// rows each take the column's type, is checked in insert.
+		types := make([]string, len(sel.Values[0]))
 		for i := range sel.Values[0] {
 			col := setOpColumnExprs(sel, i)
 			if err := c.branchTypes(col, sc, "VALUES rows"); err != nil {
@@ -725,12 +730,16 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			}
 			// The untyped rows take the type of the typed ones. A column
 			// of no typed row is left to a set operation around it.
-			typ := commonType(col, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
-			c.timeParams(typ, col...)
+			types[i] = commonType(col, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+			c.timeParams(types[i], col...)
 			for _, e := range col {
-				c.inputAs(e, typ)
+				c.inputAs(e, types[i])
 			}
 		}
+		if c.valuesTypes == nil {
+			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
+		}
+		c.valuesTypes[sel] = types
 	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
@@ -1122,7 +1131,11 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 		out := make([]string, len(sel.Values[0]))
 		for i := range out {
 			col := setOpColumnExprs(sel, i)
-			out[i] = commonType(col, nil, c.recordedSubqueryType)
+			if t, ok := c.valuesTypes[sel]; ok && i < len(t) {
+				out[i] = t[i]
+			} else {
+				out[i] = commonType(col, nil, c.recordedSubqueryType)
+			}
 			if out[i] == "" && slices.ContainsFunc(col, func(e sqlir.Expr) bool { return nestedBranches(e) != nil && untypedBranch(e) }) {
 				// A CASE or COALESCE of untyped branches alone is text,
 				// as it is in a select list.
@@ -1188,9 +1201,16 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if q.Select == nil {
 		return ""
 	}
-	if q.Select.SetOp != "" {
-		// A set operation's column may be an interval.
-		return "unresolved column type"
+	if q.Select.SetOp != "" || len(q.Select.Values) > 0 {
+		if typ, ok := c.subTypes[q]; ok {
+			return typ
+		}
+		typ := c.setOpSubqueryType(q, sc)
+		if c.subTypes == nil {
+			c.subTypes = map[*sqlir.SubQuery]string{}
+		}
+		c.subTypes[q] = typ
+		return typ
 	}
 	if len(q.Select.Targets) != 1 {
 		return ""
@@ -1241,6 +1261,27 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		return types[0]
 	}
 	return ""
+}
+
+// setOpSubqueryType is subqueryType's type of q, a set operation or a
+// VALUES query, as setOpTypes resolves its one column once q is checked.
+func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) string {
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	if _, err := vc.query(q.Select, sc); err != nil {
+		return ""
+	}
+	types := vc.setOpTypes(q.Select)
+	if len(types) != 1 {
+		return ""
+	}
+	if typ := resolvedType(types[0], setOpColumnExprs(q.Select, 0)); typ != "" {
+		return typ
+	}
+	// A column of no type the check knows, as of a *, may be an interval.
+	return "unresolved column type"
 }
 
 // viewTypes are the output types of a view's query, checked apart from the
@@ -1507,6 +1548,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			case *sqlir.IsNull:
 				if p, ok := e.X.(*sqlir.Param); ok {
+					if !c.x.tx.db.kind.InnoDB() {
+						// Postgres fails a parameter it meets first here,
+						// as IS NULL gives it no type (42P18), and the
+						// order it meets the uses in is not the
+						// statement's: UPDATE reads WHERE before SET.
+						err = c.x.unsupported(fmt.Sprintf("parameter $%d under IS NULL without a cast", p.Index+1))
+						return
+					}
 					c.typedParam(p) // IS NULL gives it no type to differ from
 				}
 			case *sqlir.BinaryExpr:

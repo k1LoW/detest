@@ -919,6 +919,11 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
 		{`VALUES ((VALUES (1))) UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`VALUES (1), ($1) LIMIT 0`, []any{"bad"}},
+		{`SELECT (VALUES (t.u) UNION ALL SELECT 'bad' WHERE false) FROM t`, nil},
+		{`SELECT coalesce((VALUES (1)), 'bad')`, nil},
+		{`SELECT CASE WHEN true THEN 1 ELSE (VALUES (n) UNION SELECT $1) END FROM t`, []any{"bad"}},
+		{`SELECT (SELECT u FROM t UNION ALL SELECT u FROM t) WHERE false UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`SELECT coalesce((SELECT u FROM t UNION ALL SELECT u FROM t), 'bad')`, nil},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -988,6 +993,10 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (1, $1) RETURNING CASE WHEN true THEN 0 ELSE $1::smallint END`,
 		// Postgres fails a parameter VALUES writes to two types (42P08).
 		`INSERT INTO t (id, k, u) VALUES (1, $1, $1)`,
+		// Postgres fails a parameter it meets first under IS NULL (42P18),
+		// in an order that is not the statement's.
+		`UPDATE t SET n = $1 WHERE $1 IS NOT NULL AND false`,
+		`SELECT $1 IS NULL, $1::int`,
 		// Arithmetic types the parameter where the checks do not follow.
 		`SELECT $1 + 1, CASE WHEN true THEN 0 ELSE $1::smallint END FROM t`,
 	} {
@@ -1081,7 +1090,6 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`VALUES (1) UNION SELECT 2::smallint UNION SELECT '40000' WHERE false`, nil},
 		{`SELECT 1::smallint WHERE false UNION (VALUES (2), ('40000') LIMIT 0)`, nil},
 		{`SELECT 1::smallint WHERE false UNION ALL VALUES ($1), (2)`, []any{int64(40000)}},
-		{`UPDATE t SET n = $1 WHERE $1 IS NOT NULL AND false`, []any{"7"}},
 		{`SELECT $1::int, $1::integer`, []any{"1"}},
 		{`SELECT n FROM t UNION SELECT id FROM t`, nil},
 		// The inner pair widens to an integer, which takes 40000.
@@ -1092,6 +1100,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT coalesce(1::smallint, $1, 2)`, []any{"40000"}},
 		// NULLIF promotes an integer compared with a numeric, which then
 		// takes 1.5.
+		// smallint + integer is an integer, which takes 40000.
+		{`SELECT coalesce(1::smallint + 2, '40000')`, nil},
 		{`SELECT coalesce(NULLIF(1, 2.5), '1.5')`, nil},
 		{`SELECT coalesce(NULLIF(n, 2.5), '1.5') FROM t`, nil},
 	} {

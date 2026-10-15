@@ -63,6 +63,14 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			case (l == "interval" || r == "interval") && e.Op == "*":
 				return "interval"
 			}
+			if numberRank[l] > 0 && numberRank[r] > 0 {
+				// The operator takes the wider of two numbers, as
+				// smallint + integer is an integer.
+				if numberRank[r] > numberRank[l] {
+					return r
+				}
+				return l
+			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
 					return typ
