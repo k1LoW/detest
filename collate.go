@@ -667,6 +667,9 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 	}
 	if timeRank[typ] > 0 || x.tx.db.branchKind(typ) != "" {
 		for _, b := range exprs {
+			if k, ok := b.(*sqlir.Collate); ok {
+				b = k.X
+			}
 			p, ok := b.(*sqlir.Param)
 			if !ok || p.Index < 0 || p.Index >= len(x.args) {
 				continue

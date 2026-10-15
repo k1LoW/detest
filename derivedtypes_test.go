@@ -93,6 +93,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT *, g / 2 AS half FROM generate_series(1.0, 2.0) g ORDER BY 1`,
 		// Postgres fails it as ambiguous, with 42725.
 		`SELECT * FROM generate_series(NULL, NULL) g ORDER BY 1`,
+		`SELECT * FROM generate_series(coalesce('1', '2'), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
 		`SELECT coalesce(s.n, (SELECT NULL), 0) FROM (SELECT * FROM t) s`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,
@@ -134,6 +135,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.name, $1) = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, true},
 		{`SELECT coalesce(s.name, lag($1) OVER (ORDER BY s.id), 'x') = '01' FROM (SELECT * FROM t) s ORDER BY s.id`, int64(1)},
+		{`SELECT coalesce(s.name, $1 COLLATE "C", 'x') = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, []byte("bogus")},
 		{`SELECT coalesce(u.v, 'x') = '01' FROM (SELECT NULL AS v UNION ALL SELECT $1) u`, int64(1)},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},

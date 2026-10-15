@@ -86,6 +86,10 @@ type columnChecker struct {
 	timeConflict string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
+	// subTypes are the types subqueryType gave, shared with the checkers
+	// it makes, so that a nested subquery is checked once per level
+	// rather than again for each level above it.
+	subTypes map[*sqlir.SubQuery]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -362,6 +366,10 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			typed := false
 			for _, a := range t.Func.Args {
 				typed = typed || !isNullConst(a) && !untypedExpr(a)
+				if untypedBranch(a) && !untypedExpr(a) {
+					// A CASE or COALESCE of literals only is text.
+					return c.x.unsupported("generate_series over a text")
+				}
 			}
 			if !typed {
 				// Postgres fails the call as ambiguous (42725).
@@ -1182,11 +1190,23 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if len(q.Select.Targets) != 1 {
 		return ""
 	}
+	if typ, ok := c.subTypes[q]; ok {
+		return typ
+	}
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	typ := c.scalarType(q, sc)
+	c.subTypes[q] = typ
+	return typ
+}
+
+func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
 	if e := q.Select.Targets[0].Expr; untypedBranch(e) || isNullConst(e) {
 		// Postgres resolves the subquery's unknown column to text.
 		return "text"
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
