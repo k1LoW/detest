@@ -40,7 +40,12 @@ func queryHasEffects(sel *sqlir.SelectStmt) bool {
 // uncorrelated and detest for every row. Elsewhere both evaluate them as
 // often.
 func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
+	if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
+		return err
+	}
 	switch st := stmt.(type) {
+	case *sqlir.CreateTableAsStmt:
+		return x.topSequenceCalls(st.Select)
 	case *sqlir.SelectStmt:
 		return x.topSequenceCalls(st)
 	case *sqlir.InsertStmt:
@@ -316,6 +321,37 @@ func (x *sqlExec) aggregateEffects(sel *sqlir.SelectStmt) error {
 		for _, q := range sqlir.Selects(n) {
 			if x.effectfulQuery(q, ctes, map[string]bool{}) {
 				return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")
+			}
+		}
+	}
+	return nil
+}
+
+// viewSequenceChecks checks the query of every view n reads, through other
+// views too, as a derived table of the statement, since Postgres expands
+// a view into the statement before it plans it. seen guards against a view
+// checked twice.
+func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
+	for _, q := range sqlir.Selects(n) {
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" {
+				continue
+			}
+			name := x.tx.db.resolve(t.Name)
+			v := x.tx.db.views[name]
+			if v == nil || v.View == nil || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if err := x.topSequenceCalls(v.View); err != nil {
+				return err
+			}
+			if err := x.viewSequenceChecks(v.View, seen); err != nil {
+				return err
 			}
 		}
 	}

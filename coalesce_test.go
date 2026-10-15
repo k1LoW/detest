@@ -20,6 +20,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('sq') AS n`)
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, NULL), (2, NULL)`)
+	mustExec(t, db, `CREATE VIEW av AS SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) AS v FROM t`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -59,6 +60,9 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		// An uncorrelated subquery runs once in Postgres and for each row
 		// in detest.
 		`SELECT coalesce(n, (SELECT n FROM seqv)) FROM u ORDER BY id`,
+		`SELECT coalesce(NULL::bigint, (SELECT v FROM av))`,
+		`SELECT v FROM av`,
+		`CREATE TABLE r AS SELECT coalesce(nextval('sq'), max(nextval('sq'))) AS v FROM t`,
 		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
 		`SELECT coalesce(CASE WHEN true THEN pg_advisory_xact_lock(1) END, CASE WHEN true THEN pg_advisory_xact_lock(2) END)`,
 		`SELECT coalesce(l.v, NULL) FROM (SELECT pg_advisory_xact_lock(1) AS v) l`,
