@@ -507,11 +507,13 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 			return folded{}, err
 		}
 		s := notStrict
-		if kids[0].null() {
+		if !v.Array && (kids[0].null() || len(v.List) == 1 && kids[1].null()) {
 			// Postgres compares the left operand with the list by =, each
-			// of which a NULL reduces to NULL. A NULL in the list reduces
+			// of which a NULL reduces to NULL, and an IN list of one item
+			// is that comparison alone. A NULL in a longer list reduces
 			// nothing, as Postgres compares the constants of the list in
-			// one array.
+			// one array, and nor does any NULL under = ANY (ARRAY[...]),
+			// which is that array comparison as written.
 			s = strict
 		}
 		return f.apply(v, kids, plainOperands(kids...), s)

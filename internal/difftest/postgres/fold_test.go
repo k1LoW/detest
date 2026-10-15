@@ -86,6 +86,7 @@ var foldCases = []difftest.Case{
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
 			`CREATE TABLE tn (n numeric)`,
+			`CREATE TABLE ts (s text)`,
 		},
 		Seed:  []string{`INSERT INTO t VALUES (1, 0)`},
 		Conns: 1,
@@ -94,6 +95,10 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN NULL IN (n) THEN 1 / 0 ELSE 0 END FROM t`),
 			difftest.Q(0, `SELECT CASE WHEN NULL IN (n, 2) THEN 1 / 0 ELSE 0 END FROM t`),
 			difftest.Q(0, `SELECT CASE WHEN n IN (NULL, 2) THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN n IN (NULL) THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN n NOT IN (NULL) THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN s = ANY (ARRAY[NULL]) THEN 1 / 0 ELSE 0 END FROM ts WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN s IN (NULL) THEN 1 / 0 ELSE 0 END FROM ts WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN abs(NULL::int + n) > 0 THEN 1 / 0 ELSE 0 END FROM t`),
 			difftest.Q(0, `SELECT CASE WHEN greatest(NULL, n) > 0 THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN coalesce(1, n) / 2 = 0 THEN 1 / 0 ELSE 1 END FROM tn WHERE false`),

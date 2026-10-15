@@ -2482,7 +2482,7 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 				list[i] = &sqlir.Cast{X: list[i], Type: typ}
 			}
 		}
-		return &sqlir.InExpr{X: l, List: list, Not: !isAny}, nil
+		return &sqlir.InExpr{X: l, List: list, Not: !isAny, Array: true}, nil
 	case pg.A_Expr_Kind_AEXPR_LIKE, pg.A_Expr_Kind_AEXPR_ILIKE:
 		l, err := c.expr(e.Lexpr)
 		if err != nil {

@@ -55,6 +55,7 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 	// it folds a constant whose volatility detest does not model.
 	for _, q := range []string{
 		`SELECT CASE WHEN n > 0 THEN interval '1 day' / 0 END FROM t`,
+		`SELECT '{}'::jsonb - 'a' WHERE false`,
 		`SELECT CASE WHEN timestamptz '2024-01-01 00:00:00+00' + interval '1 day' = timestamptz '2024-01-02 00:00:00+00' THEN 0 ELSE 1 / 0 END`,
 		`SELECT CASE WHEN timestamp '2024-01-01'::date = date '2024-01-01' THEN 1 ELSE 1 / 0 END`,
 		`SELECT CASE WHEN (1, 2) = (1, 2) THEN 0 ELSE 1 / 0 END`,
