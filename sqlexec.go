@@ -1439,6 +1439,10 @@ func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
 // Postgres coerces it. ok is false for any other expression, and for a
 // string that is no boolean input, which Postgres fails.
 func literalCondition(e sqlir.Expr) (b, ok bool) {
+	if c, isCast := e.(*sqlir.Cast); isCast && c.Type == "bool" {
+		// The parser's reading of a string literal as boolean input.
+		e = c.X
+	}
 	k, isConst := e.(*sqlir.Const)
 	if !isConst {
 		return false, false
