@@ -140,7 +140,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if err := x.checkSequenceCalls(stmt); err != nil {
 		return err
 	}
-	c := &columnChecker{x: x, paramCount: map[int]int{}}
+	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
 	for _, p := range sqlir.Params(stmt) {
 		c.paramCount[p.Index]++
 	}
@@ -857,6 +857,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
 		}
 		c.valuesTypes[sel] = types
+		c.noteValuesCertain(sel, sc)
 	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
@@ -1656,7 +1657,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -1677,7 +1678,7 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}

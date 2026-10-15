@@ -170,6 +170,9 @@ func (sc *colScope) certainColumn(r *sqlir.ColumnRef) string {
 // position where every * of it is over a table the check expands, and by
 // name for a select list with a *.
 func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
+	if len(sel.Values) > 0 {
+		return // noteValuesCertain records it over the rows
+	}
 	var types []string
 	named := map[string]string{}
 	seen := map[string]bool{}
@@ -180,7 +183,7 @@ func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
 		seen[name] = true
 		named[name] = typ
 	}
-	positional := true
+	positional, namesKnown := true, true
 	for _, t := range sel.Targets {
 		if !t.Star {
 			typ := c.certainType(t.Expr, sc)
@@ -189,13 +192,21 @@ func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
 			continue
 		}
 		if cols := c.starColumns(sel, t); cols != nil {
-			types = append(types, cols...)
+			for _, typ := range cols {
+				types = append(types, c.x.tx.db.baseType(typ))
+			}
 		} else {
 			positional = false
 		}
 		for alias, cols := range sc.items {
 			if t.Table != "" && alias != t.Table {
 				continue
+			}
+			if cols == nil {
+				// An item of columns the check does not know may give a
+				// name another item gives too, which the names below
+				// would take for one.
+				namesKnown = false
 			}
 			for name, once := range cols {
 				typ := sc.certain[alias][name]
@@ -212,6 +223,9 @@ func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
 	}
 	if positional {
 		c.outCertain[sel] = types
+	}
+	if !namesKnown {
+		named = map[string]string{}
 	}
 	c.outCertainNamed[sel] = named
 }
@@ -230,20 +244,22 @@ func (c *columnChecker) certainOutput(sel *sqlir.SelectStmt) []string {
 		}
 		return out
 	}
-	if len(sel.Values) > 0 {
-		out := make([]string, len(sel.Values[0]))
-		for i := range out {
-			var col []sqlir.Expr
-			for _, row := range sel.Values {
-				if i < len(row) {
-					col = append(col, row[i])
-				}
-			}
-			out[i] = c.certainBranches(col, &colScope{})
-		}
-		return out
-	}
 	return c.outCertain[sel]
+}
+
+// noteValuesCertain records the certain types of the columns of a VALUES
+// query over its rows in sc, the scope the walk checks them in, where a
+// row may read a column of an outer query.
+func (c *columnChecker) noteValuesCertain(sel *sqlir.SelectStmt, sc *colScope) {
+	out := make([]string, len(sel.Values[0]))
+	for i := range out {
+		out[i] = c.certainBranches(setOpColumnExprs(sel, i), sc)
+	}
+	if c.outCertain == nil {
+		c.outCertain = map[*sqlir.SelectStmt][]string{}
+		c.outCertainNamed = map[*sqlir.SelectStmt]map[string]string{}
+	}
+	c.outCertain[sel] = out
 }
 
 // certainPair is the certain type the i-th columns of a set operation's two

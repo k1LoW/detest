@@ -1791,6 +1791,8 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`UPDATE t SET id = id RETURNING (VALUES (2000000::numeric))`,
 		`SELECT s.a FROM (SELECT * FROM t) s`,
 		`SELECT s.a FROM (SELECT id, a FROM t) s(other_id)`,
+		`SELECT (VALUES (t.a)) FROM t`,
+		`UPDATE t SET a = a RETURNING (VALUES (t.a))`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
@@ -1816,6 +1818,33 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
+	}
+	// A * over a table expands its domain to the base type.
+	if rows3, err := db.Query(`SELECT * FROM t UNION ALL SELECT * FROM t WHERE false`); err == nil {
+		for rows3.Next() {
+			r := make([]any, 5)
+			ptrs := make([]any, 5)
+			for i := range r {
+				ptrs[i] = &r[i]
+			}
+			if err := rows3.Scan(ptrs...); err != nil || r[3] != "2000000" {
+				t.Errorf("a domain column of a * in a set operation: got %#v, %v, want the text 2000000", r[3], err)
+			}
+		}
+		rows3.Close()
+	} else {
+		t.Error(err)
+	}
+	// A * over an item of columns the check does not know, as a view of a
+	// *, may give a name another item gives too.
+	mustExec(t, db, `CREATE TABLE ff (n float8)`)
+	mustExec(t, db, `INSERT INTO ff VALUES (2000000)`)
+	mustExec(t, db, `CREATE VIEW vv AS SELECT * FROM ff`)
+	mustExec(t, db, `CREATE TABLE mm (n numeric)`)
+	mustExec(t, db, `INSERT INTO mm VALUES (3)`)
+	var first, second any
+	if err := db.QueryRow(`SELECT * FROM vv CROSS JOIN mm`).Scan(&first, &second); err != nil || first != float64(2000000) {
+		t.Errorf("a * over a view beside a table of the same column name: got %#v, %v, want a float64", first, err)
 	}
 	// abs(NULL) is a float8 the check does not know, so the column is not
 	// certainly a numeric.
