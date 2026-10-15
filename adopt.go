@@ -375,10 +375,13 @@ func (p *Proc) handshake() {
 // runtime ran them, so they are ordered by their parents and, between the
 // goroutines of one parent, by the call each was adopted at, such as a
 // statement with its arguments, which tells apart goroutines a loop started
-// for different items, or by where a call to Current was made from. Only
-// goroutines making the same first call from the same place are ordered by
-// goroutine id, which mostly follows the order they were started in but not
-// always, since the runtime hands ids out from per-processor caches. A
+// for different items. A call to Current describes nothing, so a goroutine
+// adopted at one is described by where Current was called from instead.
+// Only goroutines with the same description are ordered by goroutine id,
+// such as two making the same statement from different places, or two
+// calling Current from the same place. The id mostly follows the order they
+// were started in but not always, since the runtime hands ids out from
+// per-processor caches. A
 // misordering would make the replay of a schedule take another path, which
 // detest reports as nondeterminism.
 func (r *run) takeAdopted() bool {
