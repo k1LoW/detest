@@ -1339,7 +1339,7 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 			}
 		case numberRank[out[i]] > 0 && numberRank[t] > numberRank[out[i]], timeRank[out[i]] > 0 && timeRank[t] > timeRank[out[i]]:
 			// Numbers, and dates and timestamps, meet at the widest, as
-			// they do in commonType.
+			// they do in typer's common.
 			out[i] = t
 		}
 	}
@@ -2699,7 +2699,7 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // LEAST or NULLIF, or rows of a VALUES column, of two types Postgres does not resolve to one,
 // which it fails when it plans the statement (42804) and the run would
 // return one of. Two types are taken as one only where valueFamily groups
-// them, or as dates and timestamps, which commonType widens; another pair
+// them, or as dates and timestamps, which typer's common widens; another pair
 // is refused even where Postgres resolves it, as for a set operation.
 func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope, of string) error {
 	family := func(typ string) string {

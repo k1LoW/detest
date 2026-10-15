@@ -19,12 +19,6 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	return typer{column: column, subquery: subquery}.of(e)
 }
 
-// commonType is the type Postgres resolves exprs to together, as typer's
-// common does.
-func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
-	return typer{column: column, subquery: subquery}.common(exprs)
-}
-
 // typer types expressions as expressionTypeIn does, with base, when given,
 // reducing a domain to its base type where Postgres resolves an operator or
 // a function, so that 1::tiny + 0 over a smallint is an integer rather than

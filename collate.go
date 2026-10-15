@@ -852,8 +852,8 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer) (err, afterIn
 		// column's type is unknown there.
 		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"), nil
 	case domain != "" && len(names) > 1:
-		// commonType and the time and number readers take the type's own
-		// name, so a domain beside another type resolves to neither.
+		// The time and number readers take the branch's own type, so a
+		// domain beside another type resolves to neither.
 		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain)), nil
 	case len(kinds) > 1:
 		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them"), nil
