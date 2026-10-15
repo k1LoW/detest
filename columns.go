@@ -2040,15 +2040,16 @@ func (c *columnChecker) markCorrelated(found bool, owner *sqlir.SelectStmt) {
 // it gives each run its own rows even though it reads no outer column
 // itself.
 func (c *columnChecker) noteCTERead(name string) {
-	if len(c.cteDefs) != len(c.cteOwners) {
+	if len(c.cteDefs) != len(c.cteOwners) || len(c.ctes) != len(c.cteDefs) {
 		return
 	}
-	for i, defs := range slices.Backward(c.cteDefs) {
-		def, ok := defs[name]
-		if !ok {
+	// ctes holds a CTE once its query is checked, cteDefs from before, so
+	// a CTE whose own query reads one of its name finds the outer one.
+	for i, m := range slices.Backward(c.ctes) {
+		if _, ok := m[name]; !ok {
 			continue
 		}
-		if c.correlated[def] {
+		if def := c.cteDefs[i][name]; c.correlated[def] {
 			c.markCorrelated(c.cteOwners[i] != nil, c.cteOwners[i])
 		}
 		return

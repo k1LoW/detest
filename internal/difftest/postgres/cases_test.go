@@ -741,6 +741,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v) SELECT (SELECT v FROM c)) FROM u ORDER BY u.id`),
 			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v), d AS (SELECT v FROM c) SELECT (SELECT v FROM d)) FROM u ORDER BY u.id`),
 			difftest.Q(0, `SELECT (WITH c AS (SELECT 5 AS v) SELECT (SELECT v FROM c) + u.id) FROM u ORDER BY u.id`),
+			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v) SELECT (WITH c AS (SELECT v FROM c) SELECT v FROM c)) FROM u ORDER BY u.id`),
 		},
 	},
 }
