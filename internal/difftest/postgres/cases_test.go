@@ -710,6 +710,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT (SELECT sum(u.m + t.n) FROM u) FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT (SELECT count(*) FROM u WHERE u.m > t.n) FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT (SELECT sum(m) FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(t.n) OVER () FROM u) FROM t ORDER BY id`),
 		},
 	},
 }

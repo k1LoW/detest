@@ -2043,6 +2043,9 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 // with their own scopes.
 func (c *columnChecker) exprs(n any, sc *colScope) error {
 	var err error
+	// windowed are the functions windows wrap, which Postgres computes in
+	// the window's own query whatever columns they read.
+	windowed := map[*sqlir.FuncCall]bool{}
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		if err != nil {
@@ -2151,8 +2154,18 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				}
+			case *sqlir.WindowFunc:
+				windowed[e.Func] = true
 			case *sqlir.FuncCall:
-				if isAggregateCall(e) && sc.outer != nil && outerAggregate(e, sc) {
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && len(sqlir.Selects(e.Args)) > 0 {
+					// A subquery's columns may be of any query out from it,
+					// and the aggregate's level with them, which the check
+					// below does not follow, as rowSequenceCalls refuses
+					// the form outside a subquery.
+					err = c.x.unsupported("a subquery in an aggregate's argument")
+					return
+				}
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && outerAggregate(e, sc) {
 					// Postgres computes an aggregate whose arguments read
 					// only outer columns in the outer query, which then
 					// aggregates, while the evaluators compute it over the
