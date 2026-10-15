@@ -157,6 +157,30 @@ var foldCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "the other places a statement folds its expressions of constants",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, n int)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 0)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `INSERT INTO u SELECT 9, 1 WHERE false UNION ALL SELECT 8, 1 / 0 WHERE false`),
+			difftest.Q(0, `SELECT x FROM generate_series(1, 1 / 0) x WHERE false`),
+			difftest.Q(0, `SELECT NOT EXISTS (SELECT 1 / 0 FROM t WHERE false)`),
+			difftest.Q(0, `SELECT n FROM t ORDER BY CASE WHEN n > 0 THEN 1 / 0 END`),
+			difftest.Q(0, `SELECT n FROM t GROUP BY n HAVING sum(n) > 1 / 0`),
+			difftest.Q(0, `SELECT n FROM t WHERE n > 0 AND 1 / 0 = 1`),
+			difftest.Q(0, `SELECT n FROM t LIMIT 1 OFFSET 1 / 0`),
+			difftest.Q(0, `SELECT lower(NULL) || (1 / 0)::text FROM t WHERE false`),
+			difftest.Q(0, `SELECT n BETWEEN 1 AND 1 / 0 FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN n > 0 THEN 'abc'::varchar(1) END FROM t`),
+			difftest.Q(0, `SELECT CASE WHEN n > 0 THEN 99999::smallint * 1 END FROM t`),
+			difftest.Q(0, `SELECT CASE WHEN n > 0 THEN 'x'::uuid END FROM t`),
+			difftest.S(0, `INSERT INTO u VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = 1 / 0 WHERE false`),
+		},
+	},
+	{
 		Name: "a function with effects in a branch folding drops, called no more often than Postgres calls it",
 		Schema: []string{
 			`CREATE SEQUENCE s`,
