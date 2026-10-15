@@ -1068,6 +1068,21 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT s.y FROM (WITH t AS (SELECT 1 AS x, 2 AS y) SELECT * FROM t) s(i)`),
 		},
 	},
+	{
+		Name:   "IS NULL and IS NOT NULL over a row",
+		Schema: []string{`CREATE TABLE r (id int PRIMARY KEY, a int, b int)`},
+		Seed:   []string{`INSERT INTO r VALUES (1, NULL, NULL), (2, 1, NULL), (3, 1, 2)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (NULL, NULL) IS NULL, (NULL, NULL) IS NOT NULL`),
+			difftest.Q(0, `SELECT (1, NULL) IS NULL, (1, NULL) IS NOT NULL, (1, 2) IS NULL, (1, 2) IS NOT NULL`),
+			difftest.Q(0, `SELECT ROW(NULL) IS NULL, ROW(1) IS NOT NULL`),
+			difftest.Q(0, `SELECT id FROM r WHERE (a, b) IS NULL ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM r WHERE (a, b) IS NOT NULL ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM r WHERE NOT (a, b) IS NULL ORDER BY id`),
+			difftest.Q(0, `SELECT id, (a, b) IS NULL, (a, b) IS NOT NULL FROM r ORDER BY id`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {
