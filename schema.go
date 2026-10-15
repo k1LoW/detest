@@ -659,6 +659,9 @@ func defaultConstraintName(table string, u sqlir.UniqueDef) string {
 // with an existing row as an insert would. It returns the lock key to write
 // the row under.
 func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) {
+	if !x.tx.db.kind.InnoDB() {
+		x.tx.noteKeyMove(table, lk, updated)
+	}
 	def := x.tx.db.defs[table]
 	if def == nil || len(def.pk) == 0 {
 		return lk, nil

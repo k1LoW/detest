@@ -152,6 +152,12 @@ type DB struct {
 	// moved maps the key of a row an UPDATE gave a new primary key to that
 	// key, so a transaction that waited on the row can follow it.
 	moved map[lockKey]string
+	// commits counts the run's commits, and keyUpdated is the commit that
+	// last changed a key column of a row, by the row's key, which tells a
+	// FOR KEY SHARE read whether a key update came between its snapshot
+	// and the row's newest version.
+	commits    uint64
+	keyUpdated map[lockKey]uint64
 
 	// Declared by schema statements and kept across runs. Tables are named
 	// schema-qualified ("public.orders"); resolve maps a name as written.
@@ -1952,6 +1958,10 @@ type Tx struct {
 	writes     map[lockKey]Row
 	deleted    map[lockKey]bool
 	moved      map[lockKey]string // the keys this transaction changed, as DB.moved
+	// keyMoved are the rows an UPDATE of this transaction changed a key
+	// column of, even one a later UPDATE set back, which DB.keyUpdated
+	// records at commit.
+	keyMoved map[lockKey]bool
 	// start is when the transaction began, which now() and
 	// CURRENT_TIMESTAMP return throughout it.
 	start    time.Time
@@ -2058,6 +2068,7 @@ type savepoint struct {
 	writes      map[lockKey]Row
 	deleted     map[lockKey]bool
 	moved       map[lockKey]string
+	keyMoved    map[lockKey]bool
 	locks       int
 	// modes is the strength each lock held then had, since a lock taken
 	// before the savepoint may be strengthened after it.
@@ -2238,6 +2249,7 @@ func (db *DB) reset() {
 	db.locks = map[lockKey]rowLock{}
 	db.touched = map[string]bool{}
 	db.moved = map[lockKey]string{}
+	db.commits, db.keyUpdated = 0, nil
 	db.seqs = map[string]int64{}
 	for table, def := range db.defs {
 		for col := range def.autoInc {
@@ -2471,6 +2483,7 @@ func (tx *Tx) savepoint(op, name string) error {
 		}
 		maps.Copy(sp.deleted, tx.deleted)
 		sp.moved = maps.Clone(tx.moved)
+		sp.keyMoved = maps.Clone(tx.keyMoved)
 		sp.pending, sp.timeout, sp.undo, sp.inserts, sp.entries = tx.pendingLockTimeout, tx.lockTimeout, tx.undo, len(tx.inserts), len(tx.entries)
 		sp.zone, sp.pendingZone = tx.timeZone, tx.pendingTimeZone
 		sp.unstarted = !tx.started
@@ -2508,6 +2521,7 @@ func (tx *Tx) savepoint(op, name string) error {
 	}
 	maps.Copy(tx.deleted, sp.deleted)
 	tx.moved = maps.Clone(sp.moved)
+	tx.keyMoved = maps.Clone(sp.keyMoved)
 	tx.pendingLockTimeout, tx.undo = sp.pending, sp.undo
 	tx.timeZone, tx.pendingTimeZone = sp.zone, sp.pendingZone
 	if !tx.db.kind.InnoDB() {
@@ -2994,6 +3008,7 @@ func (tx *Tx) commit() {
 	// two idle loops issuing such updates would otherwise wake each other
 	// forever. The enqueues in tx.deferred count themselves.
 	changed := false
+	tx.db.commits++
 	for lk, r := range tx.writes {
 		t := tx.db.committed[lk.table]
 		if t == nil {
@@ -3002,6 +3017,12 @@ func (tx *Tx) commit() {
 		}
 		if prev, ok := t[lk.key]; !ok || !sameRow(prev, r) {
 			changed = true
+			if ok && (tx.keyMoved[lk] || tx.db.keyChanged(lk.table, prev, r)) {
+				if tx.db.keyUpdated == nil {
+					tx.db.keyUpdated = map[lockKey]uint64{}
+				}
+				tx.db.keyUpdated[lk] = tx.db.commits
+			}
 		}
 		t[lk.key] = r
 		tx.db.touched[lk.table] = true
@@ -3086,21 +3107,44 @@ func (db *DB) updateLock(table string, cols []string) lockMode {
 	return lockNoKeyUpdate
 }
 
-// keyChanged reports whether row new differs from old in a key column, as
-// updateLock tells one, which an update takes FOR UPDATE for.
+// noteKeyMove records that an update gave the row at lk new key values, as
+// keyMoved holds them.
+func (tx *Tx) noteKeyMove(table string, lk lockKey, updated Row) {
+	if old, ok := tx.view(table, lk.key); ok && tx.db.keyChanged(table, old, updated) {
+		if tx.keyMoved == nil {
+			tx.keyMoved = map[lockKey]bool{}
+		}
+		tx.keyMoved[lockKey{lk.table, updated.Key()}] = true
+	}
+}
+
+// keyChanged reports whether row new differs from old in a key column, one
+// in the primary key or in a unique index a foreign key could reference, as
+// updateLock tells one. A generated key column is compared by its own
+// value, which both rows hold, rather than by the columns it is computed
+// from, as an update of those may leave it as it was.
 func (db *DB) keyChanged(table string, old, new Row) bool {
-	var cols []string
+	def := db.defs[table]
 	for c, v := range new {
-		if !reflect.DeepEqual(old[c], v) {
-			cols = append(cols, c)
+		if reflect.DeepEqual(old[c], v) {
+			continue
+		}
+		if def == nil {
+			if c == "id" {
+				return true
+			}
+			continue
+		}
+		if slices.Contains(def.pk, c) {
+			return true
+		}
+		for _, u := range def.uniques {
+			if u.Where == nil && refersTo(u, c) {
+				return true
+			}
 		}
 	}
-	for c := range old {
-		if _, ok := new[c]; !ok {
-			cols = append(cols, c)
-		}
-	}
-	return db.updateLock(table, cols) == lockUpdate
+	return false
 }
 
 // pkConstraint is the name of table's primary key constraint.

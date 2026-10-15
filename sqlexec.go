@@ -70,6 +70,8 @@ type sqlExec struct {
 	// frozen are the rows of the tables a statement reads, as they were
 	// when it began, which its queries read instead of the latest.
 	frozen map[string][]Row
+	// frozenAt is the commit count when the statement froze its snapshot.
+	frozenAt uint64
 	// queryCols are the output columns of the queries the statement ran,
 	// in order, by the query (a *sqlir.SelectStmt), for a * over them, and
 	// cteCols those of the CTEs in scope, by name, scoped as ctes is.
@@ -1073,6 +1075,7 @@ func (x *sqlExec) freeze(stmt any) {
 		return
 	}
 	x.frozen = map[string][]Row{}
+	x.frozenAt = x.tx.db.commits
 	seen := map[string]bool{}
 	var add func(n any)
 	add = func(n any) {

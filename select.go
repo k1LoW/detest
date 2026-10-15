@@ -757,11 +757,13 @@ rows:
 			if !ok {
 				continue rows // deleted while waited for
 			}
-			if mode == lockKeyShare && !x.tx.db.kind.InnoDB() && at == r.by[a].Key() && !x.tx.db.keyChanged(table, r.by[a], cur) {
+			if mode == lockKeyShare && !x.tx.db.kind.InnoDB() && at == r.by[a].Key() && !x.tx.db.keyChanged(table, r.by[a], cur) &&
+				x.tx.db.keyUpdated[lockKey{x.tx.db.resolve(table), at}] <= x.frozenAt {
 				// An update that changed no key column takes FOR NO KEY
 				// UPDATE, which FOR KEY SHARE does not conflict with, so
 				// Postgres locks the version the snapshot sees and does not
-				// follow the update chain to the newest one.
+				// follow the update chain to the newest one. A key update
+				// since the snapshot, even one undone later, conflicts.
 				cur = r.by[a]
 			}
 			latest[a] = cur
