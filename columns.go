@@ -1434,14 +1434,11 @@ func (c *columnChecker) pairType(sel *sqlir.SelectStmt, i, n int) (string, bool)
 			return "", true
 		case l == r:
 			return l, true
-		case numberRank[l] > 0 && numberRank[r] > 0:
-			// Numbers meet at the widest, as in commonType.
+		case numberCategory(l) == 1 && numberCategory(r) == 1:
+			// Integers meet at the widest. evalSetOp does not convert the
+			// rows of a pair that meets at a numeric, a float or a time
+			// type, so such a pair is left unresolved.
 			if numberRank[r] > numberRank[l] {
-				return r, true
-			}
-			return l, true
-		case timeRank[l] > 0 && timeRank[r] > 0:
-			if timeRank[r] > timeRank[l] {
 				return r, true
 			}
 			return l, true
@@ -1554,6 +1551,9 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 		return ""
 	}
 	if q.Select.SetOp != "" || len(q.Select.Values) > 0 {
+		if c.unsentOutputParam(q.Select) {
+			return "unresolved column type"
+		}
 		if typ, ok := c.subTypes[q]; ok {
 			return typ
 		}
@@ -2099,7 +2099,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
 						return
 					}
-					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], effectful) {
+					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], func(a sqlir.Expr) bool { return c.effectful(a, map[string]bool{}) }) {
 						// Postgres stops at the first argument that is not
 						// NULL, while the evaluators evaluate them all (#90),
 						// so the effect would happen where it does not.
@@ -2967,17 +2967,66 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
 }
 
-// effectful reports an expression with an effect another statement
-// observes: a sequence's, an advisory lock's, or a subquery's row locks.
-func effectful(e sqlir.Expr) bool {
-	if slices.ContainsFunc(sqlir.Selects(e), func(q *sqlir.SelectStmt) bool { return q.Lock != nil }) {
-		return true
+// unsentOutputParam reports a set operation or VALUES query whose output
+// is a parameter bound to a value the query returns as bound, where
+// Postgres reads the text the driver sends.
+func (c *columnChecker) unsentOutputParam(sel *sqlir.SelectStmt) bool {
+	for _, q := range sqlir.Selects(sel) {
+		var outs []sqlir.Expr
+		for _, t := range q.Targets {
+			outs = append(outs, t.Expr)
+		}
+		for _, row := range q.Values {
+			outs = append(outs, row...)
+		}
+		for _, e := range outs {
+			p, ok := e.(*sqlir.Param)
+			if !ok || p.Index < 0 || p.Index >= len(c.x.args) {
+				continue
+			}
+			switch derefValue(c.x.args[p.Index]).(type) {
+			case nil, string:
+			default:
+				return true
+			}
+		}
 	}
-	return slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool {
-		switch f.Name {
-		case "nextval", "setval":
+	return false
+}
+
+// effectful reports an expression with an effect another statement
+// observes: a sequence's, an advisory lock's, or a subquery's row locks,
+// in the views it reads too. seen guards against a view read twice.
+func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
+	db := c.x.tx.db
+	for _, q := range sqlir.Selects(e) {
+		if q.Lock != nil {
 			return true
 		}
-		return strings.HasPrefix(f.Name, "pg_advisory") || strings.HasPrefix(f.Name, "pg_try_advisory")
-	})
+		refs := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			refs = append(refs, &q.Joins[i].Table)
+		}
+		for _, t := range refs {
+			if t == nil || t.Name == "" {
+				continue
+			}
+			name := db.resolve(t.Name)
+			if v := db.views[name]; v != nil && !seen[name] {
+				seen[name] = true
+				if c.effectful(v.View, seen) {
+					return true
+				}
+			}
+		}
+	}
+	return slices.ContainsFunc(sqlir.FuncCallsIn(e), isEffectCall)
+}
+
+func isEffectCall(f *sqlir.FuncCall) bool {
+	switch f.Name {
+	case "nextval", "setval":
+		return true
+	}
+	return strings.HasPrefix(f.Name, "pg_advisory") || strings.HasPrefix(f.Name, "pg_try_advisory")
 }

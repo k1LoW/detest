@@ -784,11 +784,12 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 	kinds := map[string]bool{}
 	unconverted := ""
 	names, domain := map[string]bool{}, ""
-	unknown := false
+	unknown, char, branches := false, false, 0
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
 		}
+		branches++
 		if untypedExpr(e) {
 			untyped = true
 			continue
@@ -808,10 +809,11 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		base := x.tx.db.baseType(typ)
 		switch k := x.tx.db.branchKind(typ); {
 		case k != "" && (base == "bpchar" || base == "char" || base == "character"):
-			// A literal beside it takes its trailing-space semantics,
-			// which the text conversion does not give.
+			// A branch beside it takes its trailing-space semantics,
+			// which the text conversion does not give, typed or not.
 			kinds[k] = true
 			unconverted = typ
+			char = true
 		case k != "":
 			kinds[k] = true
 		case numberRank[base] > 0:
@@ -839,6 +841,8 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		}
 	}
 	switch {
+	case char && branches > 1:
+		return x.unsupported(fmt.Sprintf("a branch beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted)), nil
 	case unknown && len(kinds) > 0 && !x.tx.checking:
 		// The branches meet at a type the unknown one decides, such as
 		// abs(NULL)'s float8, or fail beside it, which branchValue cannot

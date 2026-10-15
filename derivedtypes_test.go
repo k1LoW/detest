@@ -26,6 +26,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE ch (id int PRIMARY KEY, c char(3))`)
 	mustExec(t, db, `CREATE TABLE t2 (a int, b int)`)
 	mustExec(t, db, `CREATE TABLE big (n bigint)`)
+	mustExec(t, db, `CREATE TABLE nm (m numeric)`)
+	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('seq') AS n`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -119,6 +121,11 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// The text conversion does not give a char's trailing-space
 		// semantics to a literal beside it.
 		`SELECT coalesce(s.c, 'a ') = 'a' FROM (SELECT * FROM ch) s`,
+		`SELECT coalesce(s.c, 'a '::bpchar) = 'a'::bpchar FROM (SELECT * FROM ch) s`,
+		// evalSetOp does not convert the integer side to a numeric.
+		`SELECT coalesce(u.v / 2, 0) FROM (SELECT 1 AS v UNION ALL SELECT m FROM nm) u`,
+		// A view's sequence call is an effect too.
+		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
@@ -177,6 +184,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.name, lag($1) OVER (ORDER BY s.id), 'x') = '01' FROM (SELECT * FROM t) s ORDER BY s.id`, int64(1)},
 		{`SELECT coalesce(s.name, $1 COLLATE "C", 'x') = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT coalesce(s.name, (SELECT $1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		{`SELECT coalesce(s.name, (SELECT $1 UNION ALL SELECT NULL LIMIT 1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT CASE WHEN true THEN (SELECT $1) ELSE s.name END = '\x41' FROM (SELECT * FROM t) s`, []byte("A")},
 		{`SELECT coalesce(s.v, 'x') = '01' FROM (SELECT t.*, $1 COLLATE "C" AS v FROM t) s`, int64(1)},
 		{`SELECT coalesce((SELECT $1 COLLATE "C"), 'x') = '01' FROM t`, int64(1)},
