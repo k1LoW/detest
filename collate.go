@@ -586,17 +586,17 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 			for _, f := range sqlir.FuncCalls(e) {
 				switch f.Name {
 				case "coalesce", "greatest", "least", "nullif":
-					if k := db.branchKind(resolvedType(commonType(f.Args, column, nil), f.Args)); k != "" {
+					if k := db.branchKind(resolvedType(typer{column: column, base: db.baseType}.common(f.Args), f.Args)); k != "" {
 						m[f] = k
-					} else if k, _ := numberBranchKind(f.Args, column, nil); k != "" {
+					} else if k, _ := numberBranchKind(f.Args, typer{column: column, base: db.baseType}); k != "" {
 						m[f] = k
 					}
 				}
 			}
 			for _, c := range sqlir.CaseExprs(e) {
-				if k := db.branchKind(resolvedType(expressionType(c, column), caseBranches(c))); k != "" {
+				if k := db.branchKind(resolvedType(typer{column: column, base: db.baseType}.of(c), caseBranches(c))); k != "" {
 					m[c] = k
-				} else if k, _ := numberBranchKind(caseBranches(c), column, nil); k != "" {
+				} else if k, _ := numberBranchKind(caseBranches(c), typer{column: column, base: db.baseType}); k != "" {
 					m[c] = k
 				}
 			}
@@ -715,11 +715,11 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 // of it, as Postgres does when it parses or binds the statement, whichever
 // branch a row takes, or with no rows, and refuses a number beside a branch
 // of another type.
-func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
+func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, t typer) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
-	k, mismatch := numberBranchKind(exprs, column, subquery)
+	k, mismatch := numberBranchKind(exprs, t)
 	if mismatch {
 		return x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
 	}
@@ -778,7 +778,7 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 // boolean as text, which evaluates as false, or return 'bogus' beside a
 // uuid. Converting each other type, with the check of every literal before
 // any row, is the work of a type at a time, so the class is refused.
-func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (err, afterInput error) {
+func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer) (err, afterInput error) {
 	if x.tx.db.kind.InnoDB() {
 		return nil, nil
 	}
@@ -796,7 +796,7 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 			untyped = true
 			continue
 		}
-		typ := expressionTypeIn(e, column, subquery)
+		typ := t.of(e)
 		if untypedBranch(e) {
 			// A CASE or COALESCE of those only is text already.
 			typ = "text"

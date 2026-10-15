@@ -1302,16 +1302,23 @@ func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
 		t.Errorf("a float beside a numeric: got %v, want no error", err)
 	}
 	// A domain is reduced to its base type before the operator resolves,
-	// so 1::tiny + 0 is an integer, which detest does not follow.
+	// so 1::tiny + 0 is an integer and takes 40000, while 1::tiny is a
+	// smallint, which does not.
 	mustExec(t, db, `CREATE DOMAIN tiny AS smallint`)
+	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
 	for _, q := range []string{
 		`SELECT $1 + (1::tiny + 0) WHERE false`,
 		`SELECT $1 + s.n FROM (SELECT 1::tiny + 0 AS n) s WHERE false`,
-		`SELECT $1 + 1::tiny WHERE false`,
 	} {
-		if _, err := db.Exec(q, "40000"); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s: got %v, want unsupported", q, err)
+		if _, err := db.Exec(q, "40000"); err != nil {
+			t.Errorf("%s: got %v, want no error", q, err)
 		}
+	}
+	if _, err := db.Exec(`SELECT $1 + (1::amount + 0::bigint) WHERE false`, "1.5"); err != nil {
+		t.Errorf("beside a numeric domain promoted with a bigint: got %v, want no error", err)
+	}
+	if _, err := db.Exec(`SELECT $1 + 1::tiny WHERE false`, "40000"); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("beside a smallint domain: got %v, want out of range", err)
 	}
 }
 

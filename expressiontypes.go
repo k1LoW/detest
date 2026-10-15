@@ -16,6 +16,38 @@ func expressionType(e sqlir.Expr, column func(*sqlir.ColumnRef) string) string {
 // scalar subquery in its own scope, which expressionType reads in the scope
 // around it.
 func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+	return typer{column: column, subquery: subquery}.of(e)
+}
+
+// commonType is the type Postgres resolves exprs to together, as typer's
+// common does.
+func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+	return typer{column: column, subquery: subquery}.common(exprs)
+}
+
+// typer types expressions as expressionTypeIn does, with base, when given,
+// reducing a domain to its base type where Postgres resolves an operator or
+// a function, so that 1::tiny + 0 over a smallint is an integer rather than
+// a tiny. A cast, a column, a scalar subquery and branches all of one domain
+// keep the domain.
+type typer struct {
+	column   func(*sqlir.ColumnRef) string
+	subquery func(*sqlir.SubQuery) string
+	base     func(string) string
+}
+
+func (t typer) reduce(typ string) string {
+	if t.base == nil {
+		return typ
+	}
+	if b := t.base(typ); b != ambiguousDomain {
+		return b
+	}
+	return ""
+}
+
+func (t typer) of(e sqlir.Expr) string {
+	column, subquery := t.column, t.subquery
 	switch e := e.(type) {
 	case *sqlir.Cast:
 		return e.Type
@@ -25,7 +57,7 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			// CASE or COALESCE of those to text.
 			return "text"
 		}
-		return expressionTypeIn(e.X, column, subquery)
+		return t.of(e.X)
 	case *sqlir.ColumnRef:
 		if column != nil {
 			return column(e)
@@ -47,14 +79,14 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "bool"
 		}
 		if e.Op == "-" {
-			return expressionTypeIn(e.X, column, subquery)
+			return t.reduce(t.of(e.X))
 		}
 	case *sqlir.BinaryExpr:
 		switch e.Op {
 		case "||":
 			return "text"
 		case "+", "-", "*", "/", "%":
-			l, r := expressionTypeIn(e.L, column, subquery), expressionTypeIn(e.R, column, subquery)
+			l, r := t.reduce(t.of(e.L)), t.reduce(t.of(e.R))
 			// A date moved by an interval is a timestamp.
 			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
 				return "timestamp"
@@ -102,7 +134,7 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "int4"
 		case "sum":
 			if len(e.Args) > 0 {
-				switch typ := expressionTypeIn(e.Args[0], column, subquery); typ {
+				switch typ := t.reduce(t.of(e.Args[0])); typ {
 				case "int", "int2", "int4", "integer", "smallint":
 					return "int8"
 				case "int8", "bigint":
@@ -111,8 +143,10 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 					return typ
 				}
 			}
-		case "min", "max", "abs", "coalesce", "greatest", "least":
-			return commonType(e.Args, column, subquery)
+		case "min", "max", "abs":
+			return t.reduce(t.common(e.Args))
+		case "coalesce", "greatest", "least":
+			return t.common(e.Args)
 		case "nullif":
 			// NULLIF returns its first argument as the = it is compared by
 			// takes it: a timestamp compared with a timestamptz, or an
@@ -122,11 +156,11 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			if len(e.Args) == 0 {
 				break
 			}
-			l := expressionTypeIn(e.Args[0], column, subquery)
+			l := t.reduce(t.of(e.Args[0]))
 			if len(e.Args) != 2 {
 				return l
 			}
-			r := expressionTypeIn(e.Args[1], column, subquery)
+			r := t.reduce(t.of(e.Args[1]))
 			if l == "" {
 				return r
 			}
@@ -146,14 +180,14 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		case "lag", "lead":
 			// The value and the default resolve to one type.
 			if args := branchArgs(e); len(args) > 0 {
-				return commonType(args, column, subquery)
+				return t.common(args)
 			}
 			if len(e.Args) > 0 {
-				return expressionTypeIn(e.Args[0], column, subquery)
+				return t.of(e.Args[0])
 			}
 		case "first_value", "last_value":
 			if len(e.Args) > 0 {
-				return expressionTypeIn(e.Args[0], column, subquery)
+				return t.of(e.Args[0])
 			}
 		case "random":
 			return "float8"
@@ -171,7 +205,7 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			// A timestamp's stays a timestamp and an interval's an
 			// interval, and a date's becomes a timestamptz, as any other's.
 			if len(e.Args) == 2 {
-				if typ := expressionTypeIn(e.Args[1], column, subquery); typ == "timestamp" || typ == "interval" {
+				if typ := t.of(e.Args[1]); typ == "timestamp" || typ == "interval" {
 					return typ
 				}
 			}
@@ -180,15 +214,15 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			return "uuid"
 		}
 	case *sqlir.WindowFunc:
-		return expressionTypeIn(e.Func, column, subquery)
+		return t.of(e.Func)
 	case *sqlir.CaseExpr:
-		return commonType(caseBranches(e), column, subquery)
+		return t.common(caseBranches(e))
 	case *sqlir.SubQuery:
 		if subquery != nil {
 			return subquery(e)
 		}
 		if e.Select != nil && len(e.Select.Targets) == 1 {
-			return expressionTypeIn(e.Select.Targets[0].Expr, column, subquery)
+			return t.of(e.Select.Targets[0].Expr)
 		}
 	case *sqlir.Exists, *sqlir.InExpr, *sqlir.ArrayCmp, *sqlir.IsNull:
 		return "bool"
@@ -196,17 +230,31 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	return ""
 }
 
-// commonType is the type Postgres resolves exprs to together, as the
-// arguments of COALESCE or the branches of CASE: the first one known, except
-// that dates and timestamps meet at the widest of them, a timestamptz over a
+// common is the type Postgres resolves exprs to together, as the arguments
+// of COALESCE or the branches of CASE: the first one known, except that
+// dates and timestamps meet at the widest of them, a timestamptz over a
 // timestamp over a date, and numbers at the one the others cast to
 // implicitly, a float8 over a float4 over a numeric over the integers from
 // the widest down.
-func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+func (t typer) common(exprs []sqlir.Expr) string {
+	types := make([]string, len(exprs))
+	// Branches all of one type keep it, a domain included, while branches
+	// of several meet at their base types.
+	same, mixed := "", false
+	for i, e := range exprs {
+		types[i] = t.of(e)
+		if types[i] != "" {
+			mixed = mixed || same != "" && types[i] != same
+			same = types[i]
+		}
+	}
+	if !mixed {
+		return same
+	}
 	first, best := "", ""
 	var rank map[string]int
-	for _, e := range exprs {
-		typ := expressionTypeIn(e, column, subquery)
+	for _, typ := range types {
+		typ = t.reduce(typ)
 		if typ == "" {
 			continue
 		}
@@ -260,7 +308,7 @@ func numberCategory(typ string) int {
 // reports a number beside a branch of a type other than a number, which
 // Postgres fails with 42804 whatever the rows, and detest would run on a
 // row whose values do not show it.
-func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (kind string, mismatch bool) {
+func numberBranchKind(exprs []sqlir.Expr, t typer) (kind string, mismatch bool) {
 	other, unknown := false, false
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil || untypedExpr(e) {
@@ -271,7 +319,7 @@ func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, 
 			other = true
 			continue
 		}
-		typ := expressionTypeIn(e, column, subquery)
+		typ := t.of(e)
 		switch r := numberRank[typ]; {
 		case r >= numberRank["numeric"]:
 			kind = "numeric"
