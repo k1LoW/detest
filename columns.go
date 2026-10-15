@@ -2186,7 +2186,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					c.untypedOperands(sc, e.L, e.R)
 				case "+", "-", "*", "/", "%":
-					if err = c.arithmeticTypes(sc, e.L, e.R); err != nil {
+					if err = c.arithmeticTypes(sc, e.Op, e.L, e.R); err != nil {
 						return
 					}
 					if err = c.arithmeticOperand(sc, e); err != nil {
@@ -2195,7 +2195,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 			case *sqlir.UnaryExpr:
 				if e.Op == "-" {
-					if err = c.arithmeticTypes(sc, e.X); err != nil {
+					if err = c.arithmeticTypes(sc, "-", e.X); err != nil {
 						return
 					}
 				}
@@ -2865,46 +2865,28 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 }
 
 // arithmeticTypes refuses arithmetic over a boolean, a uuid or a
-// character type, for which Postgres has no operator and fails when it
-// plans the statement (42883), while the evaluators check the operands only
-// where a row reaches them. A domain counts as its base type, and a CASE, a
-// COALESCE, a LAG or a LEAD of string literals and NULLs as text, which
-// Postgres resolves it to. No operator takes a boolean or a uuid whatever the other operand
-// is. A character type is refused only beside an operand detest types,
-// since beside a string literal, a parameter, a bare NULL or a type whose
-// operators detest does not list it may be the text of jsonb - text, as in
-// '{}' - s.
-func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) error {
+// character type that Postgres has no operator for and fails when it plans
+// the statement (42883), while the evaluators check the operands only where
+// a row reaches them. operands are the left and the right operand of op, or
+// the one operand of unary minus. A domain counts as its base type, and a
+// CASE, a COALESCE, a LAG or a LEAD of string literals and NULLs as text,
+// which Postgres resolves it to. No operator takes a boolean or a uuid. The
+// only one that takes a character type is jsonb - text, so a character type
+// is refused anywhere but on the right of a binary minus, and there only
+// beside a type detest classifies, which cannot be jsonb, rather than beside
+// a string literal, a parameter, a bare NULL or a type whose operators
+// detest does not list, as in '{}' - s.
+func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sqlir.Expr) error {
 	t := c.typer(sc)
-	text, untyped, unknown := "", false, false
-	for _, o := range operands {
-		if untypedExpr(o) || isNullConst(o) {
-			untyped = true
-			continue
-		}
-		typ := t.reduce(t.of(o))
-		if typ == "" && untypedBranch(o) {
+	untyped := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) }
+	typeOf := func(e sqlir.Expr) string {
+		typ := t.reduce(t.of(e))
+		if typ == "" && untypedBranch(e) {
 			typ = "text"
 		}
-		switch typ {
-		case "bool", "boolean", "uuid":
-			return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", typ))
-		case "text", "varchar", "bpchar", "char", "character varying", "character", "name":
-			if arithmeticExpr(o) {
-				// typer falls back to an operand's type for an operator it
-				// does not resolve, which gives '{}' - s the text of s
-				// rather than jsonb.
-				unknown = true
-			} else {
-				text = typ
-			}
-		default:
-			if valueFamily(typ) == "" && typ != "date" {
-				unknown = true
-			}
-		}
+		return typ
 	}
-	if untyped && len(operands) == 1 {
+	if len(operands) == 1 && untyped(operands[0]) {
 		// Several prefix operators take a number, and Postgres picks
 		// none for an operand of no type (42725), while the run would
 		// negate the value bound. Postgres accepts -$1 when a use it
@@ -2915,24 +2897,29 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 		// that runs.
 		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
 	}
-	if text != "" && !untyped && !unknown {
-		return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", text))
+	for i, o := range operands {
+		if untyped(o) {
+			continue
+		}
+		typ := typeOf(o)
+		switch {
+		case typ == "bool" || typ == "boolean" || typ == "uuid":
+		case collatableType(typ):
+			if len(operands) == 2 && i == 1 && op == "-" {
+				l := operands[0]
+				if untyped(l) {
+					continue
+				}
+				if lt := typeOf(l); valueFamily(lt) == "" && lt != "date" && !collatableType(lt) {
+					continue
+				}
+			}
+		default:
+			continue
+		}
+		return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", typ))
 	}
 	return nil
-}
-
-// arithmeticExpr reports whether e is arithmetic or unary minus.
-func arithmeticExpr(e sqlir.Expr) bool {
-	switch e := e.(type) {
-	case *sqlir.BinaryExpr:
-		switch e.Op {
-		case "+", "-", "*", "/", "%":
-			return true
-		}
-	case *sqlir.UnaryExpr:
-		return e.Op == "-"
-	}
-	return false
 }
 
 // branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,

@@ -44,6 +44,16 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		// Nor beside a type detest does not classify.
 		`SELECT b + '{}'::jsonb FROM t WHERE false`,
 		`SELECT '{}'::jsonb - u FROM t WHERE false`,
+		// The only operator over text is jsonb - text, so text is
+		// refused on the left, beside any other operator, and on the
+		// right beside a type that is not jsonb.
+		`SELECT s + NULL FROM t`,
+		`SELECT s + NULL FROM t WHERE false`,
+		`SELECT NULL + s FROM t WHERE false`,
+		`SELECT s - NULL FROM t WHERE false`,
+		`SELECT s - '{}' FROM t WHERE false`,
+		`SELECT s - '{}'::jsonb FROM t WHERE false`,
+		`SELECT 1 - s FROM t WHERE false`,
 		// Postgres resolves a CASE, a COALESCE, a LAG or a LEAD of literals to
 		// text.
 		`SELECT -coalesce('1', NULL) WHERE false`,
@@ -95,6 +105,9 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		// '{}' - s resolves to jsonb - text.
 		{`SELECT '{}'::jsonb - 'a'::bpchar WHERE false`, nil},
 		{`SELECT ('{}' - s) - 'b'::text FROM t WHERE false`, nil},
+		{`SELECT coalesce('{}' - s, NULL) - 'b'::text FROM t WHERE false`, nil},
+		{`SELECT (SELECT '{}' - s) - 'b'::text FROM t WHERE false`, nil},
+		{`SELECT NULL - s FROM t WHERE false`, nil},
 		{`SELECT '{}'::jsonb - coalesce('a', NULL) WHERE false`, nil},
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {

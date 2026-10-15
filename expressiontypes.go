@@ -70,7 +70,10 @@ func (t typer) of(e sqlir.Expr) string {
 			return "bool"
 		}
 		if e.Op == "-" {
-			return t.reduce(t.of(e.X))
+			if typ := t.reduce(t.of(e.X)); !collatableType(typ) {
+				return typ
+			}
+			return ""
 		}
 	case *sqlir.BinaryExpr:
 		switch e.Op {
@@ -110,10 +113,17 @@ func (t typer) of(e sqlir.Expr) string {
 					return typ
 				}
 			}
-			if l != "" {
-				return l
+			res := l
+			if res == "" {
+				res = r
 			}
-			return r
+			if collatableType(res) {
+				// No arithmetic operator yields a character type, and the
+				// one that takes one, jsonb - text, yields jsonb, as
+				// '{}' - s does.
+				return ""
+			}
+			return res
 		case "=", "<>", "!=", "<", "<=", ">", ">=", "AND", "OR", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
 			return "bool"
 		}

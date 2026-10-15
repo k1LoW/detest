@@ -1001,6 +1001,9 @@ var valueCases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT count(*) FROM (SELECT '{}' - s FROM tj WHERE false) x`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT ('{}' - s) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce('{}' - s, NULL) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT (SELECT '{}' - s) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT NULL - s FROM tj WHERE false) x`),
 		},
 	},
 	{
