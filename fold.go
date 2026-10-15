@@ -610,10 +610,17 @@ func (f *folder) inStrictness(v *sqlir.InExpr, kids []folded) (strictness, error
 		}
 	}
 	if len(array) >= 2 {
+		unsure := false
 		for _, k := range array {
-			if k.c == varies || k.e == nil {
+			if k.c == varies {
 				return notStrict, nil
 			}
+			// An item Postgres may not fold, such as a stable concat,
+			// may keep the array comparison from folding.
+			unsure = unsure || k.c == maybe || k.e == nil
+		}
+		if unsure {
+			return maybeStrict, nil
 		}
 	}
 	return strict, nil

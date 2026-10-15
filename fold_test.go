@@ -81,6 +81,7 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT NULL::int + (SELECT 1 / 0) WHERE false`,
 		`SELECT (SELECT 1 / 0) = 1 AND false`,
 		`SELECT CASE WHEN NULL::int IN (1, (SELECT 2)) THEN 1 / 0 ELSE 0 END WHERE false`,
+		`SELECT CASE WHEN NULL::text IN ('ab', concat('a', 'b'), n::text) THEN 1 / 0 ELSE 0 END FROM t WHERE false`,
 		`SELECT CASE WHEN (NOT 'false', 1) = (true, 1) THEN 0 ELSE 1 / 0 END WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,
