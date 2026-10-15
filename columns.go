@@ -2212,6 +2212,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
 				}
 			case *sqlir.Cast:
+				if expressionTypeIn(e.X, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }) == "void" {
+					// Postgres casts a void value to the empty string,
+					// which is not NULL, while the evaluators hold it as
+					// NULL.
+					err = c.x.unsupported("a cast of a void value, which detest holds as NULL")
+					return
+				}
 				if err = c.literalInput(e); err != nil {
 					return
 				}

@@ -21,6 +21,8 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, NULL), (2, NULL)`)
 	mustExec(t, db, `CREATE VIEW av AS SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) AS v FROM t`)
+	// Creating a view runs no query, so one over av loads.
+	mustExec(t, db, `CREATE VIEW avw AS SELECT v FROM av`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -33,6 +35,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		{`SELECT nextval('sq')`, []string{"3"}},
 		{`SELECT coalesce(sum(n), -1, sum(1 / n)) FROM t`, []string{"0"}},
 		{`SELECT coalesce(0, sum(1 / n)) FROM t`, []string{"0"}},
+		{`SELECT coalesce(n, (SELECT max(g) FROM generate_series(1, 2) g)) FROM t`, []string{"0"}},
 		{`SELECT coalesce(sum(n), coalesce(0, sum(1 / n))) FROM t`, []string{"0"}},
 		{`SELECT coalesce(sum(n), CASE WHEN true THEN 0 ELSE sum(1 / n) END) FROM t`, []string{"0"}},
 	} {
@@ -68,6 +71,9 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		// Postgres resolves every call when it parses the statement.
 		`SELECT coalesce(n, abs(n, n)) FROM t`,
 		`SELECT coalesce(n, nosuchfn(n)) FROM t`,
+		`SELECT coalesce(n, (SELECT abs(n, n)::int)) FROM t`,
+		`SELECT coalesce(n, (SELECT nosuchfn(n)::int)) FROM t`,
+		`SELECT coalesce(pg_advisory_xact_lock(1)::text, pg_advisory_xact_lock(2)::text)`,
 		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
 		`SELECT coalesce(CASE WHEN true THEN pg_advisory_xact_lock(1) END, CASE WHEN true THEN pg_advisory_xact_lock(2) END)`,
 		`SELECT coalesce(l.v, NULL) FROM (SELECT pg_advisory_xact_lock(1) AS v) l`,

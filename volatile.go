@@ -40,8 +40,13 @@ func queryHasEffects(sel *sqlir.SelectStmt) bool {
 // uncorrelated and detest for every row. Elsewhere both evaluate them as
 // often.
 func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
-	if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
-		return err
+	switch stmt.(type) {
+	case *sqlir.SelectStmt, *sqlir.InsertStmt, *sqlir.UpdateStmt, *sqlir.DeleteStmt, *sqlir.CreateTableAsStmt:
+		// Creating a view runs no query, so its views are checked when a
+		// statement that runs it reads them.
+		if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
+			return err
+		}
 	}
 	switch st := stmt.(type) {
 	case *sqlir.CreateTableAsStmt:
