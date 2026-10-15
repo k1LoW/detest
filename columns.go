@@ -1150,13 +1150,9 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		if typ == "" && !untypedExpr(t.Expr) && !isNullConst(t.Expr) {
 			// Postgres resolves a CASE, a COALESCE or an aggregate of
 			// untyped values alone, such as max('1'), to text.
-			ut := c.typer(sc)
-			ut.untypedText = true
-			if ut.of(t.Expr) == "text" {
+			if params, ok := untypedLeaves(t.Expr); ok {
 				typ = "text"
-				if params, ok := untypedLeaves(t.Expr); ok {
-					c.textParams(params)
-				}
+				c.textParams(params)
 			}
 		}
 		textOut := typ == "" && (untypedExpr(t.Expr) || isNullConst(t.Expr))

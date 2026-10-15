@@ -201,6 +201,8 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		`SELECT lag('1') OVER ()`,
 		`SELECT lead(NULL, 1) OVER ()`,
 		`SELECT x.v || 'a' FROM (SELECT first_value('1') OVER () AS v) x WHERE false`,
+		// Postgres has no sum of text (42883).
+		`SELECT x.v || 'x' FROM (SELECT sum(coalesce('1', NULL)) AS v WHERE false) x`,
 		// Text has no assignment cast to an integer (42804).
 		`INSERT INTO t (id, n) SELECT 1, x.v FROM (SELECT '1' AS v) x`,
 		`INSERT INTO t (id, n) SELECT 1, min(NULL) OVER ()`,
