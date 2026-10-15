@@ -119,8 +119,44 @@ func (t typer) of(e sqlir.Expr) string {
 		}
 	case *sqlir.FuncCall:
 		switch e.Name {
-		case "floor", "ceil", "ceiling", "round", "power", "pow", "avg":
-			return "numeric"
+		case "floor", "ceil", "ceiling", "round", "power", "pow":
+			if e.Name == "round" && len(e.Args) == 2 {
+				return "numeric" // round(numeric, int) has no float form
+			}
+			// Postgres has a numeric and a float8 form of each, and takes
+			// the float8 one for an integer, as its preferred number type.
+			kind := ""
+			for _, a := range e.Args {
+				switch typ := t.reduce(t.of(a)); {
+				case numberCategory(typ) == numberCategory("float8"):
+					return "float8"
+				case typ == "numeric" || typ == "decimal":
+					kind = "numeric"
+				case numberRank[typ] > 0:
+					if kind == "" {
+						kind = "float8"
+					}
+				case typ == "":
+					// The form depends on a type the check cannot show.
+					return ""
+				default:
+					kind = "numeric" // no form takes it, which Postgres fails
+				}
+			}
+			return kind
+		case "avg":
+			if len(e.Args) == 0 {
+				break
+			}
+			switch typ := t.reduce(t.of(e.Args[0])); {
+			case numberCategory(typ) == numberCategory("float8"):
+				return "float8"
+			case numberRank[typ] > 0:
+				return "numeric"
+			case typ == "":
+				return ""
+			}
+			return "numeric" // no form takes it, which Postgres fails
 		case "pg_try_advisory_xact_lock":
 			return "bool"
 		case "pg_advisory_xact_lock":

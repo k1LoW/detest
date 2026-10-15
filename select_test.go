@@ -1747,9 +1747,31 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	if err := db.QueryRow(`SELECT 1.5`).Scan(&f); err != nil || f != 1.5 {
 		t.Errorf("a numeric with a fraction into a float64: got %v, %v", f, err)
 	}
-	// A float8 is a float64 in both drivers too.
-	var v any
-	if err := db.QueryRow(`SELECT f FROM t`).Scan(&v); err != nil || v != float64(5000000) {
-		t.Errorf("a float8: got %#v, %v, want a float64", v, err)
+	// A float8 is a float64 in both drivers too, the float8 forms of floor,
+	// round, power and avg included, which Postgres takes for an integer
+	// argument too, and a set operation whose types the check cannot tell.
+	for _, q := range []string{
+		`SELECT f FROM t`,
+		`SELECT floor(f) FROM t`,
+		`SELECT floor(5000000) FROM t`,
+		`SELECT power(f, 1) FROM t`,
+		`SELECT avg(f) FROM t`,
+		`UPDATE t SET f = f RETURNING floor(f)`,
+		`SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`,
+	} {
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
+			t.Errorf("%s: got %#v, %v, want a float64", q, v, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT floor(a) FROM t`,
+		`SELECT avg(b) - 1000000 FROM t`,
+		`SELECT 2000000::numeric UNION ALL SELECT 1::numeric WHERE false`,
+	} {
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
+		}
 	}
 }

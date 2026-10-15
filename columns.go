@@ -136,7 +136,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 			for first.SetOp != "" && first.Larg != nil {
 				first = first.Larg
 			}
-			x.selectTypes, x.selectNamed = c.setOpTypes(st), c.outNamed[first]
+			if st.SetOp == "" {
+				x.selectTypes, x.selectNamed = c.setOpTypes(st), c.outNamed[first]
+			} else if c.leavesTyped(st) {
+				// setOpTypes fills a query of unknown types from the other
+				// one's, which the readers of input go by but the output
+				// cannot, as the pair may meet at another type.
+				x.selectTypes = c.setOpTypes(st)
+			}
 		}
 	case *sqlir.InsertStmt:
 		err = c.insert(st)
@@ -1041,6 +1048,19 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
+}
+
+// leavesTyped reports whether every query of the set operation sel has its
+// output types by position.
+func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
+	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
+		return c.leavesTyped(sel.Larg) && c.leavesTyped(sel.Rarg)
+	}
+	if len(sel.Values) > 0 {
+		return true
+	}
+	_, ok := c.outTypes[sel]
+	return ok
 }
 
 // starColumns are the types of the columns the * t of sel gives, in order,
