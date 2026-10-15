@@ -2372,6 +2372,11 @@ func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) err
 		a, b = b, a
 	}
 	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
+	if typ == ambiguousDomain {
+		// Postgres reads the input by the base type of the domain the
+		// search path finds, which detest does not tell apart.
+		return c.x.unsupported("a string literal or parameter in arithmetic beside " + ambiguousDomain)
+	}
 	if numberRank[typ] == 0 || e.Op == "%" && numberRank[typ] > numberRank["numeric"] {
 		// Postgres has no % of floats, so it does not take the
 		// operand's type there.

@@ -1326,6 +1326,13 @@ func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`SELECT * FROM generate_series(NULL::big + 0, $1)`, int64(3000000000)); err != nil {
 		t.Errorf("generate_series beside a bigint domain: got %v, want no error", err)
 	}
+	// Two schemas' domains of one name and other base types are one name
+	// to detest, which cannot tell which base type the input is read by.
+	mustExec(t, db, `CREATE SCHEMA other`)
+	mustExec(t, db, `CREATE DOMAIN other.amount AS bigint`)
+	if _, err := db.Exec(`SELECT $1 + (1::amount + 0) WHERE false`, "1.5"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("beside an ambiguous domain: got %v, want unsupported", err)
+	}
 }
 
 // Postgres compares rows pair by pair: an ordering by the first pair that is

@@ -40,10 +40,7 @@ func (t typer) reduce(typ string) string {
 	if t.base == nil {
 		return typ
 	}
-	if b := t.base(typ); b != ambiguousDomain {
-		return b
-	}
-	return ""
+	return t.base(typ)
 }
 
 func (t typer) of(e sqlir.Expr) string {
@@ -87,6 +84,12 @@ func (t typer) of(e sqlir.Expr) string {
 			return "text"
 		case "+", "-", "*", "/", "%":
 			l, r := t.reduce(t.of(e.L)), t.reduce(t.of(e.R))
+			if l == ambiguousDomain || r == ambiguousDomain {
+				// The operator depends on which of the domains it is,
+				// which the fallbacks below would guess from the other
+				// operand.
+				return ambiguousDomain
+			}
 			// A date moved by an interval is a timestamp.
 			if l == "date" && r == "interval" && (e.Op == "+" || e.Op == "-") || l == "interval" && r == "date" && e.Op == "+" {
 				return "timestamp"
