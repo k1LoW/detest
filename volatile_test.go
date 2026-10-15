@@ -139,6 +139,13 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		// Whether it computes a subquery for a row past LIMIT depends on
 		// its plan.
 		`SELECT id, (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY id LIMIT 1`,
+		// A write reads a derived table or a view of its FROM or USING as
+		// far as its join asks, which only the shape of a CTE there
+		// leaves to no plan.
+		`DELETE FROM u USING (SELECT nextval('sq') AS v) s WHERE u.id = s.v`,
+		`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id < s.id`,
+		`UPDATE u SET n = 1 FROM (SELECT id FROM u FOR UPDATE) s, sv WHERE u.id = s.id`,
+		`UPDATE u SET n = 1 FROM sv WHERE u.id > 0`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -154,6 +161,7 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		{`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b ORDER BY v`, []string{"7", "8"}},
 		{`SELECT nextval('sq') FROM u UNION ALL SELECT 1`, []string{"9", "10", "1"}},
 		{`SELECT nextval('sq')`, []string{"11"}},
+		{`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id RETURNING u.n`, []string{"12", "13"}},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)

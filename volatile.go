@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"reflect"
@@ -86,6 +87,9 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		if err := x.rowSequenceCalls(assignedValues(st.Set)); err != nil {
 			return err
 		}
+		if err := x.writeItems(st.With, st.From, st.Table, st.Alias, st.Where); err != nil {
+			return err
+		}
 		if err := x.rowSequenceCalls([]any{st.From, st.OrderBy, st.Limit}); err != nil {
 			return err
 		}
@@ -97,6 +101,9 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		body := *st
 		body.With = nil
 		if err := x.cteSequenceCalls(st.With, &body); err != nil {
+			return err
+		}
+		if err := x.writeItems(st.With, st.Using, st.Table, st.Alias, st.Where); err != nil {
 			return err
 		}
 		if err := x.rowSequenceCalls([]any{st.Using, st.OrderBy, st.Limit}); err != nil {
@@ -296,6 +303,46 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// writeItems refuses a derived table or a view of a write's FROM or USING
+// that locks rows or has effects, unless it has the shape partlyRunItem
+// lets through, as Postgres reads it on demand like a CTE there, which
+// writeWith checks.
+func (x *sqlExec) writeItems(with []sqlir.CTE, items []sqlir.TableRef, target, alias string, where sqlir.Expr) error {
+	ctes := map[string]*sqlir.SelectStmt{}
+	for _, c := range with {
+		ctes[c.Name] = c.Select
+	}
+	isCTE := func(name string) bool { return ctes[name] != nil }
+	for _, t := range items {
+		if t.Lateral || t.Func != nil {
+			continue
+		}
+		sel, cols, what := t.Sub, t.Columns, "a derived table"
+		if sel == nil {
+			v := x.tx.db.views[x.tx.db.resolve(t.Name)]
+			if isCTE(t.Name) || v == nil || v.View == nil {
+				continue
+			}
+			sel, cols, what = v.View, v.ViewColumns, fmt.Sprintf("view %q", t.Name)
+		}
+		if !x.effectfulQuery(sel, ctes, map[string]bool{}) {
+			continue
+		}
+		names := outputNames(sel)
+		if len(cols) > 0 {
+			names = renamedCols(names, cols)
+			if len(names) < len(cols) {
+				names = cols
+			}
+		}
+		itemAlias := cmp.Or(t.Alias, t.Name)
+		if why := x.partlyRunItem(sel, isCTE, itemAlias, namesSet(names), items, target, targetAlias(target, alias), where); why != "" {
+			return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, %s", what, why))
 		}
 	}
 	return nil
