@@ -733,15 +733,12 @@ var cases = []difftest.Case{
 		},
 	},
 	{
-		Name:   "a subquery reading a CTE of a correlated subquery runs for each row",
+		Name:   "a subquery reading a constant CTE of a correlated subquery",
 		Schema: []string{`CREATE TABLE u (id int PRIMARY KEY)`},
 		Seed:   []string{`INSERT INTO u VALUES (1), (2)`},
 		Conns:  1,
 		Steps: []difftest.Step{
-			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v) SELECT (SELECT v FROM c)) FROM u ORDER BY u.id`),
-			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v), d AS (SELECT v FROM c) SELECT (SELECT v FROM d)) FROM u ORDER BY u.id`),
 			difftest.Q(0, `SELECT (WITH c AS (SELECT 5 AS v) SELECT (SELECT v FROM c) + u.id) FROM u ORDER BY u.id`),
-			difftest.Q(0, `SELECT (WITH c AS (SELECT u.id AS v) SELECT (WITH c AS (SELECT v FROM c) SELECT v FROM c)) FROM u ORDER BY u.id`),
 		},
 	},
 }

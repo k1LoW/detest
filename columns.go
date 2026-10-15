@@ -126,9 +126,6 @@ type columnChecker struct {
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
-	// cteOwners are the queries declaring each level of cteDefs, nil for
-	// a write's.
-	cteOwners []*sqlir.SelectStmt
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -497,7 +494,6 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			alias = relname(t.Name)
 		}
 		cols = c.tableColumns(t.Name)
-		c.noteCTERead(t.Name)
 	}
 	if len(t.Columns) > 0 && t.Func == nil {
 		// AS alias(a, b) renames the first columns, which needs them in
@@ -760,16 +756,10 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
 	c.cteDefs = append(c.cteDefs, dm)
-	var owner *sqlir.SelectStmt
-	if len(c.queries) > 0 {
-		owner = c.queries[len(c.queries)-1]
-	}
-	c.cteOwners = append(c.cteOwners, owner)
 	pop = func() {
 		c.ctes = c.ctes[:len(c.ctes)-1]
 		c.cteTypes = c.cteTypes[:len(c.cteTypes)-1]
 		c.cteDefs = c.cteDefs[:len(c.cteDefs)-1]
-		c.cteOwners = c.cteOwners[:len(c.cteOwners)-1]
 	}
 	for _, cte := range with {
 		dm[cte.Name] = cte.Select
@@ -777,6 +767,16 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 		if err != nil {
 			pop()
 			return nil, err
+		}
+		if outer != nil && c.correlated[cte.Select] {
+			// Whether Postgres runs the subquery declaring such a CTE once
+			// or for each row depends on whether it plans the CTE, which
+			// it skips when nothing reads it and inlines or materializes
+			// by its references, MATERIALIZED and volatility. detest does
+			// not model that planning, so it refuses the CTE rather than
+			// run the subquery either way on a guess.
+			pop()
+			return nil, c.x.unsupported(fmt.Sprintf("CTE %q reading a column of a query around the one declaring it", cte.Name))
 		}
 		m[cte.Name] = s
 		tm[cte.Name] = c.derivedTypes(cte.Select, nil)
@@ -2031,28 +2031,6 @@ func (c *columnChecker) markCorrelated(found bool, owner *sqlir.SelectStmt) {
 			return
 		}
 		c.correlated[q] = true
-	}
-}
-
-// noteCTERead marks the queries being checked inside the one declaring the
-// CTE name when the CTE's own query reads a column around that one. Each
-// run of the declaring query computes the CTE anew, so a subquery reading
-// it gives each run its own rows even though it reads no outer column
-// itself.
-func (c *columnChecker) noteCTERead(name string) {
-	if len(c.cteDefs) != len(c.cteOwners) || len(c.ctes) != len(c.cteDefs) {
-		return
-	}
-	// ctes holds a CTE once its query is checked, cteDefs from before, so
-	// a CTE whose own query reads one of its name finds the outer one.
-	for i, m := range slices.Backward(c.ctes) {
-		if _, ok := m[name]; !ok {
-			continue
-		}
-		if def := c.cteDefs[i][name]; c.correlated[def] {
-			c.markCorrelated(c.cteOwners[i] != nil, c.cteOwners[i])
-		}
-		return
 	}
 }
 

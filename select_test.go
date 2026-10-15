@@ -1697,3 +1697,32 @@ func TestInsertColumnChecks(t *testing.T) {
 	}
 	mustExec(t, db, `WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 6, x FROM c RETURNING id`)
 }
+
+func TestCorrelatedCTEInSubqueryUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, v int)`)
+	for _, q := range []string{
+		`SELECT (WITH c AS (SELECT u.id AS v) SELECT (SELECT v FROM c)) FROM u`,
+		`SELECT (WITH c AS (SELECT u.id AS v), d AS (SELECT v FROM c) SELECT (SELECT v FROM d)) FROM u`,
+		`SELECT (WITH c AS (SELECT u.id AS v) SELECT (WITH c AS (SELECT v FROM c) SELECT v FROM c)) FROM u`,
+		`SELECT (WITH unused AS (SELECT u.id) SELECT v FROM t WHERE id = 1) FROM u`,
+		`SELECT (WITH a AS (SELECT u.id), unused AS (SELECT * FROM a) SELECT v FROM t WHERE id = 1) FROM u`,
+		`SELECT id FROM u WHERE EXISTS (WITH c AS (SELECT 1 FROM t WHERE t.id = u.id) SELECT 1 FROM c)`,
+		`UPDATE u SET id = id WHERE id = (WITH c AS (SELECT u.id AS v) SELECT v FROM c)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) || !strings.Contains(err.Error(), "reading a column of a query around") {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL for the CTE", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT (WITH c AS (SELECT 5 AS v) SELECT (SELECT v FROM c) + u.id) FROM u`,
+		`SELECT (WITH c AS (SELECT v FROM t WHERE id = 1) SELECT v FROM c) FROM u`,
+		`WITH c AS (SELECT id FROM u) SELECT (SELECT count(*) FROM c WHERE c.id = u.id) FROM u`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
