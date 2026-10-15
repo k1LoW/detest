@@ -711,6 +711,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT (SELECT count(*) FROM u WHERE u.m > t.n) FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT (SELECT sum(m) FROM u) FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT (SELECT sum(t.n) OVER () FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(k) FROM generate_series(1, 2) WITH ORDINALITY AS g(k, ord)) FROM t ORDER BY id`),
 		},
 	},
 }

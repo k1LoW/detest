@@ -1941,44 +1941,49 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	return nil, false
 }
 
-// outerAggregate reports an aggregate whose arguments read columns, all of
-// them of a query outside sc's, which Postgres makes an aggregate of the
-// innermost such query (agglevelsup). A column whose query is not known,
-// as an item of unknown columns may have it, is taken as sc's.
+// outerAggregate reports an aggregate whose arguments read columns, none
+// of them surely of sc's own query, which Postgres may make an aggregate of
+// an outer query (agglevelsup).
 func outerAggregate(f *sqlir.FuncCall, sc *colScope) bool {
 	refs := sqlir.BlockColumnRefs(f)
 	if len(refs) == 0 {
 		return false
 	}
-	for _, r := range refs {
-		if level(r, sc) == 0 {
+	return !slices.ContainsFunc(refs, func(r *sqlir.ColumnRef) bool { return ownColumn(r, sc) })
+}
+
+// ownColumn reports a column that resolves in sc's own query, or in no
+// query, which resolve reports. An unqualified column an item of unknown
+// columns in sc may have is sc's only where no outer query may have it
+// too, as the item may lack it and Postgres would then take the outer one.
+func ownColumn(r *sqlir.ColumnRef, sc *colScope) bool {
+	if r.Table != "" {
+		for s := sc; s != nil; s = s.outer {
+			if _, ok := s.items[r.Table]; ok || r.Table == "excluded" && s.hasExcluded {
+				return s == sc
+			}
+		}
+		return true
+	}
+	may := func(s *colScope) (has, unknown bool) {
+		for _, cols := range s.items {
+			if cols == nil {
+				unknown = true
+			} else if h, _ := cols.has(r.Column); h {
+				has = true
+			}
+		}
+		return has, unknown
+	}
+	if has, _ := may(sc); has {
+		return true
+	}
+	for s := sc.outer; s != nil; s = s.outer {
+		if h, u := may(s); h || u {
 			return false
 		}
 	}
 	return true
-}
-
-// level is the number of queries out from sc the column r resolves in, 0
-// for sc's own or one not found.
-func level(r *sqlir.ColumnRef, sc *colScope) int {
-	n := 0
-	for s := sc; s != nil; s, n = s.outer, n+1 {
-		if r.Table != "" {
-			if _, ok := s.items[r.Table]; ok || r.Table == "excluded" && s.hasExcluded {
-				return n
-			}
-			continue
-		}
-		for _, cols := range s.items {
-			if cols == nil {
-				return n
-			}
-			if has, _ := cols.has(r.Column); has {
-				return n
-			}
-		}
-	}
-	return 0
 }
 
 // resolve reports a column reference no FROM item in scope has.
@@ -2170,7 +2175,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					// only outer columns in the outer query, which then
 					// aggregates, while the evaluators compute it over the
 					// subquery's rows.
-					err = c.x.unsupported("an aggregate of only outer columns in a subquery, which Postgres computes in the outer query")
+					err = c.x.unsupported("an aggregate in a subquery of no column surely the subquery's, which Postgres may compute in the outer query")
 					return
 				}
 				if what := textArgumentMismatch(e, sc.columnType); what != "" {
