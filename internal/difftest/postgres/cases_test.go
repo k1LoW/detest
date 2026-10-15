@@ -678,6 +678,14 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(id, nextval('sq')) FROM t WHERE id = 1`),
 			difftest.Q(0, `SELECT nextval('sq')`),
 			difftest.Q(0, `SELECT coalesce(NULL, nextval('sq'))`),
+			// Postgres folds an argument of constants when it plans the
+			// statement, up to the first one that is not NULL, and
+			// computes the aggregates before COALESCE picks among them.
+			difftest.Q(0, `SELECT coalesce(n, 1 / 0) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(n, NULL, -1, 1 / 0) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(sum(n), sum(1 / n)) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(sum(n), max(nextval('sq'))) FROM t`),
+			difftest.Q(0, `SELECT nextval('sq')`),
 			// The fallback's row lock is not taken, so the row locked by
 			// the other transaction does not block the statement.
 			difftest.S(1, `BEGIN`),

@@ -1314,6 +1314,16 @@ type aggEnv struct {
 	x    *sqlExec
 }
 
+// isAggregateCall reports a call of an aggregate itself, not of a function
+// over one.
+func isAggregateCall(f *sqlir.FuncCall) bool {
+	switch f.Name {
+	case "count", "sum", "min", "max", "avg":
+		return true
+	}
+	return sqlir.OtherAggregates[f.Name]
+}
+
 func hasAggregate(e sqlir.Expr) bool {
 	switch v := e.(type) {
 	case nil:
@@ -1435,7 +1445,19 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.checkArity(v); err != nil {
 			return nil, err
 		}
-		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.evalAgg(a, g) })
+		// Postgres computes the aggregates of the query block before any
+		// expression over them, so those of an argument COALESCE does not
+		// reach still fail or run their effects.
+		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.evalAgg(a, g) }, func(a sqlir.Expr) error {
+			for _, f := range sqlir.BlockFuncCalls(a) {
+				if isAggregateCall(f) {
+					if _, err := x.evalAgg(f, g); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, err
 		}
