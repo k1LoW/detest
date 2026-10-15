@@ -569,11 +569,19 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 
 // execCreateTableAs declares the table, without keys, and fills it with the
 // query's rows.
+// relationExists reports a table, a view, a sequence or an index named
+// name.
+func (x *sqlExec) relationExists(name string) bool {
+	db := x.tx.db
+	_, isView := db.views[db.resolve(name)]
+	_, isSeq := db.seqDefs[sequenceName(db.resolve(name))]
+	_, isTable := db.defs[db.resolve(name)]
+	return isTable || isView || isSeq || db.isIndex(db.resolve(name))
+}
+
 func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, error) {
 	db := x.tx.db
-	_, isView := db.views[db.resolve(st.Table)]
-	_, isSeq := db.seqDefs[sequenceName(db.resolve(st.Table))]
-	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq || db.isIndex(db.resolve(st.Table))) && st.IfNotExists {
+	if st.IfNotExists && x.relationExists(st.Table) {
 		// Postgres leaves the table as it is, without running the query.
 		return &sqlResult{}, nil
 	}

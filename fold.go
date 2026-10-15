@@ -24,8 +24,13 @@ func (x *sqlExec) foldConstants(stmt sqlir.Statement) error {
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
 		return f.query(st)
-	case *sqlir.InsertStmt, *sqlir.CreateTableAsStmt:
+	case *sqlir.InsertStmt:
 		return f.node(reflect.ValueOf(st))
+	case *sqlir.CreateTableAsStmt:
+		if st.NoData || st.IfNotExists && x.relationExists(st.Table) {
+			return nil // Postgres does not plan the query
+		}
+		return f.query(st.Select)
 	case *sqlir.UpdateStmt:
 		body := *st
 		body.With = nil
@@ -44,8 +49,8 @@ type folder struct {
 	// ctes are the names of the CTEs in scope, which hide a view of the
 	// same name.
 	ctes map[string]bool
-	// doubt counts the branches being folded that Postgres keeps or drops
-	// depending on whether it folds a constant detest cannot tell it folds.
+	// doubt counts the parts being folded that Postgres may drop before it
+	// folds them, by what detest does not model.
 	doubt int
 }
 
@@ -59,15 +64,18 @@ const (
 	// maybe is a constant whose folding depends on what detest does not
 	// model, the volatility of an operator, a cast or a function that
 	// Postgres picks by the operand types, such as timestamptz + interval,
-	// which is stable, against timestamp + interval, which is immutable.
+	// which is stable, against timestamp + interval, which is immutable,
+	// or the strictness of a function detest does not list.
 	maybe
 )
 
-// folded is an expression after folding. e is an expression of constants
-// with its value, which a reduced AND, OR, CASE or COALESCE stands in for
-// with the part Postgres reduces it to, so that evaluating it never runs a
-// part Postgres drops, such as a nextval. It is nil for varies, and for a
-// maybe whose value detest cannot compute.
+// folded is an expression after folding, with the value Postgres folds it
+// to when hasVal is set. e is the expression itself when detest can
+// evaluate it for that value, which it cannot when the expression holds
+// anything but constants, even in a part Postgres drops, as evaluating it
+// would run that part, a nextval say. A rebuilt expression would not do
+// instead, as the column check keys the types it resolves, such as a
+// division's or a CASE's, by the expression.
 type folded struct {
 	c      constness
 	e      sqlir.Expr
@@ -75,7 +83,9 @@ type folded struct {
 	hasVal bool
 }
 
-const foldDoubt = "an expression of constants that may fail when Postgres plans the statement, depending on whether it folds a constant detest cannot tell it folds"
+func (r folded) null() bool { return r.c != varies && r.hasVal && derefValue(r.val) == nil }
+
+const foldDoubt = "an expression of constants that may fail when Postgres plans the statement, where whether it does depends on what detest does not model"
 
 // node folds the expressions under v, a statement or a part of one.
 func (f *folder) node(v reflect.Value) error {
@@ -130,7 +140,7 @@ func (f *folder) tableRef(t sqlir.TableRef) error {
 		return nil
 	}
 	if t.Sub != nil {
-		return f.query(t.Sub)
+		return f.derived(t.Sub)
 	}
 	if t.Name == "" || (!strings.Contains(t.Name, ".") && f.ctes[t.Name]) {
 		return nil
@@ -146,7 +156,7 @@ func (f *folder) tableRef(t sqlir.TableRef) error {
 	outer := f.ctes
 	f.ctes = nil
 	defer func() { f.ctes = outer }()
-	return f.query(vw.View)
+	return f.derived(vw.View)
 }
 
 // query folds a query.
@@ -156,6 +166,32 @@ func (f *folder) query(sel *sqlir.SelectStmt) error {
 	return f.with(sel.With, &body, func() error { return f.node(reflect.ValueOf(&body).Elem()) })
 }
 
+// derived folds the query of a table in FROM, a view or a CTE, whose
+// select list is folded in doubt. Postgres removes the outputs the query
+// around it does not read before it plans it, and which those are depends
+// on how it reads them, whether it inlines the query, and how many times
+// a CTE is read, which detest does not model.
+func (f *folder) derived(sel *sqlir.SelectStmt) error {
+	body := *sel
+	body.With = nil
+	return f.with(sel.With, &body, func() error {
+		rest := body
+		rest.Targets = nil
+		rest.Larg, rest.Rarg = nil, nil
+		if err := f.node(reflect.ValueOf(&rest).Elem()); err != nil {
+			return err
+		}
+		if sel.SetOp != "" {
+			if err := f.derived(sel.Larg); err != nil {
+				return err
+			}
+			return f.derived(sel.Rarg)
+		}
+		defer f.enter()()
+		return f.node(reflect.ValueOf(sel.Targets))
+	})
+}
+
 // with folds the CTEs of with that body reads, leaving out the others,
 // which Postgres drops before it plans the statement, and then body, in
 // the scope of with.
@@ -163,27 +199,28 @@ func (f *folder) with(with []sqlir.CTE, body any, fold func() error) error {
 	read := reachableWith(with, body)
 	outer := f.ctes
 	defer func() { f.ctes = outer }()
-	scope := func(n int) map[string]bool {
-		m := maps.Clone(outer)
-		if m == nil {
-			m = map[string]bool{}
-		}
-		for _, c := range with[:n] {
-			m[c.Name] = true
-		}
-		return m
-	}
 	for i, c := range with {
 		if read[c.Name] {
 			// A CTE sees the ones declared before it.
-			f.ctes = scope(i)
-			if err := f.query(c.Select); err != nil {
+			f.ctes = scopeWith(outer, with[:i])
+			if err := f.derived(c.Select); err != nil {
 				return err
 			}
 		}
 	}
-	f.ctes = scope(len(with))
+	f.ctes = scopeWith(outer, with)
 	return fold()
+}
+
+func scopeWith(outer map[string]bool, with []sqlir.CTE) map[string]bool {
+	m := maps.Clone(outer)
+	if m == nil {
+		m = map[string]bool{}
+	}
+	for _, c := range with {
+		m[c.Name] = true
+	}
+	return m
 }
 
 // exists folds the query of an EXISTS, whose select list, GROUP BY,
@@ -200,48 +237,52 @@ func (f *folder) exists(sel *sqlir.SelectStmt) error {
 		return f.query(&s)
 	}
 	// Postgres folds the LIMIT to tell, keeping the query whole for one
-	// that is not a constant or is not positive.
-	body := *sel
-	body.With = nil
-	return f.with(sel.With, &body, func() error {
-		r, err := f.expr(sel.Limit)
-		if err != nil {
-			return err
+	// that is not a constant or is not positive. The CTEs are folded after
+	// that, as the select list it drops may be what reads one.
+	outer := f.ctes
+	f.ctes = scopeWith(outer, sel.With)
+	r, err := f.expr(sel.Limit)
+	f.ctes = outer
+	if err != nil {
+		return err
+	}
+	n, isInt := derefValue(r.val).(int64)
+	switch {
+	case r.c == varies:
+		return f.query(sel)
+	case r.c == fixed && r.null():
+		return f.query(&s)
+	case r.c == fixed && isInt:
+		if n > 0 {
+			return f.query(&s)
 		}
-		if r.c == varies {
-			return f.node(reflect.ValueOf(&body).Elem())
-		}
-		s.With = nil
-		if err := f.node(reflect.ValueOf(&s).Elem()); err != nil {
-			return err
-		}
-		n, isInt := derefValue(r.val).(int64)
-		if r.c == fixed && r.hasVal && (r.val == nil || isInt && n > 0) {
-			return nil
-		}
-		if r.c == maybe || !isInt && r.val != nil {
-			f.doubt++
-			defer func() { f.doubt-- }()
-		}
-		return f.node(reflect.ValueOf(&body).Elem())
-	})
+		return f.query(sel)
+	}
+	if err := f.query(&s); err != nil {
+		return err
+	}
+	defer f.enter()()
+	return f.query(sel)
 }
 
 // existsNeedsTargets reports an aggregate, a window function or a
-// set-returning function in the select list of an EXISTS, which keeps
-// Postgres from dropping the list.
+// set-returning function in the query block of an EXISTS, which keeps
+// Postgres from dropping its select list.
 func existsNeedsTargets(sel *sqlir.SelectStmt) bool {
+	if len(windowsOf(sel)) > 0 || orderOnlyAggregate(sel) {
+		return true
+	}
 	for _, t := range sel.Targets {
-		if hasAggregate(t.Expr) || len(sqlir.WindowFuncs(t.Expr)) > 0 {
+		if hasAggregate(t.Expr) {
 			return true
 		}
-		for _, c := range sqlir.FuncCalls(t.Expr) {
+		for _, c := range sqlir.BlockFuncCalls(t.Expr) {
 			if c.Name == "generate_series" || c.Name == "unnest" {
 				return true
 			}
 		}
 	}
-	return orderOnlyAggregate(sel)
+	return false
 }
 
 // expr folds e. A branch Postgres drops because of a constant before it,
@@ -272,33 +313,35 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 			// stable, as it calls the operand's output function.
 			c = maybe
 		}
-		return f.apply(kids, c, func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.BinaryExpr{Op: v.Op, L: es[0], R: es[1]}
-		})
+		return f.apply(v, kids, c, strict)
 	case *sqlir.UnaryExpr:
 		kids, err := f.exprs(v.X)
 		if err != nil {
 			return folded{}, err
 		}
-		return f.apply(kids, plainOperands(kids...), func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.UnaryExpr{Op: v.Op, X: es[0]}
-		})
+		if b, ok := derefValue(kids[0].val).(bool); ok && kids[0].c != varies && kids[0].e == nil && v.Op == "NOT" {
+			// A reduced AND or OR detest cannot evaluate, whose value it
+			// knows.
+			return folded{c: kids[0].c, val: !b, hasVal: true}, nil
+		}
+		return f.apply(v, kids, plainOperands(kids...), strict)
 	case *sqlir.IsNull:
 		kids, err := f.exprs(v.X)
 		if err != nil {
 			return folded{}, err
 		}
-		return f.apply(kids, fixed, func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.IsNull{X: es[0], Not: v.Not}
-		})
+		if k := kids[0]; k.c != varies && k.e == nil && k.hasVal {
+			// An operand detest cannot evaluate, whose value it knows to
+			// be NULL or a boolean.
+			return folded{c: k.c, val: k.null() != v.Not, hasVal: true}, nil
+		}
+		return f.apply(v, kids, fixed, notStrict)
 	case *sqlir.Collate:
 		kids, err := f.exprs(v.X)
 		if err != nil {
 			return folded{}, err
 		}
-		return f.apply(kids, fixed, func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.Collate{X: es[0], Name: v.Name}
-		})
+		return f.apply(v, kids, fixed, strict)
 	case *sqlir.Cast:
 		kids, err := f.exprs(v.X)
 		if err != nil {
@@ -314,9 +357,7 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 				c = maybe
 			}
 		}
-		return f.apply(kids, c, func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.Cast{X: es[0], Type: v.Type, Len: v.Len}
-		})
+		return f.apply(v, kids, c, strict)
 	case *sqlir.InExpr:
 		if v.Sub != nil {
 			if _, err := f.expr(v.X); err != nil {
@@ -328,17 +369,21 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		if err != nil {
 			return folded{}, err
 		}
-		return f.apply(kids, plainOperands(kids...), func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.InExpr{X: es[0], List: es[1:], Not: v.Not}
-		})
+		s := notStrict
+		if kids[0].null() {
+			// Postgres compares the left operand with the list by =, each
+			// of which a NULL reduces to NULL. A NULL in the list reduces
+			// nothing, as Postgres compares the constants of the list in
+			// one array.
+			s = strict
+		}
+		return f.apply(v, kids, plainOperands(kids...), s)
 	case *sqlir.ArrayCmp:
 		kids, err := f.exprs(v.X, v.Array)
 		if err != nil {
 			return folded{}, err
 		}
-		return f.apply(kids, plainOperands(kids...), func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.ArrayCmp{X: es[0], Array: es[1], ElemType: v.ElemType, All: v.All}
-		})
+		return f.apply(v, kids, plainOperands(kids...), notStrict)
 	case *sqlir.RowExpr:
 		kids, err := f.exprs(v.Items...)
 		if err != nil {
@@ -348,17 +393,14 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 			if k.c == varies {
 				return folded{}, nil
 			}
-			if k.e == nil {
-				return folded{c: maybe}, nil
-			}
 		}
-		// A row has no value of its own to evaluate; the comparison
+		// A row has no value of its own to evaluate, so the comparison
 		// around it is evaluated instead.
-		items := make([]sqlir.Expr, len(kids))
-		for i, k := range kids {
-			items[i] = k.e
+		r := folded{c: maybe}
+		if pure(v) {
+			r.e = v
 		}
-		return folded{c: maybe, e: &sqlir.RowExpr{Items: items}}, nil
+		return r, nil
 	case *sqlir.CaseExpr:
 		return f.caseExpr(v)
 	case *sqlir.FuncCall:
@@ -390,34 +432,58 @@ func (f *folder) exprs(es ...sqlir.Expr) ([]folded, error) {
 	return out, nil
 }
 
-// apply folds an expression whose operands are kids. When every one is a
-// constant, it evaluates the expression build makes of their expressions,
-// as c, or as maybe when an operand is one.
-func (f *folder) apply(kids []folded, c constness, build func([]sqlir.Expr) sqlir.Expr) (folded, error) {
+// strictness is whether an expression is NULL whenever an operand is,
+// which Postgres folds to NULL without the other operands being constants.
+type strictness int
+
+const (
+	notStrict strictness = iota
+	strict
+	maybeStrict // a function detest does not list
+)
+
+// apply folds e, whose operands are kids. When every one is a constant, it
+// evaluates e as c, or as maybe when an operand is one.
+func (f *folder) apply(e sqlir.Expr, kids []folded, c constness, s strictness) (folded, error) {
+	constant := true
+	for _, k := range kids {
+		if k.c == varies || k.e == nil {
+			constant = false
+		}
+	}
+	if !constant && s != notStrict {
+		for _, k := range kids {
+			if k.null() {
+				r := folded{c: k.c, hasVal: true}
+				if s == maybeStrict {
+					r.c = maybe
+				}
+				return r, nil
+			}
+		}
+	}
 	for _, k := range kids {
 		if k.c == varies {
 			return folded{}, nil
 		}
 	}
-	es := make([]sqlir.Expr, len(kids))
-	for i, k := range kids {
+	for _, k := range kids {
 		if k.c == maybe {
 			c = maybe
 		}
 		if k.e == nil {
-			// The operand may be a constant whose value detest does not
-			// know, so whether this one fails folding is not known either.
+			// An operand is a constant detest cannot evaluate, so whether
+			// this one fails folding is not known.
 			return folded{}, f.x.unsupported(foldDoubt)
 		}
-		es[i] = k.e
 	}
-	return f.eval(build(es), c)
+	return f.eval(e, c)
 }
 
 // eval evaluates e, an expression of constants, for the error Postgres
 // raises folding it. One detest does not evaluate is refused, as whether
 // Postgres fails folding it is not known, and so is any error from a
-// constant Postgres may not fold or in a branch it may drop.
+// constant Postgres may not fold or in a part it may drop.
 func (f *folder) eval(e sqlir.Expr, c constness) (folded, error) {
 	// evalRaw, as a quotient that repeats is a range here that the
 	// expression around it may still compare exactly.
@@ -432,6 +498,26 @@ func (f *folder) eval(e sqlir.Expr, c constness) (folded, error) {
 		return folded{}, err
 	}
 	return folded{c: c, e: e, val: v, hasVal: true}, nil
+}
+
+// reduced is r, the part Postgres reduces e to, as e, path being the
+// parts of e the evaluators read to reach that part, in order. e is
+// evaluated as a whole, so that the type it resolves, such as numeric for
+// CASE WHEN true THEN 1 ELSE 1.5 END, is kept. The evaluators stop where
+// Postgres does, so what follows path is not run, a random() or a nextval
+// in it included. A part of path detest cannot evaluate leaves e unknown
+// but for whether it is NULL or a boolean.
+func (f *folder) reduced(e sqlir.Expr, r folded, path ...folded) (folded, error) {
+	if r.c == varies {
+		return r, nil
+	}
+	for _, p := range path {
+		if p.e == nil {
+			r.e = nil
+			return r, nil
+		}
+	}
+	return f.eval(e, r.c)
 }
 
 // plainOperands is fixed when every operand has a value of a type whose
@@ -476,17 +562,6 @@ func pure(e sqlir.Expr) bool {
 	return true
 }
 
-// reduced is r, the part Postgres reduces e to, given as e itself when e
-// is pure. The expression around it then computes e's type as the
-// evaluators do, CASE WHEN true THEN '5' ELSE 1.0 END being a number and
-// not the text '5'.
-func (f *folder) reduced(e sqlir.Expr, r folded) (folded, error) {
-	if r.c == varies || r.e == nil || !pure(e) {
-		return r, nil
-	}
-	return f.eval(e, r.c)
-}
-
 func sameKind(a, b folded) bool {
 	if derefValue(a.val) == nil || derefValue(b.val) == nil {
 		return true
@@ -516,6 +591,10 @@ var immutableFuncs = map[string]bool{
 	"extract": true, "date_part": true, "date_trunc": true, "make_interval": true,
 }
 
+// nonStrictFuncs are the functions detest lists that a NULL argument does
+// not make NULL.
+var nonStrictFuncs = map[string]bool{"greatest": true, "least": true, "nullif": true, "concat": true}
+
 // sessionFuncs are the functions Postgres never folds, as they read the
 // transaction or the session, besides effectFuncs, which change state and
 // so are never evaluated here.
@@ -535,13 +614,17 @@ func (f *folder) call(v *sqlir.FuncCall) (folded, error) {
 	if isAggregateCall(v) || effectFuncs[v.Name] || sessionFuncs[v.Name] {
 		return folded{}, nil
 	}
-	c := plainOperands(kids...)
+	c, s := plainOperands(kids...), strict
+	if nonStrictFuncs[v.Name] {
+		s = notStrict
+	}
 	if !immutableFuncs[v.Name] {
 		c = maybe
+		if s == strict {
+			s = maybeStrict
+		}
 	}
-	return f.apply(kids, c, func(es []sqlir.Expr) sqlir.Expr {
-		return &sqlir.FuncCall{Name: v.Name, Args: es}
-	})
+	return f.apply(v, kids, c, s)
 }
 
 // cond is what Postgres may do with a branch behind a condition when it
@@ -608,7 +691,7 @@ func (f *folder) logic(v *sqlir.BinaryExpr) (folded, error) {
 		c := condOf(r, decides)
 		if c.take && !c.uncertain() {
 			// Postgres reduces the whole AND to false, or the OR to true.
-			return folded{c: fixed, e: &sqlir.Const{Value: decides}, val: decides, hasVal: true}, nil
+			return f.reduced(v, folded{c: fixed, val: decides, hasVal: true}, kids...)
 		}
 		uncertain = uncertain || c.uncertain()
 		if c.take {
@@ -618,21 +701,17 @@ func (f *folder) logic(v *sqlir.BinaryExpr) (folded, error) {
 		}
 	}
 	if !uncertain {
-		return f.apply(kids, plainOperands(kids...), func(es []sqlir.Expr) sqlir.Expr {
-			return &sqlir.BinaryExpr{Op: v.Op, L: es[0], R: es[1]}
-		})
+		return f.apply(v, kids, plainOperands(kids...), notStrict)
 	}
 	for _, k := range kids {
 		if k.c == varies || k.e == nil {
 			if reduced {
-				return folded{c: maybe, e: &sqlir.Const{Value: decides}, val: decides, hasVal: true}, nil
+				return folded{c: maybe, val: decides, hasVal: true}, nil
 			}
 			return folded{c: maybe}, nil
 		}
 	}
-	return f.apply(kids, maybe, func(es []sqlir.Expr) sqlir.Expr {
-		return &sqlir.BinaryExpr{Op: v.Op, L: es[0], R: es[1]}
-	})
+	return f.apply(v, kids, maybe, notStrict)
 }
 
 // caseExpr folds a CASE as Postgres does. A branch whose condition is a
@@ -643,13 +722,11 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 	if err != nil {
 		return folded{}, err
 	}
-	var kids []folded
-	var argExpr sqlir.Expr
+	var kids, path []folded
 	if v.Arg != nil {
 		kids = append(kids, arg)
-		argExpr = arg.e
+		path = append(path, arg)
 	}
-	var whens []sqlir.CaseWhen
 	certain := true    // every branch so far is dropped for sure
 	uncertain := false // a branch so far may be kept, taken or dropped
 	mayEnd := false    // a branch so far may be taken
@@ -662,14 +739,12 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 		}
 		test := when
 		if v.Arg != nil {
-			pair := []folded{arg, when}
-			test, err = f.apply(pair, plainOperands(pair...), func(es []sqlir.Expr) sqlir.Expr {
-				return &sqlir.BinaryExpr{Op: "=", L: es[0], R: es[1]}
-			})
+			test, err = f.caseTest(arg, when)
 			if err != nil {
 				return folded{}, err
 			}
 		}
+		path = append(path, when)
 		c := condOf(test, true)
 		if !c.keep && !c.take {
 			continue // dropped, false or NULL
@@ -684,7 +759,7 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 			return folded{}, err
 		}
 		if c.take && !c.uncertain() && certain {
-			return f.reduced(v, then) // the CASE is reduced to this branch
+			return f.reduced(v, then, append(path, then)...) // the CASE is reduced to this branch
 		}
 		certain = false
 		if !mayEnd && (test.c == varies || then.c == varies && !c.drop) {
@@ -692,7 +767,6 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 		}
 		uncertain = uncertain || c.uncertain()
 		kids = append(kids, when, then)
-		whens = append(whens, sqlir.CaseWhen{When: when.e, Then: then.e})
 		if c.take && !c.uncertain() {
 			ended = true // ELSE is dropped
 			break
@@ -702,42 +776,69 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 			defer f.enter()()
 		}
 	}
-	var elseExpr sqlir.Expr
 	if !ended {
 		r, err := f.expr(v.Else)
 		if err != nil {
 			return folded{}, err
 		}
 		if certain {
-			return f.reduced(v, r) // every branch is dropped
+			return f.reduced(v, r, append(path, r)...) // every branch is dropped
 		}
 		if !mayEnd && r.c == varies {
 			varying = true
 		}
 		kids = append(kids, r)
-		elseExpr = r.e
 	}
 	if varying {
 		return folded{}, nil
 	}
+	return f.whole(v, kids, uncertain)
+}
+
+// caseTest folds the comparison by = of a simple CASE's operand with the
+// value of one of its branches. detest has no expression of its own for
+// it, so it is evaluated from a new one, whose operands are constants of
+// the types they are written with.
+func (f *folder) caseTest(arg, when folded) (folded, error) {
+	if arg.c == varies || when.c == varies {
+		return folded{}, nil
+	}
+	c := max(arg.c, when.c)
+	if arg.null() || when.null() {
+		return folded{c: c, hasVal: true}, nil
+	}
+	if arg.e == nil || when.e == nil {
+		return folded{c: maybe}, nil
+	}
+	return f.eval(&sqlir.BinaryExpr{Op: "=", L: arg.e, R: when.e}, max(c, plainOperands(arg, when)))
+}
+
+// whole folds e, a CASE or a COALESCE that no constant reduced, from kids,
+// the parts of it Postgres keeps.
+func (f *folder) whole(e sqlir.Expr, kids []folded, uncertain bool) (folded, error) {
 	c := fixed
 	if uncertain {
 		c = maybe
-		for _, k := range kids {
-			if k.c == varies || k.e == nil {
-				return folded{c: maybe}, nil
-			}
-		}
 	}
-	return f.apply(kids, c, func([]sqlir.Expr) sqlir.Expr {
-		return &sqlir.CaseExpr{Arg: argExpr, Whens: whens, Else: elseExpr}
-	})
+	for _, k := range kids {
+		if k.c == varies {
+			if !uncertain {
+				return folded{}, nil
+			}
+			return folded{c: maybe}, nil
+		}
+		c = max(c, k.c)
+	}
+	if !pure(e) {
+		return folded{c: c}, nil
+	}
+	return f.eval(e, c)
 }
 
 // coalesce folds a COALESCE as Postgres does. It drops a NULL argument and
 // stops at the first constant that is not NULL, folding none after it.
 func (f *folder) coalesce(v *sqlir.FuncCall) (folded, error) {
-	var kids []folded
+	var kids, path []folded
 	uncertain, kept := false, false
 	mayStop := false // an argument so far may end the COALESCE
 	for _, a := range v.Args {
@@ -745,6 +846,7 @@ func (f *folder) coalesce(v *sqlir.FuncCall) (folded, error) {
 		if err != nil {
 			return folded{}, err
 		}
+		path = append(path, r)
 		if r.c == varies {
 			kept = true
 			kids = append(kids, r)
@@ -755,13 +857,12 @@ func (f *folder) coalesce(v *sqlir.FuncCall) (folded, error) {
 			}
 			continue
 		}
-		null := r.hasVal && derefValue(r.val) == nil
-		if r.c == fixed && null {
+		if r.c == fixed && r.null() {
 			continue // dropped
 		}
 		if r.c == fixed {
 			if !kept && !uncertain {
-				return f.reduced(v, r) // the COALESCE is reduced to this argument
+				return f.reduced(v, r, path...) // the COALESCE is reduced to this argument
 			}
 			kids = append(kids, r)
 			break
@@ -770,25 +871,14 @@ func (f *folder) coalesce(v *sqlir.FuncCall) (folded, error) {
 			uncertain = true
 		}
 		kids = append(kids, r)
-		if !null {
+		if !r.null() {
 			// Postgres stops here if it folds this argument.
 			mayStop = true
 			defer f.enter()()
 		}
 	}
 	if len(kids) == 0 {
-		return folded{c: fixed, e: &sqlir.Const{}, hasVal: true}, nil
+		return f.reduced(v, folded{c: fixed, hasVal: true}, path...)
 	}
-	c := fixed
-	if uncertain {
-		c = maybe
-		for _, k := range kids {
-			if k.c == varies || k.e == nil {
-				return folded{c: maybe}, nil
-			}
-		}
-	}
-	return f.apply(kids, c, func(es []sqlir.Expr) sqlir.Expr {
-		return &sqlir.FuncCall{Name: "coalesce", Args: es}
-	})
+	return f.whole(v, kids, uncertain)
 }
