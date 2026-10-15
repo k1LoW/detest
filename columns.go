@@ -64,6 +64,9 @@ type colScope struct {
 	excluded    colSet
 	hasExcluded bool
 	outer       *colScope
+	// query is the query whose scope this is, nil for a write's target
+	// and the other scopes of a statement rather than a query.
+	query *sqlir.SelectStmt
 }
 
 // columnChecker resolves the column references of a statement against the
@@ -119,6 +122,14 @@ type columnChecker struct {
 	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
+	// queries are the queries being checked, innermost last, and
+	// correlated those that read a column of a query around them.
+	queries    []*sqlir.SelectStmt
+	visited    []*sqlir.SelectStmt
+	correlated map[*sqlir.SelectStmt]bool
+	// uncertain are the queries that read around themselves only if a
+	// column whose owner is not known belongs to a query around them.
+	uncertain map[*sqlir.SelectStmt]bool
 	// rowSubqueries are the subqueries a row is compared with, by the
 	// number of columns they must have, which is the row's rather than one.
 	rowSubqueries map[*sqlir.SubQuery]int
@@ -212,6 +223,21 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
 			return err
+		}
+	}
+	for _, q := range c.visited {
+		switch {
+		case c.correlated[q]:
+		case c.uncertain[q]:
+			if x.uncertain == nil {
+				x.uncertain = map[*sqlir.SelectStmt]bool{}
+			}
+			x.uncertain[q] = true
+		default:
+			if x.uncorrelated == nil {
+				x.uncorrelated = map[*sqlir.SelectStmt]bool{}
+			}
+			x.uncorrelated[q] = true
 		}
 	}
 	return nil
@@ -785,6 +811,16 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 			pop()
 			return nil, err
 		}
+		if outer != nil && (c.correlated[cte.Select] || c.uncertain[cte.Select]) {
+			// Whether Postgres runs the subquery declaring such a CTE once
+			// or for each row depends on whether it plans the CTE, which
+			// it skips when nothing reads it and inlines or materializes
+			// by its references, MATERIALIZED and volatility. detest does
+			// not model that planning, so it refuses the CTE rather than
+			// run the subquery either way on a guess.
+			pop()
+			return nil, c.x.unsupported(fmt.Sprintf("CTE %q reading a column of a query around the one declaring it", cte.Name))
+		}
 		m[cte.Name] = s
 		tm[cte.Name] = c.derivedTypes(cte.Select, nil)
 	}
@@ -802,6 +838,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			return nil, c.x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
 		}
 	}
+	c.queries = append(c.queries, sel)
+	c.visited = append(c.visited, sel)
+	defer func() { c.queries = c.queries[:len(c.queries)-1] }()
 	pop, err := c.with(sel.With, outer)
 	if err != nil {
 		return nil, err
@@ -818,7 +857,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if err := c.noteSetOpColumns(sel); err != nil {
 			return nil, err
 		}
-		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
+		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer, query: sel}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
 			first = first.Larg
@@ -839,7 +878,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 		return out, nil
 	}
-	sc := &colScope{items: map[string]colSet{}, outer: outer}
+	sc := &colScope{items: map[string]colSet{}, outer: outer, query: sel}
 	if len(sel.Values) > 0 {
 		// Postgres resolves each column of a VALUES query over its rows
 		// when it plans the statement, and fails one of two types (42804)
@@ -2033,6 +2072,81 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	return nil, false
 }
 
+// noteCorrelation marks the queries being checked that r reads outside of:
+// those inside the query whose scope has its column. One of a write's
+// target, which is around every query, marks them all.
+func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
+	var owner *sqlir.SelectStmt
+	found := false
+	if r.Table != "" {
+		for s := sc; s != nil && !found; s = s.outer {
+			_, ok := s.items[r.Table]
+			found = ok || r.Table == "excluded" && s.hasExcluded
+			if found {
+				owner = s.query
+			}
+		}
+	} else {
+		// An item whose columns are not known, as a view or a derived table
+		// over a *, may or may not have the column, so any scope from the
+		// innermost that may have it to the first that has it may own it.
+		var owners []*colScope
+		for s := sc; s != nil; s = s.outer {
+			has, maybe := false, false
+			for _, cols := range s.items {
+				if cols == nil {
+					maybe = true
+				} else if h, _ := cols.has(r.Column); h {
+					has = true
+				}
+			}
+			if has || maybe {
+				owners = append(owners, s)
+			}
+			if has {
+				break
+			}
+		}
+		if len(owners) > 1 {
+			// The queries inside the innermost possible owner read around
+			// themselves whichever owns it. Those from it out to the
+			// outermost do only if the outer one does, which detest cannot
+			// tell, so they are noted for subquery to refuse rather than run
+			// once or for each row on a guess.
+			c.markCorrelated(owners[0].query != nil, owners[0].query)
+			outermost := owners[len(owners)-1].query
+			if c.uncertain == nil {
+				c.uncertain = map[*sqlir.SelectStmt]bool{}
+			}
+			for _, q := range slices.Backward(c.queries) {
+				if outermost != nil && q == outermost {
+					break
+				}
+				c.uncertain[q] = true
+			}
+			return
+		}
+		if len(owners) == 1 {
+			found, owner = owners[0].query != nil, owners[0].query
+		}
+	}
+	c.markCorrelated(found, owner)
+}
+
+// markCorrelated marks the queries being checked inside owner, all of them
+// when owner is not found.
+func (c *columnChecker) markCorrelated(found bool, owner *sqlir.SelectStmt) {
+	if c.correlated == nil {
+		c.correlated = map[*sqlir.SelectStmt]bool{}
+	}
+	for _, q := range slices.Backward(c.queries) {
+		if found && q == owner {
+			return
+		}
+		c.correlated[q] = true
+	}
+}
+
 // outerAggregate reports an aggregate whose arguments read columns, none
 // of them surely of sc's own query, which Postgres may make an aggregate of
 // an outer query (agglevelsup).
@@ -2080,6 +2194,7 @@ func ownColumn(r *sqlir.ColumnRef, sc *colScope) bool {
 
 // resolve reports a column reference no FROM item in scope has.
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
+	c.noteCorrelation(r, sc)
 	if r.Table != "" {
 		cols, ok := sc.lookupItem(r.Table)
 		if !ok {
