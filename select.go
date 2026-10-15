@@ -1299,6 +1299,12 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				if err != nil {
 					return err
 				}
+				if derefValue(o) == nil && !x.tx.db.kind.InnoDB() {
+					// Postgres returns NULL for a NULL offset, neither the
+					// row's value nor the default.
+					it.ctx.win[w] = nil
+					continue
+				}
 				n, ok := toInt64(derefValue(o))
 				if x.tx.db.kind.InnoDB() && (!ok || n < 0) {
 					return x.unsupported(name + " with an offset other than a nonnegative integer")
@@ -1312,9 +1318,11 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				at = i + int(off)
 			}
 			var err error
+			from := 0
 			if at >= 0 && at < len(sorted) {
 				v, err = arg(sorted[at], 0)
 			} else {
+				from = 2
 				v, err = arg(it, 2)
 			}
 			if err != nil {
@@ -1322,6 +1330,11 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 			}
 			if v, err = x.toTimeType(v, x.exprTypes[w.Func]); err != nil {
 				return err
+			}
+			if from < len(w.Func.Args) {
+				if v, err = x.asBranchType(x.branchType(w.Func), w.Func.Args[from], v); err != nil {
+					return err
+				}
 			}
 		default:
 			return x.unsupported("window function " + name)

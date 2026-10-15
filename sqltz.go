@@ -356,6 +356,21 @@ func (x *sqlExec) timeArgs(f *sqlir.FuncCall, args []any) error {
 				args[i] = v
 			}
 		}
+	case "nullif":
+		// NULLIF keeps its first argument's own type, so only a string
+		// literal or parameter takes the type the two resolve to.
+		if typ := x.exprTypes[f]; timeRank[typ] > 0 {
+			for i, a := range f.Args {
+				if !untypedExpr(a) {
+					continue
+				}
+				v, err := x.toTimeType(args[i], typ)
+				if err != nil {
+					return err
+				}
+				args[i] = v
+			}
+		}
 	case "date_trunc":
 		if len(f.Args) == 2 && !x.tx.db.kind.InnoDB() && x.sourceType(f.Args[1]) == "date" {
 			if t, ok := x.asInstant(args[1]); ok {

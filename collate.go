@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -587,11 +588,15 @@ func (db *DB) keptBranchTypes() map[sqlir.Expr]string {
 				case "coalesce", "greatest", "least", "nullif":
 					if k := db.branchKind(resolvedType(commonType(f.Args, column, nil), f.Args)); k != "" {
 						m[f] = k
+					} else if k, _ := numberBranchKind(f.Args, column, nil); k != "" {
+						m[f] = k
 					}
 				}
 			}
 			for _, c := range sqlir.CaseExprs(e) {
 				if k := db.branchKind(resolvedType(expressionType(c, column), caseBranches(c))); k != "" {
+					m[c] = k
+				} else if k, _ := numberBranchKind(caseBranches(c), column, nil); k != "" {
 					m[c] = k
 				}
 			}
@@ -632,8 +637,8 @@ func (db *DB) branchKind(typ string) string {
 }
 
 // resolvedType is typ, the type the branches exprs resolve to, or text when
-// every branch is a literal or a parameter of no type, as Postgres
-// resolves them.
+// every branch is a literal or a parameter of no type, or a CASE or
+// COALESCE of those, as Postgres resolves them.
 func resolvedType(typ string, exprs []sqlir.Expr) string {
 	if typ != "" || len(exprs) == 0 {
 		return typ
@@ -646,23 +651,245 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 				return typ
 			}
 		default:
-			return typ
+			if !untypedBranch(e) {
+				return typ
+			}
 		}
 	}
 	return "text"
 }
 
 // noteBranchType records the kind of type the column check resolved the
-// branches of e to.
-func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string) {
+// branches exprs of e to, and refuses a parameter among them bound to a
+// value the driver sends as text detest does not convert. inputAs reads
+// their input as that type before any row.
+func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if timeRank[typ] > 0 || x.tx.db.branchKind(typ) != "" {
+		for _, b := range exprs {
+			if k, ok := b.(*sqlir.Collate); ok {
+				b = k.X
+			}
+			p, ok := b.(*sqlir.Param)
+			if !ok || p.Index < 0 || p.Index >= len(x.args) {
+				continue
+			}
+			switch v := derefValue(x.args[p.Index]).(type) {
+			case nil, string:
+			case []byte:
+				if timeRank[typ] > 0 {
+					return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+				}
+			case time.Time:
+				if timeRank[typ] == 0 {
+					return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+				}
+			default:
+				// The driver sends it as text that Postgres reads as the
+				// branches' type, which detest does not reproduce: an
+				// integer beside a text column stays a number.
+				return x.unsupported(fmt.Sprintf("a %T parameter among branches of %s", v, typ))
+			}
+		}
+	}
+	if timeRank[typ] > 0 {
+		return nil
+	}
 	k := x.tx.db.branchKind(typ)
-	if k == "" || x.tx.db.kind.InnoDB() {
-		return
+	if k == "" {
+		return nil
 	}
 	if x.branchTypes == nil {
 		x.branchTypes = map[sqlir.Expr]string{}
 	}
 	x.branchTypes[e] = k
+	return nil
+}
+
+// noteNumberBranches records the branches of e, a COALESCE, GREATEST,
+// LEAST, NULLIF, CASE or the value and default of LAG or LEAD, as of the
+// number kind numberBranchKind gives, when branchKind gives none. It fails
+// a string literal or a parameter's text among them that reads as no number
+// of it, as Postgres does when it parses or binds the statement, whichever
+// branch a row takes, or with no rows, and refuses a number beside a branch
+// of another type.
+func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	k, mismatch := numberBranchKind(exprs, column, subquery)
+	if mismatch {
+		return x.unsupported("text and a number among the branches of CASE, COALESCE, GREATEST, LEAST or NULLIF")
+	}
+	if _, ok := x.branchTypes[e]; ok || k == "" {
+		return nil
+	}
+	for _, b := range exprs {
+		var s string
+		switch b := b.(type) {
+		case *sqlir.Const:
+			t, ok := b.Value.(string)
+			if !ok {
+				continue
+			}
+			s = t
+		case *sqlir.Param:
+			if b.Index < 0 || b.Index >= len(x.args) {
+				continue
+			}
+			switch v := derefValue(x.args[b.Index]).(type) {
+			case nil:
+				continue
+			case string:
+				s = v
+			default:
+				// The driver sends the value as the number's input,
+				// which detest does not model for another type, or for
+				// a float bound as an integer.
+				if _, isInt := integer(v); !isInt && (k == "integer" || !isNumber(v)) {
+					return x.unsupported(fmt.Sprintf("a %T parameter among number branches", v))
+				}
+				continue
+			}
+		default:
+			continue
+		}
+		if _, err := x.branchNumber(s, k == "numeric"); err != nil {
+			return err
+		}
+	}
+	if x.branchTypes == nil {
+		x.branchTypes = map[sqlir.Expr]string{}
+	}
+	x.branchTypes[e] = k
+	return nil
+}
+
+// unconvertedBranches refuses the branches of a COALESCE, GREATEST, LEAST,
+// NULLIF, CASE or the value and default of LAG or LEAD that Postgres
+// resolves to a type detest does not convert them to. Postgres reads a
+// string literal or a parameter there as that type, failing on text that is
+// none of it whichever branch a row takes, and fails branches of two types
+// with no implicit cast between them with 42804. detest converts branches
+// only to text, bytea, an enum, a number and a date or timestamp, and would
+// keep 'true' beside a
+// boolean as text, which evaluates as false, or return 'bogus' beside a
+// uuid. Converting each other type, with the check of every literal before
+// any row, is the work of a type at a time, so the class is refused.
+func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (err, afterInput error) {
+	if x.tx.db.kind.InnoDB() {
+		return nil, nil
+	}
+	untyped := false
+	kinds := map[string]bool{}
+	unconverted := ""
+	names, domain := map[string]bool{}, ""
+	unknown, char, branches := false, false, 0
+	for _, e := range exprs {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+			continue
+		}
+		branches++
+		if untypedExpr(e) {
+			untyped = true
+			continue
+		}
+		typ := expressionTypeIn(e, column, subquery)
+		if untypedBranch(e) {
+			// A CASE or COALESCE of those only is text already.
+			typ = "text"
+		}
+		if typ == "" {
+			unknown = true
+			continue
+		}
+		if typ == "unresolved column type" {
+			continue
+		}
+		base := x.tx.db.baseType(typ)
+		switch k := x.tx.db.branchKind(typ); {
+		case k != "" && (base == "bpchar" || base == "char" || base == "character"):
+			// A branch beside it takes its trailing-space semantics,
+			// which the text conversion does not give, typed or not.
+			kinds[k] = true
+			unconverted = typ
+			char = true
+		case k != "":
+			kinds[k] = true
+		case numberRank[base] > 0:
+			kinds["number"] = true
+			if base != typ {
+				// numberBranchKind and branchNumber read the type's own
+				// name, not a domain's base.
+				unconverted = typ
+			}
+		case timeRank[base] > 0:
+			// date, timestamp and timestamptz cast to one another, and
+			// timeParams and castTime read a literal beside them, by the
+			// type's own name.
+			kinds["time"] = true
+			if base != typ {
+				unconverted = typ
+			}
+		default:
+			kinds[base] = true
+			unconverted = base
+		}
+		names[typ] = true
+		if base != typ && (numberRank[base] > 0 || timeRank[base] > 0) {
+			domain = typ
+		}
+	}
+	switch {
+	case char && branches > 1:
+		return x.unsupported(fmt.Sprintf("a branch beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted)), nil
+	case unknown && len(kinds) > 0 && !x.tx.checking:
+		// The branches meet at a type the unknown one decides, such as
+		// abs(NULL)'s float8, or fail beside it, which branchValue cannot
+		// tell from the row's values. CheckSQL has no schema, so a
+		// column's type is unknown there.
+		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"), nil
+	case domain != "" && len(names) > 1:
+		// commonType and the time and number readers take the type's own
+		// name, so a domain beside another type resolves to neither.
+		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain)), nil
+	case len(kinds) > 1:
+		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them"), nil
+	case untyped && unconverted != "":
+		// After inputAs reads the literal, so text that is no input of
+		// the type fails as in Postgres, and only valid input, which
+		// detest would keep as text, is refused.
+		return nil, x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted))
+	}
+	return nil, nil
+}
+
+// untypedText is the text of a string literal or of a parameter bound to a
+// string.
+func (x *sqlExec) untypedText(e sqlir.Expr) (string, bool) {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		s, ok := e.Value.(string)
+		return s, ok
+	case *sqlir.Param:
+		if e.Index >= 0 && e.Index < len(x.args) {
+			s, ok := derefValue(x.args[e.Index]).(string)
+			return s, ok
+		}
+	}
+	return "", false
+}
+
+// numberBranchType is the number kind noteNumberBranches recorded for e,
+// in the statement or in an expression a table keeps, "" for any other.
+func (x *sqlExec) numberBranchType(e sqlir.Expr) string {
+	switch k := x.branchType(e); k {
+	case "integer", "numeric":
+		return k
+	}
+	return ""
 }
 
 // branchType is the kind of type the branches of e resolve to, in the

@@ -470,8 +470,8 @@ func TestIntervals(t *testing.T) {
 		// A CASE or COALESCE of NULL only is text.
 		`SELECT COALESCE(interval '1 month', COALESCE(NULL, NULL))`,
 		`SELECT COALESCE(interval '1 month', CASE WHEN true THEN NULL END)`,
-		// A column of a * or a set operation is of a type the check does
-		// not resolve, which may be an interval.
+		// A column of a * or a set operation has the type of the column
+		// it comes from.
 		`SELECT COALESCE(s.every, '1 day') FROM (SELECT * FROM plan) s`,
 		`SELECT COALESCE(u.every, '1 day') FROM (SELECT every FROM plan UNION ALL SELECT every FROM plan) u`,
 		// char(n) pads text with spaces it compares without, which

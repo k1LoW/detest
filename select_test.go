@@ -1143,8 +1143,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want invalid input", q, err)
 		}
 	}
-	if _, err := db.Exec(`SELECT s.u FROM (SELECT * FROM t, (SELECT 1 AS k) x) s WHERE false UNION ALL SELECT 'bad' WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("a column of unresolved type beside a literal: got %v, want unsupported", err)
+	// A * over a derived table gives its items' columns with their types.
+	if _, err := db.Exec(`SELECT s.u FROM (SELECT * FROM t, (SELECT 1 AS k) x) s WHERE false UNION ALL SELECT 'bad' WHERE false`); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("a column of a * beside a literal: got %v, want invalid input", err)
 	}
 	// Postgres fails a statement of unequal widths before it reads any
 	// input by type.
@@ -1576,7 +1577,6 @@ func TestOutputNameAndPositionFormsAreUnsupported(t *testing.T) {
 		`SELECT a FROM generate_series(1, 2) AS s(a, a)`,
 		`SELECT s.a FROM (SELECT 1 AS a, 2 AS a, 3 AS a) s`,
 		`SELECT a AS x, b AS x, id AS x FROM t ORDER BY x`,
-		`SELECT * FROM generate_series(1, 2) g ORDER BY 1`,
 		`SELECT a FROM (SELECT 1 AS a, 2 AS a) s, generate_series(1, 1) g`,
 		`UPDATE public.t AS x SET a = 1 RETURNING public.t.*`,
 		`UPDATE t SET a = 1 FROM t AS u WHERE u.id = t.id RETURNING u.*`,

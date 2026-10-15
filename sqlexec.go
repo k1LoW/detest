@@ -1464,7 +1464,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
-				out, err = x.branchValue(v.Args, args, out)
+				out, err = x.branchValue(v, v.Args, args, out)
 			}
 		}
 		return out, err

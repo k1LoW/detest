@@ -20,6 +20,11 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	case *sqlir.Cast:
 		return e.Type
 	case *sqlir.Collate:
+		if untypedExpr(e.X) || isNullConst(e.X) || untypedBranch(e.X) {
+			// COLLATE resolves a string literal, a parameter, a NULL or a
+			// CASE or COALESCE of those to text.
+			return "text"
+		}
 		return expressionTypeIn(e.X, column, subquery)
 	case *sqlir.ColumnRef:
 		if column != nil {
@@ -246,6 +251,49 @@ func numberCategory(typ string) int {
 	}
 }
 
+// numberBranchKind is "integer" or "numeric" when every branch among exprs
+// that has a type of its own is a number of that kind, a numeric or a float
+// making them all numeric, as Postgres resolves them; "" otherwise. A NULL,
+// a string literal or a parameter takes that type, which branchValue cannot
+// tell from the values: a NULL numeric column leaves an integer literal an
+// integer there, and text beside an integer column stays text. mismatch
+// reports a number beside a branch of a type other than a number, which
+// Postgres fails with 42804 whatever the rows, and detest would run on a
+// row whose values do not show it.
+func numberBranchKind(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (kind string, mismatch bool) {
+	other, unknown := false, false
+	for _, e := range exprs {
+		if k, ok := e.(*sqlir.Const); ok && k.Value == nil || untypedExpr(e) {
+			continue
+		}
+		if untypedBranch(e) {
+			// A CASE or COALESCE of those only is text already.
+			other = true
+			continue
+		}
+		typ := expressionTypeIn(e, column, subquery)
+		switch r := numberRank[typ]; {
+		case r >= numberRank["numeric"]:
+			kind = "numeric"
+		case r > 0:
+			if kind == "" {
+				kind = "integer"
+			}
+		case typ == "" || typ == "unresolved column type":
+			unknown = true
+		default:
+			other = true
+		}
+	}
+	if kind != "" && other {
+		return "", true
+	}
+	if unknown || other {
+		return "", false
+	}
+	return kind, false
+}
+
 func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
 	if f.Name == "left" && len(f.Args) == 2 {
 		switch typ := expressionType(f.Args[1], column); typ {
@@ -397,17 +445,27 @@ func intervalBranchMismatch(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) st
 	return ""
 }
 
-// untypedBranch reports a string literal or a parameter, or a CASE or
-// COALESCE of nothing else or of NULL only, which Postgres resolves to
-// text, as in COALESCE('bogus', 'x') and COALESCE(NULL, NULL).
+// untypedBranch reports a string literal or a parameter, or a CASE,
+// COALESCE, LAG or LEAD of nothing else or of NULL only, which Postgres
+// resolves to text, as in COALESCE('bogus', 'x') and COALESCE(NULL, NULL).
 func untypedBranch(e sqlir.Expr) bool {
 	var branches []sqlir.Expr
+	if w, ok := e.(*sqlir.WindowFunc); ok {
+		e = w.Func
+	}
 	switch e := e.(type) {
 	case *sqlir.CaseExpr:
 		branches = caseBranches(e)
 	case *sqlir.FuncCall:
 		if e.Name == "lag" || e.Name == "lead" {
-			return false
+			// The value and the default, without the offset.
+			if len(e.Args) > 0 {
+				branches = []sqlir.Expr{e.Args[0]}
+			}
+			if len(e.Args) == 3 {
+				branches = append(branches, e.Args[2])
+			}
+			break
 		}
 		branches = branchArgs(e)
 	default:
@@ -425,18 +483,26 @@ func untypedBranch(e sqlir.Expr) bool {
 }
 
 // branchArgs are the arguments of f that Postgres resolves to one type, for
-// intervalBranchMismatch: all of them, or the value and the default of LAG
+// intervalBranchMismatch: all of them, or the value and any default of LAG
 // and LEAD, whose offset is an integer.
 func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 	switch f.Name {
 	case "coalesce", "greatest", "least", "nullif":
 		return f.Args
 	case "lag", "lead":
-		if len(f.Args) == 3 {
+		switch len(f.Args) {
+		case 1, 2:
+			return f.Args[:1]
+		case 3:
 			return []sqlir.Expr{f.Args[0], f.Args[2]}
 		}
 	}
 	return nil
+}
+
+func isNullConst(e sqlir.Expr) bool {
+	k, ok := e.(*sqlir.Const)
+	return ok && k.Value == nil
 }
 
 func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {

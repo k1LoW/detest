@@ -434,7 +434,10 @@ func TestBytesAsText(t *testing.T) {
 			t.Errorf("bytea literal written to the empty CREATE TABLE AS table %s: got %v", tbl, got)
 		}
 	}
-	mustExec(t, db, `CREATE TABLE untold AS SELECT s.payload FROM (SELECT * FROM lit, (SELECT 1 AS k) x) s WHERE false`)
+	// A view of a * keeps its columns of unknown type, as Postgres fixes
+	// them when it creates the view.
+	mustExec(t, db, `CREATE VIEW litv AS SELECT * FROM lit`)
+	mustExec(t, db, `CREATE TABLE untold AS SELECT payload FROM litv WHERE false`)
 	for _, arg := range []any{`\x41`, []byte("A"), 1} {
 		if _, err := db.Exec(`INSERT INTO untold VALUES ($1)`, arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%#v written to a CREATE TABLE AS column of untold type: got %v, want unsupported", arg, err)

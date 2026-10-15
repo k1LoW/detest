@@ -435,7 +435,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if out, err = x.caseBranch(v, w.Then, out); err != nil {
 					return nil, err
 				}
-				return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+				return x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 			}
 		}
 		if v.Else != nil {
@@ -449,7 +449,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			if out, err = x.caseBranch(v, v.Else, out); err != nil {
 				return nil, err
 			}
-			return x.branchValue(caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+			return x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -496,7 +496,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		switch v.Name {
 		case "coalesce", "greatest", "least", "nullif":
 			if err == nil {
-				out, err = x.branchValue(v.Args, args, out)
+				out, err = x.branchValue(v, v.Args, args, out)
 			}
 		}
 		return out, err
@@ -835,6 +835,14 @@ func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
 		return x.untyped(e, v, []byte{})
 	case "text":
 		return paramText(e, v), nil
+	case "integer", "numeric":
+		if s, ok := derefValue(v).(string); ok && untypedExpr(e) {
+			return x.branchNumber(s, kind == "numeric")
+		}
+		if _, ok := integer(derefValue(v)); ok && kind == "numeric" {
+			return numericValue(derefValue(v)), nil
+		}
+		return v, nil
 	}
 	if t := x.tx.db.enumOf(kind); t != nil {
 		return x.untyped(e, v, enumValue{typ: t})
@@ -1183,10 +1191,16 @@ func arith(op string, l, r any) (any, error) {
 // reads as no value of it fails as its input does. Text of a branch typed as
 // text, a column or a cast, has no common type with a number in Postgres,
 // which fails the statement whatever row it reads, so it is refused. MySQL
-// converts between the two instead.
-func (x *sqlExec) branchValue(exprs []sqlir.Expr, vals []any, v any) (any, error) {
+// converts between the two instead. Where the column check gave e's
+// branches a number type, that type decides instead of the values.
+func (x *sqlExec) branchValue(e sqlir.Expr, exprs []sqlir.Expr, vals []any, v any) (any, error) {
 	if x.tx.db.kind.InnoDB() {
 		return commonNumber(exprs, v), nil
+	}
+	if k := x.numberBranchType(e); k != "" {
+		// The column check resolved the branches' type, which asBranchType
+		// has converted v to.
+		return x.asBranchType(k, nil, v)
 	}
 	// A column's type shows only in its value, so a float there makes the
 	// integer of another branch a float, as 1 ELSE amount is a numeric; a
