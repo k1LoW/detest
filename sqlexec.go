@@ -41,7 +41,7 @@ type sqlExec struct {
 	tx    *Tx
 	query string
 	args  []driver.Value
-	ctes  map[string][]Row
+	ctes  map[string]*cteCell
 	start time.Time // when the statement began, for statement_timestamp()
 	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
 	// before each query runs anything.
@@ -83,10 +83,8 @@ type sqlExec struct {
 	// frozenAt is the commit count when the statement froze its snapshot.
 	frozenAt uint64
 	// queryCols are the output columns of the queries the statement ran,
-	// in order, by the query (a *sqlir.SelectStmt), for a * over them, and
-	// cteCols those of the CTEs in scope, by name, scoped as ctes is.
+	// in order, by the query (a *sqlir.SelectStmt), for a * over them.
 	queryCols map[any][]string
-	cteCols   map[string][]string
 	// pendingCTEs are the CTEs of WITH ... UPDATE or DELETE not run yet,
 	// which run when the statement first reads them, and writeRows and
 	// writeCols those run, kept apart from ctes, which a query with a WITH
@@ -317,7 +315,7 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if err := s.static(tx.db.kind.InnoDB()); err != nil {
 		return nil, err
 	}
-	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}, start: time.Now()}
+	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string]*cteCell{}, start: time.Now()}
 	if !tx.block && !tx.start.IsZero() {
 		x.start = tx.start // the statement is its own transaction, begun at the same instant
 	}
@@ -388,7 +386,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			// collation, belong to the statement before, whose DDL may
 			// have changed the latter.
 			x.colls, x.outputs, x.collates = nil, nil, false
-			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
+			x.ctes, x.frozen = map[string]*cteCell{}, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			x.uncorrelated, x.subqueries, x.uncertain = nil, nil, nil
 			r, err := x.execStatement(sub)
@@ -925,29 +923,49 @@ func (x *sqlExec) tableLabel(t sqlir.TableRef) string {
 	return t.Name
 }
 
-// withCTEs runs the CTEs of sel the query reads. Postgres skips one it does
-// not read, so its errors, locks and calls never happen.
-func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) error {
-	return x.evalCTEs(sel.With, reachableCTEs(sel), outer)
+// cteCell is a CTE of a query in scope, run when a row first reads it.
+// Its query block shares the cell with the blocks nested in it, so that a
+// CTE they read first runs once for the block, as Postgres runs one once.
+type cteCell struct {
+	def   *sqlir.SelectStmt
+	outer *env
+	// scope are the CTEs its query sees: those around the block and those
+	// declared before it.
+	scope map[string]*cteCell
+	done  bool
+	cols  []string
+	rows  []Row
 }
 
-// evalCTEs runs the CTEs read of with, in order, so that a later one reads
-// the earlier ones.
-func (x *sqlExec) evalCTEs(with []sqlir.CTE, read map[string]bool, outer *env) error {
-	for _, cte := range with {
+// withCTEs declares the CTEs of sel the query reads, each to run when the
+// query first reads it. Postgres runs a CTE as a scan it reads on demand, or
+// inlines it, so one no row reaches, such as in a subquery of the select
+// list over no rows or behind a false condition, never runs, and neither
+// its errors, locks nor calls happen.
+func (x *sqlExec) withCTEs(sel *sqlir.SelectStmt, outer *env) {
+	read := reachableCTEs(sel)
+	for _, cte := range sel.With {
 		if !read[cte.Name] {
 			continue
 		}
-		cols, rows, err := x.evalSelect(cte.Select, outer)
-		if err != nil {
-			return err
-		}
-		if x.cteCols == nil {
-			x.cteCols = map[string][]string{}
-		}
-		x.cteCols[cte.Name] = cols
-		x.ctes[cte.Name] = rows
+		x.ctes[cte.Name] = &cteCell{def: cte.Select, outer: outer, scope: maps.Clone(x.ctes)}
 	}
+}
+
+// runCTE runs the query's CTE name, if it is one that has not run.
+func (x *sqlExec) runCTE(name string) error {
+	c, ok := x.ctes[name]
+	if !ok || c.done {
+		return nil
+	}
+	saved := x.ctes
+	x.ctes = maps.Clone(c.scope)
+	cols, rows, err := x.evalSelect(c.def, c.outer)
+	x.ctes = saved
+	if err != nil {
+		return err
+	}
+	c.cols, c.rows, c.done = cols, rows, true
 	return nil
 }
 
@@ -959,9 +977,9 @@ func (x *sqlExec) evalCTEs(with []sqlir.CTE, read map[string]bool, outer *env) e
 // or a subquery that no row reaches does not run in either, so one that
 // would fail, such as by a division by zero, fails neither.
 //
-// Not eager as a SELECT's CTEs are: those run each time their query does,
-// once per row for a correlated subquery, while a write's run once for the
-// statement.
+// Kept apart from a query's CTEs, which run again each time their query
+// does, once per row for a correlated subquery, while a write's run once
+// for the statement.
 func (x *sqlExec) writeCTEs(with []sqlir.CTE, body any) error {
 	read := reachableWith(with, body)
 	for _, cte := range with {
@@ -984,15 +1002,14 @@ func (x *sqlExec) runPendingCTE(name string) error {
 		return nil
 	}
 	delete(x.pendingCTEs, name)
-	if err := x.evalCTEs([]sqlir.CTE{cte}, map[string]bool{name: true}, nil); err != nil {
+	cols, rows, err := x.evalSelect(cte.Select, nil)
+	if err != nil {
 		return err
 	}
 	if x.writeRows == nil {
 		x.writeRows, x.writeCols = map[string][]Row{}, map[string][]string{}
 	}
-	x.writeRows[name], x.writeCols[name] = x.ctes[name], x.cteCols[name]
-	delete(x.ctes, name)
-	delete(x.cteCols, name)
+	x.writeRows[name], x.writeCols[name] = rows, cols
 	return nil
 }
 
@@ -1000,27 +1017,28 @@ func (x *sqlExec) runPendingCTE(name string) error {
 // names were bound when it was created, so a CTE does not shadow a table it
 // reads.
 func (x *sqlExec) viewRows(view *sqlir.SelectStmt) ([]string, []Row, error) {
-	ctes, cteCols, pending, wrows, wcols := x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols
+	ctes, pending, wrows, wcols := x.ctes, x.pendingCTEs, x.writeRows, x.writeCols
 	defer func() {
-		x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = ctes, cteCols, pending, wrows, wcols
+		x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = ctes, pending, wrows, wcols
 	}()
-	x.ctes, x.cteCols, x.pendingCTEs, x.writeRows, x.writeCols = map[string][]Row{}, nil, nil, nil, nil
+	x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = map[string]*cteCell{}, nil, nil, nil
 	return x.evalSelect(view, nil)
 }
 
 // cteRows are the rows of the CTE name in scope: a query's, or a write's.
 // A query declaring a write's CTE name is refused, so the two never meet.
+// A query's CTE that has not run has none yet.
 func (x *sqlExec) cteRows(name string) ([]Row, bool) {
-	if rows, ok := x.ctes[name]; ok {
-		return rows, true
+	if c, ok := x.ctes[name]; ok {
+		return c.rows, true
 	}
 	rows, ok := x.writeRows[name]
 	return rows, ok
 }
 
 func (x *sqlExec) cteColumns(name string) ([]string, bool) {
-	if cols, ok := x.cteCols[name]; ok {
-		return cols, true
+	if c, ok := x.ctes[name]; ok {
+		return c.cols, c.done
 	}
 	cols, ok := x.writeCols[name]
 	return cols, ok
@@ -1061,6 +1079,9 @@ func (x *sqlExec) tableRows(t sqlir.TableRef, outer *env) (alias string, rows []
 		alias = relname(t.Name)
 	}
 	if err := x.runPendingCTE(t.Name); err != nil {
+		return "", nil, false, err
+	}
+	if err := x.runCTE(t.Name); err != nil {
 		return "", nil, false, err
 	}
 	if rows, ok := x.cteRows(t.Name); ok {

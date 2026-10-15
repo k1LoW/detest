@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -45,6 +46,9 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		// Creating a view runs no query, so its views are checked when a
 		// statement that runs it reads them.
 		if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
+			return err
+		}
+		if err := x.partlyReadCTEs(stmt, true); err != nil {
 			return err
 		}
 	}
@@ -102,6 +106,130 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 			return err
 		}
 		return x.rowSequenceCalls(st.Returning)
+	}
+	return nil
+}
+
+// partlyReadCTEs refuses a query's CTE that locks rows or has effects
+// where Postgres may run only part of it, or none. Postgres reads a CTE's
+// rows on demand, so a LIMIT, an EXISTS, a scalar subquery, a join or a
+// query around the reader that stops early leaves the rest of its rows
+// unread, and their locks and calls never happen. A WHERE or HAVING
+// condition that reads no column of the block's own rows is a filter
+// Postgres tests once, before it reads any row, so when it is false the
+// reader asks for none. detest runs every row of a CTE when a row first
+// reads it.
+//
+// A CTE is read in full when the statement reads all of its query's rows,
+// as those of a SELECT, an INSERT ... SELECT or a CREATE TABLE AS when
+// consumed is set, and each read of the CTE is the only FROM item of a
+// block that reads all of its rows: the query itself or a later CTE read
+// in full, with no LIMIT, OFFSET or condition of no column of its own.
+// These blocks have no query around them, so a column of the block is one
+// of its own rows. A CTE of one row read by a subquery is refused too, as
+// whether Postgres reaches the subquery at all depends on more than the
+// subquery: the select list of an EXISTS is never computed, and a join or
+// a LIMIT around it may stop first. The CTEs of a write are checked by
+// writeWith.
+func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
+	readsAll := func(b *sqlir.SelectStmt) bool {
+		if b.Limit != nil || b.Offset != nil {
+			return false
+		}
+		for _, e := range append(splitAnd(b.Where), splitAnd(b.Having)...) {
+			if e != nil && len(sqlir.BlockColumnRefs(e)) == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	// readers are the blocks that read the i-th CTE of q by its name.
+	readers := func(q *sqlir.SelectStmt, i int) []*sqlir.SelectStmt {
+		body := *q
+		body.With = nil
+		in := []any{&body}
+		for _, later := range q.With[i+1:] {
+			in = append(in, later.Select)
+		}
+		var out []*sqlir.SelectStmt
+		name := q.With[i].Name
+		for _, b := range sqlir.Selects(in) {
+			reads := b.From != nil && b.From.Name == name
+			for _, j := range b.Joins {
+				reads = reads || j.Table.Name == name
+			}
+			if !reads {
+				continue
+			}
+			if b == &body {
+				b = q
+			}
+			out = append(out, b)
+		}
+		return out
+	}
+	// sole reports a read that is the only FROM item of a block reading
+	// all of its rows.
+	sole := func(b *sqlir.SelectStmt) bool { return len(b.Joins) == 0 && readsAll(b) }
+	full := map[*sqlir.SelectStmt]bool{}  // blocks whose rows are all read
+	whole := map[*sqlir.SelectStmt]bool{} // CTE queries whose rows are all read
+	var visit func(q *sqlir.SelectStmt)
+	visit = func(q *sqlir.SelectStmt) {
+		if q == nil || !readsAll(q) {
+			return
+		}
+		full[q] = true
+		if q.SetOp != "" {
+			visit(q.Larg)
+			visit(q.Rarg)
+		}
+		read := reachableCTEs(q)
+		for i, cte := range slices.Backward(q.With) {
+			if !read[cte.Name] {
+				continue
+			}
+			if !slices.ContainsFunc(readers(q, i), func(b *sqlir.SelectStmt) bool { return !full[b] || !sole(b) }) {
+				whole[cte.Select] = true
+				visit(cte.Select)
+			}
+		}
+	}
+	switch st := stmt.(type) {
+	case *sqlir.SelectStmt:
+		if consumed {
+			visit(st)
+		}
+	case *sqlir.InsertStmt:
+		visit(st.Select)
+	case *sqlir.CreateTableAsStmt:
+		visit(st.Select)
+	case *sqlir.UpdateStmt:
+		for _, cte := range st.With {
+			visit(cte.Select)
+		}
+	case *sqlir.DeleteStmt:
+		for _, cte := range st.With {
+			visit(cte.Select)
+		}
+	}
+	for _, q := range sqlir.Selects(stmt) {
+		if len(q.With) == 0 {
+			continue
+		}
+		read := reachableCTEs(q)
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, cte := range q.With {
+			ctes[cte.Name] = cte.Select
+		}
+		for _, cte := range q.With {
+			def := cte.Select
+			if !read[cte.Name] || whole[def] {
+				continue
+			}
+			if x.effectfulQuery(def, ctes, map[string]bool{}) {
+				return x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read where Postgres may run only part of it", cte.Name))
+			}
+		}
 	}
 	return nil
 }
@@ -363,6 +491,11 @@ func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
 		}
 		seen[name] = true
 		if err := x.topSequenceCalls(v.View); err != nil {
+			return err
+		}
+		// Whether a statement reads all of a view's rows is not tracked,
+		// so its query counts as one read in part.
+		if err := x.partlyReadCTEs(v.View, false); err != nil {
 			return err
 		}
 		if err := x.viewSequenceChecks(v.View, seen); err != nil {

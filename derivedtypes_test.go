@@ -130,13 +130,6 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// refused.
 		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
 		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
-		// The evaluators run a CTE the fallback reads before any row,
-		// where Postgres runs it only when a row reaches the fallback.
-		`WITH c AS (SELECT nextval('seq') AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
-		// A CTE of a view's name does not hide the view from a CTE
-		// declared before it, nor from another view.
-		`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
-		`WITH c AS (SELECT n FROM seqv) SELECT (WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s LIMIT 1)`,
 		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
 		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.

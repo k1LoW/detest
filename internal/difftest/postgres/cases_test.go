@@ -741,6 +741,31 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// Postgres runs a CTE when a row first reads it, so one whose rows
+		// fail fails only a statement that reaches it.
+		Name: "a CTE runs only when a row reads it",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (n int)`,
+			`CREATE TABLE w (id int PRIMARY KEY)`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (0)`, `INSERT INTO w VALUES (1)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u) SELECT (SELECT v FROM c) FROM t WHERE false`),
+			difftest.Q(0, `SELECT EXISTS (WITH c AS (SELECT 1 / n AS v FROM u) SELECT (SELECT v FROM c) FROM t WHERE false LIMIT 1)`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u) SELECT 1 FROM t WHERE false AND (SELECT v FROM c) = 1`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u) SELECT (SELECT v FROM c) FROM t`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u) SELECT coalesce(w.id, (SELECT v FROM c)) FROM w`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u), d AS (SELECT v FROM c) SELECT (SELECT v FROM d) FROM t`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / n AS v FROM u) SELECT (SELECT v FROM c) FROM w`),
+			// A CTE first read in a nested query reads the CTEs of its own
+			// scope, not those the nested query declares.
+			difftest.Q(0, `WITH c AS (SELECT 1 AS v), d AS (SELECT v FROM c) SELECT (WITH c AS (SELECT 2 AS v) SELECT v FROM d)`),
+			difftest.Q(0, `WITH c AS (SELECT 1 AS v) SELECT (WITH c AS (SELECT 2 AS v) SELECT v FROM c), (SELECT v FROM c)`),
+		},
+	},
+	{
 		Name: "an aggregate in a subquery reading its own query's columns",
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
