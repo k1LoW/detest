@@ -403,3 +403,15 @@ func TestSchemaCheckRefused(t *testing.T) {
 		}
 	}
 }
+
+// A script's DDL that alters the columns a CHECK reads types the CHECK anew
+// for the statements after it, as Postgres plans it with the new types.
+func TestSchemaCheckTypesAcrossScript(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (a numeric, b numeric, c numeric, CHECK (a / b = c)); INSERT INTO t VALUES (4, 2, 2); ALTER TABLE t ALTER COLUMN a TYPE int, ALTER COLUMN b TYPE int, ALTER COLUMN c TYPE int; INSERT INTO t VALUES (3, 2, 1)`)
+	mustExec(t, db, `CREATE TABLE u (a int, b int, c numeric, CHECK (a / b = c)); INSERT INTO u VALUES (4, 2, 2); ALTER TABLE u ALTER COLUMN a TYPE numeric; INSERT INTO u VALUES (3, 2, 1.5)`)
+	if _, err := db.Exec(`INSERT INTO u VALUES (3, 2, 1)`); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("got %v, want a check violation", err)
+	}
+}

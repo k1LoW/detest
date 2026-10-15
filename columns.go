@@ -278,6 +278,25 @@ func (x *sqlExec) checkTableExpr(table string, t *tableCheck) error {
 	})
 }
 
+// forgetKept drops what the column check noted over the expressions tables
+// keep, for a script's next statement, whose DDL before it may have changed
+// the types of the columns they read. Each noted expression outlives the
+// statement in the schema, unlike a statement's own, so a note the check
+// would not make again, such as a division by a column altered from numeric
+// to integer, would otherwise stay.
+func (x *sqlExec) forgetKept() {
+	for e := range x.checkedDefaults {
+		for _, n := range sqlir.Exprs(e) {
+			if b, ok := n.(*sqlir.BinaryExpr); ok {
+				delete(x.numericDivs, b)
+			}
+			delete(x.exprTypes, n)
+			delete(x.branchTypes, n)
+		}
+	}
+	x.checkedDefaults = nil
+}
+
 // checkKept runs the column check over an expression a table keeps, in the
 // scope scope builds, and keeps what it returned for the statement.
 func (x *sqlExec) checkKept(e sqlir.Expr, scope func() *colScope) error {

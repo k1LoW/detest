@@ -398,6 +398,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			x.ctes, x.frozen = map[string]*cteCell{}, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			x.uncorrelated, x.subqueries, x.uncertain = nil, nil, nil
+			x.forgetKept()
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
