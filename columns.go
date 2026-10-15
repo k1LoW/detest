@@ -123,6 +123,9 @@ type columnChecker struct {
 	queries    []*sqlir.SelectStmt
 	visited    []*sqlir.SelectStmt
 	correlated map[*sqlir.SelectStmt]bool
+	// uncertain are the queries that read around themselves only if a
+	// column whose owner is not known belongs to a query around them.
+	uncertain map[*sqlir.SelectStmt]bool
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
@@ -192,7 +195,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		}
 	}
 	for _, q := range c.visited {
-		if !c.correlated[q] {
+		switch {
+		case c.correlated[q]:
+		case c.uncertain[q]:
+			if x.uncertain == nil {
+				x.uncertain = map[*sqlir.SelectStmt]bool{}
+			}
+			x.uncertain[q] = true
+		default:
 			if x.uncorrelated == nil {
 				x.uncorrelated = map[*sqlir.SelectStmt]bool{}
 			}
@@ -768,7 +778,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 			pop()
 			return nil, err
 		}
-		if outer != nil && c.correlated[cte.Select] {
+		if outer != nil && (c.correlated[cte.Select] || c.uncertain[cte.Select]) {
 			// Whether Postgres runs the subquery declaring such a CTE once
 			// or for each row depends on whether it plans the CTE, which
 			// it skips when nothing reads it and inlines or materializes
@@ -1986,11 +1996,9 @@ func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
 		}
 	} else {
 		// An item whose columns are not known, as a view or a derived table
-		// over a *, may or may not have the column. It owns the column only
-		// when no other scope could, as the server would fail a name it
-		// finds nowhere. Otherwise the owner is not known, and every query
-		// counts as correlated rather than be run once on a guess.
-		unknown := false
+		// over a *, may or may not have the column, so any scope from the
+		// innermost that may have it to the first that has it may own it.
+		var owners []*colScope
 		for s := sc; s != nil; s = s.outer {
 			has, maybe := false, false
 			for _, cols := range s.items {
@@ -2000,21 +2008,34 @@ func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
 					has = true
 				}
 			}
-			if !has && !maybe {
-				continue
-			}
-			if found || unknown {
-				found, unknown = false, false
-				break
+			if has || maybe {
+				owners = append(owners, s)
 			}
 			if has {
-				found, owner = true, s.query
 				break
 			}
-			unknown, owner = true, s.query
 		}
-		if unknown && owner != nil {
-			found = true
+		if len(owners) > 1 {
+			// The queries inside the innermost possible owner read around
+			// themselves whichever owns it. Those from it out to the
+			// outermost do only if the outer one does, which detest cannot
+			// tell, so they are noted for subquery to refuse rather than run
+			// once or for each row on a guess.
+			c.markCorrelated(owners[0].query != nil, owners[0].query)
+			outermost := owners[len(owners)-1].query
+			if c.uncertain == nil {
+				c.uncertain = map[*sqlir.SelectStmt]bool{}
+			}
+			for _, q := range slices.Backward(c.queries) {
+				if outermost != nil && q == outermost {
+					break
+				}
+				c.uncertain[q] = true
+			}
+			return
+		}
+		if len(owners) == 1 {
+			found, owner = owners[0].query != nil, owners[0].query
 		}
 	}
 	c.markCorrelated(found, owner)

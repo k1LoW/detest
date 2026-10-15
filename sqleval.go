@@ -555,6 +555,9 @@ type subqueryResult struct {
 // InitPlan, so a lock wait or a write between two rows reaching it does not
 // give the later row another result, and its locks are taken once.
 func (x *sqlExec) subquery(sel *sqlir.SelectStmt, en *env) ([]string, []Row, error) {
+	if x.uncertain[sel] {
+		return nil, nil, x.unsupported("subquery reading a column that an item of unknown columns inside it or a query around it may have")
+	}
 	if !x.uncorrelated[sel] {
 		return x.evalSelect(sel, en)
 	}

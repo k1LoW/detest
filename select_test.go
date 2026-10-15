@@ -1726,3 +1726,32 @@ func TestCorrelatedCTEInSubqueryUnsupported(t *testing.T) {
 		}
 	}
 }
+
+func TestUnknownColumnOwnerUnsupported(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, v int, n int)`)
+	mustExec(t, db, `CREATE TABLE v (n int)`)
+	mustExec(t, db, `CREATE VIEW vv AS SELECT * FROM v`)
+	mustExec(t, db, `INSERT INTO u VALUES (1), (2)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 10, 1)`)
+	mustExec(t, db, `INSERT INTO v VALUES (7)`)
+	for _, q := range []string{
+		`SELECT (SELECT id FROM vv) FROM u`,
+		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE n IS NOT NULL)) FROM u`,
+		`SELECT (WITH c AS (SELECT id FROM vv) SELECT id FROM c) FROM u`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) || !strings.Contains(err.Error(), "may have") && !strings.Contains(err.Error(), "around the one declaring it") {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL for the column's owner", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT (SELECT n FROM vv) FROM u`,
+		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE vv.n IS NOT NULL)) FROM u`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
