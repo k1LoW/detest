@@ -101,6 +101,9 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.flag, 'true' COLLATE "C") FROM (SELECT * FROM f) s`,
 		// The time readers take the type's own name, not a domain's base.
 		`SELECT coalesce(s.ts, NULL::timestamptz) FROM (SELECT t.* FROM (SELECT '2024-05-20 00:30'::wall AS ts) t) s`,
+		// Postgres fails a numeric offset with 42883.
+		`SELECT lag(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
+		`SELECT lead(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
 		// The NULL of a scalar subquery is text, beside an integer.
 		`SELECT coalesce(s.n, (SELECT NULL), 0) FROM (SELECT * FROM t) s`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,
@@ -143,6 +146,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, true},
 		{`SELECT coalesce(s.name, lag($1) OVER (ORDER BY s.id), 'x') = '01' FROM (SELECT * FROM t) s ORDER BY s.id`, int64(1)},
 		{`SELECT coalesce(s.name, $1 COLLATE "C", 'x') = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		{`SELECT coalesce(s.name, (SELECT $1)) = '01' FROM (SELECT * FROM t) s`, int64(1)},
 		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, true},
 		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, 1.5},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, []byte("bogus")},

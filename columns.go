@@ -1215,6 +1215,15 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 
 func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
 	if e := q.Select.Targets[0].Expr; untypedBranch(e) || isNullConst(e) {
+		if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
+			switch derefValue(c.x.args[p.Index]).(type) {
+			case nil, string, []byte:
+			default:
+				// The subquery returns the value as bound, not the text
+				// Postgres reads it as.
+				return "unresolved column type"
+			}
+		}
 		// Postgres resolves the subquery's unknown column to text.
 		return "text"
 	}
@@ -1554,6 +1563,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						c.x.noteType(e.Args[1], expressionType(e.Args[1], sc.columnType))
 					}
 				case "lag", "lead":
+					if len(e.Args) > 1 {
+						// computeWindow reads an offset of another type as 1.
+						typ := expressionTypeIn(e.Args[1], sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+						if r := numberRank[typ]; typ != "" && typ != "unresolved column type" && (r == 0 || r > numberRank["int8"]) {
+							err = c.x.unsupported(fmt.Sprintf("%s with a %s offset", e.Name, typ))
+							return
+						}
+					}
 					// The value and the default take one type, as the
 					// arguments of COALESCE do.
 					if err = c.branches(e, branchArgs(e), sc); err != nil {
