@@ -2868,24 +2868,19 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // character type that Postgres has no operator for and fails when it plans
 // the statement (42883), while the evaluators check the operands only where
 // a row reaches them. operands are the left and the right operand of op, or
-// the one operand of unary minus. A domain counts as its base type, and a
-// CASE, a COALESCE, a LAG or a LEAD of string literals and NULLs as text,
-// which Postgres resolves it to. No operator takes a boolean or a uuid. The
-// only one that takes a character type is jsonb - text, so a character type
-// is refused anywhere but on the right of a binary minus, and there only
-// beside a type detest classifies, which cannot be jsonb, rather than beside
-// a string literal, a parameter, a bare NULL or a type whose operators
-// detest does not list, as in '{}' - s.
+// the one operand of unary minus. A domain counts as its base type, and an
+// expression of string literals and NULLs, such as COALESCE('1', NULL) or
+// min('1'), as text, which Postgres resolves it to. No operator takes a
+// boolean or a uuid. The only one that takes a character type is
+// jsonb - text, so a character type is refused anywhere but on the right of
+// a binary minus, and there only beside a type detest classifies, which
+// cannot be jsonb, rather than beside a string literal, a parameter, a bare
+// NULL or a type whose operators detest does not list, as in '{}' - s.
 func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sqlir.Expr) error {
 	t := c.typer(sc)
+	t.untypedText = true
 	untyped := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) }
-	typeOf := func(e sqlir.Expr) string {
-		typ := t.reduce(t.of(e))
-		if typ == "" && untypedBranch(e) {
-			typ = "text"
-		}
-		return typ
-	}
+	typeOf := func(e sqlir.Expr) string { return t.reduce(t.of(e)) }
 	if len(operands) == 1 && untyped(operands[0]) {
 		// Several prefix operators take a number, and Postgres picks
 		// none for an operand of no type (42725), while the run would

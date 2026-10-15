@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -23,11 +24,15 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 // reducing a domain to its base type where Postgres resolves an operator or
 // a function, so that 1::tiny + 0 over a smallint is an integer rather than
 // a tiny. A cast, a column, a scalar subquery and branches all of one domain
-// keep the domain.
+// keep the domain. With untypedText, branches or arguments that are all
+// string literals, parameters or NULLs are text, which Postgres resolves
+// them to, as in min('1') or COALESCE('1', NULL), where without it they are
+// left untyped for the caller, such as branchTypes, to resolve.
 type typer struct {
-	column   func(*sqlir.ColumnRef) string
-	subquery func(*sqlir.SubQuery) string
-	base     func(string) string
+	column      func(*sqlir.ColumnRef) string
+	subquery    func(*sqlir.SubQuery) string
+	base        func(string) string
+	untypedText bool
 }
 
 func (t typer) reduce(typ string) string {
@@ -238,7 +243,7 @@ func (t typer) of(e sqlir.Expr) string {
 			}
 		case "first_value", "last_value":
 			if len(e.Args) > 0 {
-				return t.of(e.Args[0])
+				return t.common(e.Args[:1])
 			}
 		case "random":
 			return "float8"
@@ -288,6 +293,9 @@ func (t typer) of(e sqlir.Expr) string {
 // implicitly, a float8 over a float4 over a numeric over the integers from
 // the widest down.
 func (t typer) common(exprs []sqlir.Expr) string {
+	if t.untypedText && len(exprs) > 0 && !slices.ContainsFunc(exprs, func(e sqlir.Expr) bool { return !untypedExpr(e) && !isNullConst(e) }) {
+		return "text"
+	}
 	types := make([]string, len(exprs))
 	// Branches all of one type keep it, a domain included, while branches
 	// of several meet at their base types.

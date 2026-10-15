@@ -61,6 +61,12 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN true THEN '1' END + 1 WHERE false`,
 		`SELECT lag('1') OVER () + 1 FROM t WHERE false`,
 		`SELECT lead('1', 1, NULL) OVER () + 1 FROM t WHERE false`,
+		// Or a wrapper of such, or of literals alone.
+		`SELECT min(coalesce('1', NULL)) + 1 FROM t WHERE false`,
+		`SELECT max('1') + 1 FROM t WHERE false`,
+		`SELECT first_value(coalesce('1', NULL)) OVER () + 1 FROM t WHERE false`,
+		`SELECT last_value('1') OVER () + 1 FROM t WHERE false`,
+		`SELECT coalesce(coalesce('1', NULL), NULL) + 1 FROM t WHERE false`,
 		// A character type other than text has no operator either.
 		`SELECT '1'::bpchar + 1 WHERE false`,
 		`SELECT -'1'::bpchar WHERE false`,
