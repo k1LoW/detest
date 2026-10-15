@@ -104,6 +104,9 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// Postgres fails a numeric offset with 42883.
 		`SELECT lag(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
 		`SELECT lead(s.n, s.m, 0) OVER (ORDER BY s.id) FROM (SELECT t.*, 1.5 AS m FROM t) s`,
+		`SELECT lag(s.n, 'bogus', 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
+		`SELECT lead(s.n, 1::bigint, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s`,
+		`SELECT *, g / 2 AS half FROM generate_series((SELECT 1.0 UNION SELECT 1.0), 2) g ORDER BY 1`,
 		// The NULL of a scalar subquery is text, beside an integer.
 		`SELECT coalesce(s.n, (SELECT NULL), 0) FROM (SELECT * FROM t) s`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,

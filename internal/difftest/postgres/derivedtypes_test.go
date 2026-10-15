@@ -29,6 +29,8 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(g, 0) FROM generate_series(1, 2) AS g ORDER BY 1`),
 			difftest.Q(0, `SELECT coalesce(k, 0) FROM generate_series(1, 2) AS g(k) ORDER BY 1`),
 			difftest.Q(0, `SELECT * FROM generate_series(1, 2) g ORDER BY 1 DESC`),
+			difftest.Q(0, `SELECT coalesce(lag(s.n, NULL, 0) OVER (ORDER BY s.id), -1) FROM (SELECT * FROM t) s ORDER BY s.id`),
+			difftest.Q(0, `SELECT coalesce(lead(s.n, NULL, 0) OVER (ORDER BY s.id), -1) FROM (SELECT * FROM t) s ORDER BY s.id`),
 			difftest.Q(0, `SELECT s.nope FROM (SELECT * FROM t) s`),
 		},
 	},

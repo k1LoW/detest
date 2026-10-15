@@ -391,7 +391,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 				// functionRows runs the integer overload only, and would
 				// read whole numeric bounds as integers.
 				typ := expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
-				if r := numberRank[typ]; typ != "" && typ != "unresolved column type" && (r == 0 || r > numberRank["int8"]) {
+				if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int8"]) {
 					return c.x.unsupported("generate_series over a " + typ)
 				}
 			}
@@ -1564,11 +1564,25 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				case "lag", "lead":
 					if len(e.Args) > 1 {
-						// computeWindow reads an offset of another type as 1.
-						typ := expressionTypeIn(e.Args[1], sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
-						if r := numberRank[typ]; typ != "" && typ != "unresolved column type" && (r == 0 || r > numberRank["int8"]) {
+						// computeWindow reads an offset of another type as 1,
+						// where Postgres takes an int4 only.
+						off := e.Args[1]
+						typ := expressionTypeIn(off, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+						if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int4"]) {
 							err = c.x.unsupported(fmt.Sprintf("%s with a %s offset", e.Name, typ))
 							return
+						}
+						if _, ok := c.x.untypedText(off); ok {
+							err = c.x.unsupported(e.Name + " with a string literal or parameter offset")
+							return
+						}
+						if p, ok := off.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
+							if v := derefValue(c.x.args[p.Index]); v != nil {
+								if _, isInt := integer(v); !isInt {
+									err = c.x.unsupported(fmt.Sprintf("%s with a %T parameter offset", e.Name, v))
+									return
+								}
+							}
 						}
 					}
 					// The value and the default take one type, as the

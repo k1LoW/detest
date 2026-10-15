@@ -1299,6 +1299,12 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				if err != nil {
 					return err
 				}
+				if derefValue(o) == nil && !x.tx.db.kind.InnoDB() {
+					// Postgres returns NULL for a NULL offset, neither the
+					// row's value nor the default.
+					it.ctx.win[w] = nil
+					continue
+				}
 				n, ok := toInt64(derefValue(o))
 				if x.tx.db.kind.InnoDB() && (!ok || n < 0) {
 					return x.unsupported(name + " with an offset other than a nonnegative integer")
