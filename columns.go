@@ -439,7 +439,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 					}
 					// The integer overload types it, int8 beside a bigint
 					// bound and int4 otherwise, and reads its value as that.
-					c.inputAs(p, seriesOverload(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
+					c.inputAs(p, seriesOverload(t.Func, c.typer(sc)))
 				}
 			}
 			if !typed {
@@ -449,7 +449,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			for _, a := range t.Func.Args {
 				// functionRows runs the integer overload only, and would
 				// read whole numeric bounds as integers.
-				typ := expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+				typ := c.typer(sc).reduce(c.typer(sc).of(a))
 				if r := numberRank[typ]; typ != "" && (r == 0 || r > numberRank["int8"]) {
 					return c.x.unsupported("generate_series over a " + typ)
 				}
@@ -504,7 +504,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	case t.Func != nil:
 		sc.types[alias] = map[string]string{}
 		if name := funcColumn(t, alias); name != "" {
-			if typ := seriesType(t.Func, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); typ != "" {
+			if typ := seriesType(t.Func, c.typer(sc)); typ != "" {
 				sc.types[alias][name] = typ
 			}
 		}
@@ -820,7 +820,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			}
 			// The untyped rows take the type of the typed ones. A column
 			// of no typed row is left to a set operation around it.
-			types[i] = commonType(col, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+			types[i] = c.typer(sc).common(col)
 			c.timeParams(types[i], col...)
 			for _, e := range col {
 				c.inputAs(e, types[i])
@@ -1010,7 +1010,7 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			}
 			continue
 		}
-		typ := expressionTypeIn(t.Expr, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+		typ := c.typer(sc).of(t.Expr)
 		if typ == "unresolved column type" {
 			typ = ""
 			if c.outUnresolved == nil {
@@ -1310,7 +1310,7 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 			if t, ok := c.valuesTypes[sel]; ok && i < len(t) {
 				out[i] = t[i]
 			} else {
-				out[i] = commonType(col, nil, c.recordedSubqueryType)
+				out[i] = typer{subquery: c.recordedSubqueryType, base: c.x.tx.db.baseType}.common(col)
 			}
 			if out[i] == "" && slices.ContainsFunc(col, func(e sqlir.Expr) bool { return nestedBranches(e) != nil && untypedBranch(e) }) {
 				// A CASE or COALESCE of untyped branches alone is text,
@@ -1339,7 +1339,7 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 			}
 		case numberRank[out[i]] > 0 && numberRank[t] > numberRank[out[i]], timeRank[out[i]] > 0 && timeRank[t] > timeRank[out[i]]:
 			// Numbers, and dates and timestamps, meet at the widest, as
-			// they do in commonType.
+			// they do in typer's common.
 			out[i] = t
 		}
 	}
@@ -1495,9 +1495,9 @@ func funcColumn(t sqlir.TableRef, alias string) string {
 
 // seriesOverload is the integer type of the generate_series overload
 // Postgres picks for f: int8 where a bound is a bigint, int4 otherwise.
-func seriesOverload(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+func seriesOverload(f *sqlir.FuncCall, t typer) string {
 	for _, a := range f.Args {
-		switch expressionTypeIn(a, column, subquery) {
+		switch t.reduce(t.of(a)) {
 		case "int8", "bigint":
 			return "int8"
 		}
@@ -1509,10 +1509,10 @@ func seriesOverload(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, sub
 // integers f's arguments are: bigint where one is a bigint, as Postgres
 // picks the bigint form, and "" where one is of a type the check does not
 // know, as of a parameter.
-func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
+func seriesType(f *sqlir.FuncCall, t typer) string {
 	typ := "int4"
 	for _, a := range f.Args {
-		switch expressionTypeIn(a, column, subquery) {
+		switch t.reduce(t.of(a)) {
 		case "int", "int2", "int4", "integer", "smallint":
 		case "int8", "bigint":
 			typ = "int8"
@@ -2019,7 +2019,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			}
 			switch e := v.Interface().(type) {
 			case *sqlir.ArrayCmp:
-				typ := expressionType(e.X, sc.columnType)
+				typ := typer{column: sc.columnType, base: c.x.tx.db.baseType}.of(e.X)
 				// CheckSQL has no schema, so an operand of a type the
 				// statement does not show is left to the run.
 				known := typ != "" && typ != "unresolved column type" || !c.x.tx.checking
@@ -2067,7 +2067,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
-				if e.Op == "/" && numberRank[c.x.tx.db.baseType(expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))] > numberRank["int8"] {
+				if e.Op == "/" && numberRank[c.x.tx.db.baseType(c.typer(sc).of(e))] > numberRank["int8"] {
 					if c.x.numericDivs == nil {
 						c.x.numericDivs = map[*sqlir.BinaryExpr]bool{}
 					}
@@ -2141,14 +2141,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				case "date_trunc":
 					if len(e.Args) == 2 {
-						c.x.noteType(e.Args[1], expressionTypeIn(e.Args[1], sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
+						c.x.noteType(e.Args[1], c.typer(sc).of(e.Args[1]))
 					}
 				case "lag", "lead":
 					if len(e.Args) > 1 {
 						// computeWindow reads an offset of another type as 1,
 						// where Postgres takes an int4 only.
 						off := e.Args[1]
-						typ := expressionTypeIn(off, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+						typ := c.typer(sc).of(off)
 						if untypedBranch(off) && !untypedExpr(off) {
 							typ = "text" // a CASE or COALESCE of literals only
 						}
@@ -2193,7 +2193,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if !c.x.tx.db.kind.InnoDB() {
 					// Postgres fails COLLATE on a type of no collation
 					// (42804) before any row.
-					typ := expressionTypeIn(e.X, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+					typ := c.typer(sc).of(e.X)
 					if typ != "" && typ != "unresolved column type" && !untypedExpr(e.X) && !c.x.tx.db.collatable(typ) {
 						err = c.x.unsupported("COLLATE on a " + typ)
 						return
@@ -2263,15 +2263,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 // their own scope.
 func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope) error {
 	subquery := func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }
-	err, afterInput := c.x.unconvertedBranches(exprs, sc.columnType, subquery)
+	err, afterInput := c.x.unconvertedBranches(exprs, c.typerWith(sc, subquery))
 	if err != nil {
 		return err
 	}
-	typ := expressionTypeIn(e, sc.columnType, subquery)
+	typ := c.typerWith(sc, subquery).of(e)
 	if _, isCase := e.(*sqlir.CaseExpr); !isCase {
 		// NULLIF's own type is its first argument's, but the arguments
 		// meet at one type.
-		typ = commonType(exprs, sc.columnType, subquery)
+		typ = c.typerWith(sc, subquery).common(exprs)
 	}
 	c.timeParams(typ, exprs...)
 	for _, b := range exprs {
@@ -2295,7 +2295,7 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 	if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "nullif" {
 		// NULLIF returns its first argument, of its own type, which a
 		// reader of the result such as date_trunc goes by.
-		c.x.noteType(e, expressionTypeIn(e, sc.columnType, subquery))
+		c.x.noteType(e, c.typerWith(sc, subquery).of(e))
 	} else {
 		c.x.noteType(e, typ)
 	}
@@ -2303,7 +2303,7 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 		return err
 	}
 	c.branchParams(exprs, typ)
-	return c.x.noteNumberBranches(e, exprs, sc.columnType, subquery)
+	return c.x.noteNumberBranches(e, exprs, c.typerWith(sc, subquery))
 }
 
 // branchParams records the parameters among number branches, whose
@@ -2334,7 +2334,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	typ := expressionType(b, sc.columnType)
+	typ := typer{column: sc.columnType, base: c.x.tx.db.baseType}.of(b)
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
@@ -2371,21 +2371,16 @@ func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) err
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	named := expressionTypeIn(b, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
-	typ := c.x.tx.db.baseType(named)
+	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
+	if typ == ambiguousDomain {
+		// Postgres reads the input by the base type of the domain the
+		// search path finds, which detest does not tell apart.
+		return c.x.unsupported("a string literal or parameter in arithmetic beside " + ambiguousDomain)
+	}
 	if numberRank[typ] == 0 || e.Op == "%" && numberRank[typ] > numberRank["numeric"] {
 		// Postgres has no % of floats, so it does not take the
 		// operand's type there.
 		return nil
-	}
-	if named != typ {
-		// Postgres reduces a domain to its base type before it resolves
-		// the operator, so 1::tiny + 0 over a smallint is an integer,
-		// while expressionType promotes by the domain's name and keeps
-		// it, through derived columns, CTEs and views too. A domain column
-		// alone would be read right, but it cannot be told apart from
-		// such a promotion by its type, so every domain is refused here.
-		return c.x.unsupported(fmt.Sprintf("a string literal or parameter in arithmetic beside a value of the domain %s", named))
 	}
 	if p, ok := a.(*sqlir.Param); ok && numberRank[typ] <= numberRank["int8"] && p.Index >= 0 && p.Index < len(c.x.args) && isFloat(c.x.args[p.Index]) {
 		// Postgres binds the parameter as an integer, so $1 / 2 with 5.0
@@ -2421,6 +2416,16 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 		c.readParam(p)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
+}
+
+// typer types expressions in sc as Postgres resolves them, with a domain
+// reduced to its base type where an operator or a function takes it.
+func (c *columnChecker) typer(sc *colScope) typer {
+	return c.typerWith(sc, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+}
+
+func (c *columnChecker) typerWith(sc *colScope, subquery func(*sqlir.SubQuery) string) typer {
+	return typer{column: sc.columnType, subquery: subquery, base: c.x.tx.db.baseType}
 }
 
 // numberParam records the number type typ the parameter p takes. Postgres
@@ -2682,7 +2687,8 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
-	fa, fb := valueFamily(expressionType(a, sc.columnType)), valueFamily(expressionType(b, sc.columnType))
+	t := typer{column: sc.columnType, base: c.x.tx.db.baseType}
+	fa, fb := valueFamily(t.of(a)), valueFamily(t.of(b))
 	if fa == "" || fb == "" || fa == fb {
 		return nil
 	}
@@ -2693,7 +2699,7 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // LEAST or NULLIF, or rows of a VALUES column, of two types Postgres does not resolve to one,
 // which it fails when it plans the statement (42804) and the run would
 // return one of. Two types are taken as one only where valueFamily groups
-// them, or as dates and timestamps, which commonType widens; another pair
+// them, or as dates and timestamps, which typer's common widens; another pair
 // is refused even where Postgres resolves it, as for a set operation.
 func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope, of string) error {
 	family := func(typ string) string {
@@ -2704,7 +2710,7 @@ func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope, of string)
 	}
 	first := ""
 	for _, e := range exprs {
-		typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+		typ := c.typer(sc).of(e)
 		if typ == "" && nestedBranches(e) != nil && untypedBranch(e) {
 			// Postgres resolves a nested CASE or COALESCE of untyped
 			// branches alone, at any depth, to text before the branches

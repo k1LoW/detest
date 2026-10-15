@@ -950,6 +950,33 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id, q = 2.5 FROM r ORDER BY id`),
 		},
 	},
+	{
+		Name: "arithmetic over a domain resolves by its base type",
+		Schema: []string{
+			`CREATE DOMAIN tiny AS smallint`,
+			`CREATE DOMAIN amount AS numeric`,
+			`CREATE DOMAIN big AS bigint`,
+			`CREATE TABLE d (id int PRIMARY KEY, x tiny, n big)`,
+		},
+		Seed:  []string{`INSERT INTO d VALUES (1, 1, 2)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT coalesce(1::tiny + 0, '40000') WHERE false`),
+			difftest.Q(0, `SELECT coalesce(1::amount + 0::bigint, '1.5') WHERE false`),
+			difftest.Q(0, `SELECT coalesce(x + 0, '40000') = 1 FROM d`),
+			difftest.Q(0, `SELECT coalesce(1::tiny, 2::tiny) = 1`),
+			difftest.Q(0, `SELECT count(*) FROM d WHERE x + 0 = '40000'`),
+			difftest.Q(0, `SELECT s.v + '40000' FROM (SELECT x + 0 AS v FROM d) s WHERE false`),
+			difftest.Q(0, `SELECT sum(x::tiny) + '40000' FROM d HAVING false`),
+			difftest.Q(0, `SELECT max(x::tiny) + '40000' FROM d WHERE false`),
+			difftest.Q(0, `SELECT -(x::tiny) + '40000' FROM d WHERE false`),
+			difftest.Q(0, `SELECT x::tiny + '40000' FROM d WHERE false`),
+			difftest.Q(0, `SELECT 5 / sum(n::big) > 2 FROM d`),
+			difftest.Q(0, `SELECT count(*) FROM generate_series(1::big, 3)`),
+			difftest.Q(0, `SELECT count(*) FROM generate_series(1::tiny, 3)`),
+			difftest.Q(0, `SELECT count(*) FROM generate_series(NULL::big + 0, 3000000000)`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {
