@@ -243,6 +243,32 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	return nil
 }
 
+// checkDefault runs the column check over a column default, once per
+// statement, for the types the run converts its values by. A default reads
+// no column and holds no subquery or parameter, so only the walk over its
+// expression and the reads of its string literals apply.
+func (x *sqlExec) checkDefault(d sqlir.Expr) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if err, ok := x.checkedDefaults[d]; ok {
+		return err
+	}
+	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
+	err := c.exprs(d, &colScope{items: map[string]colSet{}})
+	for _, read := range c.untyped {
+		if err != nil {
+			break
+		}
+		err = read()
+	}
+	if x.checkedDefaults == nil {
+		x.checkedDefaults = map[sqlir.Expr]error{}
+	}
+	x.checkedDefaults[d] = err
+	return err
+}
+
 // paramUses records how a statement uses each parameter. Postgres gives a
 // parameter one type for the whole statement, taken from where it first
 // stands, so one used as the array of = ANY and elsewhere as a scalar, as

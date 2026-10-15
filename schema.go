@@ -79,7 +79,7 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 	// table's own key, NOT NULL, constraints and generated columns are
 	// readers too, and would be decided from the marker, so a column one
 	// of them reads is refused instead.
-	v, err := x.eval(d, &env{})
+	v, err := x.evalDefault(d)
 	if err != nil && !errors.As(err, new(errUnknownExpr)) {
 		return nil, err
 	}
@@ -90,6 +90,26 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 		v = sqlir.Unknown
 	}
 	return v, nil
+}
+
+// evalDefault evaluates a column default with the types the column check
+// resolves in it, as Postgres plans a default it writes into a statement's
+// plan with the statement, so that a division by a numeric divides as one.
+// A default the check refuses is refused, as it is in a statement. Taking
+// it for one detest cannot compute and writing the Unknown marker would
+// skip the effects and the errors its evaluation has, such as a nextval or
+// a division by an hour of now(), which the processes observe, and those
+// defaults are not the ones dumps hold, which the check passes.
+func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
+	if err := x.checkDefault(d); err != nil {
+		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+			return nil, err
+		}
+		// Postgres types a default when it creates the table, so one the
+		// check fails for could not have been declared.
+		return nil, x.unsupported("a default detest cannot type: " + err.Error())
+	}
+	return x.eval(d, &env{})
 }
 
 // assignedValue evaluates the value a SET assigns, computing the column's

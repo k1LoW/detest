@@ -821,6 +821,27 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		// Postgres types a division by a numeric in a default as numeric,
+		// as it does in a statement.
+		Name: "a numeric division in a column default",
+		Schema: []string{
+			`CREATE TABLE p (id int PRIMARY KEY)`,
+			`CREATE TABLE e (id int PRIMARY KEY, n numeric DEFAULT (1 / (extract(year FROM interval '1 year') / 2)))`,
+			`CREATE TABLE d (id int PRIMARY KEY, m numeric DEFAULT (3 / (extract(year FROM interval '1 year') * 2)), k int DEFAULT ((3 / (extract(year FROM interval '1 year') * 2)) * 2)::int REFERENCES p ON DELETE SET DEFAULT)`,
+		},
+		Seed:  []string{`INSERT INTO p VALUES (2), (3), (4)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `INSERT INTO e (id) VALUES (1) RETURNING n = 2`),
+			difftest.Q(0, `INSERT INTO d (id) VALUES (1) RETURNING m = 1.5, k`),
+			difftest.Q(0, `INSERT INTO d (id, m, k) VALUES (2, DEFAULT, 4) RETURNING m = 1.5, k`),
+			difftest.S(0, `UPDATE d SET m = 0 WHERE id = 2`),
+			difftest.Q(0, `UPDATE d SET m = DEFAULT WHERE id = 2 RETURNING m = 1.5`),
+			difftest.S(0, `DELETE FROM p WHERE id = 4`),
+			difftest.Q(0, `SELECT id, k FROM d ORDER BY id`),
+		},
+	},
+	{
 		// A string literal compared with a uuid is read by uuid input, so
 		// it matches the row in another case, in braces or without hyphens,
 		// and text that is no uuid fails the statement.

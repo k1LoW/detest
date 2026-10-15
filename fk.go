@@ -456,7 +456,7 @@ func (x *sqlExec) setChildren(ck childKey, kids []Row, old, parent Row, action s
 				// so a default detest cannot compute is refused as
 				// applyDefaults refuses one a key reads: the marker would be
 				// matched against the parent's keys.
-				v, err := x.eval(def.defaults[c], &env{})
+				v, err := x.evalDefault(def.defaults[c])
 				if err != nil && !errors.As(err, new(errUnknownExpr)) {
 					return err
 				}
