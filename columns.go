@@ -2354,7 +2354,16 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					c.untypedOperands(sc, e.L, e.R)
 				case "+", "-", "*", "/", "%":
+					if err = c.arithmeticTypes(sc, e.Op, e.L, e.R); err != nil {
+						return
+					}
 					if err = c.arithmeticOperand(sc, e); err != nil {
+						return
+					}
+				}
+			case *sqlir.UnaryExpr:
+				if e.Op == "-" {
+					if err = c.arithmeticTypes(sc, "-", e.X); err != nil {
 						return
 					}
 				}
@@ -3021,6 +3030,59 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// arithmeticTypes refuses arithmetic over a boolean, a uuid or a
+// character type that Postgres has no operator for and fails when it plans
+// the statement (42883), while the evaluators check the operands only where
+// a row reaches them. operands are the left and the right operand of op, or
+// the one operand of unary minus. A domain counts as its base type, and an
+// expression of string literals and NULLs, such as COALESCE('1', NULL) or
+// min('1'), as text, which Postgres resolves it to. No operator takes a
+// boolean or a uuid. The only one that takes a character type is
+// jsonb - text, so a character type is refused anywhere but on the right of
+// a binary minus, and there only beside a type detest classifies, which
+// cannot be jsonb, rather than beside a string literal, a parameter, a bare
+// NULL or a type whose operators detest does not list, as in '{}' - s.
+func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sqlir.Expr) error {
+	t := c.typer(sc)
+	t.untypedText = true
+	untyped := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) }
+	typeOf := func(e sqlir.Expr) string { return t.reduce(t.of(e)) }
+	if len(operands) == 1 && untyped(operands[0]) {
+		// Several prefix operators take a number, and Postgres picks
+		// none for an operand of no type (42725), while the run would
+		// negate the value bound. Postgres accepts -$1 when a use it
+		// analyses earlier types the parameter, as in $1 = n, -$1, but
+		// that order is not the statement's (UPDATE reads WHERE before
+		// SET) and detest does not follow it, as numberParam does not,
+		// so -$1 is refused wherever it stands and -$1::int is the form
+		// that runs.
+		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
+	}
+	for i, o := range operands {
+		if untyped(o) {
+			continue
+		}
+		typ := typeOf(o)
+		switch {
+		case typ == "bool" || typ == "boolean" || typ == "uuid":
+		case collatableType(typ):
+			if len(operands) == 2 && i == 1 && op == "-" {
+				l := operands[0]
+				if untyped(l) {
+					continue
+				}
+				if lt := typeOf(l); valueFamily(lt) == "" && lt != "date" && !collatableType(lt) {
+					continue
+				}
+			}
+		default:
+			continue
+		}
+		return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", typ))
+	}
+	return nil
 }
 
 // branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,

@@ -979,6 +979,34 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "arithmetic over a scalar subquery types its target in its own scope",
+		Schema: []string{
+			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,
+			`CREATE TABLE nums (id int PRIMARY KEY, n int)`,
+		},
+		Seed:  []string{`INSERT INTO flags VALUES (1, true)`, `INSERT INTO nums VALUES (1, 2)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT (SELECT n FROM nums LIMIT 1) + 1 FROM flags WHERE false) s`),
+		},
+	},
+	{
+		Name: "text in arithmetic beside a literal or jsonb",
+		Schema: []string{
+			`CREATE TABLE tj (id int PRIMARY KEY, s text)`,
+		},
+		Seed:  []string{`INSERT INTO tj VALUES (1, 'a')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(*) FROM (SELECT '{}' - s FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT ('{}' - s) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce('{}' - s, NULL) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT (SELECT '{}' - s) - 'b'::text FROM tj WHERE false) x`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT NULL - s FROM tj WHERE false) x`),
+		},
+	},
+	{
 		Name: "a numeric reads back as its text",
 		Schema: []string{
 			`CREATE DOMAIN amount AS numeric`,
