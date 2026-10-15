@@ -1768,6 +1768,8 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`UPDATE t SET f = f FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s RETURNING s.v + 0::numeric`,
 		`SELECT (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
 		`UPDATE t SET id = id RETURNING (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
+		`SELECT (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
+		`UPDATE t SET id = id RETURNING (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
@@ -1806,6 +1808,10 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	// A NULL or an untyped literal takes the other query's type.
 	if err := db.QueryRow(`SELECT 2000000::numeric UNION ALL SELECT NULL WHERE false`).Scan(&sv); err != nil || sv != "2000000" {
 		t.Errorf("beside a NULL: got %#v, %v, want the text 2000000", sv, err)
+	}
+	// Untyped arguments alone take the float8 form.
+	if err := db.QueryRow(`SELECT floor($1) + 0::numeric`, int64(5000000)).Scan(&sv); err != nil || sv != float64(5000000) {
+		t.Errorf("floor of a parameter: got %#v, %v, want a float64", sv, err)
 	}
 	// An untyped parameter takes the form the other argument picks.
 	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {

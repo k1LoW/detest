@@ -153,6 +153,11 @@ func (t typer) of(e sqlir.Expr) string {
 					kind = "numeric" // no form takes it, which Postgres fails
 				}
 			}
+			if kind == "" && len(e.Args) > 0 {
+				// Untyped arguments alone take float8, the preferred
+				// number type.
+				return "float8"
+			}
 			return kind
 		case "avg":
 			if len(e.Args) == 0 {

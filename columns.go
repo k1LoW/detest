@@ -1271,6 +1271,9 @@ func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
 	case len(sel.Targets) == 1 && untypedOutput(sel.Targets[0].Expr):
 		return "text" // as subqueryType resolves it
 	}
+	if c.outUnresolved[sel][0] {
+		return unresolvedType
+	}
 	if t := c.outTypes[sel]; len(t) == 1 {
 		return t[0]
 	}
@@ -1668,8 +1671,8 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		// nesting.
 		types, ok := c.outTypes[q.Select]
 		switch {
-		case !ok:
-			return "unresolved column type"
+		case !ok || c.outUnresolved[q.Select][0]:
+			return unresolvedType
 		case len(types) == 1:
 			return types[0]
 		}
@@ -1683,9 +1686,9 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		return ""
 	}
 	types, ok := vc.outTypes[q.Select]
-	if !ok {
+	if !ok || vc.outUnresolved[q.Select][0] {
 		// A set operation's or a *'s column may be an interval.
-		return "unresolved column type"
+		return unresolvedType
 	}
 	if len(types) == 1 {
 		return types[0]
