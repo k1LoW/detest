@@ -870,6 +870,53 @@ var cases = []difftest.Case{
 			difftest.S(0, `COMMIT`),
 		},
 	},
+	{
+		Name: "a query computes only the rows it pulls",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE e (id int PRIMARY KEY)`,
+			`CREATE TABLE w (v bigint PRIMARY KEY, id int)`,
+			`CREATE SEQUENCE sq`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 1), (2, 0), (3, 0)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			// Past LIMIT, no row is read or computed.
+			difftest.Q(0, `SELECT nextval('sq') FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u WHERE id > 1 LIMIT 1`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u OFFSET 1 LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT 1 / n FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT id FROM u WHERE 1 / n = 1 LIMIT 1`),
+			// A row's select list is computed right after its WHERE.
+			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE nextval('sq') > 0`),
+			// LIMIT 0 pulls no row, whatever is under it.
+			difftest.Q(0, `SELECT 1 / n FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT id, 1 / n FROM u ORDER BY id LIMIT 0`),
+			difftest.Q(0, `SELECT sum(1 / n) FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u LIMIT 0`),
+			// A condition of no column is tested before the FROM items.
+			difftest.Q(0, `SELECT * FROM (SELECT 1 / n FROM u) s WHERE false`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT 1 / n AS v FROM u) s WHERE 1 = 0`),
+			difftest.Q(0, `SELECT sum(1 / n) FROM u HAVING false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE u.id = e.id + 2) > 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE EXISTS (SELECT 1 / n FROM u WHERE u.id = e.id + 2)`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE id > 0 AND false`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			// Under ORDER BY, a volatile item no key reads is computed
+			// after the sort, for the rows OFFSET and LIMIT let through.
+			difftest.Q(0, `SELECT setval('sq', 1, false)`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY id DESC`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY id OFFSET 1 LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT id, nextval('sq') AS v FROM u ORDER BY v DESC`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY 2 DESC LIMIT 1`),
+			difftest.S(0, `INSERT INTO w SELECT nextval('sq'), id FROM u ORDER BY id DESC`),
+			difftest.Q(0, `SELECT v, id FROM w ORDER BY v`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

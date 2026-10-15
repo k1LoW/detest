@@ -48,7 +48,7 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
 			return err
 		}
-		if err := x.partlyReadCTEs(stmt, true); err != nil {
+		if err := x.partlyRead(stmt, true); err != nil {
 			return err
 		}
 	}
@@ -110,28 +110,32 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 	return nil
 }
 
-// partlyReadCTEs refuses a query's CTE that locks rows or has effects
-// where Postgres may run only part of it, or none. Postgres reads a CTE's
-// rows on demand, so a LIMIT, an EXISTS, a scalar subquery, a join or a
-// query around the reader that stops early leaves the rest of its rows
-// unread, and their locks and calls never happen. A WHERE or HAVING
-// condition that reads no column of the block's own rows is a filter
-// Postgres tests once, before it reads any row, so when it is false the
-// reader asks for none. detest runs every row of a CTE when a row first
-// reads it.
+// partlyRead refuses a FROM item that locks rows or has effects, a CTE,
+// a derived table or a view, where Postgres may run only part of it, or
+// none, or where its rows interleave with effects of the query reading
+// it. Postgres reads such an item's rows on demand, so a LIMIT, an EXISTS,
+// a scalar subquery, a join or a query around the reader that stops early
+// leaves the rest of its rows unread, and their locks and calls never
+// happen. A WHERE or HAVING condition that reads no column of the block's
+// own rows is a filter Postgres tests once, before it reads any row, so
+// when it is false the reader asks for none. And Postgres computes a row
+// of the reader as soon as it pulls the row from the item, so a sequence
+// call of the reader's select list comes between two of the item's.
+// detest runs every row of an item before the query reading it computes
+// any of its own.
 //
-// A CTE is read in full when the statement reads all of its query's rows,
-// as those of a SELECT, an INSERT ... SELECT or a CREATE TABLE AS when
-// consumed is set, and each read of the CTE is the only FROM item of a
-// block that reads all of its rows: the query itself or a later CTE read
-// in full, with no LIMIT, OFFSET or condition of no column of its own.
-// These blocks have no query around them, so a column of the block is one
-// of its own rows. A CTE of one row read by a subquery is refused too, as
-// whether Postgres reaches the subquery at all depends on more than the
-// subquery: the select list of an EXISTS is never computed, and a join or
-// a LIMIT around it may stop first. The CTEs of a write are checked by
-// writeWith.
-func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
+// An item is read in full when the statement reads all of its query's
+// rows, as those of a SELECT, an INSERT ... SELECT or a CREATE TABLE AS
+// when consumed is set, and each read of the item is the only FROM item of
+// a block that reads all of its rows, which is the query itself or a later
+// CTE or an item read in full, with no LIMIT, OFFSET or condition of no
+// column of its own. These blocks have no query around them, so a column of the
+// block is one of its own rows. A CTE of one row read by a subquery is
+// refused too, as whether Postgres reaches the subquery at all depends on
+// more than the subquery. The select list of an EXISTS is never computed,
+// and a join or a LIMIT around it may stop first. The CTEs of a write are
+// checked by writeWith.
+func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 	readsAll := func(b *sqlir.SelectStmt) bool {
 		if b.Limit != nil || b.Offset != nil {
 			return false
@@ -168,66 +172,129 @@ func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement, consumed bool) error {
 		}
 		return out
 	}
+	ctes := map[string]*sqlir.SelectStmt{}
+	for _, q := range sqlir.Selects(stmt) {
+		for _, cte := range q.With {
+			ctes[cte.Name] = cte.Select
+		}
+	}
+	// own reports a block with effects of its own, beside its FROM items.
+	own := func(b *sqlir.SelectStmt) bool {
+		rest := *b
+		// The block's own locking clause takes no lock between the
+		// item's rows, as planLocking refuses it over a derived table or
+		// a view and Postgres over a CTE.
+		rest.From, rest.Joins, rest.With, rest.Lock = nil, nil, nil, nil
+		return x.effectfulQuery(&rest, ctes, map[string]bool{})
+	}
+	// view is the query of the view t names, nil for another item.
+	view := func(t *sqlir.TableRef) *sqlir.SelectStmt {
+		if t == nil || t.Name == "" || t.Sub != nil {
+			return nil
+		}
+		if v := x.tx.db.views[x.tx.db.resolve(t.Name)]; v != nil {
+			return v.View
+		}
+		return nil
+	}
 	// sole reports a read that is the only FROM item of a block reading
 	// all of its rows.
 	sole := func(b *sqlir.SelectStmt) bool { return len(b.Joins) == 0 && readsAll(b) }
 	full := map[*sqlir.SelectStmt]bool{}  // blocks whose rows are all read
-	whole := map[*sqlir.SelectStmt]bool{} // CTE queries whose rows are all read
-	var visit func(q *sqlir.SelectStmt)
-	visit = func(q *sqlir.SelectStmt) {
+	whole := map[*sqlir.SelectStmt]bool{} // item queries whose rows are all read
+	paced := map[*sqlir.SelectStmt]bool{} // item queries read by a block with effects
+	var visit func(q *sqlir.SelectStmt, effects bool)
+	visit = func(q *sqlir.SelectStmt, effects bool) {
 		if q == nil || !readsAll(q) {
 			return
 		}
 		full[q] = true
 		if q.SetOp != "" {
-			visit(q.Larg)
-			visit(q.Rarg)
+			visit(q.Larg, effects)
+			visit(q.Rarg, effects)
+			return
+		}
+		effects = effects || own(q)
+		if f := q.From; f != nil && len(q.Joins) == 0 && !f.Lateral {
+			item := f.Sub
+			if item == nil && ctes[f.Name] == nil {
+				item = view(f)
+			}
+			if item != nil {
+				whole[item] = true
+				paced[item] = paced[item] || effects
+				visit(item, effects)
+			}
 		}
 		read := reachableCTEs(q)
 		for i, cte := range slices.Backward(q.With) {
 			if !read[cte.Name] {
 				continue
 			}
-			if !slices.ContainsFunc(readers(q, i), func(b *sqlir.SelectStmt) bool { return !full[b] || !sole(b) }) {
+			rs := readers(q, i)
+			if !slices.ContainsFunc(rs, func(b *sqlir.SelectStmt) bool { return !full[b] || !sole(b) }) {
 				whole[cte.Select] = true
-				visit(cte.Select)
+				paced[cte.Select] = paced[cte.Select] || effects || slices.ContainsFunc(rs, own)
+				visit(cte.Select, effects)
 			}
 		}
 	}
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
 		if consumed {
-			visit(st)
+			visit(st, false)
 		}
 	case *sqlir.InsertStmt:
-		visit(st.Select)
+		visit(st.Select, false)
 	case *sqlir.CreateTableAsStmt:
-		visit(st.Select)
+		visit(st.Select, false)
 	case *sqlir.UpdateStmt:
 		for _, cte := range st.With {
-			visit(cte.Select)
+			visit(cte.Select, false)
 		}
 	case *sqlir.DeleteStmt:
 		for _, cte := range st.With {
-			visit(cte.Select)
+			visit(cte.Select, false)
 		}
 	}
+	check := func(what string, def *sqlir.SelectStmt) error {
+		if whole[def] && !paced[def] || !x.effectfulQuery(def, ctes, map[string]bool{}) {
+			return nil
+		}
+		if whole[def] {
+			return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read by a query with effects of its own, which Postgres computes between its rows", what))
+		}
+		return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read where Postgres may run only part of it", what))
+	}
 	for _, q := range sqlir.Selects(stmt) {
-		if len(q.With) == 0 {
-			continue
-		}
 		read := reachableCTEs(q)
-		ctes := map[string]*sqlir.SelectStmt{}
 		for _, cte := range q.With {
-			ctes[cte.Name] = cte.Select
-		}
-		for _, cte := range q.With {
-			def := cte.Select
-			if !read[cte.Name] || whole[def] {
+			if !read[cte.Name] {
 				continue
 			}
-			if x.effectfulQuery(def, ctes, map[string]bool{}) {
-				return x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read where Postgres may run only part of it", cte.Name))
+			if err := check(fmt.Sprintf("CTE %q", cte.Name), cte.Select); err != nil {
+				return err
+			}
+		}
+		items := []*sqlir.TableRef{q.From}
+		for i := range q.Joins {
+			items = append(items, &q.Joins[i].Table)
+		}
+		for _, t := range items {
+			// A LATERAL subquery runs again for each row, which
+			// rowSequenceCalls refuses for a call of effectFuncs.
+			if t == nil || t.Lateral {
+				continue
+			}
+			switch {
+			case t.Sub != nil:
+				if err := check("a derived table", t.Sub); err != nil {
+					return err
+				}
+			case view(t) != nil:
+				if err := check(fmt.Sprintf("view %q", t.Name), view(t)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -267,6 +334,68 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 		}
 		if err := x.topSequenceCalls(sel.Rarg); err != nil {
 			return err
+		}
+		if sel.Limit != nil || sel.Offset != nil {
+			// Postgres pulls the queries' rows on demand and stops at
+			// LIMIT, where detest runs them in full.
+			ctes := map[string]*sqlir.SelectStmt{}
+			for _, c := range sel.With {
+				ctes[c.Name] = c.Select
+			}
+			if x.effectfulQuery(sel.Larg, ctes, map[string]bool{}) || x.effectfulQuery(sel.Rarg, ctes, map[string]bool{}) {
+				return x.unsupported("a set operation under LIMIT or OFFSET over a query that locks rows or has effects, which Postgres runs only as far as LIMIT reads")
+			}
+		}
+	}
+	if len(windowsOf(sel)) > 0 && (len(sel.OrderBy) > 0 || sel.Limit != nil || sel.Offset != nil) {
+		// Postgres computes the select list after the window functions,
+		// row by row as ORDER BY and LIMIT pull them, where detest
+		// computes it for every row before.
+		for _, t := range sel.Targets {
+			for _, f := range sqlir.FuncCalls(t.Expr) {
+				if effectFuncs[f.Name] {
+					return x.unsupported(f.Name + " in the select list of a query with window functions and ORDER BY, LIMIT or OFFSET")
+				}
+			}
+		}
+	}
+	if sel.Lock != nil {
+		// Postgres computes the select list below the row locks, for a
+		// row SKIP LOCKED skips too and again for a row it re-checks after
+		// a lock wait, where detest computes it for the rows it locked.
+		for _, t := range sel.Targets {
+			for _, f := range sqlir.FuncCalls(t.Expr) {
+				if effectFuncs[f.Name] {
+					return x.unsupported(f.Name + " in the select list of a locking read")
+				}
+			}
+		}
+		// Its WHERE runs for the rows it pulls, which LIMIT stops, where
+		// detest tests every row before it locks any.
+		if sel.Limit != nil || sel.Offset != nil {
+			for _, f := range sqlir.FuncCalls(sel.Where) {
+				if effectFuncs[f.Name] {
+					return x.unsupported(f.Name + " in the WHERE of a locking read with LIMIT or OFFSET")
+				}
+			}
+		}
+	}
+	if len(sel.OrderBy) > 0 && (sel.Limit != nil || sel.Offset != nil) {
+		// Whether Postgres computes a subquery of the select list for a
+		// row past LIMIT depends on its plan. Its cost may postpone the
+		// subquery past the sort, and an index may stand in for the sort.
+		// Without LIMIT it computes the subquery for every row before the
+		// sort, and without ORDER BY for the rows it pulls, as pull does.
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, c := range sel.With {
+			ctes[c.Name] = c.Select
+		}
+		for _, t := range sel.Targets {
+			for _, q := range sqlir.Selects(t.Expr) {
+				if x.effectfulQuery(q, ctes, map[string]bool{}) {
+					return x.unsupported("a subquery that locks rows in the select list of a query with ORDER BY and LIMIT or OFFSET")
+				}
+			}
 		}
 	}
 	if len(sel.GroupBy) > 0 {
@@ -495,7 +624,7 @@ func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
 		}
 		// Whether a statement reads all of a view's rows is not tracked,
 		// so its query counts as one read in part.
-		if err := x.partlyReadCTEs(v.View, false); err != nil {
+		if err := x.partlyRead(v.View, false); err != nil {
 			return err
 		}
 		if err := x.viewSequenceChecks(v.View, seen); err != nil {

@@ -99,3 +99,64 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		}
 	}
 }
+
+// Postgres pulls the rows of a derived table, a view or a set operation's
+// query on demand, and computes the select list of the query reading them
+// between two of their rows, where detest runs them in full first. One
+// that locks rows or has effects is accepted only where every row of it is
+// read and the query reading it has no effects of its own.
+func TestPartlyReadItemWithEffects(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 10), (2, 20)`)
+	mustExec(t, db, `CREATE VIEW sv AS SELECT nextval('sq') AS v FROM u`)
+	for _, q := range []string{
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s OFFSET 1`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s WHERE false`,
+		`SELECT s.v FROM u JOIN (SELECT nextval('sq') AS v) s ON true`,
+		`SELECT EXISTS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s)`,
+		`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a LIMIT 1) b`,
+		`SELECT v FROM sv LIMIT 1`,
+		`SELECT n FROM (SELECT n FROM u FOR UPDATE) s LIMIT 1`,
+		// The select list of the query reading it is computed between its
+		// rows.
+		`SELECT v, nextval('sq') AS w FROM (SELECT nextval('sq') AS v FROM u) s`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v, nextval('sq') AS w FROM c`,
+		`SELECT v, nextval('sq') AS w FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s WHERE v > random()`,
+		`SELECT v, nextval('sq') AS w FROM sv`,
+		// A set operation reads its queries as far as LIMIT asks.
+		`SELECT nextval('sq') FROM u UNION ALL SELECT 1 LIMIT 1`,
+		// Postgres computes the select list after the window functions,
+		// and below the row locks, for a row SKIP LOCKED skips too.
+		`SELECT nextval('sq'), row_number() OVER () FROM u LIMIT 1`,
+		`SELECT nextval('sq'), row_number() OVER () FROM u ORDER BY 1`,
+		`SELECT id, nextval('sq') FROM u LIMIT 1 FOR UPDATE SKIP LOCKED`,
+		`SELECT id FROM u WHERE nextval('sq') > 0 LIMIT 1 FOR UPDATE`,
+		// Whether it computes a subquery for a row past LIMIT depends on
+		// its plan.
+		`SELECT id, (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY id LIMIT 1`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, tt := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s ORDER BY v`, []string{"1", "2"}},
+		{`SELECT count(*) FROM (SELECT nextval('sq') AS v FROM u) s WHERE v > 0`, []string{"2"}},
+		{`SELECT v FROM sv ORDER BY v`, []string{"5", "6"}},
+		{`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b ORDER BY v`, []string{"7", "8"}},
+		{`SELECT nextval('sq') FROM u UNION ALL SELECT 1`, []string{"9", "10", "1"}},
+		{`SELECT nextval('sq')`, []string{"11"}},
+	} {
+		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+}
