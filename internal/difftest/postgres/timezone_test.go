@@ -45,13 +45,16 @@ var tzCases = []difftest.Case{
 		Name: "date_trunc over a domain of date reads it as a date in the session's zone",
 		Schema: []string{
 			`CREATE DOMAIN day AS date`,
-			`CREATE TABLE days (id int PRIMARY KEY, d date NOT NULL)`,
+			`CREATE DOMAIN wall AS timestamp`,
+			`CREATE TABLE days (id int PRIMARY KEY, d date NOT NULL, ts timestamp NOT NULL)`,
 		},
-		Seed:  []string{`INSERT INTO days VALUES (1, '2026-01-02')`},
+		Seed:  []string{`INSERT INTO days VALUES (1, '2026-01-02', '2026-01-02 12:00')`},
 		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.S(0, `SET TIME ZONE 'America/New_York'`),
 			difftest.Q(0, `WITH x AS (SELECT d::day AS n FROM days) SELECT extract(epoch FROM date_trunc('day', n))::bigint FROM x`),
+			// date_trunc keeps a timestamp's a timestamp over a domain too.
+			difftest.Q(0, `WITH x AS (SELECT ts::wall AS n FROM days) SELECT extract(epoch FROM coalesce(date_trunc('day', n), NULL::timestamp))::bigint FROM x`),
 		},
 	},
 	{

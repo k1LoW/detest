@@ -139,6 +139,7 @@ func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE DOMAIN day AS date`)
+	mustExec(t, db, `CREATE DOMAIN span AS interval`)
 	mustExec(t, db, `CREATE TABLE dates (id int PRIMARY KEY, n date)`)
 	mustExec(t, db, `CREATE TABLE words (id int PRIMARY KEY, n text)`)
 	mustExec(t, db, `CREATE TABLE nums (id int PRIMARY KEY, n int)`)
@@ -154,6 +155,9 @@ func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 		// A domain over a date is a date there.
 		`SELECT n::day - n::day FROM dates`,
 		`WITH x AS (SELECT n::day AS n FROM dates) SELECT (SELECT n FROM x LIMIT 1) - (SELECT n FROM x LIMIT 1) FROM dates`,
+		// date_trunc of an interval domain is an interval, which Postgres
+		// does not compare with a timestamptz.
+		`WITH x AS (SELECT interval '1 day' AS n) SELECT count(*) FROM (SELECT n::span AS n FROM x) y WHERE false AND date_trunc('day', n) = now()`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

@@ -266,7 +266,7 @@ func (t typer) of(e sqlir.Expr) string {
 			// A timestamp's stays a timestamp and an interval's an
 			// interval, and a date's becomes a timestamptz, as any other's.
 			if len(e.Args) == 2 {
-				if typ := t.of(e.Args[1]); typ == "timestamp" || typ == "interval" {
+				if typ := t.reduce(t.of(e.Args[1])); typ == "timestamp" || typ == "interval" {
 					return typ
 				}
 			}
