@@ -21,6 +21,35 @@ import (
 // every goroutine detest starts for a process.
 var procMainEntry = runtime.FuncForPC(reflect.ValueOf((*Proc).main).Pointer()).Entry()
 
+// currentName is the name of Sim.Current, which the code under test calls
+// without saying what it calls detest for. Its frame is found by name, as an
+// inlined frame has no entry, and is spelled out, as taking it from the
+// method value would make an initialization cycle through adopt.
+var currentName = reflect.TypeFor[Sim]().PkgPath() + ".(*Sim).Current"
+
+// currentCallSite describes a call to Current by the file and line it was
+// made from, as the first call of a goroutine adopted at it. Goroutines that
+// reach detest through Current at different places, such as fakes handed
+// s.Current(), are then ordered by their code rather than by goroutine id.
+// The line is stable within a binary, which is all a replay needs.
+func currentCallSite() string {
+	var pcs [512]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if f.Function == currentName {
+			if c, _ := frames.Next(); c.File != "" {
+				return "current " + c.File + ":" + strconv.Itoa(c.Line)
+			}
+			return ""
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
 // onProcGoroutine reports whether the calling goroutine is one detest started
 // for a process, and whether it could tell. It walks the stack rather than
 // reading the goroutine id, as runtime.Stack takes a lock shared by the whole
@@ -296,6 +325,8 @@ func (r *run) adopt(gid string, first func() string) *Proc {
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{})}
 	if first != nil {
 		np.first = first()
+	} else {
+		np.first = currentCallSite()
 	}
 	r.gidMu.Lock()
 	if r.over() {
@@ -344,11 +375,12 @@ func (p *Proc) handshake() {
 // runtime ran them, so they are ordered by their parents and, between the
 // goroutines of one parent, by the call each was adopted at, such as a
 // statement with its arguments, which tells apart goroutines a loop started
-// for different items. Only goroutines making the same first call are
-// ordered by goroutine id, which mostly follows the order they were started
-// in but not always, since the runtime hands ids out from per-processor
-// caches. A misordering would make the replay of a schedule take another
-// path, which detest reports as nondeterminism.
+// for different items, or by where a call to Current was made from. Only
+// goroutines making the same first call from the same place are ordered by
+// goroutine id, which mostly follows the order they were started in but not
+// always, since the runtime hands ids out from per-processor caches. A
+// misordering would make the replay of a schedule take another path, which
+// detest reports as nondeterminism.
 func (r *run) takeAdopted() bool {
 	r.gidMu.Lock()
 	pending := r.adopting
