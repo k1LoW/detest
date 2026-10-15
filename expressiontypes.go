@@ -197,7 +197,11 @@ func (t typer) of(e sqlir.Expr) string {
 				}
 			}
 		case "min", "max", "abs":
-			if e.Name == "abs" && len(e.Args) == 1 && untypedExpr(e.Args[0]) {
+			// abs(NULL) takes float8 too, but only where untyped values are
+			// resolved: elsewhere it stays unknown, so that the branch
+			// checks refuse a COALESCE of an integer with it, which
+			// Postgres computes as a float8 and the run as an integer.
+			if e.Name == "abs" && len(e.Args) == 1 && (untypedExpr(e.Args[0]) || t.untypedText && isNullConst(e.Args[0])) {
 				return "float8" // the preferred number type's form
 			}
 			return t.reduce(t.common(e.Args))
@@ -218,7 +222,8 @@ func (t typer) of(e sqlir.Expr) string {
 			}
 			r := t.reduce(t.of(e.Args[1]))
 			if l == "" {
-				return r
+				// Literals and NULLs alone resolve as COALESCE's do.
+				return t.reduce(t.common(e.Args))
 			}
 			if lc, rc := numberCategory(l), numberCategory(r); lc > 0 && rc > lc {
 				if rc == numberCategory("numeric") {

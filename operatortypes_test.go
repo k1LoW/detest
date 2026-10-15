@@ -67,6 +67,10 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT first_value(coalesce('1', NULL)) OVER () + 1 FROM t WHERE false`,
 		`SELECT last_value('1') OVER () + 1 FROM t WHERE false`,
 		`SELECT coalesce(coalesce('1', NULL), NULL) + 1 FROM t WHERE false`,
+		`SELECT NULLIF('1', '2') + 1 WHERE false`,
+		`SELECT coalesce(NULLIF('1', '2'), NULL) + 1 WHERE false`,
+		`SELECT NULLIF(NULL, NULL) + 1 WHERE false`,
+		`SELECT min(NULL) + 1 WHERE false`,
 		// A character type other than text has no operator either.
 		`SELECT '1'::bpchar + 1 WHERE false`,
 		`SELECT -'1'::bpchar WHERE false`,
@@ -114,6 +118,9 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT coalesce('{}' - s, NULL) - 'b'::text FROM t WHERE false`, nil},
 		{`SELECT (SELECT '{}' - s) - 'b'::text FROM t WHERE false`, nil},
 		{`SELECT NULL - s FROM t WHERE false`, nil},
+		// abs of no type takes float8, the preferred number type.
+		{`SELECT abs(NULL) + 1`, []string{"NULL"}},
+		{`SELECT -abs(NULL) FROM t WHERE false`, nil},
 		{`SELECT '{}'::jsonb - coalesce('a', NULL) WHERE false`, nil},
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {
