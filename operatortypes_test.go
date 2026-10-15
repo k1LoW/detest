@@ -44,10 +44,13 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		// Nor beside a type detest does not classify.
 		`SELECT b + '{}'::jsonb FROM t WHERE false`,
 		`SELECT '{}'::jsonb - u FROM t WHERE false`,
-		// Postgres resolves a CASE or a COALESCE of literals to text.
+		// Postgres resolves a CASE, a COALESCE, a LAG or a LEAD of literals to
+		// text.
 		`SELECT -coalesce('1', NULL) WHERE false`,
 		`SELECT coalesce('1', NULL) + 1 WHERE false`,
 		`SELECT CASE WHEN true THEN '1' END + 1 WHERE false`,
+		`SELECT lag('1') OVER () + 1 FROM t WHERE false`,
+		`SELECT lead('1', 1, NULL) OVER () + 1 FROM t WHERE false`,
 		// A character type other than text has no operator either.
 		`SELECT '1'::bpchar + 1 WHERE false`,
 		`SELECT -'1'::bpchar WHERE false`,

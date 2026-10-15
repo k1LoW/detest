@@ -2724,9 +2724,9 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 // arithmeticTypes refuses arithmetic over a boolean, a uuid or a
 // character type, for which Postgres has no operator and fails when it
 // plans the statement (42883), while the evaluators check the operands only
-// where a row reaches them. A domain counts as its base type, and a CASE or
-// a COALESCE of string literals and NULLs as text, which Postgres resolves
-// it to. No operator takes a boolean or a uuid whatever the other operand
+// where a row reaches them. A domain counts as its base type, and a CASE, a
+// COALESCE, a LAG or a LEAD of string literals and NULLs as text, which
+// Postgres resolves it to. No operator takes a boolean or a uuid whatever the other operand
 // is. A character type is refused only beside an operand detest types,
 // since beside a string literal, a parameter, a bare NULL or a type whose
 // operators detest does not list it may be the text of jsonb - text, as in
@@ -2740,7 +2740,7 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 			continue
 		}
 		typ := t.reduce(t.of(o))
-		if typ == "" && nestedBranches(o) != nil && untypedBranch(o) {
+		if typ == "" && untypedBranch(o) {
 			typ = "text"
 		}
 		switch typ {
