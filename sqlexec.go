@@ -46,6 +46,12 @@ type sqlExec struct {
 	// bounds are the OFFSET and LIMIT of the queries being evaluated, taken
 	// before each query runs anything.
 	bounds map[*sqlir.SelectStmt][2]int
+	// uncorrelated are the queries the column check found reading no
+	// column of a query around them, and subqueries the results of those
+	// run as an expression, which Postgres computes once for the statement
+	// (an InitPlan) however many rows reach it.
+	uncorrelated map[*sqlir.SelectStmt]bool
+	subqueries   map[*sqlir.SelectStmt]subqueryResult
 	// arrays are the arrays the statement's = ANY and <> ALL read, read
 	// before it runs anything.
 	arrays map[*sqlir.ArrayCmp]*arrayElems
@@ -357,6 +363,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			x.colls, x.outputs, x.collates = nil, nil, false
 			x.ctes, x.cteCols, x.frozen = map[string][]Row{}, nil, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
+			x.uncorrelated, x.subqueries = nil, nil
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err

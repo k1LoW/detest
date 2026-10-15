@@ -697,6 +697,27 @@ var cases = []difftest.Case{
 			difftest.S(1, `COMMIT`),
 		},
 	},
+	{
+		Name: "an uncorrelated subquery runs once for the statement",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, v int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE w (id int PRIMARY KEY)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 10)`, `INSERT INTO u VALUES (1, NULL), (2, NULL)`, `INSERT INTO w VALUES (1), (2)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(1, `BEGIN`),
+			difftest.Q(1, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			// The first row reads 10 and waits for w's row; the update
+			// the other transaction commits meanwhile is not seen by the
+			// second row, which reuses the subquery's result.
+			difftest.Q(0, `SELECT coalesce(u.n, (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)), (SELECT w.id FROM w WHERE w.id = u.id FOR UPDATE) FROM u ORDER BY u.id`),
+			difftest.S(1, `UPDATE t SET v = 20 WHERE id = 1`),
+			difftest.S(1, `COMMIT`),
+			difftest.Q(0, `SELECT coalesce(u.n, (SELECT v FROM t WHERE id = 1)) FROM u ORDER BY u.id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

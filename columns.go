@@ -60,6 +60,9 @@ type colScope struct {
 	excluded    colSet
 	hasExcluded bool
 	outer       *colScope
+	// query is the query whose scope this is, nil for a write's target
+	// and the other scopes of a statement rather than a query.
+	query *sqlir.SelectStmt
 }
 
 // columnChecker resolves the column references of a statement against the
@@ -115,6 +118,11 @@ type columnChecker struct {
 	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
+	// queries are the queries being checked, innermost last, and
+	// correlated those that read a column of a query around them.
+	queries    []*sqlir.SelectStmt
+	visited    []*sqlir.SelectStmt
+	correlated map[*sqlir.SelectStmt]bool
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
@@ -181,6 +189,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	for _, read := range c.untyped {
 		if err := read(); err != nil {
 			return err
+		}
+	}
+	for _, q := range c.visited {
+		if !c.correlated[q] {
+			if x.uncorrelated == nil {
+				x.uncorrelated = map[*sqlir.SelectStmt]bool{}
+			}
+			x.uncorrelated[q] = true
 		}
 	}
 	return nil
@@ -762,6 +778,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if sel == nil {
 		return nil, nil
 	}
+	c.queries = append(c.queries, sel)
+	c.visited = append(c.visited, sel)
+	defer func() { c.queries = c.queries[:len(c.queries)-1] }()
 	pop, err := c.with(sel.With, outer)
 	if err != nil {
 		return nil, err
@@ -778,7 +797,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if err := c.noteSetOpColumns(sel); err != nil {
 			return nil, err
 		}
-		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
+		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer, query: sel}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
 			first = first.Larg
@@ -799,7 +818,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		}
 		return out, nil
 	}
-	sc := &colScope{items: map[string]colSet{}, outer: outer}
+	sc := &colScope{items: map[string]colSet{}, outer: outer, query: sel}
 	if len(sel.Values) > 0 {
 		// Postgres resolves each column of a VALUES query over its rows
 		// when it plans the statement, and fails one of two types (42804)
@@ -1941,8 +1960,43 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	return nil, false
 }
 
+// noteCorrelation marks the queries being checked that r reads outside of:
+// those inside the query whose scope has its column. A column whose scope
+// is not known, as an item of unknown columns may have it, marks them all,
+// as does one of a write's target, which is around every query.
+func (c *columnChecker) noteCorrelation(r *sqlir.ColumnRef, sc *colScope) {
+	var owner *sqlir.SelectStmt
+	found := false
+	for s := sc; s != nil && !found; s = s.outer {
+		if r.Table != "" {
+			_, ok := s.items[r.Table]
+			found = ok || r.Table == "excluded" && s.hasExcluded
+		} else {
+			for _, cols := range s.items {
+				if has, _ := cols.has(r.Column); cols == nil || has {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
+			owner = s.query
+		}
+	}
+	if c.correlated == nil {
+		c.correlated = map[*sqlir.SelectStmt]bool{}
+	}
+	for _, q := range slices.Backward(c.queries) {
+		if found && q == owner {
+			return
+		}
+		c.correlated[q] = true
+	}
+}
+
 // resolve reports a column reference no FROM item in scope has.
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
+	c.noteCorrelation(r, sc)
 	if r.Table != "" {
 		cols, ok := sc.lookupItem(r.Table)
 		if !ok {
