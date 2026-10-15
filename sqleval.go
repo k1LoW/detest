@@ -521,6 +521,9 @@ func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error)
 			switch a.(type) {
 			case *sqlir.Const, *sqlir.Param, *sqlir.ColumnRef:
 			default:
+				if err := x.resolveCalls(a); err != nil {
+					return nil, err
+				}
 				if skipped != nil && !dropped {
 					if err := skipped(a); err != nil {
 						return nil, err
@@ -542,6 +545,25 @@ func (x *sqlExec) callArgs(v *sqlir.FuncCall, eval func(sqlir.Expr) (any, error)
 		}
 	}
 	return args, nil
+}
+
+// resolveCalls refuses an unknown function or a call of another number of
+// arguments in e, as evaluating it would, for an argument callArgs leaves
+// unevaluated: Postgres resolves every call when it parses the statement.
+// The aggregates are computed, or dropped as Postgres drops them.
+func (x *sqlExec) resolveCalls(e sqlir.Expr) error {
+	for _, f := range sqlir.BlockFuncCalls(e) {
+		if isAggregateCall(f) {
+			continue
+		}
+		if !knownFunc(f.Name, x.tx.db.kind.InnoDB()) {
+			return errUnknownExpr{f.Name + "(...)"}
+		}
+		if err := x.checkArity(f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // untypedPair resolves the operands of a comparison as Postgres resolves an

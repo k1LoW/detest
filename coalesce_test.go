@@ -63,6 +63,11 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		`SELECT coalesce(NULL::bigint, (SELECT v FROM av))`,
 		`SELECT v FROM av`,
 		`CREATE TABLE r AS SELECT coalesce(nextval('sq'), max(nextval('sq'))) AS v FROM t`,
+		`UPDATE u SET n = 0 WHERE coalesce(n, (SELECT n FROM seqv)) > 0`,
+		`DELETE FROM u WHERE coalesce(n, (SELECT n FROM seqv)) > 0`,
+		// Postgres resolves every call when it parses the statement.
+		`SELECT coalesce(n, abs(n, n)) FROM t`,
+		`SELECT coalesce(n, nosuchfn(n)) FROM t`,
 		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
 		`SELECT coalesce(CASE WHEN true THEN pg_advisory_xact_lock(1) END, CASE WHEN true THEN pg_advisory_xact_lock(2) END)`,
 		`SELECT coalesce(l.v, NULL) FROM (SELECT pg_advisory_xact_lock(1) AS v) l`,

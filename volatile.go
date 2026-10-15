@@ -254,10 +254,6 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 				if err = x.noSequenceCalls(sub); err != nil {
 					return
 				}
-				if x.viewSequenceCalls(sub, map[string]bool{}) {
-					err = x.unsupported("a subquery reading a view with a sequence call, which detest evaluates another number of times than Postgres")
-					return
-				}
 				for _, q := range sqlir.Selects(sub) {
 					if err = x.aggregateEffects(q); err != nil {
 						return
@@ -358,10 +354,10 @@ func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
 	return nil
 }
 
-// viewSequenceCalls reports a query reading a view, directly or through
+// viewSequenceCalls reports a node reading a view, directly or through
 // another, whose query calls one of effectFuncs. seen guards against a view
 // read twice.
-func (x *sqlExec) viewSequenceCalls(sel *sqlir.SelectStmt, seen map[string]bool) bool {
+func (x *sqlExec) viewSequenceCalls(sel any, seen map[string]bool) bool {
 	for _, q := range sqlir.Selects(sel) {
 		refs := []*sqlir.TableRef{q.From}
 		for i := range q.Joins {
@@ -449,6 +445,9 @@ func (x *sqlExec) noSequenceCalls(ns ...any) error {
 		walk(reflect.ValueOf(n))
 		if found != "" {
 			return x.unsupported(found + " where detest evaluates it another number of times than Postgres, such as a subquery or the WHERE of an UPDATE or a DELETE")
+		}
+		if x.viewSequenceCalls(n, map[string]bool{}) {
+			return x.unsupported("a view with a sequence call where detest evaluates it another number of times than Postgres, such as a subquery or the WHERE of an UPDATE or a DELETE")
 		}
 	}
 	return nil
