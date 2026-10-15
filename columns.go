@@ -133,9 +133,6 @@ type columnChecker struct {
 	// rowSubqueries are the subqueries a row is compared with, by the
 	// number of columns they must have, which is the row's rather than one.
 	rowSubqueries map[*sqlir.SubQuery]int
-	// cteDefs are the queries of the CTEs in scope, as ctes holds their
-	// names, which the COALESCE CTE effect check follows.
-	cteDefs []map[string]*sqlir.SelectStmt
 	// outCertain are the certain types of a query's output columns by
 	// position, and outCertainNamed by name (noteCertain).
 	outCertain      map[*sqlir.SelectStmt][]string
@@ -241,6 +238,32 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		}
 	}
 	return nil
+}
+
+// checkDefault runs the column check over a column default, once per
+// statement, for the types the run converts its values by. A default reads
+// no column and holds no subquery or parameter, so only the walk over its
+// expression and the reads of its string literals apply.
+func (x *sqlExec) checkDefault(d sqlir.Expr) error {
+	if x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	if err, ok := x.checkedDefaults[d]; ok {
+		return err
+	}
+	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
+	err := c.exprs(d, &colScope{items: map[string]colSet{}})
+	for _, read := range c.untyped {
+		if err != nil {
+			break
+		}
+		err = read()
+	}
+	if x.checkedDefaults == nil {
+		x.checkedDefaults = map[sqlir.Expr]error{}
+	}
+	x.checkedDefaults[d] = err
+	return err
 }
 
 // paramUses records how a statement uses each parameter. Postgres gives a
@@ -688,8 +711,14 @@ func (c *columnChecker) writeWith(with []sqlir.CTE, target, alias string, items 
 		readElsewhere[name] = true
 	}
 	effects := map[string]bool{}
+	defs := map[string]*sqlir.SelectStmt{}
 	for _, cte := range with {
-		if !queryHasEffects(cte.Select) {
+		defs[cte.Name] = cte.Select
+	}
+	for _, cte := range with {
+		// Through the views and the earlier CTEs it reads too, whose
+		// effects run as far as it is read.
+		if !c.x.effectfulQuery(cte.Select, defs, map[string]bool{}) {
 			continue
 		}
 		if readElsewhere[cte.Name] {
@@ -795,17 +824,14 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	if len(with) == 0 {
 		return func() {}, nil
 	}
-	m, tm, dm := map[string]colSet{}, map[string]map[string]string{}, map[string]*sqlir.SelectStmt{}
+	m, tm := map[string]colSet{}, map[string]map[string]string{}
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
-	c.cteDefs = append(c.cteDefs, dm)
 	pop = func() {
 		c.ctes = c.ctes[:len(c.ctes)-1]
 		c.cteTypes = c.cteTypes[:len(c.cteTypes)-1]
-		c.cteDefs = c.cteDefs[:len(c.cteDefs)-1]
 	}
 	for _, cte := range with {
-		dm[cte.Name] = cte.Select
 		s, err := c.query(cte.Select, outer)
 		if err != nil {
 			pop()
@@ -2437,15 +2463,6 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						err = c.x.unsupported("COALESCE of a void value, which detest holds as NULL")
 						return
 					}
-					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], c.readsEffectfulCTE) {
-						// The evaluators stop at the first argument that is
-						// not NULL as Postgres does, but run every CTE the
-						// statement reads before its rows, where Postgres
-						// runs one only when a row reaches it, so the
-						// effect would happen where it does not.
-						err = c.x.unsupported("COALESCE reading a CTE of an effect after its first argument")
-						return
-					}
 					// The arguments take the type of the typed ones.
 					if err = c.branches(e, e.Args, sc); err != nil {
 						return
@@ -3472,88 +3489,4 @@ func (c *columnChecker) unsentOutputParam(sel *sqlir.SelectStmt) bool {
 		}
 	}
 	return false
-}
-
-// effectful reports an expression with an effect another statement
-// observes: a sequence's, an advisory lock's, or a subquery's row locks,
-// in the views it reads too. seen guards against a view read twice.
-func (c *columnChecker) effectful(e any, seen map[string]bool) bool {
-	db := c.x.tx.db
-	for _, q := range sqlir.Selects(e) {
-		if q.Lock != nil {
-			return true
-		}
-		refs := []*sqlir.TableRef{q.From}
-		for i := range q.Joins {
-			refs = append(refs, &q.Joins[i].Table)
-		}
-		for _, t := range refs {
-			if t == nil || t.Name == "" {
-				continue
-			}
-			// A CTE resolves in the scope it was declared in and a view in
-			// none, which this check does not track, so every CTE of the
-			// name in scope and the view of the name are followed alike.
-			for _, def := range c.cteDefsOf(t.Name) {
-				key := fmt.Sprintf("cte %s %p", t.Name, def)
-				if !seen[key] {
-					seen[key] = true
-					if def == nil || c.effectful(def, seen) {
-						return true
-					}
-				}
-			}
-			name := db.resolve(t.Name)
-			if v := db.views[name]; v != nil && !seen[name] {
-				seen[name] = true
-				if c.effectful(v.View, seen) {
-					return true
-				}
-			}
-		}
-	}
-	return slices.ContainsFunc(sqlir.FuncCallsIn(e), isEffectCall)
-}
-
-// readsEffectfulCTE reports an expression reading a CTE in scope whose
-// query has an effect, as effectful finds one.
-func (c *columnChecker) readsEffectfulCTE(e sqlir.Expr) bool {
-	seen := map[string]bool{}
-	for _, q := range sqlir.Selects(e) {
-		refs := []*sqlir.TableRef{q.From}
-		for i := range q.Joins {
-			refs = append(refs, &q.Joins[i].Table)
-		}
-		for _, t := range refs {
-			if t == nil || t.Name == "" {
-				continue
-			}
-			for _, def := range c.cteDefsOf(t.Name) {
-				if def == nil || c.effectful(def, seen) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// cteDefsOf are the queries of the CTEs of the name in scope, at every
-// level.
-func (c *columnChecker) cteDefsOf(name string) []*sqlir.SelectStmt {
-	var out []*sqlir.SelectStmt
-	for _, defs := range c.cteDefs {
-		if q, ok := defs[name]; ok {
-			out = append(out, q)
-		}
-	}
-	return out
-}
-
-func isEffectCall(f *sqlir.FuncCall) bool {
-	switch f.Name {
-	case "nextval", "setval":
-		return true
-	}
-	return strings.HasPrefix(f.Name, "pg_advisory") || strings.HasPrefix(f.Name, "pg_try_advisory")
 }
