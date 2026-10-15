@@ -1557,7 +1557,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.castTo(v, x.halfToInteger(v, paramBool(v, val)))
+		return x.castTo(v, x.halfToInteger(v, paramBool(v, x.tx.db.baseType(v.Type), val)))
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.

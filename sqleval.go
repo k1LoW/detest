@@ -122,7 +122,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, val))))
+		return x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, x.tx.db.baseType(v.Type), val))))
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {

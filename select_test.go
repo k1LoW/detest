@@ -1056,9 +1056,26 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`UPDATE y SET d = $1 WHERE false`, int64(3)); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("an integer for a date column: got %v, want unsupported", err)
 	}
-	// An integer is read by its digits, as the driver sends it.
-	if _, err := db.Exec(`UPDATE t SET b = $1 WHERE false`, int64(5)); !errors.Is(err, ErrInvalidTextRepresentation) {
-		t.Errorf("5 for a boolean column: got %v, want invalid input", err)
+	// An integer is read by its digits, as the driver sends it, for a
+	// boolean domain too.
+	mustExec(t, db, `CREATE DOMAIN flag AS boolean`)
+	for _, q := range []string{`UPDATE t SET b = $1 WHERE false`, `SELECT $1::flag FROM t`} {
+		if _, err := db.Exec(q, int64(5)); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s with 5: got %v, want invalid input", q, err)
+		}
+	}
+	mustExec(t, db, `CREATE TABLE w (id int PRIMARY KEY, ts timestamp, tz timestamptz)`)
+	for _, q := range []string{`UPDATE w SET ts = $1 WHERE false`, `UPDATE w SET tz = $1 WHERE false`} {
+		for _, v := range []any{true, int64(3)} {
+			if _, err := db.Exec(q, v); !errors.As(err, new(*ErrUnsupportedSQL)) {
+				t.Errorf("%s with a %T: got %v, want unsupported", q, v, err)
+			}
+		}
+		for _, v := range []any{nil, at, "2024-05-20 10:00"} {
+			if _, err := db.Exec(q, v); err != nil {
+				t.Errorf("%s with %v: got %v, want no error", q, v, err)
+			}
+		}
 	}
 	if _, err := db.Exec(`UPDATE t SET u = $1 WHERE false`, nil); err != nil {
 		t.Errorf("NULL for a uuid column: got %v, want no error", err)

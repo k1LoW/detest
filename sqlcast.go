@@ -104,9 +104,10 @@ func (x *sqlExec) boolCastSource(c *sqlir.Cast) error {
 
 // paramBool is an integer parameter cast to boolean as the text the driver
 // sends it as, so that $1::bool with 2 fails as boolean input does, where
-// 2::bool is true through the integer cast.
-func paramBool(c *sqlir.Cast, v any) any {
-	if _, ok := c.X.(*sqlir.Param); !ok || (c.Type != "bool" && c.Type != "boolean") {
+// 2::bool is true through the integer cast. typ is the cast's base type, so
+// a boolean domain reads it the same way.
+func paramBool(c *sqlir.Cast, typ string, v any) any {
+	if _, ok := c.X.(*sqlir.Param); !ok || (typ != "bool" && typ != "boolean") {
 		return v
 	}
 	if n, ok := integer(derefValue(v)); ok {

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -1928,6 +1929,15 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 			// The cast leaves a value of another type to the run, where the
 			// driver refuses it or sends text Postgres fails as uuid input.
 			return c.x.unsupported(fmt.Sprintf("a %T bound to a parameter taken as a uuid", derefValue(v)))
+		}
+		if base := c.x.tx.db.baseType(e.Type); (base == "timestamp" || base == "timestamptz") && isParam(e.X) && derefValue(v) != nil && !isText(v) {
+			switch derefValue(v).(type) {
+			case time.Time, instant:
+			default:
+				// castValue leaves such a value as it is, where the driver
+				// refuses it or sends text Postgres fails as a timestamp.
+				return c.x.unsupported(fmt.Sprintf("a %T bound to a parameter taken as %s", derefValue(v), e.Type))
+			}
 		}
 		if _, isBool := derefValue(v).(bool); isBool && rank > 0 && isParam(e.X) {
 			// A cast makes a boolean 1 or 0, where the driver sends it as
