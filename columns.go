@@ -370,6 +370,11 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 					// A CASE or COALESCE of literals only is text.
 					return c.x.unsupported("generate_series over a text")
 				}
+				if _, ok := c.x.untypedText(a); ok {
+					// Postgres reads it as the integer bound before the
+					// call, which functionRows skips on a NULL bound.
+					return c.x.unsupported("generate_series over a string literal or parameter")
+				}
 			}
 			if !typed {
 				// Postgres fails the call as ambiguous (42725).

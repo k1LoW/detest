@@ -94,6 +94,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// Postgres fails it as ambiguous, with 42725.
 		`SELECT * FROM generate_series(NULL, NULL) g ORDER BY 1`,
 		`SELECT * FROM generate_series(coalesce('1', '2'), 2) g ORDER BY 1`,
+		`SELECT * FROM generate_series(NULL::int, 'bogus') g ORDER BY 1`,
+		// COLLATE makes a literal text.
+		`SELECT coalesce(s.n, 'bogus' COLLATE "C", 0) FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(s.flag, 'true' COLLATE "C") FROM (SELECT * FROM f) s`,
 		// The NULL of a scalar subquery is text, beside an integer.
 		`SELECT coalesce(s.n, (SELECT NULL), 0) FROM (SELECT * FROM t) s`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,

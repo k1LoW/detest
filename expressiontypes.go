@@ -20,6 +20,10 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 	case *sqlir.Cast:
 		return e.Type
 	case *sqlir.Collate:
+		if untypedExpr(e.X) {
+			// COLLATE resolves a string literal or a parameter to text.
+			return "text"
+		}
 		return expressionTypeIn(e.X, column, subquery)
 	case *sqlir.ColumnRef:
 		if column != nil {
