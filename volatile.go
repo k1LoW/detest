@@ -137,25 +137,8 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			return err
 		}
 	}
-	if isAggregate(sel) {
-		// Postgres computes the aggregates before any other expression
-		// of the select list, HAVING or ORDER BY, so one that fails does
-		// so before a sequence call or a subquery's lock beside it, where
-		// detest evaluates them in their written order.
-		if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy); err != nil {
-			return err
-		}
-		ctes := map[string]*sqlir.SelectStmt{}
-		for _, c := range sel.With {
-			ctes[c.Name] = c.Select
-		}
-		for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy} {
-			for _, q := range sqlir.Selects(n) {
-				if x.effectfulQuery(q, ctes, map[string]bool{}) {
-					return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")
-				}
-			}
-		}
+	if err := x.aggregateEffects(sel); err != nil {
+		return err
 	}
 	for _, n := range []any{sel.Values, sel.Targets, sel.From, sel.Joins, sel.Where, sel.GroupBy, sel.Having, sel.OrderBy, sel.Limit, sel.Offset, sel.DistinctOn} {
 		if err := x.rowSequenceCalls(n); err != nil {
@@ -262,7 +245,14 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 				return
 			}
 			if sub, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok {
-				err = x.noSequenceCalls(sub)
+				if err = x.noSequenceCalls(sub); err != nil {
+					return
+				}
+				for _, q := range sqlir.Selects(sub) {
+					if err = x.aggregateEffects(q); err != nil {
+						return
+					}
+				}
 				return
 			}
 			if f, ok := reflect.TypeAssert[*sqlir.FuncCall](v); ok && isAggregateCall(f) {
@@ -298,6 +288,33 @@ func (x *sqlExec) rowSequenceCalls(n any) error {
 	}
 	walk(reflect.ValueOf(n))
 	return err
+}
+
+// aggregateEffects refuses what runs beside the aggregates of sel when it
+// aggregates.
+func (x *sqlExec) aggregateEffects(sel *sqlir.SelectStmt) error {
+	if !isAggregate(sel) {
+		return nil
+	}
+	// Postgres computes the aggregates before any other expression
+	// of the select list, HAVING or ORDER BY, so one that fails does
+	// so before a sequence call or a subquery's lock beside it, where
+	// detest evaluates them in their written order.
+	if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy); err != nil {
+		return err
+	}
+	ctes := map[string]*sqlir.SelectStmt{}
+	for _, c := range sel.With {
+		ctes[c.Name] = c.Select
+	}
+	for _, n := range []any{sel.Targets, sel.Having, sel.OrderBy} {
+		for _, q := range sqlir.Selects(n) {
+			if x.effectfulQuery(q, ctes, map[string]bool{}) {
+				return x.unsupported("a subquery with an effect, or reading a view or a CTE with one, beside an aggregate")
+			}
+		}
+	}
+	return nil
 }
 
 // effectfulQuery reports a query with a locking clause or one of

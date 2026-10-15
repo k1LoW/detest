@@ -53,6 +53,7 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		`SELECT coalesce(sum(NULL::int), (SELECT n FROM seqv) + sum(1 / n)) FROM t`,
 		`SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) FROM t`,
 		`WITH c AS (SELECT n FROM seqv) SELECT coalesce(sum(NULL::int), (SELECT n FROM c) + sum(1 / n)) FROM t`,
+		`SELECT (SELECT coalesce(sum(NULL::int), (SELECT n FROM seqv) + sum(1 / n)) FROM t)`,
 		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
