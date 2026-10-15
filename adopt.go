@@ -381,9 +381,8 @@ func (p *Proc) handshake() {
 // such as two making the same statement from different places, or two
 // calling Current from the same place. The id mostly follows the order they
 // were started in but not always, since the runtime hands ids out from
-// per-processor caches. A
-// misordering would make the replay of a schedule take another path, which
-// detest reports as nondeterminism.
+// per-processor caches. A misordering would make the replay of a schedule
+// take another path, which detest reports as nondeterminism.
 func (r *run) takeAdopted() bool {
 	r.gidMu.Lock()
 	pending := r.adopting
