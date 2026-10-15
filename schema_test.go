@@ -307,28 +307,56 @@ func TestSchemaDefaultTypes(t *testing.T) {
 	// ADD COLUMN fills the rows already there with the default as an
 	// INSERT does.
 	mustExec(t, db, `ALTER TABLE e ADD COLUMN m numeric DEFAULT (3 / (extract(year FROM interval '1 year') * 2))`)
-	// A default the check cannot type loads as it does for an INSERT,
-	// with the Unknown marker in the rows already there.
-	mustExec(t, db, `ALTER TABLE e ADD COLUMN k numeric DEFAULT coalesce(1, abs(NULL))`)
+	// The rows already there take the default ADD COLUMN gives, not one
+	// the same statement sets after it.
+	mustExec(t, db, `ALTER TABLE e ADD COLUMN k int DEFAULT 1, ALTER COLUMN k SET DEFAULT 2`)
+	mustExec(t, db, `INSERT INTO e (id) VALUES (DEFAULT)`)
+	var ks []int
+	rows, err := db.Query(`SELECT k FROM e ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var k int
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		ks = append(ks, k)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ks, []int{1, 1, 2}) {
+		t.Fatalf("k = %v, want [1 1 2]", ks)
+	}
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM e WHERE n = 2 AND m = 1.5 AND at IS NOT NULL AND u IS NOT NULL AND j = '{}'::jsonb`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("got %d rows with the defaults Postgres computes, want 2", n)
+	if n != 3 {
+		t.Fatalf("got %d rows with the defaults Postgres computes, want 3", n)
 	}
 }
 
-// A default the column check refuses is not computed, so one with an effect
-// is refused rather than stored as the Unknown marker without advancing its
-// sequence.
-func TestSchemaDefaultWithEffectRefused(t *testing.T) {
+// A default the column check refuses is refused, as it is in a statement,
+// rather than stored as the Unknown marker, which would skip the effects and
+// the errors evaluating it has.
+func TestSchemaDefaultCheckRefused(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE SEQUENCE s`)
 	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, n numeric DEFAULT coalesce(nextval('s'), abs(NULL)))`)
-	if _, err := db.Exec(`INSERT INTO e (id) VALUES (1)`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Fatalf("got %v, want ErrUnsupportedSQL", err)
+	mustExec(t, db, `CREATE TABLE f (id int PRIMARY KEY, n numeric DEFAULT coalesce(1 / extract(hour FROM now()), abs(NULL)))`)
+	mustExec(t, db, `CREATE TABLE g (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO g VALUES (1)`)
+	for _, q := range []string{
+		`INSERT INTO e (id) VALUES (1)`,
+		`INSERT INTO f (id) VALUES (1)`,
+		`ALTER TABLE g ADD COLUMN n numeric DEFAULT coalesce(1, abs(NULL))`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
 	}
 	var n int
 	if err := db.QueryRow(`SELECT nextval('s')`).Scan(&n); err != nil || n != 1 {

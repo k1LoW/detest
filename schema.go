@@ -95,19 +95,19 @@ func (x *sqlExec) columnDefault(table, col string) (any, error) {
 // evalDefault evaluates a column default with the types the column check
 // resolves in it, as Postgres plans a default it writes into a statement's
 // plan with the statement, so that a division by a numeric divides as one.
-// A default the check refuses is one detest cannot compute, as evaluated
-// without the types the check would have noted it could give a value the
-// server never produces. One with an effect, such as nextval, is refused
-// instead, as the marker would skip the effect a later statement observes.
-// The marker also skips an error the default would raise, but a default of
-// immutable parts raises it on every write that leaves the column out, a
-// write path no application under test has.
+// A default the check refuses is refused, as it is in a statement. Taking
+// it for one detest cannot compute and writing the Unknown marker would
+// skip the effects and the errors its evaluation has, such as a nextval or
+// a division by an hour of now(), which the processes observe, and those
+// defaults are not the ones dumps hold, which the check passes.
 func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
 	if err := x.checkDefault(d); err != nil {
-		if hasEffects(d) {
-			return nil, x.unsupported("a default with an effect whose expression detest cannot type: " + err.Error())
+		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+			return nil, err
 		}
-		return nil, errUnknownExpr{err.Error()}
+		// Postgres types a default when it creates the table, so one the
+		// check fails for could not have been declared.
+		return nil, x.unsupported("a default detest cannot type: " + err.Error())
 	}
 	return x.eval(d, &env{})
 }
