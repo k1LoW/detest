@@ -81,16 +81,19 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 		// a WHERE condition of no column of the block is a filter it tests
 		// once before the FROM items, so neither runs what is under it.
 		if limit == 0 {
-			return x.columnsOf(sel), nil, nil
+			return x.unpulled(sel)
 		}
 		scan, out, err := x.gated(sel, outer)
 		switch {
 		case err != nil:
 			return nil, nil, err
 		case !scan && out && isAggregate(sel):
+			if err := x.checkRelations(sel); err != nil {
+				return nil, nil, err
+			}
 			return x.compute(sel, nil, outer)
 		case !scan:
-			return x.columnsOf(sel), nil, nil
+			return x.unpulled(sel)
 		}
 	}
 	switch {
@@ -178,11 +181,53 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 	return true, true, nil
 }
 
+// unpulled is the result of sel when Postgres pulls no row from it, its
+// columns and no rows. A relation that does not exist still fails it, as
+// Postgres fails it when it parses the statement.
+func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
+	if err := x.checkRelations(sel); err != nil {
+		return nil, nil, err
+	}
+	return x.columnsOf(sel), nil, nil
+}
+
+// checkRelations fails on a table sel or a query inside it reads that does
+// not exist, without running anything. A name some WITH of the statement
+// declares is taken for its CTE.
+func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
+	declared := map[string]bool{}
+	for _, q := range sqlir.Selects(sel) {
+		for _, cte := range q.With {
+			declared[cte.Name] = true
+		}
+	}
+	for _, q := range sqlir.Selects(sel) {
+		for _, t := range fromRefs(q) {
+			if t.Name == "" || t.Sub != nil || t.Func != nil || declared[t.Name] || x.ctes[t.Name] != nil || x.isCTE(t.Name) {
+				continue
+			}
+			if err := x.tx.db.checkTable(x.tx.db.resolve(t.Name)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // columnsOf are the output columns of sel without running it, for a query
-// Postgres pulls no row from.
+// Postgres pulls no row from. The CTEs sel declares are declared for its
+// own items, unrun, and taken back after.
 func (x *sqlExec) columnsOf(sel *sqlir.SelectStmt) []string {
-	for sel.SetOp != "" && sel.Larg != nil {
-		sel = sel.Larg
+	if len(sel.With) > 0 {
+		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(x.ctes)
+		x.ctes = maps.Clone(x.ctes)
+		if x.ctes == nil {
+			x.ctes = map[string]*cteCell{}
+		}
+		x.withCTEs(sel, nil)
+	}
+	if sel.SetOp != "" && sel.Larg != nil {
+		return x.columnsOf(sel.Larg)
 	}
 	if len(sel.Values) > 0 {
 		return outputNames(sel)
@@ -1806,7 +1851,13 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 				return cols
 			}
 			if c := x.ctes[t.Name]; c != nil && rows == nil {
-				return x.columnsOf(c.def)
+				// In the scope it was declared in, which does not hold
+				// itself, as runCTE runs it.
+				saved := x.ctes
+				x.ctes = maps.Clone(c.scope)
+				cols := x.columnsOf(c.def)
+				x.ctes = saved
+				return cols
 			}
 			break
 		}

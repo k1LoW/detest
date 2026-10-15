@@ -904,6 +904,12 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE u.id = e.id + 2) > 0`),
 			difftest.Q(0, `SELECT id FROM e WHERE EXISTS (SELECT 1 / n FROM u WHERE u.id = e.id + 2)`),
 			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE id > 0 AND false`),
+			// What is not run still gives its columns, and still fails on a
+			// relation that does not exist.
+			difftest.Q(0, `WITH u AS (SELECT * FROM u) SELECT * FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS v) SELECT * FROM c) s UNION ALL SELECT 2 LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM missing LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM e, (SELECT * FROM missing) s WHERE false`),
 			difftest.Q(0, `SELECT nextval('sq')`),
 			// Under ORDER BY, a volatile item no key reads is computed
 			// after the sort, for the rows OFFSET and LIMIT let through.
