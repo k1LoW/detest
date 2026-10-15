@@ -231,6 +231,10 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		{`SELECT (x.v = '01')::text FROM (SELECT $1 AS v) x`, int64(1)},
 		{`SELECT coalesce($1, NULL) = '01'`, int64(1)},
 		{`SELECT (SELECT $1) = '01'`, int64(1)},
+		// Nor reads bytes there as the text they hold.
+		{`SELECT CASE WHEN x.v = '\x41' THEN 'matched' ELSE x.v || '' END FROM (SELECT $1 AS v) x`, []byte("A")},
+		{`SELECT (SELECT $1) = '\x41'`, []byte("A")},
+		{`SELECT x.v || '' FROM (SELECT max($1) AS v) x`, []byte("A")},
 	} {
 		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
@@ -238,6 +242,10 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 	}
 	if got := rowsOf(t, db, `SELECT x.v || 'a', y.w FROM (SELECT $1 AS v) x, (SELECT $1 AS w) y`, "1"); !reflect.DeepEqual(got, []string{"1a,1"}) {
 		t.Errorf("a text parameter read through derived tables: got %v, want [1a,1]", got)
+	}
+	// COALESCE reads bytes as the text they hold.
+	if got := rowsOf(t, db, `SELECT x.v || 'b' FROM (SELECT coalesce($1, NULL) AS v) x`, []byte("A")); !reflect.DeepEqual(got, []string{"Ab"}) {
+		t.Errorf("bytes under COALESCE read through a derived table: got %v, want [Ab]", got)
 	}
 	// An INSERT reads its own query's literals and parameters as the
 	// columns' input.

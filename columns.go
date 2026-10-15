@@ -1168,7 +1168,7 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			// untyped values alone, such as max('1'), to text.
 			if params, ok := untypedLeaves(t.Expr); ok {
 				typ = "text"
-				c.textParams(params)
+				c.textParams(params, bytesUnread(t.Expr, false))
 			}
 		}
 		textOut := typ == "" && (untypedExpr(t.Expr) || isNullConst(t.Expr))
@@ -1273,11 +1273,42 @@ func untypedLeavesIn(e sqlir.Expr, inAggregate bool) ([]*sqlir.Param, bool) {
 	return out, true
 }
 
+// bytesUnread are the parameters among e's untyped leaves that no CASE,
+// COALESCE, GREATEST, LEAST or NULLIF takes directly, whose evaluators
+// read a []byte as the text it holds; elsewhere the run keeps it as bytea.
+func bytesUnread(e sqlir.Expr, read bool) []*sqlir.Param {
+	var args []sqlir.Expr
+	switch e := e.(type) {
+	case *sqlir.Param:
+		if read {
+			return nil
+		}
+		return []*sqlir.Param{e}
+	case *sqlir.WindowFunc:
+		if e.Func != nil {
+			return bytesUnread(e.Func, false)
+		}
+	case *sqlir.CaseExpr:
+		args, read = caseBranches(e), true
+	case *sqlir.FuncCall:
+		args, read = e.Args, false
+		switch e.Name {
+		case "coalesce", "greatest", "least", "nullif":
+			read = true
+		}
+	}
+	var out []*sqlir.Param
+	for _, a := range args {
+		out = append(out, bytesUnread(a, read)...)
+	}
+	return out
+}
+
 // textParams records params as typed text, which Postgres resolves them to
 // as the leaves of an output it resolves to text, and refuses one bound to
 // another value, as the run reads the value as bound rather than as that
-// text.
-func (c *columnChecker) textParams(params []*sqlir.Param) {
+// text, and one of unread bound to bytes, which the run keeps as bytea.
+func (c *columnChecker) textParams(params, unread []*sqlir.Param) {
 	for _, p := range params {
 		if c.textParamAt == nil {
 			c.textParamAt = map[*sqlir.Param]bool{}
@@ -1285,7 +1316,11 @@ func (c *columnChecker) textParams(params []*sqlir.Param) {
 		c.textParamAt[p] = true
 		if p.Index >= 0 && p.Index < len(c.x.args) {
 			switch v := derefValue(c.x.args[p.Index]).(type) {
-			case nil, string, []byte:
+			case nil, string:
+			case []byte:
+				if slices.Contains(unread, p) && c.textConflict == "" {
+					c.textConflict = fmt.Sprintf("a %T parameter $%d in a query output Postgres resolves to text", v, p.Index+1)
+				}
 			default:
 				if c.textConflict == "" {
 					c.textConflict = fmt.Sprintf("a %T parameter $%d in a query output Postgres resolves to text", v, p.Index+1)
@@ -1303,7 +1338,7 @@ func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
 	}
 	for _, t := range sel.Targets {
 		if p, ok := t.Expr.(*sqlir.Param); ok && !t.Star {
-			c.textParams([]*sqlir.Param{p})
+			c.textParams([]*sqlir.Param{p}, []*sqlir.Param{p})
 		}
 	}
 }
@@ -1928,7 +1963,7 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	}
 	if e := q.Select.Targets[0].Expr; untypedOutput(e) {
 		if p, ok := e.(*sqlir.Param); ok {
-			c.textParams([]*sqlir.Param{p})
+			c.textParams([]*sqlir.Param{p}, []*sqlir.Param{p})
 		}
 		if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
 			switch derefValue(c.x.args[p.Index]).(type) {
