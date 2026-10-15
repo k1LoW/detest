@@ -661,12 +661,14 @@ func defaultConstraintName(table string, u sqlir.UniqueDef) string {
 func (x *sqlExec) rekey(table string, lk lockKey, updated Row) (lockKey, error) {
 	def := x.tx.db.defs[table]
 	if def == nil || len(def.pk) == 0 {
+		x.tx.noteKeyMove(table, lk, lk, updated)
 		return lk, nil
 	}
 	if err := x.tx.db.assignKey(table, updated); err != nil {
 		return lk, err
 	}
 	nlk := lockKey{table, updated.Key()}
+	x.tx.noteKeyMove(table, lk, nlk, updated)
 	if nlk == lk {
 		return lk, nil
 	}

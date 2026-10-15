@@ -757,6 +757,73 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT (SELECT sum(k) FROM generate_series(1, 2) WITH ORDINALITY AS g(k, ord)) FROM t ORDER BY id`),
 		},
 	},
+	{
+		Name: "FOR KEY SHARE locks the snapshot's version past a non-key update",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, v int, k int UNIQUE, e text, el text GENERATED ALWAYS AS (lower(e)) STORED UNIQUE)`,
+			`CREATE TABLE u (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE w (id int PRIMARY KEY)`,
+		},
+		Seed:  []string{`INSERT INTO t (id, v, k, e) VALUES (1, 10, 100, 'A')`, `INSERT INTO u VALUES (1, NULL), (2, NULL)`, `INSERT INTO w VALUES (1), (2)`},
+		Conns: 3,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT coalesce(u.n, (SELECT v FROM t WHERE id = 1 AND u.id = 2 FOR KEY SHARE)), (SELECT w.id FROM w WHERE w.id = u.id FOR UPDATE) FROM u ORDER BY u.id`),
+			difftest.S(0, `UPDATE t SET v = 20 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(0, `UPDATE t SET v = 30 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// A key update conflicts with FOR KEY SHARE, so the read
+			// follows the chain to the newest version.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(0, `UPDATE t SET v = 40, k = 101 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// A generated key column that keeps its value is no key update.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(0, `UPDATE t SET v = 50, e = 'a' WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// A key changed and set back conflicts all the same.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(0, `UPDATE t SET v = 60, k = 102 WHERE id = 1`),
+			difftest.S(0, `UPDATE t SET v = 70, k = 101 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// So do a key change and its undoing committed apart.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(2, `UPDATE t SET v = 80, k = 103 WHERE id = 1`),
+			difftest.S(2, `UPDATE t SET v = 90, k = 101 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// And a key set back that leaves the whole row as it was.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(2, `BEGIN`),
+			difftest.S(2, `UPDATE t SET k = 104 WHERE id = 1`),
+			difftest.S(2, `UPDATE t SET k = 101 WHERE id = 1`),
+			difftest.S(2, `COMMIT`),
+			difftest.S(2, `UPDATE t SET v = 95 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			// And a primary key that goes and comes back.
+			difftest.S(0, `BEGIN`),
+			difftest.Q(0, `SELECT id FROM w WHERE id = 1 FOR UPDATE`),
+			difftest.Q(1, `SELECT (SELECT w.id FROM w WHERE w.id = 1 FOR UPDATE), (SELECT v FROM t WHERE id = 1 FOR KEY SHARE)`),
+			difftest.S(2, `UPDATE t SET id = 2 WHERE id = 1`),
+			difftest.S(2, `UPDATE t SET id = 1 WHERE id = 2`),
+			difftest.S(2, `UPDATE t SET v = 96 WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
