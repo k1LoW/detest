@@ -32,7 +32,7 @@ func rowEnv(table string, row Row) *env {
 // evaluator evaluates schema expressions (defaults, expression indexes,
 // partial index predicates) for a write made through the Tx API.
 func (tx *Tx) evaluator() *sqlExec {
-	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string][]Row{}, start: time.Now()}
+	return &sqlExec{tx: tx, query: "(schema expression)", ctes: map[string]*cteCell{}, start: time.Now()}
 }
 
 // applyDefaults fills the columns a new row leaves out with their declared

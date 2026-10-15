@@ -112,10 +112,21 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 			t.Errorf("%s: got %v, want the integer input error", tt.q, err)
 		}
 	}
-	// The evaluators run a CTE the statement reads before its rows, where
-	// Postgres runs it only when a row reaches it.
-	q := `WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`
-	if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+	// A CTE runs when a row first reaches it, and once for the statement.
+	for _, tt := range []struct {
+		q    string
+		want []string
+	}{
+		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`, []string{"0"}},
+		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM u ORDER BY id`, []string{"5", "5"}},
+		{`WITH c AS (SELECT n FROM seqv) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`, []string{"6", "6"}},
+		{`WITH c AS (SELECT n FROM seqv) SELECT (WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.n, (SELECT n FROM c)) FROM (SELECT * FROM u) s LIMIT 1)`, []string{"7"}},
+		// A CTE does not see one declared after it, so c reads the view.
+		{`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`, []string{"8", "8"}},
+		{`SELECT nextval('sq')`, []string{"9"}},
+	} {
+		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
 	}
 }

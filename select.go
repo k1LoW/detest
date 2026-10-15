@@ -41,9 +41,7 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if len(sel.With) > 0 {
 		// The CTEs a query block declares shadow outer ones of the same
 		// name inside it only.
-		defer func(ctes map[string][]Row, cols map[string][]string) {
-			x.ctes, x.cteCols = ctes, cols
-		}(maps.Clone(x.ctes), maps.Clone(x.cteCols))
+		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(maps.Clone(x.ctes))
 	}
 	var locking lockPlan
 	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
@@ -66,12 +64,10 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			return nil, nil, x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
 		}
 	}
-	if err := x.withCTEs(sel, outer); err != nil {
-		return nil, nil, err
-	}
+	x.withCTEs(sel, outer)
 	// OFFSET and LIMIT are taken, and a negative one refused, before the
 	// query produces a row, as Postgres does before fetching rows. They may
-	// read the WITH queries, so those come first.
+	// read the WITH queries, so those are declared first.
 	offset, limit, err := x.evalBounds(sel, outer)
 	if err != nil {
 		return nil, nil, err
