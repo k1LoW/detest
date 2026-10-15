@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -45,6 +46,9 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		// Creating a view runs no query, so its views are checked when a
 		// statement that runs it reads them.
 		if err := x.viewSequenceChecks(stmt, map[string]bool{}); err != nil {
+			return err
+		}
+		if err := x.partlyReadCTEs(stmt); err != nil {
 			return err
 		}
 	}
@@ -102,6 +106,98 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 			return err
 		}
 		return x.rowSequenceCalls(st.Returning)
+	}
+	return nil
+}
+
+// partlyReadCTEs refuses a query's CTE that locks rows or has effects
+// where Postgres may run only part of it. Postgres reads a CTE's rows on
+// demand, so a LIMIT, an EXISTS, a scalar subquery, a join or a query
+// around the reader that stops early leaves the rest of its rows unread,
+// and their locks and calls never happen, while detest runs every row of
+// a CTE when a row first reads it. A CTE is read in full when the
+// statement reads all of its query's rows, as those of a SELECT, an
+// INSERT ... SELECT or a CREATE TABLE AS, and each read of the CTE is the
+// only FROM item of a block that reads all of its rows, the query itself
+// or a later CTE read in full. One with no FROM has a row at most, which
+// any read takes in full. The CTEs of a write are checked by writeWith.
+func (x *sqlExec) partlyReadCTEs(stmt sqlir.Statement) error {
+	full := map[*sqlir.SelectStmt]bool{}  // blocks that read all of their inputs
+	whole := map[*sqlir.SelectStmt]bool{} // CTE queries whose rows are all read
+	var visit func(q *sqlir.SelectStmt)
+	visit = func(q *sqlir.SelectStmt) {
+		if q == nil || q.Limit != nil || q.Offset != nil {
+			return
+		}
+		full[q] = true
+		if q.SetOp != "" {
+			visit(q.Larg)
+			visit(q.Rarg)
+		}
+		read := reachableCTEs(q)
+		body := *q
+		body.With = nil
+		for i, cte := range slices.Backward(q.With) {
+			if !read[cte.Name] {
+				continue
+			}
+			readers := []any{&body}
+			for _, later := range q.With[i+1:] {
+				readers = append(readers, later.Select)
+			}
+			all := true
+			for _, b := range sqlir.Selects(readers) {
+				if b == &body {
+					b = q
+				}
+				reads := b.From != nil && b.From.Name == cte.Name
+				for _, j := range b.Joins {
+					reads = reads || j.Table.Name == cte.Name
+				}
+				if reads && (!full[b] || len(b.Joins) > 0) {
+					all = false
+				}
+			}
+			if all {
+				whole[cte.Select] = true
+				visit(cte.Select)
+			}
+		}
+	}
+	switch st := stmt.(type) {
+	case *sqlir.SelectStmt:
+		visit(st)
+	case *sqlir.InsertStmt:
+		visit(st.Select)
+	case *sqlir.CreateTableAsStmt:
+		visit(st.Select)
+	case *sqlir.UpdateStmt:
+		for _, cte := range st.With {
+			visit(cte.Select)
+		}
+	case *sqlir.DeleteStmt:
+		for _, cte := range st.With {
+			visit(cte.Select)
+		}
+	}
+	for _, q := range sqlir.Selects(stmt) {
+		if len(q.With) == 0 {
+			continue
+		}
+		read := reachableCTEs(q)
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, cte := range q.With {
+			ctes[cte.Name] = cte.Select
+		}
+		for _, cte := range q.With {
+			def := cte.Select
+			if !read[cte.Name] || whole[def] || def.From == nil && def.SetOp == "" && def.Values == nil {
+				continue
+			}
+			if x.effectfulQuery(def, ctes, map[string]bool{}) {
+				return x.unsupported(fmt.Sprintf("CTE %q, which locks rows or has effects, read where Postgres may run only part of it", cte.Name))
+			}
+		}
 	}
 	return nil
 }

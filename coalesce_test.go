@@ -119,14 +119,21 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	}{
 		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM t`, []string{"0"}},
 		{`WITH c AS (SELECT nextval('sq') AS v) SELECT coalesce(n, (SELECT v FROM c)) FROM u ORDER BY id`, []string{"5", "5"}},
-		{`WITH c AS (SELECT n FROM seqv) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`, []string{"6", "6"}},
-		{`WITH c AS (SELECT n FROM seqv) SELECT (WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.n, (SELECT n FROM c)) FROM (SELECT * FROM u) s LIMIT 1)`, []string{"7"}},
-		// A CTE does not see one declared after it, so c reads the view.
-		{`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`, []string{"8", "8"}},
-		{`SELECT nextval('sq')`, []string{"9"}},
+		{`SELECT nextval('sq')`, []string{"6"}},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+	// A CTE with an effect that a subquery reads may run in part
+	// (partlyReadCTEs), here through a view. A CTE does not see one
+	// declared after it, so c reads the view in the second.
+	for _, q := range []string{
+		`WITH c AS (SELECT n FROM seqv) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`,
+		`WITH c AS (SELECT n FROM seqv), seqv AS (SELECT 0 AS n) SELECT coalesce(u.n, (SELECT n FROM c)) FROM u ORDER BY id`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
 }

@@ -1,8 +1,11 @@
 package detest
 
 import (
+	"errors"
+	"reflect"
 	"testing"
 
+	"github.com/k1LoW/detest/db/postgres"
 	"github.com/k1LoW/detest/internal/sqlir"
 )
 
@@ -17,6 +20,46 @@ func TestVolatileIsNoBound(t *testing.T) {
 	} {
 		if got := volatile(e); got != want {
 			t.Errorf("volatile(%#v) = %v, want %v", e, got, want)
+		}
+	}
+}
+
+// Postgres reads a CTE's rows on demand, so one that locks rows or has
+// effects runs only as far as its readers ask, where detest runs it in
+// full. Such a CTE is accepted only where every row of it is read.
+func TestPartlyReadCTEWithEffects(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 10), (2, 20)`)
+	for _, q := range []string{
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT coalesce(NULL::bigint, (SELECT v FROM c LIMIT 1))`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT (SELECT v FROM c LIMIT 1)`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c LIMIT 1`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT EXISTS (SELECT v FROM c)`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT c.v FROM u JOIN c ON true`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u), d AS (SELECT v FROM c LIMIT 1) SELECT v FROM d`,
+		`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c LIMIT 1`,
+		`SELECT (WITH c AS (SELECT n FROM u FOR UPDATE) SELECT count(*) FROM c)`,
+		`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c UNION ALL SELECT 1 LIMIT 1`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, tt := range []struct {
+		q    string
+		want []string
+	}{
+		{`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c ORDER BY v`, []string{"1", "2"}},
+		{`WITH c AS (SELECT nextval('sq') AS v FROM u), d AS (SELECT v FROM c) SELECT count(*) FROM d`, []string{"2"}},
+		{`WITH c AS (SELECT nextval('sq') AS v) SELECT (SELECT v FROM c) + (SELECT v FROM c)`, []string{"10"}},
+		{`WITH c AS (SELECT n FROM u FOR UPDATE) SELECT n FROM c ORDER BY n`, []string{"10", "20"}},
+		{`SELECT nextval('sq')`, []string{"6"}},
+	} {
+		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
 		}
 	}
 }
