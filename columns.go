@@ -104,9 +104,8 @@ type columnChecker struct {
 	// textConflict names a parameter bound to other than text in an
 	// output Postgres resolves to text.
 	textConflict string
-	// arithParams are the parameters that are operands of arithmetic,
-	// where a parameter typed text has no operator.
-	arithParams map[int]bool
+	// textParamAt are the uses of parameters a query output types text.
+	textParamAt map[*sqlir.Param]bool
 	// paramNumbers is the number type each parameter takes, and
 	// numberConflict names one given two, by numberRank.
 	paramNumbers   map[int]string
@@ -213,9 +212,18 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if c.textConflict != "" {
 		return x.unsupported(c.textConflict)
 	}
-	for i := range c.arithParams {
-		if c.params.compared[i] == c.paramTypeFamily("text") {
-			return x.unsupported(fmt.Sprintf("parameter $%d typed text by a query output and taken as an operand of arithmetic", i+1))
+	if len(c.textParamAt) > 0 {
+		typed := map[int]bool{}
+		for p := range c.textParamAt {
+			typed[p.Index] = true
+		}
+		for _, p := range sqlir.Params(stmt) {
+			if typed[p.Index] && !c.textParamAt[p] {
+				// Each other use would have to be checked as text, as a
+				// comparison, an operand of arithmetic or a function's
+				// argument, which the checks do not all do.
+				return x.unsupported(fmt.Sprintf("parameter $%d typed text by a query output and used elsewhere", p.Index+1))
+			}
 		}
 	}
 	if c.numberConflict != "" {
@@ -1211,8 +1219,13 @@ func unknownPolymorphic(f *sqlir.FuncCall) string {
 // untypedLeaves are the parameters of e when e is made of string literals,
 // parameters and NULLs alone, through the CASE branches and the arguments
 // of the functions Postgres resolves to one type, which it resolves to
-// text, and false when e is not.
+// text, and false when e is not. An aggregate or a window function inside
+// another is not, as Postgres does not nest them (42803).
 func untypedLeaves(e sqlir.Expr) ([]*sqlir.Param, bool) {
+	return untypedLeavesIn(e, false)
+}
+
+func untypedLeavesIn(e sqlir.Expr, inAggregate bool) ([]*sqlir.Param, bool) {
 	var args []sqlir.Expr
 	switch e := e.(type) {
 	case *sqlir.Param:
@@ -1221,10 +1234,20 @@ func untypedLeaves(e sqlir.Expr) ([]*sqlir.Param, bool) {
 		_, isText := e.Value.(string)
 		return nil, isText || e.Value == nil
 	case *sqlir.WindowFunc:
-		return untypedLeaves(e.Func)
+		if e.Func == nil || inAggregate {
+			return nil, false
+		}
+		return untypedLeavesIn(e.Func, false)
 	case *sqlir.CaseExpr:
 		args = caseBranches(e)
 	case *sqlir.FuncCall:
+		switch e.Name {
+		case "min", "max", "first_value", "last_value", "lag", "lead":
+			if inAggregate {
+				return nil, false
+			}
+			inAggregate = true
+		}
 		switch e.Name {
 		case "min", "max":
 			args = e.Args
@@ -1241,7 +1264,7 @@ func untypedLeaves(e sqlir.Expr) ([]*sqlir.Param, bool) {
 	}
 	var out []*sqlir.Param
 	for _, a := range args {
-		ps, ok := untypedLeaves(a)
+		ps, ok := untypedLeavesIn(a, inAggregate)
 		if !ok {
 			return nil, false
 		}
@@ -1250,11 +1273,16 @@ func untypedLeaves(e sqlir.Expr) ([]*sqlir.Param, bool) {
 	return out, true
 }
 
-// textParams types params as text, which Postgres resolves them to as the
-// leaves of an output it resolves to text, and refuses one bound to another
-// value, as the run reads the value as bound rather than as that text.
+// textParams records params as typed text, which Postgres resolves them to
+// as the leaves of an output it resolves to text, and refuses one bound to
+// another value, as the run reads the value as bound rather than as that
+// text.
 func (c *columnChecker) textParams(params []*sqlir.Param) {
 	for _, p := range params {
+		if c.textParamAt == nil {
+			c.textParamAt = map[*sqlir.Param]bool{}
+		}
+		c.textParamAt[p] = true
 		if p.Index >= 0 && p.Index < len(c.x.args) {
 			switch v := derefValue(c.x.args[p.Index]).(type) {
 			case nil, string, []byte:
@@ -1264,7 +1292,6 @@ func (c *columnChecker) textParams(params []*sqlir.Param) {
 				}
 			}
 		}
-		c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
 	}
 }
 
@@ -3272,17 +3299,6 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sql
 		// so -$1 is refused wherever it stands and -$1::int is the form
 		// that runs.
 		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
-	}
-	// arithParams reads them once every use has typed the parameter, as an
-	// output that types it text may come later in the walk. jsonb - text
-	// would take a text parameter, but the evaluators refuse jsonb - text.
-	for _, o := range operands {
-		if p, ok := o.(*sqlir.Param); ok {
-			if c.arithParams == nil {
-				c.arithParams = map[int]bool{}
-			}
-			c.arithParams[p.Index] = true
-		}
 	}
 	for i, o := range operands {
 		if untyped(o) {

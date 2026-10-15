@@ -203,6 +203,8 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		`SELECT x.v || 'a' FROM (SELECT first_value('1') OVER () AS v) x WHERE false`,
 		// Postgres has no sum of text (42883).
 		`SELECT x.v || 'x' FROM (SELECT sum(coalesce('1', NULL)) AS v WHERE false) x`,
+		// Nor nests aggregates (42803).
+		`SELECT x.v || 'a' FROM (SELECT max(min('1')) AS v WHERE false) x`,
 		// Text has no assignment cast to an integer (42804).
 		`INSERT INTO t (id, n) SELECT 1, x.v FROM (SELECT '1' AS v) x`,
 		`INSERT INTO t (id, n) SELECT 1, min(NULL) OVER ()`,
@@ -222,6 +224,7 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		{`SELECT x.v FROM (SELECT max($1) AS v) x WHERE $1 = 1`, "1"},
 		{`SELECT (SELECT $1) = 'a', $1 = 1`, "1"},
 		{`SELECT x.v || 'a', $1 + NULL FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		{`SELECT x.v || 'a', abs($1) FROM (SELECT $1 AS v) x WHERE false`, "1"},
 		// The run reads a parameter bound to another value as bound,
 		// where Postgres reads it as text.
 		{`SELECT x.v || '', (x.v = '01')::text FROM (SELECT max($1) AS v) x`, int64(1)},
@@ -233,8 +236,8 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
 		}
 	}
-	if got := rowsOf(t, db, `SELECT x.v || 'a' FROM (SELECT $1 AS v) x WHERE $1 = '1'`, "1"); !reflect.DeepEqual(got, []string{"1a"}) {
-		t.Errorf("a text parameter read through a derived table: got %v, want [1a]", got)
+	if got := rowsOf(t, db, `SELECT x.v || 'a', y.w FROM (SELECT $1 AS v) x, (SELECT $1 AS w) y`, "1"); !reflect.DeepEqual(got, []string{"1a,1"}) {
+		t.Errorf("a text parameter read through derived tables: got %v, want [1a,1]", got)
 	}
 	// An INSERT reads its own query's literals and parameters as the
 	// columns' input.
