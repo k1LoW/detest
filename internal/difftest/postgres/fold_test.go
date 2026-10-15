@@ -52,6 +52,45 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE n WHEN 1 THEN 1 / 0 END FROM t`),
 		},
 	},
+	{
+		Name: "what Postgres drops before it folds, the CTEs no statement reads and the select list of an EXISTS",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE VIEW fv AS SELECT CASE WHEN n > 0 THEN 1 / 0 END AS v FROM t`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 0)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `WITH c AS (SELECT 1 / 0) UPDATE t SET n = 1 WHERE false`),
+			difftest.S(0, `WITH c AS (SELECT 1 / 0) DELETE FROM t WHERE false`),
+			difftest.Q(0, `WITH c AS (SELECT 1 / 0) INSERT INTO t SELECT 2, 2 WHERE false`),
+			difftest.Q(0, `WITH fv AS (SELECT 1 AS v) SELECT v FROM fv`),
+			difftest.Q(0, `WITH fv AS (SELECT 1 AS v) SELECT (SELECT v FROM fv)`),
+			difftest.Q(0, `WITH a AS (SELECT * FROM fv), fv AS (SELECT 1 AS v) SELECT v FROM a`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false)`),
+			difftest.Q(0, `SELECT 1 FROM t WHERE EXISTS (SELECT 1 / 0 FROM t WHERE false)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false LIMIT 1)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false LIMIT 0)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false OFFSET 1)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT sum(1 / 0) FROM t WHERE false)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false HAVING true)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 FROM t WHERE false UNION SELECT 1)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT 1 FROM t WHERE false ORDER BY 1 / 0)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT n FROM t WHERE false GROUP BY n, 1 / 0)`),
+		},
+	},
+	{
+		Name: "a function with effects in a branch folding drops, called no more often than Postgres calls it",
+		Schema: []string{
+			`CREATE SEQUENCE s`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT coalesce(nextval('s') > 0 OR true, false) WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN (nextval('s') > 0 AND false) IS NULL THEN 1 END WHERE false`),
+			difftest.Q(0, `SELECT nextval('s')`),
+		},
+	},
 }
 
 func TestDiffFold(t *testing.T) {

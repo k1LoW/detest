@@ -63,6 +63,9 @@ func BlockFuncCalls(e Expr) []*FuncCall {
 	return out
 }
 
+// WindowFuncs returns the window functions under n, subqueries included.
+func WindowFuncs(n any) []*WindowFunc { return find[*WindowFunc](n) }
+
 // ArrayCmps returns the comparisons with an array value under n, a statement
 // or an expression, subqueries included.
 func ArrayCmps(n any) []*ArrayCmp { return find[*ArrayCmp](n) }
