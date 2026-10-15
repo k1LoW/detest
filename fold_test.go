@@ -120,28 +120,16 @@ func TestFoldConstantsCreateTableAsUnplanned(t *testing.T) {
 	}
 }
 
-// Postgres folds the default of a column a write leaves out or names by
-// DEFAULT. detest does not know the types it resolves in a default (#121),
-// so an error from folding one is refused.
+// Postgres folds the default of a column a write leaves out. Where detest
+// cannot tell how many columns a * gives, it cannot tell whether the
+// INSERT leaves the column out, so an error from its default is refused.
 func TestFoldConstantsDefaults(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE d (id int, n int DEFAULT (1 / 0))`)
 	mustExec(t, db, `CREATE TABLE src (id int)`)
-	mustExec(t, db, `CREATE TABLE dn (id int, n numeric DEFAULT (1 / (extract(year FROM interval '1 year') / 2)))`)
-	mustExec(t, db, `CREATE TABLE db (id int, n int DEFAULT (CASE WHEN NOT 'false' THEN 1 / 0 ELSE 0 END))`)
-	for _, q := range []string{
-		`UPDATE d SET n = DEFAULT WHERE false`,
-		`INSERT INTO d (id) SELECT 1 WHERE false`,
-		`INSERT INTO d SELECT 1 WHERE false`,
-		`INSERT INTO d SELECT * FROM src WHERE false`,
-		`INSERT INTO d SELECT 1 WHERE false UNION ALL SELECT 2 WHERE false`,
-		`INSERT INTO dn (id) SELECT 1 WHERE false`,
-		`INSERT INTO db (id) SELECT 1 WHERE false`,
-	} {
-		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
-		}
+	if _, err := db.Exec(`INSERT INTO d SELECT * FROM src WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v, want ErrUnsupportedSQL", err)
 	}
 	mustExec(t, db, `INSERT INTO d (id, n) SELECT 1, 2 WHERE false`)
 }

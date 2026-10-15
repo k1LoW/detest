@@ -59,20 +59,20 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	if def == nil {
 		return nil
 	}
-	cols := st.Columns
+	cols, known := st.Columns, true
 	if len(cols) == 0 {
 		n := len(def.columns)
 		switch {
 		case len(st.Rows) > 0:
 			n = len(st.Rows[0])
 		case st.Select != nil:
-			n = width(st.Select)
+			n, known = width(st.Select)
 		}
 		cols = def.columns[:min(n, len(def.columns))]
 	}
 	for _, c := range def.columns {
 		if !slices.Contains(cols, c) {
-			if err := f.columnDefault(def, c); err != nil {
+			if err := f.columnDefault(def, c, known); err != nil {
 				return err
 			}
 		}
@@ -80,7 +80,7 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	for _, row := range st.Rows {
 		for i, e := range row {
 			if _, ok := e.(*sqlir.Default); ok && i < len(cols) {
-				if err := f.columnDefault(def, cols[i]); err != nil {
+				if err := f.columnDefault(def, cols[i], true); err != nil {
 					return err
 				}
 			}
@@ -100,7 +100,7 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 	}
 	for _, a := range set {
 		if _, ok := a.Value.(*sqlir.Default); ok {
-			if err := f.columnDefault(def, a.Column); err != nil {
+			if err := f.columnDefault(def, a.Column, true); err != nil {
 				return err
 			}
 		}
@@ -108,36 +108,51 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 	return nil
 }
 
-// columnDefault folds the default of col. A default has not been through
-// the column check, so detest does not know the types Postgres resolves in
-// it, such as a numeric division (#121), and an error from folding it is
-// refused rather than raised. A default detest cannot evaluate is written
-// as the Unknown marker rather than refused (columnDefault in schema.go),
-// so a refusal for that is dropped, or every INSERT that leaves the column
-// out would be unsupported.
-func (f *folder) columnDefault(def *tableDef, col string) error {
+// columnDefault folds the default of col, which the statement writes into
+// its plan, with the types the column check resolves in it (evalDefault),
+// so that an error Postgres raises folding it is raised. A default the
+// check refuses is refused, as evalDefault refuses it for a row. One detest
+// cannot evaluate drops its refusal, as a row writes the Unknown marker
+// for it or is refused when a reader needs its value (columnDefault in
+// schema.go), so that every INSERT leaving the column out is not
+// unsupported. sure is unset for a column the statement may give, a * of
+// unknown width standing before it, where an error is refused.
+func (f *folder) columnDefault(def *tableDef, col string, sure bool) error {
 	d, ok := def.defaults[col]
 	if !ok || def.generated[col] != nil {
 		return nil
 	}
+	if err := f.x.checkDefault(d); err != nil {
+		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+			return err
+		}
+		return f.x.unsupported("a default detest cannot type: " + err.Error())
+	}
 	f.doubted = false
 	_, err := f.expr(d)
-	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok && !f.doubted || err == nil {
+	switch {
+	case err == nil:
 		return nil
-	}
-	if f.doubted {
+	case f.doubted:
 		return err
 	}
-	return f.x.unsupported(foldDoubt)
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+		return nil
+	}
+	if !sure {
+		return f.x.unsupported(foldDoubt)
+	}
+	return err
 }
 
-// width is the number of columns sel gives, or, for a * whose columns
-// depend on the scope it is read in, the number of the other items, which
-// takes the columns after them as left out. Every arm of a set operation
+// width is the number of columns sel gives, and whether detest knows it.
+// For a * whose columns depend on the scope it is read in, it is the
+// number of the other items, which takes the columns after them as left
+// out. Every arm of a set operation
 // gives as many, so one without a * tells.
-func width(sel *sqlir.SelectStmt) int {
+func width(sel *sqlir.SelectStmt) (int, bool) {
 	if n, ok := knownWidth(sel); ok {
-		return n
+		return n, true
 	}
 	for sel.SetOp != "" && sel.Larg != nil {
 		sel = sel.Larg
@@ -148,7 +163,7 @@ func width(sel *sqlir.SelectStmt) int {
 			n++
 		}
 	}
-	return n
+	return n, false
 }
 
 func knownWidth(sel *sqlir.SelectStmt) (int, bool) {
