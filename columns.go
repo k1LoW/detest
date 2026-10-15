@@ -32,6 +32,10 @@ func (s colSet) has(name string) (found, once bool) {
 type colScope struct {
 	items map[string]colSet
 	types map[string]map[string]string
+	// certain are the types of the columns a statement shows without a
+	// guess, by item: a table's declared ones and a derived table's
+	// certainItem, which the output goes by.
+	certain map[string]map[string]string
 	// colls are the collations the columns of the base tables in scope
 	// declare, by alias. A derived item has no entry, as detest does not
 	// carry the collation of its query's columns.
@@ -126,23 +130,50 @@ type columnChecker struct {
 	// uncertain are the queries that read around themselves only if a
 	// column whose owner is not known belongs to a query around them.
 	uncertain map[*sqlir.SelectStmt]bool
+	// rowSubqueries are the subqueries a row is compared with, by the
+	// number of columns they must have, which is the row's rather than one.
+	rowSubqueries map[*sqlir.SubQuery]int
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
+	// outCertain are the certain types of a query's output columns by
+	// position, and outCertainNamed by name (noteCertain).
+	outCertain      map[*sqlir.SelectStmt][]string
+	outCertainNamed map[*sqlir.SelectStmt]map[string]string
+	// paramCount is the number of uses of each parameter in the statement.
+	paramCount map[int]int
+	// outExpanded are the names of a query's columns with its * expanded
+	// (noteExpanded).
+	outExpanded map[*sqlir.SelectStmt][]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
+	// A script runs its statements on one executor, so the types of an
+	// earlier statement's output must not reach a later one's.
+	x.selectTypes, x.selectNamed, x.returningTypes, x.returningStar = nil, nil, nil, nil
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
 	if err := x.checkSequenceCalls(stmt); err != nil {
 		return err
 	}
-	c := &columnChecker{x: x}
+	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
+	for _, p := range sqlir.Params(stmt) {
+		c.paramCount[p.Index]++
+	}
 	var err error
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
-		_, err = c.query(st, nil)
+		if _, err = c.query(st, nil); err == nil {
+			first := st
+			for first.SetOp != "" && first.Larg != nil {
+				first = first.Larg
+			}
+			x.selectTypes = c.certainOutput(st)
+			if st.SetOp == "" {
+				x.selectNamed = c.outCertainNamed[first]
+			}
+		}
 	case *sqlir.InsertStmt:
 		err = c.insert(st)
 	case *sqlir.UpdateStmt:
@@ -508,7 +539,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 	if len(t.Columns) > 0 && t.Func == nil {
 		// AS alias(a, b) renames the first columns, which needs them in
 		// order.
-		names := outputNames(t.Sub)
+		names := c.expandedNames(t.Sub)
 		cols = nil
 		if names != nil {
 			cols = namesSet(renamedCols(names, t.Columns))
@@ -536,6 +567,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 	case t.Sub != nil:
 		sc.types[alias] = c.derivedTypes(t.Sub, t.Columns)
+		sc.noteCertain(alias, c.certainItem(t.Sub, t.Columns))
 	default:
 		db := c.x.tx.db
 		if types, ok := c.cteTypesOf(t.Name); ok {
@@ -552,6 +584,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
+			sc.noteCertain(alias, def.types)
 			sc.noteCollations(alias, def)
 		}
 	}
@@ -798,6 +831,13 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if sel == nil {
 		return nil, nil
 	}
+	if sel.Lock != nil {
+		// Postgres refuses these when it analyzes the statement, which
+		// planLocking refuses only where a run reaches the query.
+		if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+			return nil, c.x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+		}
+	}
 	c.queries = append(c.queries, sel)
 	c.visited = append(c.visited, sel)
 	defer func() { c.queries = c.queries[:len(c.queries)-1] }()
@@ -869,6 +909,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
 		}
 		c.valuesTypes[sel] = types
+		c.noteValuesCertain(sel, sc)
 	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
@@ -969,6 +1010,8 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	c.noteOutputTypes(sel, sc)
+	c.noteCertain(sel, sc)
+	c.noteExpanded(sel)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1076,10 +1119,10 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	c.outNamed[sel] = named
 }
 
-// starColumns are the types of the columns the * t of sel gives, in order,
-// when its one FROM item is a table the schema declares, the order of whose
-// columns the check knows, and nil otherwise.
-func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+// starTable is the table the * t of sel expands when its one FROM item is
+// a table the schema declares, the order of whose columns the check knows,
+// and nil otherwise.
+func (c *columnChecker) starTable(sel *sqlir.SelectStmt, t sqlir.Target) *tableDef {
 	from := sel.From
 	if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || len(from.Columns) > 0 {
 		return nil
@@ -1091,7 +1134,54 @@ func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []str
 	if _, cte := c.cteTypesOf(from.Name); cte || db.views[db.resolve(from.Name)] != nil {
 		return nil
 	}
-	def := db.defs[db.resolve(from.Name)]
+	return db.defs[db.resolve(from.Name)]
+}
+
+// expandedNames are the names of sel's columns in order, as outputNames
+// gives them, with a * over a table starTable finds expanded to its
+// columns, and nil where a * gives columns of no known order.
+func (c *columnChecker) expandedNames(sel *sqlir.SelectStmt) []string {
+	if names := outputNames(sel); names != nil {
+		return names
+	}
+	for sel.SetOp != "" && sel.Larg != nil {
+		sel = sel.Larg
+	}
+	// A query's own CTEs are out of scope once it is walked, where a name
+	// may resolve to a table they shadow, so the walk records them.
+	return c.outExpanded[sel]
+}
+
+// noteExpanded records expandedNames' names of sel while its CTEs are in
+// scope, nil where a * gives columns of no known order.
+func (c *columnChecker) noteExpanded(sel *sqlir.SelectStmt) {
+	if c.outExpanded == nil {
+		c.outExpanded = map[*sqlir.SelectStmt][]string{}
+	}
+	c.outExpanded[sel] = c.expandNames(sel)
+}
+
+func (c *columnChecker) expandNames(sel *sqlir.SelectStmt) []string {
+	var out []string
+	for _, t := range sel.Targets {
+		if !t.Star {
+			out = append(out, targetName(t))
+			continue
+		}
+		def := c.starTable(sel, t)
+		if def == nil {
+			return nil
+		}
+		out = append(out, def.columns...)
+	}
+	return out
+}
+
+// starColumns are the types of the columns the * t of sel gives, in order,
+// when its one FROM item is a table the schema declares, the order of whose
+// columns the check knows, and nil otherwise.
+func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+	def := c.starTable(sel, t)
 	if def == nil {
 		return nil
 	}
@@ -1391,14 +1481,16 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 // renaming, and a set operation's by the types its queries agree on.
 func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[string]string {
 	if sel.SetOp != "" {
-		return namedTypes(sel, c.agreedTypes(sel), names)
+		return c.namedTypes(sel, c.agreedTypes(sel), names)
 	}
 	if len(sel.Values) > 0 {
-		return namedTypes(sel, c.itemTypes(sel), names)
+		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
 	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
-	if types, ok := c.outTypes[sel]; ok && !star {
-		return namedTypes(sel, types, names)
+	if types, ok := c.outTypes[sel]; ok && (!star || len(names) > 0) {
+		// A * the check expands has its types by position too, which an
+		// alias list renames.
+		return c.namedTypes(sel, types, names)
 	}
 	out := map[string]string{}
 	if len(names) > 0 {
@@ -1580,11 +1672,11 @@ func (c *columnChecker) itemTypes(sel *sqlir.SelectStmt) []string {
 // namedTypes are the output types of sel by the names its columns have,
 // under those an AS alias(a, b) or a view's column list gives the first
 // ones. A name two columns have is left unresolved, as its type is either.
-func namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
+func (c *columnChecker) namedTypes(sel *sqlir.SelectStmt, types []string, names []string) map[string]string {
 	out := map[string]string{}
 	// Without types, as of VALUES, the item's columns are of unresolved
 	// type rather than unknown.
-	cols := outputNames(sel)
+	cols := c.expandedNames(sel)
 	if types == nil || len(cols) != len(types) {
 		return out
 	}
@@ -1667,7 +1759,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -1688,7 +1780,7 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -2055,6 +2147,51 @@ func (c *columnChecker) markCorrelated(found bool, owner *sqlir.SelectStmt) {
 	}
 }
 
+// outerAggregate reports an aggregate whose arguments read columns, none
+// of them surely of sc's own query, which Postgres may make an aggregate of
+// an outer query (agglevelsup).
+func outerAggregate(f *sqlir.FuncCall, sc *colScope) bool {
+	refs := sqlir.BlockColumnRefs(f)
+	if len(refs) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(refs, func(r *sqlir.ColumnRef) bool { return ownColumn(r, sc) })
+}
+
+// ownColumn reports a column that resolves in sc's own query, or in no
+// query, which resolve reports. An unqualified column an item of unknown
+// columns in sc may have is sc's only where no outer query may have it
+// too, as the item may lack it and Postgres would then take the outer one.
+func ownColumn(r *sqlir.ColumnRef, sc *colScope) bool {
+	if r.Table != "" {
+		for s := sc; s != nil; s = s.outer {
+			if _, ok := s.items[r.Table]; ok || r.Table == "excluded" && s.hasExcluded {
+				return s == sc
+			}
+		}
+		return true
+	}
+	may := func(s *colScope) (has, unknown bool) {
+		for _, cols := range s.items {
+			if cols == nil {
+				unknown = true
+			} else if h, _ := cols.has(r.Column); h {
+				has = true
+			}
+		}
+		return has, unknown
+	}
+	if has, _ := may(sc); has {
+		return true
+	}
+	for s := sc.outer; s != nil; s = s.outer {
+		if h, u := may(s); h || u {
+			return false
+		}
+	}
+	return true
+}
+
 // resolve reports a column reference no FROM item in scope has.
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	c.noteCorrelation(r, sc)
@@ -2118,6 +2255,9 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 // with their own scopes.
 func (c *columnChecker) exprs(n any, sc *colScope) error {
 	var err error
+	// windowed are the functions windows wrap, which Postgres computes in
+	// the window's own query whatever columns they read.
+	windowed := map[*sqlir.FuncCall]bool{}
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		if err != nil {
@@ -2174,6 +2314,21 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.typedParam(p) // IS NULL gives it no type to differ from
 				}
 			case *sqlir.BinaryExpr:
+				// Only the operators compareRowSubquery takes compare a row
+				// with a subquery. Postgres fails a row beside a subquery
+				// under any other operator, so that subquery keeps the
+				// scalar width check.
+				switch e.Op {
+				case "=", "<>", "!=", "<", "<=", ">", ">=":
+					if row, ok := e.L.(*sqlir.RowExpr); ok {
+						if q, ok := e.R.(*sqlir.SubQuery); ok {
+							if c.rowSubqueries == nil {
+								c.rowSubqueries = map[*sqlir.SubQuery]int{}
+							}
+							c.rowSubqueries[q] = len(row.Items)
+						}
+					}
+				}
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
@@ -2182,7 +2337,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
-				if e.Op == "/" && numberRank[c.x.tx.db.baseType(c.typer(sc).of(e))] > numberRank["int8"] {
+				if e.Op == "/" && slices.ContainsFunc([]sqlir.Expr{e, e.L, e.R}, func(x sqlir.Expr) bool {
+					// A numeric or a float operand divides as one whatever the
+					// other is, even where the result's type is unresolved.
+					return numberRank[c.x.tx.db.baseType(c.typer(sc).of(x))] > numberRank["int8"]
+				}) {
 					if c.x.numericDivs == nil {
 						c.x.numericDivs = map[*sqlir.BinaryExpr]bool{}
 					}
@@ -2226,7 +2385,25 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				}
+			case *sqlir.WindowFunc:
+				windowed[e.Func] = true
 			case *sqlir.FuncCall:
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && len(sqlir.Selects(e.Args)) > 0 {
+					// A subquery's columns may be of any query out from it,
+					// and the aggregate's level with them, which the check
+					// below does not follow, as rowSequenceCalls refuses
+					// the form outside a subquery.
+					err = c.x.unsupported("a subquery in an aggregate's argument")
+					return
+				}
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && outerAggregate(e, sc) {
+					// Postgres computes an aggregate whose arguments read
+					// only outer columns in the outer query, which then
+					// aggregates, while the evaluators compute it over the
+					// subquery's rows.
+					err = c.x.unsupported("an aggregate in a subquery of no column surely the subquery's, which Postgres may compute in the outer query")
+					return
+				}
 				if what := textArgumentMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
@@ -2369,6 +2546,25 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			case *sqlir.SelectStmt:
 				_, err = c.query(e, sc)
+				return
+			case *sqlir.SubQuery:
+				if _, err = c.query(e.Select, sc); err != nil {
+					return
+				}
+				// Postgres fails a subquery of other than the width its place
+				// takes when it analyzes the statement, which the run refuses
+				// only where a row reaches it.
+				w, ok := c.knownWidth(e.Select)
+				if !ok {
+					return
+				}
+				if want, row := c.rowSubqueries[e]; row {
+					if w != want {
+						err = c.x.unsupported("a row compared with a subquery of another number of columns")
+					}
+				} else if w != 1 {
+					err = c.x.unsupported("a scalar subquery of other than one column")
+				}
 				return
 			}
 			walk(v.Elem())
@@ -2897,6 +3093,7 @@ func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
 	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
 		sc.types[targetAlias(table, alias)] = def.types
+		sc.noteCertain(targetAlias(table, alias), def.types)
 		sc.noteCollations(targetAlias(table, alias), def)
 	}
 	return sc, cols
@@ -2959,11 +3156,13 @@ func (c *columnChecker) assigned(table string, cols colSet, names []string, inse
 // for, so a * of another item, which UPDATE ... FROM and DELETE ... USING
 // may name, is refused.
 func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string) error {
-	for _, t := range ts {
+	c.x.returningTypes, c.x.returningStar = make([]string, len(ts)), sc.certain[target]
+	for i, t := range ts {
 		if !t.Star {
 			if err := c.exprs(t.Expr, sc); err != nil {
 				return err
 			}
+			c.x.returningTypes[i] = c.certainType(t.Expr, sc)
 			continue
 		}
 		// With FROM or USING items, Postgres's RETURNING * gives their columns
@@ -3057,6 +3256,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		c.assignedInput(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
+		up.noteCertain("excluded", sc.certain[targetAlias(ins.Table, ins.Alias)])
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
@@ -3155,6 +3355,7 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 		}
 		sc.items[alias] = cols
 		sc.types[alias] = own.types[alias]
+		sc.noteCertain(alias, own.certain[alias])
 		if colls, ok := own.colls[alias]; ok {
 			if sc.colls == nil {
 				sc.colls = map[string]map[string]string{}

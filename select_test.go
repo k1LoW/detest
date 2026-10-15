@@ -1755,3 +1755,207 @@ func TestUnknownColumnOwnerUnsupported(t *testing.T) {
 		}
 	}
 }
+
+func TestNumericReadsBackAsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a numeric(12, 2), b bigint, c amount, f float8)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2000000, 3000000, 2000000, 5000000)`)
+	// pq and pgx return a numeric as its text, which scans into an int64,
+	// where a float64 scans by its %g text, 2e+06.
+	for _, q := range []string{
+		`SELECT 2000000::numeric`,
+		`SELECT a FROM t`,
+		`SELECT c FROM t`,
+		`SELECT sum(b) - 1000000 FROM t`,
+		`SELECT * FROM (SELECT a FROM t) s`,
+		`SELECT a FROM t UNION ALL SELECT 2000000::numeric WHERE false`,
+		`UPDATE t SET a = a RETURNING a`,
+	} {
+		var n int64
+		if err := db.QueryRow(q).Scan(&n); err != nil || n != 2000000 {
+			t.Errorf("%s into an int64: got %d, %v, want 2000000", q, n, err)
+		}
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s into an any: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+	var r []any
+	rows, err := db.Query(`UPDATE t SET b = b RETURNING *`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		r = make([]any, 5)
+		ptrs := make([]any, 5)
+		for i := range r {
+			ptrs[i] = &r[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows.Close()
+	if r[1] != "2000000" || r[2] != int64(3000000) || r[3] != "2000000" || r[4] != float64(5000000) {
+		t.Errorf("RETURNING *: got %#v, want a numeric and a domain over one as text, a bigint and a float as numbers", r)
+	}
+	var f float64
+	if err := db.QueryRow(`SELECT 1.5`).Scan(&f); err != nil || f != 1.5 {
+		t.Errorf("a numeric with a fraction into a float64: got %v, %v", f, err)
+	}
+	// A float8 is a float64 in both drivers too, the float8 forms of floor,
+	// round, power and avg included, which Postgres takes for an integer
+	// argument too, and a set operation whose types the check cannot tell.
+	for _, q := range []string{
+		`SELECT f FROM t`,
+		`SELECT floor(f) FROM t`,
+		`SELECT floor(5000000) FROM t`,
+		`SELECT power(f, 1) FROM t`,
+		`SELECT avg(f) FROM t`,
+		`UPDATE t SET f = f RETURNING floor(f)`,
+		`SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`,
+		`SELECT v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
+		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT avg(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
+		// An expression over a column of unresolved type does not take
+		// the other operand's or branch's type.
+		`SELECT s.v + 0::numeric FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`UPDATE t SET f = f FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s RETURNING s.v + 0::numeric`,
+		`SELECT (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
+		`UPDATE t SET id = id RETURNING (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
+		`SELECT (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
+		`UPDATE t SET id = id RETURNING (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
+		`SELECT nullif(f, 0::numeric) FROM t`,
+		`SELECT x.n FROM (SELECT s.v + 0::numeric AS n FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) x`,
+		`SELECT * FROM (VALUES (5000000::numeric), (abs(NULL))) v WHERE false UNION ALL SELECT f FROM t`,
+	} {
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
+			t.Errorf("%s: got %#v, %v, want a float64", q, v, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT floor(a) FROM t`,
+		`SELECT avg(b) - 1000000 FROM t`,
+		`SELECT 2000000::numeric UNION ALL SELECT 1::numeric WHERE false`,
+		`SELECT s.v + 1 FROM (SELECT 1999999::numeric AS v) s`,
+		`SELECT floor(c) FROM t`,
+		`SELECT c + 0 FROM t`,
+		`SELECT sum(c) FROM t`,
+		`SELECT (SELECT 2000000::numeric UNION ALL SELECT 0::numeric WHERE false)`,
+		`SELECT (VALUES (2000000::numeric))`,
+		`UPDATE t SET id = id RETURNING (VALUES (2000000::numeric))`,
+		`SELECT s.a FROM (SELECT * FROM t) s`,
+		`SELECT s.a FROM (SELECT id, a FROM t) s(other_id)`,
+		`SELECT (VALUES (t.a)) FROM t`,
+		`UPDATE t SET a = a RETURNING (VALUES (t.a))`,
+		`SELECT nullif(2000000::numeric, 0::numeric)`,
+		`SELECT nullif(2000000, 0::numeric)`,
+		`UPDATE t SET a = a RETURNING nullif(a, 0)`,
+		`SELECT first_value(a) OVER () FROM t`,
+		`SELECT lag(a, 0) OVER () FROM t`,
+	} {
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+	// A branch beside a column of unresolved type is refused, as it may
+	// be an interval, and a text function of a number function over one,
+	// whose every form is a number.
+	for _, q := range []string{
+		`SELECT lower(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT length(avg(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(-floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(floor((SELECT f FROM t)))`,
+		`SELECT lower(s.v + 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(floor(s.v) + floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(avg(s.v) OVER ()) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT pg_try_advisory_xact_lock(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT pg_advisory_xact_lock(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT coalesce(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT nullif(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	// A * over a table expands its domain to the base type.
+	if rows3, err := db.Query(`SELECT * FROM t UNION ALL SELECT * FROM t WHERE false`); err == nil {
+		for rows3.Next() {
+			r := make([]any, 5)
+			ptrs := make([]any, 5)
+			for i := range r {
+				ptrs[i] = &r[i]
+			}
+			if err := rows3.Scan(ptrs...); err != nil || r[3] != "2000000" {
+				t.Errorf("a domain column of a * in a set operation: got %#v, %v, want the text 2000000", r[3], err)
+			}
+		}
+		rows3.Close()
+	} else {
+		t.Error(err)
+	}
+	// A * over an item of columns the check does not know, as a view of a
+	// *, may give a name another item gives too.
+	mustExec(t, db, `CREATE TABLE ff (n float8)`)
+	mustExec(t, db, `INSERT INTO ff VALUES (2000000)`)
+	mustExec(t, db, `CREATE VIEW vv AS SELECT * FROM ff`)
+	mustExec(t, db, `CREATE TABLE mm (n numeric)`)
+	mustExec(t, db, `INSERT INTO mm VALUES (3)`)
+	var first, second any
+	if err := db.QueryRow(`SELECT * FROM vv CROSS JOIN mm`).Scan(&first, &second); err != nil || first != float64(2000000) {
+		t.Errorf("a * over a view beside a table of the same column name: got %#v, %v, want a float64", first, err)
+	}
+	// abs(NULL) is a float8 the check does not know, so the column is not
+	// certainly a numeric.
+	var sv any
+	if err := db.QueryRow(`VALUES (2000000::numeric), (abs(NULL))`).Scan(&sv); err != nil || sv != float64(2000000) {
+		t.Errorf("VALUES beside abs(NULL): got %#v, %v, want a float64", sv, err)
+	}
+	// A statement of a script does not read an earlier one's types.
+	if _, err := db.Exec(`SELECT 1::numeric; SELECT 2::numeric`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT 2000000::numeric; SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`).Scan(&sv); err != nil || sv != float64(5000000) {
+		t.Errorf("a script's last statement: got %#v, %v, want a float64", sv, err)
+	}
+	// A NULL or an untyped literal takes the other query's type.
+	if err := db.QueryRow(`SELECT 2000000::numeric UNION ALL SELECT NULL WHERE false`).Scan(&sv); err != nil || sv != "2000000" {
+		t.Errorf("beside a NULL: got %#v, %v, want the text 2000000", sv, err)
+	}
+	// Untyped arguments alone take the float8 form.
+	for _, q := range []string{`SELECT floor($1) + 0::numeric`, `SELECT floor(abs($1)) + 0::numeric`} {
+		if err := db.QueryRow(q, int64(5000000)).Scan(&sv); err != nil || sv != float64(5000000) {
+			t.Errorf("%s: got %#v, %v, want a float64", q, sv, err)
+		}
+	}
+	// A numeric operand divides as one beside a column of unresolved type.
+	if err := db.QueryRow(`SELECT s.v / (SELECT sum(b) FROM t) > 0 FROM (SELECT 1::bigint AS v UNION ALL SELECT sum(b) FROM t WHERE false) s WHERE s.v IS NOT NULL`).Scan(&sv); err != nil || sv != true {
+		t.Errorf("division by a numeric beside an unresolved column: got %#v, %v, want true", sv, err)
+	}
+	// A parameter used again takes the type of the use Postgres meets
+	// first, which may be another form than this call's, so the output is
+	// left as it was: floor($1) makes it a float8 here.
+	rows2, err := db.Query(`SELECT floor($1), power($1, 1::numeric)`, int64(2000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows2.Next() {
+		var a, b any
+		if err := rows2.Scan(&a, &b); err != nil || b != float64(2000000) {
+			t.Errorf("power of a reused parameter: got %#v, %v, want a float64", b, err)
+		}
+	}
+	rows2.Close()
+	// An untyped parameter takes the form the other argument picks.
+	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {
+		var v any
+		if err := db.QueryRow(q, int64(2000000)).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+}
