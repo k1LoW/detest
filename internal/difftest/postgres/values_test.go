@@ -880,6 +880,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `VALUES ((SELECT u FROM z)) UNION ALL SELECT 'bad' WHERE false`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT 1::smallint WHERE false UNION (VALUES (2), ('40000') LIMIT 0)) s`),
 			difftest.Q(0, `SELECT NULLIF(1::smallint, '40000') FROM z`),
+			difftest.Q(0, `SELECT count(*) FROM (VALUES (1::smallint), ('40000') LIMIT 0) s`),
+			difftest.Q(0, `SELECT count(*) FROM (VALUES ((VALUES (1))) UNION ALL SELECT 'bad' WHERE false) s`),
 			difftest.Q(0, `SELECT count(*) FROM (VALUES (1) UNION SELECT 2::smallint UNION SELECT '40000' WHERE false) s`),
 			difftest.Q(0, `SELECT CASE WHEN true THEN (SELECT u FROM z) ELSE 'bad' END`),
 			difftest.Q(0, `SELECT coalesce((SELECT u FROM z), 'bad')`),

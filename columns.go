@@ -719,8 +719,16 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		// whether or not a LIMIT drops the rows. INSERT ... VALUES, whose
 		// rows each take the column's type, is checked in insert.
 		for i := range sel.Values[0] {
-			if err := c.branchTypes(setOpColumnExprs(sel, i), sc, "VALUES rows"); err != nil {
+			col := setOpColumnExprs(sel, i)
+			if err := c.branchTypes(col, sc, "VALUES rows"); err != nil {
 				return nil, err
+			}
+			// The untyped rows take the type of the typed ones. A column
+			// of no typed row is left to a set operation around it.
+			typ := commonType(col, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+			c.timeParams(typ, col...)
+			for _, e := range col {
+				c.inputAs(e, typ)
 			}
 		}
 	}
@@ -1020,7 +1028,7 @@ func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
 	switch {
 	case sel == nil:
 		return ""
-	case sel.SetOp != "":
+	case sel.SetOp != "" || len(sel.Values) > 0:
 		if t := c.setOpTypes(sel); len(t) == 1 {
 			return resolvedType(t[0], setOpColumnExprs(sel, 0))
 		}
@@ -1113,7 +1121,13 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 		// untyped rows alone untyped, where a set operation makes it text.
 		out := make([]string, len(sel.Values[0]))
 		for i := range out {
-			out[i] = commonType(setOpColumnExprs(sel, i), nil, c.recordedSubqueryType)
+			col := setOpColumnExprs(sel, i)
+			out[i] = commonType(col, nil, c.recordedSubqueryType)
+			if out[i] == "" && slices.ContainsFunc(col, func(e sqlir.Expr) bool { return nestedBranches(e) != nil && untypedBranch(e) }) {
+				// A CASE or COALESCE of untyped branches alone is text,
+				// as it is in a select list.
+				out[i] = "text"
+			}
 		}
 		return out
 	}
@@ -1782,6 +1796,12 @@ func (c *columnChecker) castInput(e *sqlir.Cast) {
 			// as integer input, which Postgres fails, with a message that
 			// depends on the driver.
 			return c.x.unsupported(fmt.Sprintf("a float with a fraction bound to a parameter taken as %s", e.Type))
+		}
+		if rank > 0 && isOtherNumberText(v) {
+			// Postgres reads 0x, 0o and 0b prefixes and underscores in
+			// integers, and fails them elsewhere; detest models neither,
+			// and the run refuses such text where a row reaches it.
+			return c.x.unsupported(fmt.Sprintf("number text in a form detest does not model taken as %s", e.Type))
 		}
 		if c.x.tx.db.baseType(e.Type) == "uuid" && isParam(e.X) && derefValue(v) != nil && !isText(v) {
 			// The cast leaves a value of another type to the run, where the

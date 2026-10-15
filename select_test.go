@@ -917,6 +917,8 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`VALUES ((SELECT u FROM t UNION ALL SELECT u FROM t)) UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`SELECT CASE WHEN true THEN (SELECT u FROM t) ELSE $1 END`, []any{"bad"}},
 		{`SELECT coalesce((SELECT u FROM t), $1)`, []any{"bad"}},
+		{`VALUES ((VALUES (1))) UNION ALL SELECT 'bad' WHERE false`, nil},
+		{`VALUES (1), ($1) LIMIT 0`, []any{"bad"}},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -954,6 +956,11 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// a LIMIT drops them.
 		`VALUES (1), (false) LIMIT 0`,
 		`(VALUES (1), (false) LIMIT 0) UNION ALL SELECT 2 WHERE false`,
+		`(VALUES (coalesce('bad', NULL)) LIMIT 0) UNION ALL SELECT 1 WHERE false`,
+		// Postgres reads prefixed and underscored integers, which detest
+		// does not model.
+		`SELECT '0b2'::int FROM t`,
+		`SELECT '1_000'::int FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -1046,6 +1053,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)
+	}
+	if _, err := db.Exec(`VALUES (1::smallint), ('40000') LIMIT 0`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("VALUES of a smallint and 40000: got %v, want 22003", err)
 	}
 	if _, err := db.Exec(`SELECT NULLIF(1::smallint, '40000') FROM t`); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("NULLIF of a smallint and 40000: got %v, want 22003", err)
