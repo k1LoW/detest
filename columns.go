@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -722,6 +723,13 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		// when it plans the statement, and fails one of two types (42804)
 		// whether or not a LIMIT drops the rows. INSERT ... VALUES, whose
 		// rows each take the column's type, is checked in insert.
+		for _, row := range sel.Values[1:] {
+			if len(row) != len(sel.Values[0]) {
+				// Postgres fails this when it parses the statement, before
+				// it reads any input by the columns' types.
+				return nil, c.x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
+			}
+		}
 		types := make([]string, len(sel.Values[0]))
 		for i := range sel.Values[0] {
 			col := setOpColumnExprs(sel, i)
@@ -932,6 +940,13 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	if db.kind.InnoDB() {
 		return nil
 	}
+	if l, ok := knownWidth(sel.Larg); ok {
+		if r, ok := knownWidth(sel.Rarg); ok && l != r {
+			// Postgres fails this before it reads any input by the
+			// columns' types, as the run does once it has both queries.
+			return db.kind.Error(sqlir.SyntaxError, fmt.Sprintf("each %s query must have the same number of columns", strings.ToUpper(sel.SetOp)), "", "", "")
+		}
+	}
 	for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
 		if starQuery(q) && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
 			// The check does not place the targets beside a * by position,
@@ -1025,6 +1040,16 @@ func untypedColumn(q *sqlir.SelectStmt, i int) bool {
 	return slices.ContainsFunc(setOpColumnExprs(q, i), untypedExpr)
 }
 
+// untypedOutput reports whether e, a scalar subquery's one target, is of
+// no type of its own, which Postgres resolves to text at the subquery's
+// output: untyped input, a CASE or COALESCE of it alone, or a bare NULL.
+func untypedOutput(e sqlir.Expr) bool {
+	if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+		return true
+	}
+	return untypedBranch(e)
+}
+
 func isParam(e sqlir.Expr) bool {
 	_, ok := e.(*sqlir.Param)
 	return ok
@@ -1042,7 +1067,7 @@ func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
 			return resolvedType(t[0], setOpColumnExprs(sel, 0))
 		}
 		return ""
-	case len(sel.Targets) == 1 && untypedBranch(sel.Targets[0].Expr):
+	case len(sel.Targets) == 1 && untypedOutput(sel.Targets[0].Expr):
 		return "text" // as subqueryType resolves it
 	}
 	if t := c.outTypes[sel]; len(t) == 1 {
@@ -1215,7 +1240,7 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if len(q.Select.Targets) != 1 {
 		return ""
 	}
-	if untypedBranch(q.Select.Targets[0].Expr) {
+	if untypedOutput(q.Select.Targets[0].Expr) {
 		return "text"
 	}
 	if typ, ok := c.subTypes[q]; ok {
@@ -1340,6 +1365,22 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Ex
 		return c.x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("%s position %d is not in select list", clause, n), "", "", "")
 	}
 	return nil
+}
+
+// knownWidth is the number of columns q gives, false where a * leaves it to
+// the items the * covers.
+func knownWidth(q *sqlir.SelectStmt) (int, bool) {
+	switch {
+	case q == nil:
+		return 0, false
+	case q.SetOp != "":
+		return knownWidth(q.Larg)
+	case len(q.Values) > 0:
+		return len(q.Values[0]), true
+	case slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star }):
+		return 0, false
+	}
+	return len(q.Targets), true
 }
 
 // starWidth is the number of columns a select list with a * gives, false

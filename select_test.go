@@ -966,6 +966,9 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		// does not model.
 		`SELECT '0b2'::int FROM t`,
 		`SELECT '1_000'::int FROM t`,
+		// A scalar subquery's bare NULL is text at its output.
+		`SELECT (SELECT NULL) WHERE false UNION ALL SELECT 1 WHERE false`,
+		`SELECT coalesce((SELECT NULL), 1)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -1062,6 +1065,19 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	}
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)
+	}
+	// Postgres fails a statement of unequal widths before it reads any
+	// input by type.
+	for _, q := range []string{
+		`VALUES (1::smallint), ('40000', 2) LIMIT 0`,
+		`SELECT 1 WHERE false UNION SELECT 'bad', 2 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
+			t.Errorf("%s: got %v, want a syntax error", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT NULL UNION SELECT 1`); err != nil {
+		t.Errorf("a bare NULL beside an integer: got %v, want no error", err)
 	}
 	if _, err := db.Exec(`VALUES (1::smallint), ('40000') LIMIT 0`); !errors.Is(err, ErrNumericValueOutOfRange) {
 		t.Errorf("VALUES of a smallint and 40000: got %v, want 22003", err)
