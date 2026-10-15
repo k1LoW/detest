@@ -1435,13 +1435,9 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.checkArity(v); err != nil {
 			return nil, err
 		}
-		args := make([]any, len(v.Args))
-		for i, a := range v.Args {
-			val, err := x.evalAgg(a, g)
-			if err != nil {
-				return nil, err
-			}
-			args[i] = val
+		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.evalAgg(a, g) })
+		if err != nil {
+			return nil, err
 		}
 		if v.Name == "nullif" {
 			var err error

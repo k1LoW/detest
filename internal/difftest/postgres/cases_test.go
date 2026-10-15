@@ -664,6 +664,28 @@ var cases = []difftest.Case{
 		},
 		Pauses: []map[int]time.Duration{{5: 1500 * time.Millisecond}},
 	},
+	{
+		Name: "coalesce stops at the first argument that is not null",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE SEQUENCE sq`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 0), (2, 5)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT coalesce(n, 1 / n) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(sum(n), 1 / min(n)) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT coalesce(id, nextval('sq')) FROM t WHERE id = 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT coalesce(NULL, nextval('sq'))`),
+			// The fallback's row lock is not taken, so the row locked by
+			// the other transaction does not block the statement.
+			difftest.S(1, `BEGIN`),
+			difftest.Q(1, `SELECT id FROM t WHERE id = 2 FOR UPDATE`),
+			difftest.Q(0, `SELECT coalesce(n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM t WHERE id = 1`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
