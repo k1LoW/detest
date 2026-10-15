@@ -2080,7 +2080,16 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					c.untypedOperands(sc, e.L, e.R)
 				case "+", "-", "*", "/", "%":
+					if err = c.arithmeticTypes(sc, e.L, e.R); err != nil {
+						return
+					}
 					if err = c.arithmeticOperand(sc, e); err != nil {
+						return
+					}
+				}
+			case *sqlir.UnaryExpr:
+				if e.Op == "-" {
+					if err = c.arithmeticTypes(sc, e.X); err != nil {
 						return
 					}
 				}
@@ -2710,6 +2719,35 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// arithmeticTypes refuses arithmetic over a boolean, a uuid or text, for
+// which Postgres has no operator and fails when it plans the statement
+// (42883), while the evaluators check the operands only where a row
+// reaches them. A string literal or a parameter takes the other operand's
+// type and is left to arithmeticOperand, and text beside a type whose
+// operators detest does not list, such as jsonb's -, is left alone.
+func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) error {
+	t := typer{column: sc.columnType, base: c.x.tx.db.baseType}
+	var known []string
+	for _, o := range operands {
+		if untypedExpr(o) {
+			return nil
+		}
+		typ := t.of(o)
+		f := valueFamily(typ)
+		if f == "" && typ != "date" {
+			return nil
+		}
+		known = append(known, f)
+	}
+	for _, f := range known {
+		switch f {
+		case "bool", "boolean", "uuid", "text":
+			return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", f))
+		}
+	}
+	return nil
 }
 
 // branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,
