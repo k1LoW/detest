@@ -106,6 +106,20 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT coalesce(u.v, 'bogus') FROM (SELECT v FROM (SELECT (SELECT n FROM b) AS v FROM a) s UNION ALL SELECT m FROM a) u`),
 		},
 	},
+	{
+		Name:   "a query output of string literals or NULLs is text to the query around it",
+		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT x.v || 'a', (x.v = '1')::text, length(x.v) FROM (SELECT '1' AS v) x`),
+			difftest.Q(0, `SELECT coalesce(x.v, 'z'), (x.v IS NULL)::text FROM (SELECT NULL AS v) x`),
+			difftest.Q(0, `WITH c AS (SELECT '1' AS v) SELECT v || 'b' FROM c`),
+			difftest.Q(0, `SELECT x.v || 'c' FROM (SELECT max('1') AS v) x`),
+			difftest.Q(0, `SELECT x.v::int + 1 FROM (SELECT '1' AS v) x`),
+			difftest.Q(0, `SELECT upper((SELECT 'a')), ((SELECT '1') = '1')::text, (SELECT max('1')) || 'x'`),
+			difftest.Q(0, `SELECT x.v || 'd' FROM t, LATERAL (SELECT '1' AS v) x`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {

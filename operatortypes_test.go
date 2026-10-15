@@ -164,3 +164,54 @@ func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 		}
 	}
 }
+
+// Postgres resolves a query output of string literals, parameters or NULLs
+// alone to text where a query around reads it, so a comparison or
+// arithmetic of it with a number fails when it plans the statement (42883),
+// whatever rows the statement reads.
+func TestQueryOutputOfLiteralsIsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT '1' AS x, NULL AS y`)
+	for _, q := range []string{
+		`SELECT x.v = 1 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT (SELECT '1') = 1 WHERE false`,
+		`SELECT (SELECT max('1')) + 1 WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT NULL AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT NULL AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT max(NULL) AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT DISTINCT '1' AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT min(NULL) OVER () AS v) x WHERE false`,
+		`SELECT x.v = 1.5 FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT s.a = 1 FROM (SELECT '1') s(a) WHERE false`,
+		`SELECT s.v = 1 FROM (SELECT *, '1' AS v FROM t) s WHERE false`,
+		`SELECT s.v = 1 FROM t, LATERAL (SELECT '1' AS v) s WHERE false`,
+		`WITH c AS (SELECT '1' AS v) SELECT v = 1 FROM c WHERE false`,
+		`SELECT x = 1 FROM v WHERE false`,
+		`SELECT y + 1 FROM v WHERE false`,
+		`SELECT n FROM t WHERE n = (SELECT max('1'))`,
+		// Text has no assignment cast to an integer (42804).
+		`INSERT INTO t (id, n) SELECT 1, x.v FROM (SELECT '1' AS v) x`,
+		`INSERT INTO t (id, n) SELECT 1, min(NULL) OVER ()`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT x.v + 1 FROM (SELECT $1 AS v) x WHERE false`,
+		`SELECT x.v = 1 FROM (SELECT $1 AS v) x WHERE false`,
+	} {
+		if _, err := db.Query(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// An INSERT reads its own query's literals as the columns' input.
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 1, '1'`)
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 2, NULL`)
+	if got := rowsOf(t, db, `SELECT n FROM t ORDER BY id`); !reflect.DeepEqual(got, []string{"1", "NULL"}) {
+		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL]", got)
+	}
+}

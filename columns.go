@@ -88,7 +88,14 @@ type columnChecker struct {
 	// select list with a * has where outTypes has none; "" for a name two
 	// columns give or of a type expressionType does not know.
 	outNamed map[*sqlir.SelectStmt]map[string]string
-	params   paramUses
+	// outText are the positions and the names of a query's output columns
+	// that are a string literal, a parameter or a NULL, which Postgres
+	// resolves to text where a query around reads the column. outTypes
+	// leaves them untyped, as a set operation, VALUES or an INSERT reading
+	// the query directly gives them the type of what stands beside them.
+	outText      map[*sqlir.SelectStmt]map[int]bool
+	outTextNamed map[*sqlir.SelectStmt]map[string]bool
+	params       paramUses
 	// untyped holds the reads of string literals and parameters, run after
 	// the walk, as Postgres types the parameters before it binds them.
 	untyped []func() error
@@ -1088,9 +1095,11 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	var types []string
 	named := map[string]string{}
 	seen := map[string]bool{}
+	textAt, textNamed := map[int]bool{}, map[string]bool{}
 	note := func(name, typ string) {
 		if seen[name] {
 			typ = ""
+			delete(textNamed, name)
 		}
 		seen[name] = true
 		named[name] = typ
@@ -1129,12 +1138,30 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			}
 			c.outUnresolved[sel][len(types)] = true
 		}
-		if typ == "" && nestedBranches(t.Expr) != nil && untypedBranch(t.Expr) {
-			typ = "text" // as Postgres resolves a CASE or COALESCE of untyped branches
+		if typ == "" && !untypedExpr(t.Expr) && !isNullConst(t.Expr) {
+			// Postgres resolves a CASE, a COALESCE or an aggregate of
+			// untyped values alone, such as max('1'), to text.
+			ut := c.typer(sc)
+			ut.untypedText = true
+			if ut.of(t.Expr) == "text" {
+				typ = "text"
+			}
+		}
+		textOut := typ == "" && c.textOutput(t.Expr)
+		if textOut {
+			textAt[len(types)] = true
 		}
 		types = append(types, typ)
+		if textOut && !seen[targetName(t)] {
+			textNamed[targetName(t)] = true
+		}
 		note(targetName(t), typ)
 	}
+	if c.outText == nil {
+		c.outText = map[*sqlir.SelectStmt]map[int]bool{}
+		c.outTextNamed = map[*sqlir.SelectStmt]map[string]bool{}
+	}
+	c.outText[sel], c.outTextNamed[sel] = textAt, textNamed
 	if c.outTypes == nil {
 		c.outTypes = map[*sqlir.SelectStmt][]string{}
 		c.outNamed = map[*sqlir.SelectStmt]map[string]string{}
@@ -1143,6 +1170,38 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
+}
+
+// textOutput reports whether e, an output column of a query, is a string
+// literal, a NULL or a parameter bound to text or NULL, which Postgres
+// resolves to text where a query around reads it. A parameter bound to
+// another value is not, as the run reads the value as bound rather than
+// the text Postgres reads it as.
+func (c *columnChecker) textOutput(e sqlir.Expr) bool {
+	if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
+		switch derefValue(c.x.args[p.Index]).(type) {
+		case nil, string:
+		default:
+			return false
+		}
+	}
+	return untypedExpr(e) || isNullConst(e)
+}
+
+// readTypes are outTypes of sel as a query around it reads them, with the
+// columns of outText resolved to text.
+func (c *columnChecker) readTypes(sel *sqlir.SelectStmt) ([]string, bool) {
+	types, ok := c.outTypes[sel]
+	if !ok || len(c.outText[sel]) == 0 {
+		return types, ok
+	}
+	types = slices.Clone(types)
+	for i := range c.outText[sel] {
+		if i < len(types) {
+			types[i] = "text"
+		}
+	}
+	return types, true
 }
 
 // starTable is the table the * t of sel expands when its one FROM item is
@@ -1376,7 +1435,7 @@ func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
 	case len(sel.Targets) == 1 && untypedOutput(sel.Targets[0].Expr):
 		return "text" // as subqueryType resolves it
 	}
-	if t := c.outTypes[sel]; len(t) == 1 {
+	if t, _ := c.readTypes(sel); len(t) == 1 {
 		return t[0]
 	}
 	return ""
@@ -1513,7 +1572,7 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
 	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
-	if types, ok := c.outTypes[sel]; ok && (!star || len(names) > 0) {
+	if types, ok := c.readTypes(sel); ok && (!star || len(names) > 0) {
 		// A * the check expands has its types by position too, which an
 		// alias list renames.
 		return c.namedTypes(sel, types, names)
@@ -1523,6 +1582,9 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 		return out
 	}
 	for n, t := range c.outNamed[sel] {
+		if t == "" && c.outTextNamed[sel][n] {
+			t = "text"
+		}
 		if t != "" {
 			out[n] = t
 		}
@@ -1773,7 +1835,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 		// The walk has checked the subquery already, in this scope, and
 		// checking it again here would double the work at each level of
 		// nesting.
-		types, ok := c.outTypes[q.Select]
+		types, ok := c.readTypes(q.Select)
 		switch {
 		case !ok:
 			return "unresolved column type"
@@ -1789,7 +1851,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
-	types, ok := vc.outTypes[q.Select]
+	types, ok := vc.readTypes(q.Select)
 	if !ok {
 		// A set operation's or a *'s column may be an interval.
 		return "unresolved column type"
