@@ -131,7 +131,13 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	var err error
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
-		_, err = c.query(st, nil)
+		if _, err = c.query(st, nil); err == nil {
+			first := st
+			for first.SetOp != "" && first.Larg != nil {
+				first = first.Larg
+			}
+			x.selectTypes, x.selectNamed = c.setOpTypes(st), c.outNamed[first]
+		}
 	case *sqlir.InsertStmt:
 		err = c.insert(st)
 	case *sqlir.UpdateStmt:
@@ -2827,11 +2833,13 @@ func (c *columnChecker) assigned(table string, cols colSet, names []string, inse
 // for, so a * of another item, which UPDATE ... FROM and DELETE ... USING
 // may name, is refused.
 func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string) error {
-	for _, t := range ts {
+	c.x.returningTypes, c.x.returningStar = make([]string, len(ts)), sc.types[target]
+	for i, t := range ts {
 		if !t.Star {
 			if err := c.exprs(t.Expr, sc); err != nil {
 				return err
 			}
+			c.x.returningTypes[i] = c.typer(sc).of(t.Expr)
 			continue
 		}
 		// With FROM or USING items, Postgres's RETURNING * gives their columns

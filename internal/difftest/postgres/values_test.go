@@ -977,6 +977,25 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM generate_series(NULL::big + 0, 3000000000)`),
 		},
 	},
+	{
+		Name: "a numeric reads back as its text",
+		Schema: []string{
+			`CREATE DOMAIN amount AS numeric`,
+			`CREATE TABLE m (id int PRIMARY KEY, a numeric, n bigint, c amount)`,
+		},
+		Seed:  []string{`INSERT INTO m VALUES (1, 2000000, 3, 4000000)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT 2000000::numeric, 1.5, -7::numeric`),
+			difftest.Q(0, `SELECT a, c FROM m`),
+			difftest.Q(0, `SELECT * FROM (SELECT a FROM m) s`),
+			difftest.Q(0, `SELECT sum(n), sum(a) FROM m`),
+			difftest.Q(0, `SELECT a + 1 FROM m`),
+			difftest.Q(0, `SELECT a FROM m UNION ALL SELECT 5`),
+			difftest.Q(0, `UPDATE m SET a = a + 1 RETURNING a, c`),
+			difftest.Q(0, `INSERT INTO m VALUES (2, 9000000, 1, 1) RETURNING *`),
+		},
+	},
 }
 
 func TestDiffValues(t *testing.T) {

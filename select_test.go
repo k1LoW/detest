@@ -1697,3 +1697,59 @@ func TestInsertColumnChecks(t *testing.T) {
 	}
 	mustExec(t, db, `WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT 6, x FROM c RETURNING id`)
 }
+
+func TestNumericReadsBackAsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a numeric(12, 2), b bigint, c amount, f float8)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2000000, 3000000, 2000000, 5000000)`)
+	// pq and pgx return a numeric as its text, which scans into an int64,
+	// where a float64 scans by its %g text, 2e+06.
+	for _, q := range []string{
+		`SELECT 2000000::numeric`,
+		`SELECT a FROM t`,
+		`SELECT c FROM t`,
+		`SELECT sum(b) - 1000000 FROM t`,
+		`SELECT * FROM (SELECT a FROM t) s`,
+		`SELECT a FROM t UNION ALL SELECT 2000000::numeric WHERE false`,
+		`UPDATE t SET a = a RETURNING a`,
+	} {
+		var n int64
+		if err := db.QueryRow(q).Scan(&n); err != nil || n != 2000000 {
+			t.Errorf("%s into an int64: got %d, %v, want 2000000", q, n, err)
+		}
+		var v any
+		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s into an any: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+	var r []any
+	rows, err := db.Query(`UPDATE t SET b = b RETURNING *`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		r = make([]any, 5)
+		ptrs := make([]any, 5)
+		for i := range r {
+			ptrs[i] = &r[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows.Close()
+	if r[1] != "2000000" || r[2] != int64(3000000) || r[3] != "2000000" || r[4] != float64(5000000) {
+		t.Errorf("RETURNING *: got %#v, want a numeric and a domain over one as text, a bigint and a float as numbers", r)
+	}
+	var f float64
+	if err := db.QueryRow(`SELECT 1.5`).Scan(&f); err != nil || f != 1.5 {
+		t.Errorf("a numeric with a fraction into a float64: got %v, %v", f, err)
+	}
+	// A float8 is a float64 in both drivers too.
+	var v any
+	if err := db.QueryRow(`SELECT f FROM t`).Scan(&v); err != nil || v != float64(5000000) {
+		t.Errorf("a float8: got %#v, %v, want a float64", v, err)
+	}
+}
