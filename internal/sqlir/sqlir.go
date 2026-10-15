@@ -515,6 +515,11 @@ type InExpr struct {
 	List []Expr
 	Sub  *SelectStmt
 	Not  bool
+	// Array is set where Postgres compares X with the list as one array:
+	// = ANY or <> ALL over ARRAY[...], and an IN list of two or more items
+	// that read no column, which its parser makes the same comparison. It
+	// splits any other IN list into comparisons by =, one per item.
+	Array bool
 }
 
 // IsNull is x IS [NOT] NULL.

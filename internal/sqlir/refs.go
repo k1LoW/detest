@@ -67,6 +67,9 @@ func BlockFuncCalls(e Expr) []*FuncCall {
 	return out
 }
 
+// WindowFuncs returns the window functions under n, subqueries included.
+func WindowFuncs(n any) []*WindowFunc { return find[*WindowFunc](n) }
+
 // BlockColumnRefs returns the column references of e's own query block,
 // not those in a subquery.
 func BlockColumnRefs(e Expr) []*ColumnRef {
