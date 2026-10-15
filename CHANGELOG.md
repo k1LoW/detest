@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.6.0](https://github.com/k1LoW/detest/compare/v0.5.1...v0.6.0) - 2026-10-14
+
+### Fix bug 🐛
+- fix: wait only for writers in the Postgres duplicate check by @k1LoW in https://github.com/k1LoW/detest/pull/79
+- fix: name an unaliased Postgres select item as Postgres does by @k1LoW in https://github.com/k1LoW/detest/pull/86
+- fix: read a process's goroutine id under its lock in the DETEST_DEBUG trace by @k1LoW in https://github.com/k1LoW/detest/pull/87
+### Other Changes
+- feat: order Postgres enums by their labels by @k1LoW in https://github.com/k1LoW/detest/pull/81
+- test: tell apart the sibling goroutines of the canceled-statement test by @k1LoW in https://github.com/k1LoW/detest/pull/84
+- test: wait for database/sql to roll back a canceled transaction on the real server by @k1LoW in https://github.com/k1LoW/detest/pull/85
+
 ## [v0.5.1](https://github.com/k1LoW/detest/compare/v0.5.0...v0.5.1) - 2026-10-11
 
 ### Fix bug 🐛

@@ -866,6 +866,9 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `INSERT INTO x (v) VALUES ('a') RETURNING id`),
 			difftest.Q(0, `SELECT nextval('x_seq')`),
 			difftest.Q(0, `INSERT INTO y (v) VALUES ('a'), ('b') RETURNING id`),
+			// The width fails before the source runs its nextval.
+			difftest.S(0, `INSERT INTO u (id) SELECT * FROM (SELECT nextval('r') AS id, 2 AS extra) s`),
+			difftest.Q(0, `SELECT nextval('r')`),
 		},
 	},
 	{

@@ -374,7 +374,9 @@ func TestBytesAsText(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New(postgres.Collation(foldCase{})))
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, name text, payload bytea)`)
-	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $1), (2, $2, $2)`, []byte("a"), []byte("B"))
+	// One parameter per column, as Postgres fails one written to a text
+	// and a bytea column (42P08).
+	mustExec(t, db, `INSERT INTO t VALUES (1, $1, $2), (2, $3, $4)`, []byte("a"), []byte("a"), []byte("B"), []byte("B"))
 	// A bytea literal, which detest may hold as a string, and a CREATE
 	// TABLE AS of it keep byte order.
 	mustExec(t, db, `CREATE TABLE lit (id int PRIMARY KEY, payload bytea)`)
@@ -432,10 +434,10 @@ func TestBytesAsText(t *testing.T) {
 			t.Errorf("bytea literal written to the empty CREATE TABLE AS table %s: got %v", tbl, got)
 		}
 	}
-	// Postgres resolves bytea and a domain over it to bytea, which the
-	// check does not, as it tells the queries' types apart by name.
-	mustExec(t, db, `CREATE DOMAIN blob4 AS bytea`)
-	mustExec(t, db, `CREATE TABLE untold AS SELECT * FROM (SELECT payload FROM lit UNION SELECT payload::blob4 FROM lit) s WHERE false`)
+	// A view of a * keeps its columns of unknown type, as Postgres fixes
+	// them when it creates the view.
+	mustExec(t, db, `CREATE VIEW litv AS SELECT * FROM lit`)
+	mustExec(t, db, `CREATE TABLE untold AS SELECT payload FROM litv WHERE false`)
 	for _, arg := range []any{`\x41`, []byte("A"), 1} {
 		if _, err := db.Exec(`INSERT INTO untold VALUES ($1)`, arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%#v written to a CREATE TABLE AS column of untold type: got %v, want unsupported", arg, err)

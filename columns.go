@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/k1LoW/detest/internal/sqlir"
 )
@@ -85,12 +87,34 @@ type columnChecker struct {
 	untyped []func() error
 	// timeConflict names a parameter given two date and time types.
 	timeConflict string
+	// paramNumbers is the number type each parameter takes, and
+	// numberConflict names one given two, by numberRank.
+	paramNumbers   map[int]string
+	numberConflict string
+	// paramAt are the uses of parameters the walk met, paramTyped those a
+	// check gave a type, and paramRead the parameters whose input is read
+	// by a cast to a type before the run.
+	paramAt, paramTyped map[*sqlir.Param]bool
+	paramRead           map[int]bool
+	// subTypes are the types subqueryType resolved, shared with the
+	// checkers it starts, so that the branch checks, which resolve a
+	// subquery before the walk reaches it, resolve each one once rather
+	// than again at every level of nesting above it.
+	subTypes map[*sqlir.SubQuery]string
+	// outUnresolved are the positions of a query's output columns whose
+	// type the check does not know, which outTypes holds as "" alike with
+	// an untyped column's.
+	outUnresolved map[*sqlir.SelectStmt]map[int]bool
+	// outWidth are the numbers of output columns of a query with a *, where
+	// the items the * covers have columns of known names but perhaps of no
+	// known type, as a derived table's.
+	outWidth map[*sqlir.SelectStmt]int
+	// valuesTypes are the column types of a VALUES query, resolved over
+	// its rows in the scope the walk checked them in, which setOpTypes has
+	// no other way to see for a correlated column.
+	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
-	// subTypes are the types subqueryType gave, shared with the checkers
-	// it makes, so that a nested subquery is checked once per level
-	// rather than again for each level above it.
-	subTypes map[*sqlir.SubQuery]string
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
@@ -131,6 +155,12 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if c.timeConflict != "" {
 		return x.unsupported(c.timeConflict)
 	}
+	if c.numberConflict != "" {
+		return x.unsupported(c.numberConflict)
+	}
+	if what := c.untrackedParam(); what != "" {
+		return x.unsupported(what)
+	}
 	if len(c.numberParams) > 0 {
 		uses := map[int]int{}
 		for _, p := range sqlir.Params(stmt) {
@@ -155,20 +185,21 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 
 // paramUses records how a statement uses each parameter. Postgres gives a
 // parameter one type for the whole statement, taken from where it first
-// stands, so one used as the array of = ANY and elsewhere as a scalar, or as
-// the array of = ANY against operands of other types, fails before it runs,
-// whatever value is bound to it.
+// stands, so one used as the array of = ANY and elsewhere as a scalar, as
+// the array of = ANY against operands of other types, or as a scalar of two
+// families, such as a boolean column's value and an integer column's, fails
+// before it runs, whatever value is bound to it.
 type paramUses struct {
 	scalars  map[int]bool
 	arrays   map[int][]string // the types of the operands compared with it
-	compared map[int]string   // the family of the first operand compared with it as a scalar
-	mixed    map[int]bool     // compared as a scalar with operands of two families
+	compared map[int]string   // the family of the first type it takes as a scalar
+	mixed    map[int]bool     // taken as a scalar of two families
 }
 
-// comparedWith records the type of an operand the scalar parameter i is
-// compared with.
-func (u *paramUses) comparedWith(i int, typ string) {
-	f := paramFamily(typ)
+// comparedWith records the family f, by paramTypeFamily, of a type the
+// scalar parameter i takes, from an operand it is compared with or from
+// where it stands, as the column it is written to.
+func (u *paramUses) comparedWith(i int, f string) {
 	if f == "" {
 		return
 	}
@@ -180,6 +211,27 @@ func (u *paramUses) comparedWith(i int, typ string) {
 	} else if first != f {
 		u.mixed[i] = true
 	}
+}
+
+// paramTypeFamily is paramFamily, with an enum a family of its own, as
+// Postgres gives a parameter one type for the statement and an enum casts
+// implicitly to no other type.
+func (c *columnChecker) paramTypeFamily(typ string) string {
+	if t := c.x.tx.db.enumOf(typ); t != nil {
+		return "enum " + t.qualified
+	}
+	switch f := paramFamily(typ); {
+	case f != "":
+		return f
+	case typ == "bpchar":
+		return "text"
+	case typ == "" || typ == "unresolved column type":
+		return ""
+	}
+	// A type paramFamily does not group is a family of its own, so that a
+	// parameter taken as it and as another type is refused, even where
+	// Postgres would cast one to the other.
+	return "type " + typ
 }
 
 // paramFamily groups the types whose values detest reads a parameter
@@ -218,7 +270,7 @@ func (u *paramUses) array(i int, operand string) {
 // the operand types are left to the run.
 func (u *paramUses) conflict(checking bool) string {
 	if len(u.mixed) > 0 {
-		return fmt.Sprintf("parameter $%d compared with operands of different types", slices.Min(slices.Collect(maps.Keys(u.mixed)))+1)
+		return fmt.Sprintf("parameter $%d taken as values of different types", slices.Min(slices.Collect(maps.Keys(u.mixed)))+1)
 	}
 	for i, types := range u.arrays {
 		if u.scalars[i] {
@@ -716,7 +768,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if _, err := c.query(sel.Rarg, outer); err != nil {
 			return nil, err
 		}
-		c.noteSetOpColumns(sel)
+		if err := c.noteSetOpColumns(sel); err != nil {
+			return nil, err
+		}
 		sc := &colScope{items: map[string]colSet{}, outputs: out, anyOutput: out == nil, outer: outer}
 		first := sel
 		for first.SetOp != "" && first.Larg != nil {
@@ -739,6 +793,37 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return out, nil
 	}
 	sc := &colScope{items: map[string]colSet{}, outer: outer}
+	if len(sel.Values) > 0 {
+		// Postgres resolves each column of a VALUES query over its rows
+		// when it plans the statement, and fails one of two types (42804)
+		// whether or not a LIMIT drops the rows. INSERT ... VALUES, whose
+		// rows each take the column's type, is checked in insert.
+		for _, row := range sel.Values[1:] {
+			if len(row) != len(sel.Values[0]) {
+				// Postgres fails this when it parses the statement, before
+				// it reads any input by the columns' types.
+				return nil, c.x.tx.db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", "", "", "")
+			}
+		}
+		types := make([]string, len(sel.Values[0]))
+		for i := range sel.Values[0] {
+			col := setOpColumnExprs(sel, i)
+			if err := c.branchTypes(col, sc, "VALUES rows"); err != nil {
+				return nil, err
+			}
+			// The untyped rows take the type of the typed ones. A column
+			// of no typed row is left to a set operation around it.
+			types[i] = commonType(col, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+			c.timeParams(types[i], col...)
+			for _, e := range col {
+				c.inputAs(e, types[i])
+			}
+		}
+		if c.valuesTypes == nil {
+			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
+		}
+		c.valuesTypes[sel] = types
+	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
 			return nil, err
@@ -767,6 +852,11 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			if t.Table != "" {
 				if _, ok := sc.lookupItem(t.Table); !ok {
 					return nil, c.missingItem(t.Table)
+				}
+				if _, local := sc.items[t.Table]; !local {
+					// The run expands a * over this query's items only, so
+					// an outer query's would give no columns.
+					return nil, c.x.unsupported(fmt.Sprintf("%s.* of an outer query's item", t.Table))
 				}
 			}
 			continue
@@ -836,12 +926,6 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
-	for _, t := range sel.Targets {
-		if _, local := sc.items[t.Table]; t.Star && t.Table != "" && !local {
-			// The projection expands a * over the query's own items only.
-			return nil, c.x.unsupported(fmt.Sprintf("%s.* of an outer query", t.Table))
-		}
-	}
 	return starColumns(sel, sc), nil
 }
 
@@ -878,6 +962,14 @@ func starColumns(sel *sqlir.SelectStmt, sc *colScope) colSet {
 // name only, as the order of the columns it gives is not kept. A set
 // operation's are its queries', which agreedTypes reads.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
+	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		if w, ok := starWidth(sel, sc); ok {
+			if c.outWidth == nil {
+				c.outWidth = map[*sqlir.SelectStmt]int{}
+			}
+			c.outWidth[sel] = w
+		}
+	}
 	var types []string
 	named := map[string]string{}
 	seen := map[string]bool{}
@@ -888,10 +980,15 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		seen[name] = true
 		named[name] = typ
 	}
-	star := false
+	star, starKnown := false, true
 	for _, t := range sel.Targets {
 		if t.Star {
 			star = true
+			if cols := c.starColumns(sel, t); cols != nil {
+				types = append(types, cols...)
+			} else {
+				starKnown = false
+			}
 			for alias, cols := range sc.items {
 				if t.Table != "" && alias != t.Table {
 					continue
@@ -909,6 +1006,16 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		typ := expressionTypeIn(t.Expr, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
 		if typ == "unresolved column type" {
 			typ = ""
+			if c.outUnresolved == nil {
+				c.outUnresolved = map[*sqlir.SelectStmt]map[int]bool{}
+			}
+			if c.outUnresolved[sel] == nil {
+				c.outUnresolved[sel] = map[int]bool{}
+			}
+			c.outUnresolved[sel][len(types)] = true
+		}
+		if typ == "" && nestedBranches(t.Expr) != nil && untypedBranch(t.Expr) {
+			typ = "text" // as Postgres resolves a CASE or COALESCE of untyped branches
 		}
 		types = append(types, typ)
 		note(targetName(t), typ)
@@ -917,24 +1024,111 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 		c.outTypes = map[*sqlir.SelectStmt][]string{}
 		c.outNamed = map[*sqlir.SelectStmt]map[string]string{}
 	}
-	if !star {
+	if !star || starKnown {
 		c.outTypes[sel] = types
 	}
 	c.outNamed[sel] = named
 }
 
+// starColumns are the types of the columns the * t of sel gives, in order,
+// when its one FROM item is a table the schema declares, the order of whose
+// columns the check knows, and nil otherwise.
+func (c *columnChecker) starColumns(sel *sqlir.SelectStmt, t sqlir.Target) []string {
+	from := sel.From
+	if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || len(from.Columns) > 0 {
+		return nil
+	}
+	if t.Table != "" && t.Table != targetAlias(from.Name, from.Alias) {
+		return nil
+	}
+	db := c.x.tx.db
+	if _, cte := c.cteTypesOf(from.Name); cte || db.views[db.resolve(from.Name)] != nil {
+		return nil
+	}
+	def := db.defs[db.resolve(from.Name)]
+	if def == nil {
+		return nil
+	}
+	types := make([]string, len(def.columns))
+	for i, col := range def.columns {
+		if typ := def.types[col]; typ != "unresolved column type" {
+			types[i] = typ
+		}
+	}
+	return types
+}
+
 // noteSetOpColumns records the columns of the set operation sel its
 // queries resolve to bytea or to text, by position and, for the columns of
 // a * in the first query, whose position the check does not know, by name.
-func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
+func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 	db := c.x.tx.db
 	if db.kind.InnoDB() {
-		return
+		return nil
+	}
+	if l, ok := c.knownWidth(sel.Larg); ok {
+		if r, ok := c.knownWidth(sel.Rarg); ok && l != r {
+			// Postgres fails this before it reads any input by the
+			// columns' types, as the run does once it has both queries.
+			return db.kind.Error(sqlir.SyntaxError, fmt.Sprintf("each %s query must have the same number of columns", strings.ToUpper(sel.SetOp)), "", "", "")
+		}
+	}
+	for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
+		if starQuery(q) && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
+			// The check does not place the targets beside a * by position,
+			// which Postgres types their input by.
+			return c.x.unsupported("a set operation of a query with a * beside a string literal or a parameter")
+		}
 	}
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
 		cols.byPos[i] = db.branchKind(resolvedType(t, setOpColumnExprs(sel, i)))
+		lt, rt := c.setOpBranchType(sel.Larg, i), c.setOpBranchType(sel.Rarg, i)
+		// Postgres fails a pair it cannot resolve to one type when it plans
+		// the statement (42804), which the run refuses only once it has
+		// rows of both. Two types are taken as one only where valueFamily
+		// groups them, so a pair it does not group is refused even where
+		// Postgres resolves it, such as a date with a timestamp, rather
+		// than modeled pair by pair.
+		if lt != "" && rt != "" && lt != rt && (valueFamily(lt) == "" || valueFamily(lt) != valueFamily(rt)) {
+			return c.x.unsupported("a set operation over a column of values of two types")
+		}
+		if (c.unresolvedColumn(sel.Larg, i) && untypedColumn(sel.Rarg, i)) || (c.unresolvedColumn(sel.Rarg, i) && untypedColumn(sel.Larg, i)) {
+			// A column of a type the check does not know, as of a derived
+			// table's * over a join, which Postgres reads the other query's
+			// input by.
+			return c.x.unsupported("a set operation of a column of unresolved type against a string literal or a parameter")
+		}
+		pair := lt
+		if pair == "" || rt == "bytea" && rt != "" {
+			pair = rt
+		}
+		if pair == "" && (hasStar(sel.Larg) || hasStar(sel.Rarg)) && (untypedColumn(sel.Larg, i) || untypedColumn(sel.Rarg, i)) {
+			// The column of a * has a type the check does not know by
+			// position, which Postgres reads the other query's input by.
+			return c.x.unsupported("a set operation of a * against a string literal or a parameter")
+		}
+		// Untyped queries alone resolve to text, which the parameters among
+		// them take.
+		pair = resolvedType(pair, setOpColumnExprs(sel, i))
+		// Only the queries of this pair are read by its type. Those of a
+		// nested set operation took that one's, as Postgres resolves the
+		// pairs from the inside out.
+		for _, q := range []*sqlir.SelectStmt{sel.Larg, sel.Rarg} {
+			if q != nil && q.SetOp == "" {
+				exprs := setOpColumnExprs(q, i)
+				typ := pair
+				if own := c.setOpBranchType(q, i); len(q.Values) > 0 && own != "" {
+					// VALUES reads its rows by its own column's type first.
+					typ = own
+				}
+				c.timeParams(typ, exprs...)
+				for _, e := range exprs {
+					c.inputAs(e, typ)
+				}
+			}
+		}
 	}
 	first := sel
 	for first.SetOp != "" && first.Larg != nil {
@@ -946,12 +1140,111 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) {
 		}
 	}
 	if !slices.ContainsFunc(cols.byPos, func(k string) bool { return k != "" }) && len(cols.byName) == 0 {
-		return
+		return nil
 	}
 	if c.x.setOpColumns == nil {
 		c.x.setOpColumns = map[*sqlir.SelectStmt]setOpColumns{}
 	}
 	c.x.setOpColumns[sel] = cols
+	return nil
+}
+
+// starQuery reports whether q is a query whose select list has a *.
+func starQuery(q *sqlir.SelectStmt) bool {
+	return q != nil && q.SetOp == "" && slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star })
+}
+
+// hasStar reports whether q, or a query of q when it is a set operation,
+// has a * in its select list.
+func hasStar(q *sqlir.SelectStmt) bool {
+	if q != nil && q.SetOp != "" {
+		return hasStar(q.Larg) || hasStar(q.Rarg)
+	}
+	return starQuery(q)
+}
+
+// untypedColumn reports whether the i-th column of q, a query that is no set
+// operation, is a string literal or a parameter.
+func untypedColumn(q *sqlir.SelectStmt, i int) bool {
+	if q == nil || q.SetOp != "" {
+		return false
+	}
+	return slices.ContainsFunc(setOpColumnExprs(q, i), untypedExpr)
+}
+
+// untypedOutput reports whether e, a scalar subquery's one target, is of
+// no type of its own, which Postgres resolves to text at the subquery's
+// output: untyped input, a CASE or COALESCE of it alone, or a bare NULL.
+func untypedOutput(e sqlir.Expr) bool {
+	if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
+		return true
+	}
+	return untypedBranch(e)
+}
+
+// unresolvedColumn reports whether the i-th column of q, a query of a set
+// operation or one nested in it, is of a type the check does not know.
+func (c *columnChecker) unresolvedColumn(q *sqlir.SelectStmt, i int) bool {
+	switch {
+	case q == nil:
+		return false
+	case q.SetOp != "":
+		return c.unresolvedColumn(q.Larg, i) || c.unresolvedColumn(q.Rarg, i)
+	}
+	return c.outUnresolved[q][i]
+}
+
+func isParam(e sqlir.Expr) bool {
+	_, ok := e.(*sqlir.Param)
+	return ok
+}
+
+// recordedSubqueryType is the type of a scalar subquery's one column as the
+// walk recorded it, "" where it recorded none.
+func (c *columnChecker) recordedSubqueryType(q *sqlir.SubQuery) string {
+	sel := q.Select
+	switch {
+	case sel == nil:
+		return ""
+	case sel.SetOp != "" || len(sel.Values) > 0:
+		if t := c.setOpTypes(sel); len(t) == 1 {
+			return resolvedType(t[0], setOpColumnExprs(sel, 0))
+		}
+		return ""
+	case len(sel.Targets) == 1 && untypedOutput(sel.Targets[0].Expr):
+		return "text" // as subqueryType resolves it
+	}
+	if t := c.outTypes[sel]; len(t) == 1 {
+		return t[0]
+	}
+	return ""
+}
+
+// setOpBranchType is the type of the i-th column of q, a query of a set
+// operation, before the set operation resolves it with the other: a nested
+// set operation's own, text when every query of it is untyped there, and ""
+// for a column of no type of its own, which takes the other query's.
+func (c *columnChecker) setOpBranchType(q *sqlir.SelectStmt, i int) string {
+	if q == nil {
+		return ""
+	}
+	if len(q.Values) > 0 {
+		if t := c.setOpTypes(q); i < len(t) {
+			return t[i]
+		}
+		return ""
+	}
+	if q.SetOp == "" {
+		if t := c.outTypes[q]; i < len(t) {
+			return t[i]
+		}
+		return ""
+	}
+	var t string
+	if ts := c.setOpTypes(q); i < len(ts) {
+		t = ts[i]
+	}
+	return resolvedType(t, setOpColumnExprs(q, i))
 }
 
 // setOpColumnExprs are the expressions of the i-th column of every query
@@ -1001,6 +1294,25 @@ func (s setOpColumns) kind(j int, name string) string {
 // Postgres resolves the others to it or fails, and the first type one
 // gives otherwise.
 func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
+	if len(sel.Values) > 0 {
+		// VALUES resolves each column over its rows, and leaves one of
+		// untyped rows alone untyped, where a set operation makes it text.
+		out := make([]string, len(sel.Values[0]))
+		for i := range out {
+			col := setOpColumnExprs(sel, i)
+			if t, ok := c.valuesTypes[sel]; ok && i < len(t) {
+				out[i] = t[i]
+			} else {
+				out[i] = commonType(col, nil, c.recordedSubqueryType)
+			}
+			if out[i] == "" && slices.ContainsFunc(col, func(e sqlir.Expr) bool { return nestedBranches(e) != nil && untypedBranch(e) }) {
+				// A CASE or COALESCE of untyped branches alone is text,
+				// as it is in a select list.
+				out[i] = "text"
+			}
+		}
+		return out
+	}
 	if sel.SetOp == "" || sel.Larg == nil || sel.Rarg == nil {
 		return c.outTypes[sel]
 	}
@@ -1018,6 +1330,10 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 			if t != "" {
 				out[i] = t
 			}
+		case numberRank[out[i]] > 0 && numberRank[t] > numberRank[out[i]], timeRank[out[i]] > 0 && timeRank[t] > timeRank[out[i]]:
+			// Numbers, and dates and timestamps, meet at the widest, as
+			// they do in commonType.
+			out[i] = t
 		}
 	}
 	return out
@@ -1031,7 +1347,11 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 	if sel.SetOp != "" {
 		return namedTypes(sel, c.agreedTypes(sel), names)
 	}
-	if types, ok := c.outTypes[sel]; ok {
+	if len(sel.Values) > 0 {
+		return namedTypes(sel, c.itemTypes(sel), names)
+	}
+	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
+	if types, ok := c.outTypes[sel]; ok && !star {
 		return namedTypes(sel, types, names)
 	}
 	out := map[string]string{}
@@ -1114,6 +1434,17 @@ func (c *columnChecker) pairType(sel *sqlir.SelectStmt, i, n int) (string, bool)
 			return "", true
 		case l == r:
 			return l, true
+		case numberRank[l] > 0 && numberRank[r] > 0:
+			// Numbers meet at the widest, as in commonType.
+			if numberRank[r] > numberRank[l] {
+				return r, true
+			}
+			return l, true
+		case timeRank[l] > 0 && timeRank[r] > 0:
+			if timeRank[r] > timeRank[l] {
+				return r, true
+			}
+			return l, true
 		}
 		return "", true
 	}
@@ -1172,6 +1503,21 @@ func seriesType(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string 
 	return typ
 }
 
+// itemTypes are the output types of sel, a query read as a FROM item, by
+// position: a set operation's or a VALUES query's as setOpTypes resolves
+// them, text for a column of untyped queries alone, as Postgres resolves it
+// at the item's output.
+func (c *columnChecker) itemTypes(sel *sqlir.SelectStmt) []string {
+	if sel.SetOp == "" && len(sel.Values) == 0 {
+		return c.outTypes[sel]
+	}
+	types := slices.Clone(c.setOpTypes(sel))
+	for i := range types {
+		types[i] = resolvedType(types[i], setOpColumnExprs(sel, i))
+	}
+	return types
+}
+
 // namedTypes are the output types of sel by the names its columns have,
 // under those an AS alias(a, b) or a view's column list gives the first
 // ones. A name two columns have is left unresolved, as its type is either.
@@ -1203,26 +1549,21 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if q.Select == nil {
 		return ""
 	}
-	if q.Select.SetOp != "" {
-		// A set operation's column may be an interval.
-		return "unresolved column type"
+	if q.Select.SetOp != "" || len(q.Select.Values) > 0 {
+		if typ, ok := c.subTypes[q]; ok {
+			return typ
+		}
+		typ := c.setOpSubqueryType(q, sc)
+		if c.subTypes == nil {
+			c.subTypes = map[*sqlir.SubQuery]string{}
+		}
+		c.subTypes[q] = typ
+		return typ
 	}
 	if len(q.Select.Targets) != 1 {
 		return ""
 	}
-	if typ, ok := c.subTypes[q]; ok {
-		return typ
-	}
-	if c.subTypes == nil {
-		c.subTypes = map[*sqlir.SubQuery]string{}
-	}
-	typ := c.scalarType(q, sc)
-	c.subTypes[q] = typ
-	return typ
-}
-
-func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
-	if e := q.Select.Targets[0].Expr; untypedBranch(e) || isNullConst(e) {
+	if e := q.Select.Targets[0].Expr; untypedOutput(e) {
 		if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
 			switch derefValue(c.x.args[p.Index]).(type) {
 			case nil, string:
@@ -1232,8 +1573,37 @@ func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
 				return "unresolved column type"
 			}
 		}
-		// Postgres resolves the subquery's unknown column to text.
 		return "text"
+	}
+	if typ, ok := c.subTypes[q]; ok {
+		return typ
+	}
+	typ := c.checkedSubqueryType(q, sc)
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	c.subTypes[q] = typ
+	return typ
+}
+
+// checkedSubqueryType is subqueryType's type of q, a subquery of one
+// target, from the walk's record or from checking q.
+func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) string {
+	if _, walked := c.outNamed[q.Select]; walked {
+		// The walk has checked the subquery already, in this scope, and
+		// checking it again here would double the work at each level of
+		// nesting.
+		types, ok := c.outTypes[q.Select]
+		switch {
+		case !ok:
+			return "unresolved column type"
+		case len(types) == 1:
+			return types[0]
+		}
+		return ""
+	}
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
 	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
 	if _, err := vc.query(q.Select, sc); err != nil {
@@ -1248,6 +1618,27 @@ func (c *columnChecker) scalarType(q *sqlir.SubQuery, sc *colScope) string {
 		return types[0]
 	}
 	return ""
+}
+
+// setOpSubqueryType is subqueryType's type of q, a set operation or a
+// VALUES query, as setOpTypes resolves its one column once q is checked.
+func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) string {
+	if c.subTypes == nil {
+		c.subTypes = map[*sqlir.SubQuery]string{}
+	}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	if _, err := vc.query(q.Select, sc); err != nil {
+		return ""
+	}
+	types := vc.setOpTypes(q.Select)
+	if len(types) != 1 {
+		return ""
+	}
+	if typ := resolvedType(types[0], setOpColumnExprs(q.Select, 0)); typ != "" {
+		return typ
+	}
+	// A column of no type the check knows, as of a *, may be an interval.
+	return "unresolved column type"
 }
 
 // viewTypes are the output types of a view's query, checked apart from the
@@ -1308,6 +1699,119 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Ex
 	return nil
 }
 
+// insertWidth fails an INSERT ... SELECT whose query gives more columns
+// than it writes, or fewer than its column list names, as Postgres does
+// when it plans the statement (42601), before it reads any input by the
+// columns' types. Without a column list, fewer write the first columns.
+func (c *columnChecker) insertWidth(ins *sqlir.InsertStmt) error {
+	db := c.x.tx.db
+	if db.kind.InnoDB() {
+		return nil
+	}
+	w, ok := c.knownWidth(ins.Select)
+	if !ok {
+		if queryHasEffects(ins.Select) {
+			// The run compares the width only once it has run the
+			// query, which would spend a sequence value or take a lock
+			// Postgres never takes, as it fails the width when it plans
+			// the statement.
+			return c.x.unsupported("INSERT ... SELECT of a * whose width detest does not know, from a query that changes state")
+		}
+		return nil
+	}
+	return c.insertWidthOf(ins, w)
+}
+
+// insertWidthOf is insertWidth for a source of w columns.
+func (c *columnChecker) insertWidthOf(ins *sqlir.InsertStmt, w int) error {
+	db := c.x.tx.db
+	n := len(ins.Columns)
+	if n == 0 {
+		def := db.defs[db.resolve(ins.Table)]
+		if def == nil {
+			return nil
+		}
+		n = len(def.columns)
+	}
+	switch {
+	case w > n:
+		return db.kind.Error(sqlir.SyntaxError, "INSERT has more expressions than target columns", relname(ins.Table), "", "")
+	case w < n && len(ins.Columns) > 0:
+		return db.kind.Error(sqlir.SyntaxError, "INSERT has more target columns than expressions", relname(ins.Table), "", "")
+	}
+	return nil
+}
+
+// insertRows reads the input INSERT ... VALUES writes as its columns' types
+// before the statement runs, as Postgres converts each row when it analyzes
+// the statement, so that an invalid value in a later row fails before an
+// earlier one is written. Its structural errors come first, as there: rows
+// of unequal lengths, then rows of the wrong width. Literals are read row by
+// row where the walk stands, and parameters once it ends, as they are bound.
+func (c *columnChecker) insertRows(ins *sqlir.InsertStmt) error {
+	db := c.x.tx.db
+	if len(ins.Rows) == 0 || db.kind.InnoDB() {
+		return nil
+	}
+	for _, row := range ins.Rows[1:] {
+		if len(row) != len(ins.Rows[0]) {
+			return db.kind.Error(sqlir.SyntaxError, "VALUES lists must all be the same length", relname(ins.Table), "", "")
+		}
+	}
+	if err := c.insertWidthOf(ins, len(ins.Rows[0])); err != nil {
+		return err
+	}
+	def := db.defs[db.resolve(ins.Table)]
+	if def == nil {
+		return nil
+	}
+	cols := ins.Columns
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	for _, row := range ins.Rows {
+		for i, e := range row {
+			if i >= len(cols) {
+				break
+			}
+			typ := def.types[cols[i]]
+			if _, ok := e.(*sqlir.Const); !ok || typ == "" || typ == "unresolved column type" {
+				c.inputAs(e, typ)
+				continue
+			}
+			if err := c.literalInput(&sqlir.Cast{X: e, Type: typ}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// knownWidth is the number of columns q gives, false for a * whose columns
+// the walk did not count, as of an item of columns it does not know.
+func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
+	switch {
+	case q == nil:
+		return 0, false
+	case q.SetOp != "":
+		// Both queries' widths, as a width taken from the left alone
+		// would leave an unknown right one to the run, which runs it
+		// before it compares them.
+		l, lok := c.knownWidth(q.Larg)
+		r, rok := c.knownWidth(q.Rarg)
+		return l, lok && rok && l == r
+	case len(q.Values) > 0:
+		return len(q.Values[0]), true
+	case slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star }):
+		if t, ok := c.outTypes[q]; ok {
+			return len(t), true
+		}
+		w, ok := c.outWidth[q]
+		return w, ok
+	}
+	return len(q.Targets), true
+}
+
 // starWidth is the number of columns a select list with a * gives, false
 // when an item the * covers has columns detest does not know, or two of
 // one name, which its set does not count.
@@ -1317,6 +1821,13 @@ func starWidth(sel *sqlir.SelectStmt, sc *colScope) (int, bool) {
 		if !t.Star {
 			width++
 			continue
+		}
+		if t.Table != "" {
+			if _, local := sc.items[t.Table]; !local {
+				// An outer query's item, whose columns this scope does
+				// not hold.
+				return 0, false
+			}
 		}
 		for alias, cols := range sc.items {
 			if t.Table != "" && alias != t.Table {
@@ -1507,7 +2018,23 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			case *sqlir.Param:
 				c.params.scalar(e.Index)
+				if c.paramAt == nil {
+					c.paramAt = map[*sqlir.Param]bool{}
+				}
+				c.paramAt[e] = true
 				return
+			case *sqlir.IsNull:
+				if p, ok := e.X.(*sqlir.Param); ok {
+					if !c.x.tx.db.kind.InnoDB() {
+						// Postgres fails a parameter it meets first here,
+						// as IS NULL gives it no type (42P18), and the
+						// order it meets the uses in is not the
+						// statement's: UPDATE reads WHERE before SET.
+						err = c.x.unsupported(fmt.Sprintf("parameter $%d under IS NULL without a cast", p.Index+1))
+						return
+					}
+					c.typedParam(p) // IS NULL gives it no type to differ from
+				}
 			case *sqlir.BinaryExpr:
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
@@ -1536,6 +2063,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if err = c.branchTypes(caseBranches(e), sc, "branches"); err != nil {
+					return
+				}
 				// The branches take the type of the typed ones.
 				if err = c.branches(e, caseBranches(e), sc); err != nil {
 					return
@@ -1562,6 +2092,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
+					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
+						return
+					}
 					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], effectful) {
 						// Postgres stops at the first argument that is not
 						// NULL, while the evaluators evaluate them all (#90),
@@ -1635,8 +2168,19 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				}
 			case *sqlir.Cast:
-				c.castInput(e)
+				if err = c.literalInput(e); err != nil {
+					return
+				}
 				c.timeParams(e.Type, e.X)
+				if p, ok := e.X.(*sqlir.Param); ok {
+					// A cast of a parameter types it as well, so one cast
+					// to two types is refused, as Postgres reads it by one
+					// and casts it to the other at each row.
+					c.params.comparedWith(p.Index, c.paramTypeFamily(e.Type))
+					c.numberParam(p, e.Type)
+					c.typedParam(p)
+					c.readParam(p)
+				}
 				if typeCollation(e.Type) != "" {
 					// A cast to name brings name's C collation in, as a
 					// COLLATE does.
@@ -1675,7 +2219,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 // their own scope.
 func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope) error {
 	subquery := func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }
-	if err := c.x.unconvertedBranches(exprs, sc.columnType, subquery); err != nil {
+	err, afterInput := c.x.unconvertedBranches(exprs, sc.columnType, subquery)
+	if err != nil {
 		return err
 	}
 	typ := expressionTypeIn(e, sc.columnType, subquery)
@@ -1685,6 +2230,24 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 		typ = commonType(exprs, sc.columnType, subquery)
 	}
 	c.timeParams(typ, exprs...)
+	for _, b := range exprs {
+		c.inputAs(b, resolvedType(typ, exprs))
+	}
+	if afterInput != nil {
+		c.untyped = append(c.untyped, func() error { return afterInput })
+	}
+	if rt := resolvedType(typ, exprs); timeRank[rt] > 0 {
+		// toTimeType converts the branch a row takes, and refuses text in
+		// a format it does not parse, which inputAs leaves to the run.
+		for _, b := range exprs {
+			if text, ok := c.x.untypedText(b); ok {
+				c.untyped = append(c.untyped, func() error {
+					_, err := c.x.toTimeType(text, rt)
+					return err
+				})
+			}
+		}
+	}
 	if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "nullif" {
 		// NULLIF returns its first argument, of its own type, which a
 		// reader of the result such as date_trunc goes by.
@@ -1699,9 +2262,8 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 	return c.x.noteNumberBranches(e, exprs, sc.columnType, subquery)
 }
 
-// branchParams records the parameters among branches as of typ, the type
-// the branches resolve to, which Postgres gives each of them, so that one
-// also used as another type is refused as one compared with both.
+// branchParams records the parameters among number branches, whose
+// other uses the statement check refuses. inputAs records their type.
 func (c *columnChecker) branchParams(exprs []sqlir.Expr, typ string) {
 	typ = resolvedType(typ, exprs)
 	for _, e := range exprs {
@@ -1712,7 +2274,6 @@ func (c *columnChecker) branchParams(exprs []sqlir.Expr, typ string) {
 				}
 				c.numberParams[p.Index] = true
 			}
-			c.params.comparedWith(p.Index, typ)
 		}
 	}
 }
@@ -1731,55 +2292,202 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	}
 	typ := expressionType(b, sc.columnType)
 	if p, ok := a.(*sqlir.Param); ok {
-		c.params.comparedWith(p.Index, typ)
+		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
+		c.numberParam(p, typ)
+		if c.paramTypeFamily(typ) != "" {
+			c.typedParam(p)
+		}
 	}
 	sample := c.x.tx.db.typeSample(typ)
 	if sample == nil {
 		return
 	}
 	c.untyped = append(c.untyped, func() error {
-		var v any
-		switch a := a.(type) {
-		case *sqlir.Const:
-			v = a.Value
-		case *sqlir.Param:
-			if a.Index < 0 || a.Index >= len(c.x.args) {
-				return nil
-			}
-			v = paramText(a, c.x.args[a.Index])
+		v, ok := c.untypedValue(a)
+		if !ok {
+			return nil
 		}
 		_, err := c.x.untyped(a, v, sample)
 		return err
 	})
 }
 
-// castInput reads a string literal or a parameter cast to interval or date
-// before the statement runs, as Postgres converts a literal when it plans
-// the statement and a parameter when it binds it, so that 'bad'::interval
-// fails over an empty table too. Only the server's errors are raised here;
-// a form detest does not read is left to the run, which refuses it if a row
-// reaches it.
-func (c *columnChecker) castInput(e *sqlir.Cast) {
-	if e.Type != "interval" && e.Type != "date" || !untypedExpr(e.X) {
+// inputAs reads a string literal or a parameter that takes the type typ
+// from where it stands rather than from a comparison, such as from the
+// column it is assigned to, or from the other branches of a CASE, a
+// COALESCE, a GREATEST, a LEAST or a set operation. Postgres reads it with
+// the type's input function when it plans or binds the statement, which is
+// what a cast of it does too, while a write that reaches no row or a branch
+// the run does not take never reads it.
+//
+// It is read as a cast to typ, rather than by typeSample as a comparison
+// is, because a comparison has only a value to go by and so cannot check an
+// integer's width, a date or a fraction written to an integer, and refuses
+// text with a fraction that a float takes.
+func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
+	if typ == "" || typ == "unresolved column type" || !untypedExpr(e) {
 		return
 	}
-	c.untyped = append(c.untyped, func() error {
-		var v any
-		switch src := e.X.(type) {
-		case *sqlir.Const:
-			v = src.Value
-		case *sqlir.Param:
-			if src.Index < 0 || src.Index >= len(c.x.args) {
-				return nil
-			}
-			v = paramText(src, c.x.args[src.Index])
+	if p, ok := e.(*sqlir.Param); ok {
+		// Postgres gives the parameter this type for the whole statement,
+		// as it does where the parameter is compared.
+		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+		c.numberParam(p, typ)
+		c.typedParam(p)
+		c.readParam(p)
+	}
+	c.castInput(&sqlir.Cast{X: e, Type: typ})
+}
+
+// numberParam records the number type typ the parameter p takes. Postgres
+// gives p the type of the use it meets first, in an order that is not the
+// statement's (UPDATE reads WHERE before SET), and converts it to the
+// others' at each row, so p's input is read by one type only. One given two
+// number types is refused rather than following that order, since reading
+// it by the other's input could fail it where Postgres does not, as 40000
+// for a smallint beside an integer.
+func (c *columnChecker) numberParam(p *sqlir.Param, typ string) {
+	if numberRank[typ] == 0 {
+		return
+	}
+	if c.paramNumbers == nil {
+		c.paramNumbers = map[int]string{}
+	}
+	if first, ok := c.paramNumbers[p.Index]; ok && numberRank[first] != numberRank[typ] {
+		c.numberConflict = fmt.Sprintf("parameter $%d typed as both %s and %s", p.Index+1, first, typ)
+	} else if !ok {
+		c.paramNumbers[p.Index] = typ
+	}
+}
+
+func (c *columnChecker) typedParam(p *sqlir.Param) {
+	if c.paramTyped == nil {
+		c.paramTyped = map[*sqlir.Param]bool{}
+	}
+	c.paramTyped[p] = true
+}
+
+func (c *columnChecker) readParam(p *sqlir.Param) {
+	if c.paramRead == nil {
+		c.paramRead = map[int]bool{}
+	}
+	c.paramRead[p.Index] = true
+}
+
+// untrackedParam names a parameter whose input is read by a cast to a type
+// before the run while another of its uses, such as an operand of
+// arithmetic or a function's argument, types it in a way the checks do not
+// follow. Postgres gives the parameter one type, which may be that use's,
+// and the read would then fail input Postgres takes, so the statement is
+// refused rather than each such context modeled.
+func (c *columnChecker) untrackedParam() string {
+	var idx []int
+	for p := range c.paramAt {
+		if !c.paramTyped[p] && c.paramRead[p.Index] {
+			idx = append(idx, p.Index)
 		}
-		if _, err := c.x.cast(paramDate(e, v), e.Type); errors.As(err, new(*sqlir.DBError)) {
-			return err
+	}
+	if len(idx) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("parameter $%d read as a type beside a use whose type detest does not follow", slices.Min(idx)+1)
+}
+
+// untypedValue is the text of a string literal, or the value bound to a
+// parameter, false for a parameter the statement is not given, which the
+// run reports.
+func (c *columnChecker) untypedValue(e sqlir.Expr) (any, bool) {
+	switch e := e.(type) {
+	case *sqlir.Const:
+		return e.Value, true
+	case *sqlir.Param:
+		if e.Index < 0 || e.Index >= len(c.x.args) {
+			return nil, false
 		}
+		return paramText(e, c.x.args[e.Index]), true
+	}
+	return nil, false
+}
+
+// castInput reads a string literal or a parameter cast to a type before
+// the statement runs, as Postgres converts a literal when it plans the
+// statement and a parameter when it binds it, so that 'bad'::uuid fails
+// over an empty table too. The cast is evaluated as the run evaluates it,
+// and its errors are raised here, the server's and the refusals of a form
+// detest cannot run alike, as a refused cast would run with other semantics
+// whether or not a row reaches it. An expression detest does not evaluate
+// is left to the run, which refuses it where a row reaches it.
+func (c *columnChecker) castInput(e *sqlir.Cast) {
+	if !untypedExpr(e.X) {
+		return
+	}
+	c.untyped = append(c.untyped, func() error { return c.readCast(e) })
+}
+
+// literalInput reads a string literal cast to a type where the walk stands,
+// as Postgres converts it where it analyzes the cast, before the errors of
+// what it analyzes later, such as a set operation's widths. A parameter is
+// read once the walk ends, as Postgres binds it after analyzing the whole
+// statement.
+func (c *columnChecker) literalInput(e *sqlir.Cast) error {
+	if _, ok := e.X.(*sqlir.Const); ok && untypedExpr(e.X) {
+		return c.readCast(e)
+	}
+	c.castInput(e)
+	return nil
+}
+
+// readCast is castInput's read of e.
+func (c *columnChecker) readCast(e *sqlir.Cast) error {
+	v, ok := c.untypedValue(e.X)
+	if !ok {
 		return nil
-	})
+	}
+	rank := numberRank[c.x.tx.db.baseType(e.Type)]
+	if f, isFloat := derefValue(v).(float64); isFloat && rank > 0 && rank <= numberRank["int8"] && f != math.Trunc(f) {
+		// A cast rounds the float, where the driver sends its digits
+		// as integer input, which Postgres fails, with a message that
+		// depends on the driver.
+		return c.x.unsupported(fmt.Sprintf("a float with a fraction bound to a parameter taken as %s", e.Type))
+	}
+	if rank > 0 && isOtherNumberText(v) {
+		// Postgres reads 0x, 0o and 0b prefixes and underscores in
+		// integers, and fails them elsewhere; detest models neither,
+		// and the run refuses such text where a row reaches it.
+		return c.x.unsupported(fmt.Sprintf("number text in a form detest does not model taken as %s", e.Type))
+	}
+	if c.x.tx.db.baseType(e.Type) == "uuid" && isParam(e.X) && derefValue(v) != nil && !isText(v) {
+		// The cast leaves a value of another type to the run, where the
+		// driver refuses it or sends text Postgres fails as uuid input.
+		return c.x.unsupported(fmt.Sprintf("a %T bound to a parameter taken as a uuid", derefValue(v)))
+	}
+	if base := c.x.tx.db.baseType(e.Type); (base == "timestamp" || base == "timestamptz") && isParam(e.X) && derefValue(v) != nil && !isText(v) {
+		switch derefValue(v).(type) {
+		case time.Time, instant:
+		default:
+			// castValue leaves such a value as it is, where the driver
+			// refuses it or sends text Postgres fails as a timestamp.
+			return c.x.unsupported(fmt.Sprintf("a %T bound to a parameter taken as %s", derefValue(v), e.Type))
+		}
+	}
+	if _, isBool := derefValue(v).(bool); isBool && rank > 0 && isParam(e.X) {
+		// A cast makes a boolean 1 or 0, where the driver sends it as
+		// boolean text or refuses it, neither of which a number reads.
+		return c.x.unsupported(fmt.Sprintf("a boolean bound to a parameter taken as %s", e.Type))
+	}
+	if _, err := c.x.eval(e, nil); err != nil {
+		if u, unknown := errors.AsType[errUnknownExpr](err); !unknown {
+			return err
+		} else if isParam(e.X) && derefValue(v) != nil && !isText(v) {
+			// A conversion the cast does not model leaves a value the
+			// driver encodes in its own way, which the run refuses
+			// where a row reaches it. Text, such as a date in a format
+			// detest does not parse, stays unchecked as before.
+			return c.x.unsupported(u.what)
+		}
+	}
+	return nil
 }
 
 // timeParams records the date or timestamp type, typ, that Postgres gives
@@ -1823,8 +2531,39 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 		cols = def.columns
 	}
 	for i, e := range exprs {
+		if i >= len(cols) {
+			continue
+		}
+		typ := def.types[cols[i]]
+		c.timeParams(typ, e)
+		if p, ok := e.(*sqlir.Param); ok {
+			// A parameter written to a column takes its type for the
+			// statement, in VALUES too, whose input checkTypes reads.
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+			c.numberParam(p, typ)
+			if c.paramTypeFamily(typ) != "" {
+				c.typedParam(p)
+			}
+		}
+	}
+}
+
+// assignedInput reads the string literals and parameters written to
+// table's columns, cols in order or the table's own without a column list,
+// as the columns' input. It is for the writes a row may never reach, as
+// UPDATE's SET, INSERT ... SELECT and ON CONFLICT DO UPDATE are, and not
+// for VALUES, whose rows are each written and checked by checkTypes.
+func (c *columnChecker) assignedInput(table string, cols []string, exprs []sqlir.Expr) {
+	def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]
+	if def == nil {
+		return
+	}
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	for i, e := range exprs {
 		if i < len(cols) {
-			c.timeParams(def.types[cols[i]], e)
+			c.inputAs(e, def.types[cols[i]])
 		}
 	}
 }
@@ -1860,24 +2599,75 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
-	family := func(typ string) string {
-		switch f := paramFamily(typ); f {
-		case "integer", "float":
-			return "number"
-		case "":
-			if typ == "timestamp" || typ == "timestamptz" {
-				return "time"
-			}
-		default:
-			return f
-		}
-		return ""
-	}
-	fa, fb := family(expressionType(a, sc.columnType)), family(expressionType(b, sc.columnType))
+	fa, fb := valueFamily(expressionType(a, sc.columnType)), valueFamily(expressionType(b, sc.columnType))
 	if fa == "" || fb == "" || fa == fb {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,
+// LEAST or NULLIF, or rows of a VALUES column, of two types Postgres does not resolve to one,
+// which it fails when it plans the statement (42804) and the run would
+// return one of. Two types are taken as one only where valueFamily groups
+// them, or as dates and timestamps, which commonType widens; another pair
+// is refused even where Postgres resolves it, as for a set operation.
+func (c *columnChecker) branchTypes(exprs []sqlir.Expr, sc *colScope, of string) error {
+	family := func(typ string) string {
+		if timeRank[typ] > 0 {
+			return "time"
+		}
+		return valueFamily(typ)
+	}
+	first := ""
+	for _, e := range exprs {
+		typ := expressionTypeIn(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+		if typ == "" && nestedBranches(e) != nil && untypedBranch(e) {
+			// Postgres resolves a nested CASE or COALESCE of untyped
+			// branches alone, at any depth, to text before the branches
+			// around it.
+			typ = "text"
+		}
+		switch {
+		case typ == "" || typ == "unresolved column type":
+		case first == "":
+			first = typ
+		case typ != first && (family(typ) == "" || family(typ) != family(first)):
+			return c.x.unsupported(fmt.Sprintf("%s of a %s and a %s, which Postgres does not resolve to one type", of, first, typ))
+		}
+	}
+	return nil
+}
+
+// nestedBranches are the branches of e when it is a CASE, or the arguments
+// when it is a COALESCE, a GREATEST, a LEAST or a NULLIF, nil otherwise.
+func nestedBranches(e sqlir.Expr) []sqlir.Expr {
+	switch e := e.(type) {
+	case *sqlir.CaseExpr:
+		return caseBranches(e)
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "coalesce", "greatest", "least", "nullif":
+			return e.Args
+		}
+	}
+	return nil
+}
+
+// valueFamily groups the types Postgres compares or resolves to one
+// another, "" for a type detest does not group.
+func valueFamily(typ string) string {
+	switch f := paramFamily(typ); f {
+	case "integer", "float":
+		return "number"
+	case "":
+		if typ == "timestamp" || typ == "timestamptz" {
+			return "time"
+		}
+	default:
+		return f
+	}
+	return ""
 }
 
 // target is the scope of the table a write targets.
@@ -2000,9 +2790,23 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		}
 		c.assignedParams(ins.Table, ins.Columns, row)
 	}
+	if err := c.insertRows(ins); err != nil {
+		return err
+	}
 	if ins.Select != nil {
 		if _, err := c.query(ins.Select, nil); err != nil {
 			return err
+		}
+		if err := c.insertWidth(ins); err != nil {
+			return err
+		}
+		if err := c.textInsert(ins); err != nil {
+			return err
+		}
+		if starQuery(ins.Select) && slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return !t.Star && untypedExpr(t.Expr) }) {
+			// The check does not place the targets beside a * by position,
+			// which Postgres reads their input by the column of.
+			return c.x.unsupported("INSERT ... SELECT of a * beside a string literal or a parameter")
 		}
 		if ins.Select.SetOp == "" && len(ins.Select.Values) == 0 && !slices.ContainsFunc(ins.Select.Targets, func(t sqlir.Target) bool { return t.Star }) {
 			exprs := make([]sqlir.Expr, len(ins.Select.Targets))
@@ -2010,6 +2814,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 				exprs[i] = t.Expr
 			}
 			c.assignedParams(ins.Table, ins.Columns, exprs)
+			c.assignedInput(ins.Table, ins.Columns, exprs)
 		}
 	}
 	if oc := ins.OnConflict; oc != nil {
@@ -2028,6 +2833,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 			return err
 		}
 		c.assignedParams(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
+		c.assignedInput(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
@@ -2038,6 +2844,50 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		}
 	}
 	return c.returning(ins.Returning, sc, targetAlias(ins.Table, ins.Alias))
+}
+
+// textInsert refuses INSERT ... SELECT of a column of text into a column of
+// another type, which Postgres fails when it plans the statement (42804),
+// as text has no assignment cast to it, while the run would convert the
+// text as input at each row and write nothing over no rows. A column of
+// text is one of a text type, a CASE or COALESCE of untyped branches alone,
+// or one of a set operation of untyped queries alone. An untyped literal is
+// not: Postgres converts it as the column's input.
+func (c *columnChecker) textInsert(ins *sqlir.InsertStmt) error {
+	sel := ins.Select
+	def := c.x.tx.db.defs[c.x.tx.db.resolve(ins.Table)]
+	if def == nil || c.x.tx.db.kind.InnoDB() {
+		return nil
+	}
+	cols := ins.Columns
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	var types []string
+	switch {
+	case sel.SetOp != "":
+		types = c.setOpTypes(sel)
+	case len(sel.Values) > 0:
+		types = c.valuesTypes[sel]
+	default:
+		types = c.outTypes[sel]
+	}
+	for i, col := range cols {
+		typ := ""
+		if i < len(types) {
+			typ = types[i]
+		}
+		if sel.SetOp != "" {
+			typ = resolvedType(typ, setOpColumnExprs(sel, i))
+		}
+		if typ == "" || c.paramTypeFamily(typ) != "text" {
+			continue
+		}
+		if target := def.types[col]; target != "" && c.paramTypeFamily(target) != "text" {
+			return c.x.unsupported(fmt.Sprintf("INSERT ... SELECT of a %s column into the %s column %q", typ, target, col))
+		}
+	}
+	return nil
 }
 
 func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
@@ -2060,6 +2910,7 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 		return err
 	}
 	c.assignedParams(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
+	c.assignedInput(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
 	if err := c.exprs(up.Where, sc); err != nil {
 		return err
 	}

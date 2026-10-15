@@ -658,9 +658,9 @@ func resolvedType(typ string, exprs []sqlir.Expr) string {
 }
 
 // noteBranchType records the kind of type the column check resolved the
-// branches exprs of e to, and reads a string literal or a bound parameter
-// among them as that type, failing on one that is none of it as Postgres
-// does when it parses or binds the statement, whichever branch a row takes.
+// branches exprs of e to, and refuses a parameter among them bound to a
+// value the driver sends as text detest does not convert. inputAs reads
+// their input as that type before any row.
 func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
@@ -693,15 +693,6 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 		}
 	}
 	if timeRank[typ] > 0 {
-		// toTimeType converts the branch a row takes; text in an
-		// untaken one, or with no rows, is read here.
-		for _, b := range exprs {
-			if s, ok := x.untypedText(b); ok {
-				if _, err := x.toTimeType(s, typ); err != nil {
-					return err
-				}
-			}
-		}
 		return nil
 	}
 	k := x.tx.db.branchKind(typ)
@@ -712,26 +703,6 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 		x.branchTypes = map[sqlir.Expr]string{}
 	}
 	x.branchTypes[e] = k
-	if k == "text" {
-		return nil
-	}
-	for _, b := range exprs {
-		var v any
-		switch b := b.(type) {
-		case *sqlir.Const:
-			v = b.Value
-		case *sqlir.Param:
-			if b.Index < 0 || b.Index >= len(x.args) {
-				continue
-			}
-			v = x.args[b.Index]
-		default:
-			continue
-		}
-		if _, err := x.asBranchType(k, b, v); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -805,9 +776,9 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, column fu
 // boolean as text, which evaluates as false, or return 'bogus' beside a
 // uuid. Converting each other type, with the check of every literal before
 // any row, is the work of a type at a time, so the class is refused.
-func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) error {
+func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) (err, afterInput error) {
 	if x.tx.db.kind.InnoDB() {
-		return nil
+		return nil, nil
 	}
 	untyped := false
 	kinds := map[string]bool{}
@@ -873,17 +844,20 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 		// abs(NULL)'s float8, or fail beside it, which branchValue cannot
 		// tell from the row's values. CheckSQL has no schema, so a
 		// column's type is unknown there.
-		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD")
+		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"), nil
 	case domain != "" && len(names) > 1:
 		// commonType and the time and number readers take the type's own
 		// name, so a domain beside another type resolves to neither.
-		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain))
+		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain)), nil
 	case len(kinds) > 1:
-		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them")
+		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them"), nil
 	case untyped && unconverted != "":
-		return x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted))
+		// After inputAs reads the literal, so text that is no input of
+		// the type fails as in Postgres, and only valid input, which
+		// detest would keep as text, is refused.
+		return nil, x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted))
 	}
-	return nil
+	return nil, nil
 }
 
 // untypedText is the text of a string literal or of a parameter bound to a

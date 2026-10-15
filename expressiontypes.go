@@ -68,6 +68,14 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 			case (l == "interval" || r == "interval") && e.Op == "*":
 				return "interval"
 			}
+			if numberRank[l] > 0 && numberRank[r] > 0 {
+				// The operator takes the wider of two numbers, as
+				// smallint + integer is an integer.
+				if numberRank[r] > numberRank[l] {
+					return r
+				}
+				return l
+			}
 			for _, typ := range []string{"float8", "float4", "numeric", "int8"} {
 				if l == typ || r == typ {
 					return typ
@@ -106,26 +114,29 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		case "min", "max", "abs", "coalesce", "greatest", "least":
 			return commonType(e.Args, column, subquery)
 		case "nullif":
-			// NULLIF returns its first argument, of its own type: a
-			// timestamp compared with a timestamptz by the cross-type =
-			// stays a timestamp, and so does an integer compared with
-			// another. A number beside a numeric or a float has no = of
-			// the two types, so it is promoted to the wider. A NULL, a
-			// string literal or a parameter first takes the other's type,
-			// as the = resolves it.
-			if len(e.Args) > 0 {
-				typ := expressionTypeIn(e.Args[0], column, subquery)
-				if k, ok := e.Args[0].(*sqlir.Const); len(e.Args) == 2 && (ok && k.Value == nil || untypedExpr(e.Args[0])) {
-					return expressionTypeIn(e.Args[1], column, subquery)
-				}
-				if len(e.Args) == 2 && numberRank[typ] > 0 {
-					other := expressionTypeIn(e.Args[1], column, subquery)
-					if numberRank[other] > numberRank[typ] && numberRank[other] >= numberRank["numeric"] {
-						return other
-					}
-				}
-				return typ
+			// NULLIF returns its first argument as the = it is compared by
+			// takes it: a timestamp compared with a timestamptz, or an
+			// integer with another, by a cross-type = stays as it is, while
+			// an integer compared with a numeric, or either with a float,
+			// is promoted, as no = takes the pair.
+			if len(e.Args) == 0 {
+				break
 			}
+			l := expressionTypeIn(e.Args[0], column, subquery)
+			if len(e.Args) != 2 {
+				return l
+			}
+			r := expressionTypeIn(e.Args[1], column, subquery)
+			if l == "" {
+				return r
+			}
+			if lc, rc := numberCategory(l), numberCategory(r); lc > 0 && rc > lc {
+				if rc == numberCategory("numeric") {
+					return "numeric"
+				}
+				return "float8"
+			}
+			return l
 		case "lower", "upper", "left", "concat":
 			return "text"
 		case "length", "char_length", "octet_length":
@@ -188,11 +199,12 @@ func expressionTypeIn(e sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 // commonType is the type Postgres resolves exprs to together, as the
 // arguments of COALESCE or the branches of CASE: the first one known, except
 // that dates and timestamps meet at the widest of them, a timestamptz over a
-// timestamp over a date, and numbers at the widest of them, a float over a
-// numeric over an integer.
+// timestamp over a date, and numbers at the one the others cast to
+// implicitly, a float8 over a float4 over a numeric over the integers from
+// the widest down.
 func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
-	first, rank := "", timeRank
-	best, all := "", true
+	first, best := "", ""
+	var rank map[string]int
 	for _, e := range exprs {
 		typ := expressionTypeIn(e, column, subquery)
 		if typ == "" {
@@ -200,23 +212,17 @@ func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 		}
 		if first == "" {
 			first = typ
-			if numberRank[typ] > 0 {
-				rank = numberRank
+			for _, r := range []map[string]int{timeRank, numberRank} {
+				if r[typ] > 0 {
+					rank = r
+				}
 			}
-		}
-		if rank[typ] == 0 {
-			all = false
 		}
 		if rank[typ] > rank[best] {
 			best = typ
 		}
 	}
-	switch {
-	case timeRank[first] > 0:
-		return best
-	case numberRank[first] > 0 && all:
-		// Another type beside a number fails in Postgres; the first is
-		// kept for the check that refuses it.
+	if rank != nil && best != "" {
 		return best
 	}
 	return first
@@ -225,14 +231,25 @@ func commonType(exprs []sqlir.Expr, column func(*sqlir.ColumnRef) string, subque
 var (
 	timeRank   = map[string]int{"date": 1, "timestamp": 2, "timestamptz": 3}
 	numberRank = map[string]int{
-		"int2": 1, "smallint": 1,
-		"int4": 2, "int": 2, "integer": 2,
-		"int8": 3, "bigint": 3,
-		"numeric": 4, "decimal": 4,
-		"float4": 5, "real": 5,
-		"float8": 6, "double precision": 6,
+		"int2": 1, "smallint": 1, "int4": 2, "int": 2, "integer": 2, "int8": 3, "bigint": 3,
+		"numeric": 4, "decimal": 4, "float4": 5, "real": 5, "float8": 6, "double precision": 6,
 	}
 )
+
+// numberCategory groups the number types Postgres compares by a cross-type
+// =: integers 1, numeric 2 and floats 3, 0 for any other type.
+func numberCategory(typ string) int {
+	switch r := numberRank[typ]; {
+	case r == 0:
+		return 0
+	case r <= numberRank["int8"]:
+		return 1
+	case r == numberRank["numeric"]:
+		return 2
+	default:
+		return 3
+	}
+}
 
 // numberBranchKind is "integer" or "numeric" when every branch among exprs
 // that has a type of its own is a number of that kind, a numeric or a float

@@ -16,6 +16,23 @@ var (
 
 var enumCases = []difftest.Case{
 	{
+		// Postgres reads a literal by the enum it takes from an assignment,
+		// a cast or the other branches when it plans the statement, so a
+		// write or a branch no row reaches fails too.
+		Name:   "enum input typed by assignment, cast or branch over no rows",
+		Schema: enumSchema, Seed: enumSeed, Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `UPDATE p SET m = 'bogus' WHERE false`),
+			difftest.Q(0, `SELECT 'bogus'::mood FROM p WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN true THEN m ELSE 'bogus' END FROM p WHERE false`),
+			difftest.Q(0, `SELECT coalesce(m, 'bogus') FROM p WHERE false`),
+			difftest.Q(0, `SELECT m FROM p WHERE false UNION SELECT 'bogus' WHERE false`),
+			difftest.S(0, `INSERT INTO p (id, m) SELECT 9, 'bogus' WHERE false`),
+			difftest.S(0, `UPDATE p SET m = 'ok' WHERE false`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce(m, 'sad') FROM p WHERE false) s`),
+		},
+	},
+	{
 		Name:   "enum values order by declaration",
 		Schema: enumSchema, Seed: enumSeed, Conns: 1,
 		Steps: []difftest.Step{

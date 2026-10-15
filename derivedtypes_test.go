@@ -66,7 +66,6 @@ func TestDerivedColumnTypes(t *testing.T) {
 	// to text, which an integer does not join, and converts a string
 	// literal beside an interval, which detest does not.
 	for _, q := range []string{
-		`SELECT coalesce(u.v, 'x') FROM (SELECT id AS v FROM t UNION SELECT n::int8 FROM t) u`,
 		`SELECT coalesce(u.v, 0) FROM (SELECT NULL AS v UNION ALL SELECT NULL UNION ALL SELECT 1) u`,
 		`SELECT coalesce(u.v, 0) FROM (SELECT coalesce(NULL, NULL) AS v UNION ALL SELECT 1) u`,
 		`SELECT coalesce(u.v, interval '0 days') FROM (SELECT NULL::interval AS v UNION ALL SELECT 'bogus') u`,
@@ -82,11 +81,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// text with 42804.
 		`SELECT s.id FROM (SELECT * FROM f) s WHERE coalesce(s.flag, 'true')`,
 		`SELECT id FROM f WHERE coalesce(flag, $1)`,
-		`SELECT coalesce(s.u, 'bogus') FROM (SELECT * FROM f) s`,
 		`SELECT CASE WHEN true THEN s.u ELSE 'x'::text END FROM (SELECT * FROM f) s`,
 		`SELECT CASE WHEN true THEN u ELSE 'x'::text END FROM f`,
-		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::span AS v UNION ALL SELECT NULL::span) u`,
-		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::amount AS v UNION ALL SELECT NULL::amount) u`,
 		// A CASE or COALESCE of literals only is text, beside a bytea.
 		`SELECT coalesce(s.payload, coalesce('x', 'y')) FROM (SELECT * FROM b) s`,
 		`SELECT CASE WHEN false THEN coalesce('x', 'y') ELSE s.payload END FROM (SELECT * FROM b) s`,
@@ -135,6 +131,19 @@ func TestDerivedColumnTypes(t *testing.T) {
 	} {
 		if _, err := db.Query(q, 1); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// Postgres reads the literal as the column's type before any row, and
+	// fails with the type's input error.
+	for _, q := range []string{
+		`SELECT coalesce(u.v, 'x') FROM (SELECT id AS v FROM t UNION SELECT n::int8 FROM t) u`,
+		`SELECT coalesce(s.u, 'bogus') FROM (SELECT * FROM f) s`,
+		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::span AS v UNION ALL SELECT NULL::span) u`,
+		`SELECT coalesce(u.v, 'bogus') FROM (SELECT NULL::amount AS v UNION ALL SELECT NULL::amount) u`,
+	} {
+		_, err := db.Query(q)
+		if err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want the type's input error", q, err)
 		}
 	}
 	// Postgres binds a parameter among number branches as that number,
