@@ -32,6 +32,10 @@ func (s colSet) has(name string) (found, once bool) {
 type colScope struct {
 	items map[string]colSet
 	types map[string]map[string]string
+	// certain are the types of the columns a statement shows without a
+	// guess, by item: a table's declared ones and a derived table's
+	// certainItem, which the output goes by.
+	certain map[string]map[string]string
 	// colls are the collations the columns of the base tables in scope
 	// declare, by alias. A derived item has no entry, as detest does not
 	// carry the collation of its query's columns.
@@ -121,20 +125,41 @@ type columnChecker struct {
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
+	// outCertain are the certain types of a query's output columns by
+	// position, and outCertainNamed by name (noteCertain).
+	outCertain      map[*sqlir.SelectStmt][]string
+	outCertainNamed map[*sqlir.SelectStmt]map[string]string
+	// paramCount is the number of uses of each parameter in the statement.
+	paramCount map[int]int
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
+	// A script runs its statements on one executor, so the types of an
+	// earlier statement's output must not reach a later one's.
+	x.selectTypes, x.selectNamed, x.returningTypes, x.returningStar = nil, nil, nil, nil
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
 	if err := x.checkSequenceCalls(stmt); err != nil {
 		return err
 	}
-	c := &columnChecker{x: x}
+	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
+	for _, p := range sqlir.Params(stmt) {
+		c.paramCount[p.Index]++
+	}
 	var err error
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
-		_, err = c.query(st, nil)
+		if _, err = c.query(st, nil); err == nil {
+			first := st
+			for first.SetOp != "" && first.Larg != nil {
+				first = first.Larg
+			}
+			x.selectTypes = c.certainOutput(st)
+			if st.SetOp == "" {
+				x.selectNamed = c.outCertainNamed[first]
+			}
+		}
 	case *sqlir.InsertStmt:
 		err = c.insert(st)
 	case *sqlir.UpdateStmt:
@@ -513,6 +538,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 	case t.Sub != nil:
 		sc.types[alias] = c.derivedTypes(t.Sub, t.Columns)
+		sc.noteCertain(alias, c.certainItem(t.Sub, t.Columns))
 	default:
 		db := c.x.tx.db
 		if types, ok := c.cteTypesOf(t.Name); ok {
@@ -529,6 +555,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
+			sc.noteCertain(alias, def.types)
 			sc.noteCollations(alias, def)
 		}
 	}
@@ -840,6 +867,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
 		}
 		c.valuesTypes[sel] = types
+		c.noteValuesCertain(sel, sc)
 	}
 	for _, row := range sel.Values {
 		if err := c.exprs(row, sc); err != nil {
@@ -940,6 +968,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		return nil, err
 	}
 	c.noteOutputTypes(sel, sc)
+	c.noteCertain(sel, sc)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1638,7 +1667,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -1659,7 +1688,7 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -2140,7 +2169,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
-				if e.Op == "/" && numberRank[c.x.tx.db.baseType(c.typer(sc).of(e))] > numberRank["int8"] {
+				if e.Op == "/" && slices.ContainsFunc([]sqlir.Expr{e, e.L, e.R}, func(x sqlir.Expr) bool {
+					// A numeric or a float operand divides as one whatever the
+					// other is, even where the result's type is unresolved.
+					return numberRank[c.x.tx.db.baseType(c.typer(sc).of(x))] > numberRank["int8"]
+				}) {
 					if c.x.numericDivs == nil {
 						c.x.numericDivs = map[*sqlir.BinaryExpr]bool{}
 					}
@@ -2892,6 +2925,7 @@ func (c *columnChecker) target(table, alias string) (*colScope, colSet) {
 	sc := &colScope{items: map[string]colSet{targetAlias(table, alias): cols}, types: map[string]map[string]string{}}
 	if def := c.x.tx.db.defs[c.x.tx.db.resolve(table)]; def != nil {
 		sc.types[targetAlias(table, alias)] = def.types
+		sc.noteCertain(targetAlias(table, alias), def.types)
 		sc.noteCollations(targetAlias(table, alias), def)
 	}
 	return sc, cols
@@ -2954,11 +2988,13 @@ func (c *columnChecker) assigned(table string, cols colSet, names []string, inse
 // for, so a * of another item, which UPDATE ... FROM and DELETE ... USING
 // may name, is refused.
 func (c *columnChecker) returning(ts []sqlir.Target, sc *colScope, target string) error {
-	for _, t := range ts {
+	c.x.returningTypes, c.x.returningStar = make([]string, len(ts)), sc.certain[target]
+	for i, t := range ts {
 		if !t.Star {
 			if err := c.exprs(t.Expr, sc); err != nil {
 				return err
 			}
+			c.x.returningTypes[i] = c.certainType(t.Expr, sc)
 			continue
 		}
 		// With FROM or USING items, Postgres's RETURNING * gives their columns
@@ -3052,6 +3088,7 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		c.assignedInput(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set))
 		up := &colScope{items: sc.items, types: maps.Clone(sc.types), excluded: cols, hasExcluded: true}
 		up.types["excluded"] = sc.types[targetAlias(ins.Table, ins.Alias)]
+		up.noteCertain("excluded", sc.certain[targetAlias(ins.Table, ins.Alias)])
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
@@ -3150,6 +3187,7 @@ func (c *columnChecker) extraItems(items []sqlir.TableRef, sc *colScope, target 
 		}
 		sc.items[alias] = cols
 		sc.types[alias] = own.types[alias]
+		sc.noteCertain(alias, own.certain[alias])
 		if colls, ok := own.colls[alias]; ok {
 			if sc.colls == nil {
 				sc.colls = map[string]map[string]string{}

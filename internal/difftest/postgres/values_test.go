@@ -943,6 +943,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT g, 5 / s > 1 FROM bv ORDER BY g`),
 			difftest.Q(0, `SELECT g, 5 / x.s > 1 FROM (SELECT g, sum(n) AS s FROM b GROUP BY g) x ORDER BY g`),
 			difftest.Q(0, `SELECT g FROM b GROUP BY g ORDER BY 7 / sum(n), g LIMIT 1`),
+			difftest.Q(0, `SELECT s.v / (SELECT sum(n) FROM b WHERE id = 1) > 2 FROM (SELECT 5::bigint AS v UNION ALL SELECT sum(n) FROM b WHERE false) s WHERE s.v IS NOT NULL`),
 			difftest.Q(0, `SELECT sum(n) = 6 FROM b`),
 			difftest.S(0, `INSERT INTO r SELECT 1, 5 / sum(n) FROM b WHERE id = 1`),
 			difftest.S(0, `INSERT INTO r VALUES (2, 0)`),
@@ -975,6 +976,25 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM generate_series(1::big, 3)`),
 			difftest.Q(0, `SELECT count(*) FROM generate_series(1::tiny, 3)`),
 			difftest.Q(0, `SELECT count(*) FROM generate_series(NULL::big + 0, 3000000000)`),
+		},
+	},
+	{
+		Name: "a numeric reads back as its text",
+		Schema: []string{
+			`CREATE DOMAIN amount AS numeric`,
+			`CREATE TABLE m (id int PRIMARY KEY, a numeric, n bigint, c amount)`,
+		},
+		Seed:  []string{`INSERT INTO m VALUES (1, 2000000, 3, 4000000)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT 2000000::numeric, 1.5, -7::numeric`),
+			difftest.Q(0, `SELECT a, c FROM m`),
+			difftest.Q(0, `SELECT * FROM (SELECT a FROM m) s`),
+			difftest.Q(0, `SELECT sum(n), sum(a) FROM m`),
+			difftest.Q(0, `SELECT a + 1 FROM m`),
+			difftest.Q(0, `SELECT a FROM m UNION ALL SELECT 5`),
+			difftest.Q(0, `UPDATE m SET a = a + 1 RETURNING a, c`),
+			difftest.Q(0, `INSERT INTO m VALUES (2, 9000000, 1, 1) RETURNING *`),
 		},
 	},
 }

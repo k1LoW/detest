@@ -110,6 +110,15 @@ type sqlExec struct {
 	// CREATE TABLE AS, "" where it could not tell.
 	ctasTypes []string
 	ctasNamed map[string]string
+	// selectTypes are the types the column check found for the output
+	// columns of a SELECT by position, selectNamed by name for a select
+	// list with a *, and returningTypes for the targets
+	// of RETURNING, with returningStar the target table's for a *, "" where
+	// it could not tell, by which a numeric reads back as text.
+	selectTypes    []string
+	selectNamed    map[string]string
+	returningTypes []string
+	returningStar  map[string]string
 	// outputs are the ORDER BY keys that name an output column, with the
 	// select list's expression they name.
 	outputs map[sqlir.Expr]sqlir.Expr
@@ -847,10 +856,19 @@ func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
 		return nil, err
 	}
 	out := &sqlResult{cols: cols, affected: int64(len(rows))}
+	types := x.selectTypes
+	if len(types) != len(cols) {
+		// A select list with a * has its types by name, where the check
+		// knows them.
+		types = make([]string, len(cols))
+		for i, c := range cols {
+			types[i] = x.selectNamed[c]
+		}
+	}
 	for _, row := range rows {
 		vals := make([]driver.Value, len(cols))
 		for i, c := range cols {
-			vals[i] = toDriverValue(row[c])
+			vals[i] = x.driverValueAs(row[c], types[i])
 		}
 		out.rows = append(out.rows, vals)
 	}
@@ -2213,10 +2231,10 @@ func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row,
 		return nil
 	}
 	vals := make([]driver.Value, 0, len(out.cols))
-	for _, t := range ret {
+	for i, t := range ret {
 		if t.Star {
 			for _, c := range out.star {
-				vals = append(vals, toDriverValue(row[c]))
+				vals = append(vals, x.driverValueAs(row[c], x.returningStar[c]))
 			}
 			continue
 		}
@@ -2224,7 +2242,11 @@ func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row,
 		if err != nil {
 			return x.unsupportedExpr(err, "in RETURNING")
 		}
-		vals = append(vals, toDriverValue(v))
+		typ := ""
+		if i < len(x.returningTypes) {
+			typ = x.returningTypes[i]
+		}
+		vals = append(vals, x.driverValueAs(v, typ))
 	}
 	out.rows = append(out.rows, vals)
 	return nil
@@ -2688,6 +2710,26 @@ func seenDistinct(rows []Row, o Row, cols []string) bool {
 		}
 	}
 	return false
+}
+
+// driverValueAs is v as the driver reads a column of the type typ: a numeric
+// as its text, which pq and pgx return, rather than as the float64 or int64
+// detest holds it as. database/sql scans a float64 into an integer by its
+// %g text, which has an exponent from 1e6 and fails, where the text scans.
+// A float stays a float64, as both drivers return one.
+func (x *sqlExec) driverValueAs(v any, typ string) driver.Value {
+	if typ == "" || numberRank[x.tx.db.baseType(typ)] != numberRank["numeric"] {
+		return toDriverValue(v)
+	}
+	switch n := derefValue(v).(type) {
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case float64:
+		if !math.IsInf(n, 0) && !math.IsNaN(n) {
+			return strconv.FormatFloat(n, 'f', -1, 64)
+		}
+	}
+	return toDriverValue(v)
 }
 
 func toDriverValue(v any) driver.Value {
