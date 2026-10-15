@@ -1367,6 +1367,36 @@ func (c *columnChecker) position(sel *sqlir.SelectStmt, sc *colScope, e sqlir.Ex
 	return nil
 }
 
+// insertWidth fails an INSERT ... SELECT whose query gives more columns
+// than it writes, or fewer than its column list names, as Postgres does
+// when it plans the statement (42601), before it reads any input by the
+// columns' types. Without a column list, fewer write the first columns.
+func (c *columnChecker) insertWidth(ins *sqlir.InsertStmt) error {
+	db := c.x.tx.db
+	if db.kind.InnoDB() {
+		return nil
+	}
+	w, ok := c.knownWidth(ins.Select)
+	if !ok {
+		return nil
+	}
+	n := len(ins.Columns)
+	if n == 0 {
+		def := db.defs[db.resolve(ins.Table)]
+		if def == nil {
+			return nil
+		}
+		n = len(def.columns)
+	}
+	switch {
+	case w > n:
+		return db.kind.Error(sqlir.SyntaxError, "INSERT has more expressions than target columns", relname(ins.Table), "", "")
+	case w < n && len(ins.Columns) > 0:
+		return db.kind.Error(sqlir.SyntaxError, "INSERT has more target columns than expressions", relname(ins.Table), "", "")
+	}
+	return nil
+}
+
 // knownWidth is the number of columns q gives, false for a * whose columns
 // the walk did not record by position.
 func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
@@ -2221,6 +2251,9 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 	}
 	if ins.Select != nil {
 		if _, err := c.query(ins.Select, nil); err != nil {
+			return err
+		}
+		if err := c.insertWidth(ins); err != nil {
 			return err
 		}
 		if err := c.setOpInsert(ins); err != nil {
