@@ -76,6 +76,7 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN NOT 'false' THEN 0 ELSE 1 / 0 END FROM t WHERE false`,
 		`SELECT CASE WHEN (CASE WHEN NOT 'false' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`,
 		`SELECT coalesce('true' AND NULL, 1 / 0 = 1) WHERE false`,
+		`SELECT CASE WHEN (NOT 'false', 1) = (true, 1) THEN 0 ELSE 1 / 0 END WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,
 	} {
@@ -111,4 +112,28 @@ func TestFoldConstantsCreateTableAsUnplanned(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE dst2 AS SELECT 1 / 0 AS v FROM src`); err == nil || !strings.Contains(err.Error(), "division by zero") {
 		t.Errorf("got %v, want division by zero", err)
 	}
+}
+
+// Postgres folds the default of a column a write leaves out or names by
+// DEFAULT. detest does not know the types it resolves in a default (#121),
+// so an error from folding one is refused.
+func TestFoldConstantsDefaults(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE d (id int, n int DEFAULT (1 / 0))`)
+	mustExec(t, db, `CREATE TABLE src (id int)`)
+	mustExec(t, db, `CREATE TABLE dn (id int, n numeric DEFAULT (1 / (extract(year FROM interval '1 year') / 2)))`)
+	for _, q := range []string{
+		`UPDATE d SET n = DEFAULT WHERE false`,
+		`INSERT INTO d (id) SELECT 1 WHERE false`,
+		`INSERT INTO d SELECT 1 WHERE false`,
+		`INSERT INTO d SELECT * FROM src WHERE false`,
+		`INSERT INTO d SELECT 1 WHERE false UNION ALL SELECT 2 WHERE false`,
+		`INSERT INTO dn (id) SELECT 1 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	mustExec(t, db, `INSERT INTO d (id, n) SELECT 1, 2 WHERE false`)
 }

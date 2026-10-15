@@ -57,20 +57,20 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	if def == nil {
 		return nil
 	}
-	cols, known := st.Columns, true
+	cols := st.Columns
 	if len(cols) == 0 {
 		n := len(def.columns)
 		switch {
 		case len(st.Rows) > 0:
 			n = len(st.Rows[0])
 		case st.Select != nil:
-			n, known = f.width(st.Select)
+			n = width(st.Select)
 		}
 		cols = def.columns[:min(n, len(def.columns))]
 	}
 	for _, c := range def.columns {
 		if !slices.Contains(cols, c) {
-			if err := f.columnDefault(def, c, !known); err != nil {
+			if err := f.columnDefault(def, c); err != nil {
 				return err
 			}
 		}
@@ -78,7 +78,7 @@ func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
 	for _, row := range st.Rows {
 		for i, e := range row {
 			if _, ok := e.(*sqlir.Default); ok && i < len(cols) {
-				if err := f.columnDefault(def, cols[i], false); err != nil {
+				if err := f.columnDefault(def, cols[i]); err != nil {
 					return err
 				}
 			}
@@ -98,7 +98,7 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 	}
 	for _, a := range set {
 		if _, ok := a.Value.(*sqlir.Default); ok {
-			if err := f.columnDefault(def, a.Column, false); err != nil {
+			if err := f.columnDefault(def, a.Column); err != nil {
 				return err
 			}
 		}
@@ -106,13 +106,14 @@ func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
 	return nil
 }
 
-// columnDefault folds the default of col. Only an error Postgres raises
-// for sure is kept. A default detest cannot evaluate is written as the
-// Unknown marker rather than refused (columnDefault in schema.go), so
-// refusing one here, or one whose folding detest cannot tell, would make
-// every INSERT that leaves the column out unsupported. An error from the
-// default of a column the INSERT may give, doubt being set, is refused.
-func (f *folder) columnDefault(def *tableDef, col string, doubt bool) error {
+// columnDefault folds the default of col. A default has not been through
+// the column check, so detest does not know the types Postgres resolves in
+// it, such as a numeric division (#121), and an error from folding it is
+// refused rather than raised. A default detest cannot evaluate is written
+// as the Unknown marker rather than refused (columnDefault in schema.go),
+// so a refusal for that is dropped, or every INSERT that leaves the column
+// out would be unsupported.
+func (f *folder) columnDefault(def *tableDef, col string) error {
 	d, ok := def.defaults[col]
 	if !ok || def.generated[col] != nil {
 		return nil
@@ -121,43 +122,40 @@ func (f *folder) columnDefault(def *tableDef, col string, doubt bool) error {
 	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok || err == nil {
 		return nil
 	}
-	if doubt {
-		return f.x.unsupported(foldDoubt)
-	}
-	return err
+	return f.x.unsupported(foldDoubt)
 }
 
-// width is the number of columns sel gives, and whether detest knows it.
-// It knows a * only over one table the schema declares, and gives the
-// number of the other items when it does not.
-func (f *folder) width(sel *sqlir.SelectStmt) (int, bool) {
-	if names := outputNames(sel); names != nil {
-		return len(names), true
+// width is the number of columns sel gives, or, for a * whose columns
+// depend on the scope it is read in, the number of the other items, which
+// takes the columns after them as left out. Every arm of a set operation
+// gives as many, so one without a * tells.
+func width(sel *sqlir.SelectStmt) int {
+	if n, ok := knownWidth(sel); ok {
+		return n
 	}
 	for sel.SetOp != "" && sel.Larg != nil {
 		sel = sel.Larg
 	}
-	n, known := 0, true
+	n := 0
 	for _, t := range sel.Targets {
 		if !t.Star {
 			n++
-			continue
 		}
-		from := sel.From
-		db := f.x.tx.db
-		if from == nil || len(sel.Joins) > 0 || from.Sub != nil || from.Func != nil || db.views[db.resolve(from.Name)] != nil ||
-			slices.ContainsFunc(sel.With, func(c sqlir.CTE) bool { return c.Name == from.Name }) {
-			known = false
-			continue
-		}
-		def := db.defs[db.resolve(from.Name)]
-		if def == nil {
-			known = false
-			continue
-		}
-		n += len(def.columns)
 	}
-	return n, known
+	return n
+}
+
+func knownWidth(sel *sqlir.SelectStmt) (int, bool) {
+	if sel.SetOp != "" {
+		if n, ok := knownWidth(sel.Larg); ok {
+			return n, true
+		}
+		return knownWidth(sel.Rarg)
+	}
+	if names := outputNames(sel); names != nil {
+		return len(names), true
+	}
+	return 0, false
 }
 
 type folder struct {
@@ -518,9 +516,14 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		}
 		// A row has no value of its own to evaluate, so the comparison
 		// around it is evaluated instead.
-		r := folded{c: maybe}
-		if pure(v) {
-			r.e = v
+		r := folded{c: maybe, e: v}
+		for _, k := range kids {
+			if k.e == nil {
+				// An item whose value detest does not know, such as a
+				// string literal under NOT (#118), so the row's is not
+				// known either.
+				r.e = nil
+			}
 		}
 		return r, nil
 	case *sqlir.CaseExpr:
