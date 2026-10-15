@@ -200,18 +200,36 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	for _, q := range []string{
-		`SELECT x.v + 1 FROM (SELECT $1 AS v) x WHERE false`,
-		`SELECT x.v = 1 FROM (SELECT $1 AS v) x WHERE false`,
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		{`SELECT x.v + 1 FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		{`SELECT x.v = 1 FROM (SELECT $1 AS v) x WHERE false`, "1"},
+		// The parameter is text for its other uses too.
+		{`SELECT x.v || 'a' FROM (SELECT $1 AS v) x WHERE false AND $1 = 1`, "1"},
+		{`SELECT x.v FROM (SELECT max($1) AS v) x WHERE $1 = 1`, "1"},
+		{`SELECT (SELECT $1) = 'a', $1 = 1`, "1"},
+		// The run reads a parameter bound to another value as bound,
+		// where Postgres reads it as text.
+		{`SELECT x.v || '', (x.v = '01')::text FROM (SELECT max($1) AS v) x`, int64(1)},
+		{`SELECT (x.v = '01')::text FROM (SELECT $1 AS v) x`, int64(1)},
+		{`SELECT coalesce($1, NULL) = '01'`, int64(1)},
+		{`SELECT (SELECT $1) = '01'`, int64(1)},
 	} {
-		if _, err := db.Query(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
 		}
 	}
-	// An INSERT reads its own query's literals as the columns' input.
+	if got := rowsOf(t, db, `SELECT x.v || 'a' FROM (SELECT $1 AS v) x WHERE $1 = '1'`, "1"); !reflect.DeepEqual(got, []string{"1a"}) {
+		t.Errorf("a text parameter read through a derived table: got %v, want [1a]", got)
+	}
+	// An INSERT reads its own query's literals and parameters as the
+	// columns' input.
 	mustExec(t, db, `INSERT INTO t (id, n) SELECT 1, '1'`)
 	mustExec(t, db, `INSERT INTO t (id, n) SELECT 2, NULL`)
-	if got := rowsOf(t, db, `SELECT n FROM t ORDER BY id`); !reflect.DeepEqual(got, []string{"1", "NULL"}) {
-		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL]", got)
+	mustExec(t, db, `INSERT INTO t (id, n) SELECT 3, $1`, int64(3))
+	if got := rowsOf(t, db, `SELECT n FROM t ORDER BY id`); !reflect.DeepEqual(got, []string{"1", "NULL", "3"}) {
+		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL 3]", got)
 	}
 }

@@ -101,6 +101,9 @@ type columnChecker struct {
 	untyped []func() error
 	// timeConflict names a parameter given two date and time types.
 	timeConflict string
+	// textConflict names a parameter bound to other than text in an
+	// output Postgres resolves to text.
+	textConflict string
 	// paramNumbers is the number type each parameter takes, and
 	// numberConflict names one given two, by numberRank.
 	paramNumbers   map[int]string
@@ -203,6 +206,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.timeConflict != "" {
 		return x.unsupported(c.timeConflict)
+	}
+	if c.textConflict != "" {
+		return x.unsupported(c.textConflict)
 	}
 	if c.numberConflict != "" {
 		return x.unsupported(c.numberConflict)
@@ -1145,9 +1151,12 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			ut.untypedText = true
 			if ut.of(t.Expr) == "text" {
 				typ = "text"
+				if params, ok := untypedLeaves(t.Expr); ok {
+					c.textParams(params)
+				}
 			}
 		}
-		textOut := typ == "" && c.textOutput(t.Expr)
+		textOut := typ == "" && (untypedExpr(t.Expr) || isNullConst(t.Expr))
 		if textOut {
 			textAt[len(types)] = true
 		}
@@ -1172,20 +1181,77 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	c.outNamed[sel] = named
 }
 
-// textOutput reports whether e, an output column of a query, is a string
-// literal, a NULL or a parameter bound to text or NULL, which Postgres
-// resolves to text where a query around reads it. A parameter bound to
-// another value is not, as the run reads the value as bound rather than
-// the text Postgres reads it as.
-func (c *columnChecker) textOutput(e sqlir.Expr) bool {
-	if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
-		switch derefValue(c.x.args[p.Index]).(type) {
-		case nil, string:
+// untypedLeaves are the parameters of e when e is made of string literals,
+// parameters and NULLs alone, through the CASE branches and the arguments
+// of the functions Postgres resolves to one type, which it resolves to
+// text, and false when e is not.
+func untypedLeaves(e sqlir.Expr) ([]*sqlir.Param, bool) {
+	var args []sqlir.Expr
+	switch e := e.(type) {
+	case *sqlir.Param:
+		return []*sqlir.Param{e}, true
+	case *sqlir.Const:
+		_, isText := e.Value.(string)
+		return nil, isText || e.Value == nil
+	case *sqlir.WindowFunc:
+		return untypedLeaves(e.Func)
+	case *sqlir.CaseExpr:
+		args = caseBranches(e)
+	case *sqlir.FuncCall:
+		switch e.Name {
+		case "min", "max":
+			args = e.Args
+		case "first_value", "last_value":
+			if len(e.Args) > 0 {
+				args = e.Args[:1]
+			}
 		default:
-			return false
+			args = branchArgs(e)
 		}
 	}
-	return untypedExpr(e) || isNullConst(e)
+	if len(args) == 0 {
+		return nil, false
+	}
+	var out []*sqlir.Param
+	for _, a := range args {
+		ps, ok := untypedLeaves(a)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, ps...)
+	}
+	return out, true
+}
+
+// textParams types params as text, which Postgres resolves them to as the
+// leaves of an output it resolves to text, and refuses one bound to another
+// value, as the run reads the value as bound rather than as that text.
+func (c *columnChecker) textParams(params []*sqlir.Param) {
+	for _, p := range params {
+		if p.Index >= 0 && p.Index < len(c.x.args) {
+			switch v := derefValue(c.x.args[p.Index]).(type) {
+			case nil, string, []byte:
+			default:
+				if c.textConflict == "" {
+					c.textConflict = fmt.Sprintf("a %T parameter $%d in a query output Postgres resolves to text", v, p.Index+1)
+				}
+			}
+		}
+		c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
+	}
+}
+
+// readOutputs types as text the parameters among sel's outputs of outText,
+// where a query around sel reads them.
+func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
+	if len(c.outText[sel]) == 0 {
+		return
+	}
+	for _, t := range sel.Targets {
+		if p, ok := t.Expr.(*sqlir.Param); ok && !t.Star {
+			c.textParams([]*sqlir.Param{p})
+		}
+	}
 }
 
 // readTypes are outTypes of sel as a query around it reads them, with the
@@ -1571,6 +1637,7 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 	if len(sel.Values) > 0 {
 		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
+	c.readOutputs(sel)
 	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
 	if types, ok := c.readTypes(sel); ok && (!star || len(names) > 0) {
 		// A * the check expands has its types by position too, which an
@@ -1806,6 +1873,9 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 		return ""
 	}
 	if e := q.Select.Targets[0].Expr; untypedOutput(e) {
+		if p, ok := e.(*sqlir.Param); ok {
+			c.textParams([]*sqlir.Param{p})
+		}
 		if p, ok := e.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
 			switch derefValue(c.x.args[p.Index]).(type) {
 			case nil, string:
