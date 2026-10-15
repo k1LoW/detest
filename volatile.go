@@ -137,6 +137,15 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			return err
 		}
 	}
+	if isAggregate(sel) {
+		// Postgres computes the aggregates before any other expression
+		// of the select list, HAVING or ORDER BY, so one that fails does
+		// so before a sequence call beside it runs, where detest
+		// evaluates them in their written order.
+		if err := x.noSequenceCalls(sel.Targets, sel.Having, sel.OrderBy); err != nil {
+			return err
+		}
+	}
 	for _, n := range []any{sel.Values, sel.Targets, sel.From, sel.Joins, sel.Where, sel.GroupBy, sel.Having, sel.OrderBy, sel.Limit, sel.Offset, sel.DistinctOn} {
 		if err := x.rowSequenceCalls(n); err != nil {
 			return err
