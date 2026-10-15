@@ -1304,11 +1304,14 @@ func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
 	// A domain is reduced to its base type before the operator resolves,
 	// so 1::tiny + 0 is an integer, which detest does not follow.
 	mustExec(t, db, `CREATE DOMAIN tiny AS smallint`)
-	if _, err := db.Exec(`SELECT $1 + (1::tiny + 0) WHERE false`, "40000"); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("beside a compound of a domain: got %v, want unsupported", err)
-	}
-	if _, err := db.Exec(`SELECT $1 + 1::tiny WHERE false`, "40000"); !errors.Is(err, ErrNumericValueOutOfRange) {
-		t.Errorf("beside a domain over smallint: got %v, want out of range", err)
+	for _, q := range []string{
+		`SELECT $1 + (1::tiny + 0) WHERE false`,
+		`SELECT $1 + s.n FROM (SELECT 1::tiny + 0 AS n) s WHERE false`,
+		`SELECT $1 + 1::tiny WHERE false`,
+	} {
+		if _, err := db.Exec(q, "40000"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
 	}
 }
 

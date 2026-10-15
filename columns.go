@@ -2372,17 +2372,14 @@ func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) err
 		// operand's type there.
 		return nil
 	}
-	switch b.(type) {
-	case *sqlir.ColumnRef, *sqlir.Cast:
-	default:
-		if named != typ {
-			// Postgres reduces a domain to its base type before it
-			// resolves the operator, so 1::tiny + 0 over a smallint is
-			// an integer, while expressionType promotes by the domain's
-			// name and keeps it. Following the reduction through every
-			// expression expressionType types is refused instead.
-			return c.x.unsupported(fmt.Sprintf("a string literal or parameter in arithmetic beside an expression of the domain %s", named))
-		}
+	if named != typ {
+		// Postgres reduces a domain to its base type before it resolves
+		// the operator, so 1::tiny + 0 over a smallint is an integer,
+		// while expressionType promotes by the domain's name and keeps
+		// it, through derived columns, CTEs and views too. A domain column
+		// alone would be read right, but it cannot be told apart from
+		// such a promotion by its type, so every domain is refused here.
+		return c.x.unsupported(fmt.Sprintf("a string literal or parameter in arithmetic beside a value of the domain %s", named))
 	}
 	if p, ok := a.(*sqlir.Param); ok && numberRank[typ] <= numberRank["int8"] && p.Index >= 0 && p.Index < len(c.x.args) && isFloat(c.x.args[p.Index]) {
 		// Postgres binds the parameter as an integer, so $1 / 2 with 5.0
