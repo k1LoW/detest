@@ -127,6 +127,9 @@ func (t typer) of(e sqlir.Expr) string {
 			// the float8 one for an integer, as its preferred number type.
 			kind := ""
 			for _, a := range e.Args {
+				if untypedExpr(a) || isNullConst(a) {
+					continue // it takes the form the other arguments pick
+				}
 				switch typ := t.reduce(t.of(a)); {
 				case numberCategory(typ) == numberCategory("float8"):
 					return "float8"
@@ -136,7 +139,7 @@ func (t typer) of(e sqlir.Expr) string {
 					if kind == "" {
 						kind = "float8"
 					}
-				case typ == "":
+				case typ == "" || typ == "unresolved column type":
 					// The form depends on a type the check cannot show.
 					return ""
 				default:
@@ -153,7 +156,7 @@ func (t typer) of(e sqlir.Expr) string {
 				return "float8"
 			case numberRank[typ] > 0:
 				return "numeric"
-			case typ == "":
+			case typ == "" || typ == "unresolved column type":
 				return ""
 			}
 			return "numeric" // no form takes it, which Postgres fails

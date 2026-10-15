@@ -1051,7 +1051,7 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 }
 
 // leavesTyped reports whether every query of the set operation sel has its
-// output types by position.
+// output types by position, none of them a column of unresolved type.
 func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
 	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
 		return c.leavesTyped(sel.Larg) && c.leavesTyped(sel.Rarg)
@@ -1060,7 +1060,7 @@ func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
 		return true
 	}
 	_, ok := c.outTypes[sel]
-	return ok
+	return ok && len(c.outUnresolved[sel]) == 0
 }
 
 // starColumns are the types of the columns the * t of sel gives, in order,

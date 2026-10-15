@@ -1758,6 +1758,9 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT avg(f) FROM t`,
 		`UPDATE t SET f = f RETURNING floor(f)`,
 		`SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`,
+		`SELECT v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
+		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT avg(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
@@ -1771,6 +1774,13 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
+			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
+		}
+	}
+	// An untyped parameter takes the form the other argument picks.
+	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {
+		var v any
+		if err := db.QueryRow(q, int64(2000000)).Scan(&v); err != nil || v != "2000000" {
 			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
 		}
 	}
