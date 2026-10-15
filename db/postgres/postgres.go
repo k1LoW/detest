@@ -1228,7 +1228,7 @@ func (c *pgConv) indexDef(ix *pg.IndexStmt) (sqlir.UniqueDef, error) {
 		u.Elems = append(u.Elems, e)
 	}
 	if ix.WhereClause != nil {
-		e, err := c.expr(ix.WhereClause)
+		e, err := c.condition(ix.WhereClause)
 		if err != nil {
 			return u, err
 		}
@@ -1462,7 +1462,7 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		}
 	}
 	if s.WhereClause != nil {
-		if out.Where, err = c.expr(s.WhereClause); err != nil {
+		if out.Where, err = c.condition(s.WhereClause); err != nil {
 			return nil, err
 		}
 	}
@@ -1474,7 +1474,7 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 		out.GroupBy = append(out.GroupBy, e)
 	}
 	if s.HavingClause != nil {
-		if out.Having, err = c.expr(s.HavingClause); err != nil {
+		if out.Having, err = c.condition(s.HavingClause); err != nil {
 			return nil, err
 		}
 	}
@@ -1672,7 +1672,7 @@ func (c *pgConv) fromItem(n *pg.Node) (*sqlir.TableRef, []sqlir.Join, error) {
 		}
 		var on sqlir.Expr
 		if j.Quals != nil {
-			if on, err = c.expr(j.Quals); err != nil {
+			if on, err = c.condition(j.Quals); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -1786,7 +1786,7 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 				conf.Columns = nil
 			}
 			if oc.Infer.WhereClause != nil {
-				w, err := c.expr(oc.Infer.WhereClause)
+				w, err := c.condition(oc.Infer.WhereClause)
 				if err != nil {
 					return nil, err
 				}
@@ -1810,7 +1810,7 @@ func (c *pgConv) insertStmt(s *pg.InsertStmt) (sqlir.Statement, error) {
 				conf.Set = append(conf.Set, sqlir.Assignment{Column: name, Value: e})
 			}
 			if oc.WhereClause != nil {
-				w, err := c.expr(oc.WhereClause)
+				w, err := c.condition(oc.WhereClause)
 				if err != nil {
 					return nil, err
 				}
@@ -1870,7 +1870,7 @@ func (c *pgConv) updateStmt(s *pg.UpdateStmt) (sqlir.Statement, error) {
 		out.From = append(out.From, *t)
 	}
 	if s.WhereClause != nil {
-		if out.Where, err = c.expr(s.WhereClause); err != nil {
+		if out.Where, err = c.condition(s.WhereClause); err != nil {
 			return nil, err
 		}
 	}
@@ -1900,7 +1900,7 @@ func (c *pgConv) deleteStmt(s *pg.DeleteStmt) (sqlir.Statement, error) {
 		out.Using = append(out.Using, *t)
 	}
 	if s.WhereClause != nil {
-		if out.Where, err = c.expr(s.WhereClause); err != nil {
+		if out.Where, err = c.condition(s.WhereClause); err != nil {
 			return nil, err
 		}
 	}
@@ -1920,6 +1920,34 @@ func (c *pgConv) exprs(list []*pg.Node) ([]sqlir.Expr, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// condition converts an expression that stands where Postgres wants a
+// boolean, such as a WHERE clause.
+func (c *pgConv) condition(n *pg.Node) (sqlir.Expr, error) {
+	e, err := c.expr(n)
+	if err != nil {
+		return nil, err
+	}
+	return boolInput(e), nil
+}
+
+// boolInput makes a string literal or a parameter that stands where
+// Postgres wants a boolean a cast of it to boolean, which is how Postgres
+// types it: it reads the literal with the boolean input function when it
+// analyzes the statement, so that 'maybe' fails over an empty table too,
+// and gives the parameter the boolean type, so that text bound to it is
+// read as boolean input rather than compared as text.
+func boolInput(e sqlir.Expr) sqlir.Expr {
+	switch k := e.(type) {
+	case *sqlir.Const:
+		if _, isText := k.Value.(string); isText {
+			return &sqlir.Cast{X: e, Type: "bool"}
+		}
+	case *sqlir.Param:
+		return &sqlir.Cast{X: e, Type: "bool"}
+	}
+	return e
 }
 
 func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
@@ -2011,6 +2039,9 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 		args, err := c.exprs(e.BoolExpr.Args)
 		if err != nil {
 			return nil, err
+		}
+		for i, a := range args {
+			args[i] = boolInput(a)
 		}
 		switch e.BoolExpr.Boolop {
 		case pg.BoolExprType_NOT_EXPR:
@@ -2204,6 +2235,9 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 			when, err := c.expr(cw.Expr)
 			if err != nil {
 				return nil, err
+			}
+			if out.Arg == nil {
+				when = boolInput(when)
 			}
 			then, err := c.expr(cw.Result)
 			if err != nil {

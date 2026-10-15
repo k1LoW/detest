@@ -1959,3 +1959,29 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		}
 	}
 }
+
+func TestParameterAsCondition(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 0)`)
+	for _, c := range []struct {
+		q    string
+		arg  any
+		want string
+	}{
+		{`SELECT count(*) FROM t WHERE $1 AND n = 0`, "true", "1"},
+		{`SELECT count(*) FROM t WHERE $1 AND n = 0`, true, "1"},
+		{`SELECT count(*) FROM t WHERE $1 OR n = 1`, "off", "0"},
+		{`SELECT count(*) FROM t WHERE NOT $1`, "f", "1"},
+		{`SELECT count(*) FROM t WHERE $1`, nil, "0"},
+		{`SELECT CASE WHEN $1 THEN 1 ELSE 2 END FROM t`, "yes", "1"},
+	} {
+		if got := rowsOf(t, db, c.q, c.arg); len(got) != 1 || got[0] != c.want {
+			t.Errorf("%s with %#v: got %v, want %s", c.q, c.arg, got, c.want)
+		}
+	}
+	if _, err := db.Query(`SELECT count(*) FROM t WHERE $1 AND id = 99`, "maybe"); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("text that is no boolean input: got %v, want invalid input", err)
+	}
+}
