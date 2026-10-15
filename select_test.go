@@ -1290,6 +1290,26 @@ func TestArithmeticOperandInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`SELECT $1 + 0.5 FROM t WHERE false`, "1.5"); err != nil {
 		t.Errorf("a fraction beside a numeric: got %v, want no error", err)
 	}
+	// Postgres computes with the integer it binds, 2 for 5.0 / 2, while
+	// the run would compute with the float.
+	mustExec(t, db, `INSERT INTO t VALUES (1, 5, 1)`)
+	for _, q := range []string{`SELECT $1 / 2 FROM t`, `SELECT $1::int, $1 / 2 FROM t`} {
+		if _, err := db.Exec(q, float64(5)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s with a float: got %v, want unsupported", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT $1 / 2.0 FROM t`, float64(5)); err != nil {
+		t.Errorf("a float beside a numeric: got %v, want no error", err)
+	}
+	// A domain is reduced to its base type before the operator resolves,
+	// so 1::tiny + 0 is an integer, which detest does not follow.
+	mustExec(t, db, `CREATE DOMAIN tiny AS smallint`)
+	if _, err := db.Exec(`SELECT $1 + (1::tiny + 0) WHERE false`, "40000"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("beside a compound of a domain: got %v, want unsupported", err)
+	}
+	if _, err := db.Exec(`SELECT $1 + 1::tiny WHERE false`, "40000"); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("beside a domain over smallint: got %v, want out of range", err)
+	}
 }
 
 // Postgres compares rows pair by pair: an ordering by the first pair that is

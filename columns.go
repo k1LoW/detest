@@ -2074,7 +2074,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					c.untypedOperands(sc, e.L, e.R)
 				case "+", "-", "*", "/", "%":
-					c.arithmeticOperand(sc, e)
+					if err = c.arithmeticOperand(sc, e); err != nil {
+						return
+					}
 				}
 			case *sqlir.InExpr:
 				for _, item := range e.List {
@@ -2355,21 +2357,40 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 // it does on the server. Beside an operand of another type, such as a
 // timestamp or an interval, Postgres picks among several operators, which
 // is left to the run.
-func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) {
+func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) error {
 	a, b := e.L, e.R
 	if untypedExpr(a) == untypedExpr(b) {
-		return
+		return nil
 	}
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	typ := c.x.tx.db.baseType(expressionTypeIn(b, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }))
+	named := expressionTypeIn(b, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+	typ := c.x.tx.db.baseType(named)
 	if numberRank[typ] == 0 || e.Op == "%" && numberRank[typ] > numberRank["numeric"] {
 		// Postgres has no % of floats, so it does not take the
 		// operand's type there.
-		return
+		return nil
+	}
+	switch b.(type) {
+	case *sqlir.ColumnRef, *sqlir.Cast:
+	default:
+		if named != typ {
+			// Postgres reduces a domain to its base type before it
+			// resolves the operator, so 1::tiny + 0 over a smallint is
+			// an integer, while expressionType promotes by the domain's
+			// name and keeps it. Following the reduction through every
+			// expression expressionType types is refused instead.
+			return c.x.unsupported(fmt.Sprintf("a string literal or parameter in arithmetic beside an expression of the domain %s", named))
+		}
+	}
+	if p, ok := a.(*sqlir.Param); ok && numberRank[typ] <= numberRank["int8"] && p.Index >= 0 && p.Index < len(c.x.args) && isFloat(c.x.args[p.Index]) {
+		// Postgres binds the parameter as an integer, so $1 / 2 with 5.0
+		// is 2, while the run computes with the float as bound.
+		return c.x.unsupported(fmt.Sprintf("a float bound to parameter $%d taken as %s in arithmetic", p.Index+1, typ))
 	}
 	c.inputAs(a, typ)
+	return nil
 }
 
 // inputAs reads a string literal or a parameter that takes the type typ
