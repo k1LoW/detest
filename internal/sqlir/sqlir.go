@@ -878,8 +878,8 @@ const (
 	// InvalidDatetimeFormat is text that does not read as a date, a time or
 	// an interval.
 	InvalidDatetimeFormat
-	// InvalidPowerArgument is zero raised to a negative power or
-	// a negative number raised to a non-integer one.
+	// InvalidPowerArgument is zero raised to a negative power or a negative
+	// number raised to a non-integer one.
 	InvalidPowerArgument
 )
 
