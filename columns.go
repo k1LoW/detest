@@ -104,6 +104,9 @@ type columnChecker struct {
 	// textConflict names a parameter bound to other than text in an
 	// output Postgres resolves to text.
 	textConflict string
+	// arithParams are the parameters that are operands of arithmetic,
+	// where a parameter typed text has no operator.
+	arithParams map[int]bool
 	// paramNumbers is the number type each parameter takes, and
 	// numberConflict names one given two, by numberRank.
 	paramNumbers   map[int]string
@@ -209,6 +212,11 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.textConflict != "" {
 		return x.unsupported(c.textConflict)
+	}
+	for i := range c.arithParams {
+		if c.params.compared[i] == c.paramTypeFamily("text") {
+			return x.unsupported(fmt.Sprintf("parameter $%d typed text by a query output and taken as an operand of arithmetic", i+1))
+		}
 	}
 	if c.numberConflict != "" {
 		return x.unsupported(c.numberConflict)
@@ -3264,6 +3272,17 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sql
 		// so -$1 is refused wherever it stands and -$1::int is the form
 		// that runs.
 		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
+	}
+	// arithParams reads them once every use has typed the parameter, as an
+	// output that types it text may come later in the walk. jsonb - text
+	// would take a text parameter, but the evaluators refuse jsonb - text.
+	for _, o := range operands {
+		if p, ok := o.(*sqlir.Param); ok {
+			if c.arithParams == nil {
+				c.arithParams = map[int]bool{}
+			}
+			c.arithParams[p.Index] = true
+		}
 	}
 	for i, o := range operands {
 		if untyped(o) {

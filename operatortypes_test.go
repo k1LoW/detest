@@ -221,6 +221,7 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		{`SELECT x.v || 'a' FROM (SELECT $1 AS v) x WHERE false AND $1 = 1`, "1"},
 		{`SELECT x.v FROM (SELECT max($1) AS v) x WHERE $1 = 1`, "1"},
 		{`SELECT (SELECT $1) = 'a', $1 = 1`, "1"},
+		{`SELECT x.v || 'a', $1 + NULL FROM (SELECT $1 AS v) x WHERE false`, "1"},
 		// The run reads a parameter bound to another value as bound,
 		// where Postgres reads it as text.
 		{`SELECT x.v || '', (x.v = '01')::text FROM (SELECT max($1) AS v) x`, int64(1)},
