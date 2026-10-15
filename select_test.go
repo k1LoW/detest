@@ -1086,6 +1086,15 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 	if _, err := db.Exec(`UPDATE t SET n = $1 WHERE false`, 2.0); err != nil {
 		t.Errorf("a whole float for an integer column: got %v, want no error", err)
 	}
+	// The width fails before the source runs, so its nextval does not
+	// advance the sequence.
+	mustExec(t, db, `CREATE SEQUENCE q`)
+	if _, err := db.Exec(`INSERT INTO t (id) SELECT * FROM (SELECT nextval('q') AS id, 2 AS extra) s`); !errors.Is(err, ErrSyntaxError) {
+		t.Errorf("a derived table of two columns into one: got %v, want a syntax error", err)
+	}
+	if got := rowsOf(t, db, `SELECT nextval('q')`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("nextval after the failed INSERT: got %v, want 1", got)
+	}
 	// Postgres converts an explicitly cast literal where it analyzes it,
 	// before it compares a set operation's widths.
 	if _, err := db.Exec(`SELECT 'bad'::int WHERE false UNION SELECT 1, 2 WHERE false`); !errors.Is(err, ErrInvalidTextRepresentation) {
@@ -1132,8 +1141,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`INSERT INTO t (id) SELECT 1, 2`,
 		`INSERT INTO t (id, u) VALUES (1, 'bad'), (2)`,
 		`INSERT INTO t (id) VALUES (1, 'bad')`,
-		// A * over a derived table has a width the check does not know,
-		// which the run compares before it writes.
+		// A * over a derived table counts the columns the table names.
 		`INSERT INTO t (id) SELECT * FROM (SELECT 1 AS id, 2 AS extra) s`,
 		`INSERT INTO t (id, u) SELECT * FROM (SELECT 1 AS id) s`,
 	} {

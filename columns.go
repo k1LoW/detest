@@ -105,6 +105,10 @@ type columnChecker struct {
 	// type the check does not know, which outTypes holds as "" alike with
 	// an untyped column's.
 	outUnresolved map[*sqlir.SelectStmt]map[int]bool
+	// outWidth are the numbers of output columns of a query with a *, where
+	// the items the * covers have columns of known names but perhaps of no
+	// known type, as a derived table's.
+	outWidth map[*sqlir.SelectStmt]int
 	// valuesTypes are the column types of a VALUES query, resolved over
 	// its rows in the scope the walk checked them in, which setOpTypes has
 	// no other way to see for a correlated column.
@@ -856,6 +860,14 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 // name only, as the order of the columns it gives is not kept, and a set
 // operation's not at all, so their columns stay of unresolved type.
 func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
+	if slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star }) {
+		if w, ok := starWidth(sel, sc); ok {
+			if c.outWidth == nil {
+				c.outWidth = map[*sqlir.SelectStmt]int{}
+			}
+			c.outWidth[sel] = w
+		}
+	}
 	var types []string
 	named := map[string]string{}
 	seen := map[string]bool{}
@@ -1494,7 +1506,7 @@ func (c *columnChecker) insertRows(ins *sqlir.InsertStmt) error {
 }
 
 // knownWidth is the number of columns q gives, false for a * whose columns
-// the walk did not record by position.
+// the walk did not count, as of an item of columns it does not know.
 func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
 	switch {
 	case q == nil:
@@ -1504,8 +1516,11 @@ func (c *columnChecker) knownWidth(q *sqlir.SelectStmt) (int, bool) {
 	case len(q.Values) > 0:
 		return len(q.Values[0]), true
 	case slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star }):
-		t, ok := c.outTypes[q]
-		return len(t), ok
+		if t, ok := c.outTypes[q]; ok {
+			return len(t), true
+		}
+		w, ok := c.outWidth[q]
+		return w, ok
 	}
 	return len(q.Targets), true
 }
