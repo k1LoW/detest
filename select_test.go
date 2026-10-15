@@ -1770,6 +1770,7 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`UPDATE t SET id = id RETURNING (SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false)`,
 		`SELECT (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
 		`UPDATE t SET id = id RETURNING (SELECT s.v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) + 0::numeric`,
+		`SELECT nullif(f, 0::numeric) FROM t`,
 		`SELECT x.n FROM (SELECT s.v + 0::numeric AS n FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s) x`,
 		`SELECT * FROM (VALUES (5000000::numeric), (abs(NULL))) v WHERE false UNION ALL SELECT f FROM t`,
 	} {
@@ -1793,6 +1794,11 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT s.a FROM (SELECT id, a FROM t) s(other_id)`,
 		`SELECT (VALUES (t.a)) FROM t`,
 		`UPDATE t SET a = a RETURNING (VALUES (t.a))`,
+		`SELECT nullif(2000000::numeric, 0::numeric)`,
+		`SELECT nullif(2000000, 0::numeric)`,
+		`UPDATE t SET a = a RETURNING nullif(a, 0)`,
+		`SELECT first_value(a) OVER () FROM t`,
+		`SELECT lag(a, 0) OVER () FROM t`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {

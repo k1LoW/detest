@@ -72,6 +72,37 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 			}
 		case "min", "max", "abs", "coalesce", "greatest", "least":
 			return c.certainBranches(e.Args, sc)
+		case "lag", "lead":
+			// The value and the default, not the offset.
+			return c.certainBranches(branchArgs(e), sc)
+		case "first_value", "last_value", "nth_value":
+			if len(e.Args) > 0 {
+				return c.certainType(e.Args[0], sc)
+			}
+		case "nullif":
+			if len(e.Args) != 2 {
+				return ""
+			}
+			l := c.certainType(e.Args[0], sc)
+			if numberRank[l] == 0 {
+				return ""
+			}
+			if takesOtherType(e.Args[1]) {
+				return l
+			}
+			r := c.certainType(e.Args[1], sc)
+			if numberRank[r] == 0 {
+				return ""
+			}
+			// The = it compares by promotes the first argument to the
+			// second's category where no = takes the pair.
+			if lc, rc := numberCategory(l), numberCategory(r); rc > lc {
+				if rc == numberCategory("numeric") {
+					return "numeric"
+				}
+				return "float8"
+			}
+			return l
 		case "floor", "ceil", "ceiling", "round", "power", "pow":
 			if e.Name == "round" && len(e.Args) == 2 {
 				return "numeric"
