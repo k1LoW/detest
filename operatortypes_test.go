@@ -74,6 +74,9 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT b + $1 FROM t WHERE false`, "true"},
 		{`SELECT -$1 FROM t`, int64(5)},
 		{`SELECT n + -$1 FROM t`, int64(5)},
+		// Postgres takes this one, as the comparison it analyses first
+		// types $1, but detest does not follow its order.
+		{`SELECT $1 = n, -$1 FROM t`, int64(5)},
 	} {
 		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
@@ -91,11 +94,15 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 		{`SELECT n + NULL FROM t`, []string{"NULL"}},
 		// '{}' - s resolves to jsonb - text.
 		{`SELECT '{}'::jsonb - 'a'::bpchar WHERE false`, nil},
+		{`SELECT ('{}' - s) - 'b'::text FROM t WHERE false`, nil},
 		{`SELECT '{}'::jsonb - coalesce('a', NULL) WHERE false`, nil},
 		{`SELECT '{}' - s FROM t WHERE false`, nil},
 	} {
 		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
 		}
+	}
+	if got := rowsOf(t, db, `SELECT -$1::int FROM t`, int64(5)); !reflect.DeepEqual(got, []string{"-5"}) {
+		t.Errorf("a cast parameter: got %v, want [-5]", got)
 	}
 }

@@ -2747,7 +2747,14 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 		case "bool", "boolean", "uuid":
 			return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", typ))
 		case "text", "varchar", "bpchar", "char", "character varying", "character", "name":
-			text = typ
+			if arithmeticExpr(o) {
+				// typer falls back to an operand's type for an operator it
+				// does not resolve, which gives '{}' - s the text of s
+				// rather than jsonb.
+				unknown = true
+			} else {
+				text = typ
+			}
 		default:
 			if valueFamily(typ) == "" && typ != "date" {
 				unknown = true
@@ -2757,13 +2764,32 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, operands ...sqlir.Expr) er
 	if untyped && len(operands) == 1 {
 		// Several prefix operators take a number, and Postgres picks
 		// none for an operand of no type (42725), while the run would
-		// negate the value bound.
+		// negate the value bound. Postgres accepts -$1 when a use it
+		// analyses earlier types the parameter, as in $1 = n, -$1, but
+		// that order is not the statement's (UPDATE reads WHERE before
+		// SET) and detest does not follow it, as numberParam does not,
+		// so -$1 is refused wherever it stands and -$1::int is the form
+		// that runs.
 		return c.x.unsupported("unary minus over a string literal, a parameter or NULL, for which Postgres picks no operator")
 	}
 	if text != "" && !untyped && !unknown {
 		return c.x.unsupported(fmt.Sprintf("arithmetic over a %s, for which Postgres has no operator", text))
 	}
 	return nil
+}
+
+// arithmeticExpr reports whether e is arithmetic or unary minus.
+func arithmeticExpr(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			return true
+		}
+	case *sqlir.UnaryExpr:
+		return e.Op == "-"
+	}
+	return false
 }
 
 // branchTypes refuses branches of CASE, arguments of COALESCE, GREATEST,
