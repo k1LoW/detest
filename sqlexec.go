@@ -115,8 +115,9 @@ type sqlExec struct {
 	// them while it folds gives instead, so that an operand Postgres drops
 	// is not evaluated. It is nil outside foldConstants.
 	foldValues map[sqlir.Expr]any
-	// checkedDefaults are the column defaults the column check has run
-	// over, with what it returned (checkDefault).
+	// checkedDefaults are the column defaults, CHECK constraints and
+	// generated columns the column check has run over, with what it
+	// returned (checkKept).
 	checkedDefaults map[sqlir.Expr]error
 	setOpColumns    map[*sqlir.SelectStmt]setOpColumns
 	// colls are the collations the column check found the columns of the
