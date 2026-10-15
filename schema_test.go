@@ -304,8 +304,11 @@ func TestSchemaDefaultTypes(t *testing.T) {
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE e (id serial PRIMARY KEY, n numeric NOT NULL DEFAULT (1 / (extract(year FROM interval '1 year') / 2)), at timestamptz NOT NULL DEFAULT now(), u uuid NOT NULL DEFAULT gen_random_uuid(), j jsonb NOT NULL DEFAULT '{}'::jsonb, tags text[] DEFAULT ARRAY[]::text[], c timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP)`)
 	mustExec(t, db, `INSERT INTO e (id) VALUES (DEFAULT); INSERT INTO e (id) VALUES (DEFAULT)`)
+	// ADD COLUMN fills the rows already there with the default as an
+	// INSERT does.
+	mustExec(t, db, `ALTER TABLE e ADD COLUMN m numeric DEFAULT (3 / (extract(year FROM interval '1 year') * 2))`)
 	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM e WHERE n = 2 AND at IS NOT NULL AND u IS NOT NULL AND j = '{}'::jsonb`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM e WHERE n = 2 AND m = 1.5 AND at IS NOT NULL AND u IS NOT NULL AND j = '{}'::jsonb`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
