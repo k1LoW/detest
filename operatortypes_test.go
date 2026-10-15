@@ -138,6 +138,7 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE DOMAIN day AS date`)
 	mustExec(t, db, `CREATE TABLE dates (id int PRIMARY KEY, n date)`)
 	mustExec(t, db, `CREATE TABLE words (id int PRIMARY KEY, n text)`)
 	mustExec(t, db, `CREATE TABLE nums (id int PRIMARY KEY, n int)`)
@@ -150,6 +151,9 @@ func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
 		`SELECT (SELECT n FROM dates LIMIT 1) - (SELECT n FROM dates LIMIT 1) FROM words`,
 		// Postgres has no lower of an integer.
 		`SELECT lower((SELECT n FROM nums LIMIT 1)) FROM words WHERE false`,
+		// A domain over a date is a date there.
+		`SELECT n::day - n::day FROM dates`,
+		`WITH x AS (SELECT n::day AS n FROM dates) SELECT (SELECT n FROM x LIMIT 1) - (SELECT n FROM x LIMIT 1) FROM dates`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

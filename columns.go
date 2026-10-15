@@ -2274,7 +2274,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			}
 			switch e := v.Interface().(type) {
 			case *sqlir.ArrayCmp:
-				typ := c.typer(sc).of(e.X)
+				typ := c.x.tx.db.baseType(c.typer(sc).of(e.X))
 				// CheckSQL has no schema, so an operand of a type the
 				// statement does not show is left to the run.
 				known := typ != "" && typ != "unresolved column type" || !c.x.tx.checking
@@ -2340,11 +2340,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					return typ
 				}
-				if what := concatTypeMismatch(e, sc.columnType, subquery); what != "" {
+				if what := concatTypeMismatch(e, c.typerWith(sc, subquery)); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
-				if what := dateDifferenceMismatch(e, sc.columnType, subquery); what != "" {
+				if what := dateDifferenceMismatch(e, c.typerWith(sc, subquery)); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
@@ -2424,7 +2424,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported("an aggregate in a subquery of no column surely the subquery's, which Postgres may compute in the outer query")
 					return
 				}
-				if what := textArgumentMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
+				if what := textArgumentMismatch(e, c.typer(sc)); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
@@ -2682,7 +2682,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	typ := c.typer(sc).of(b)
+	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
@@ -3036,7 +3036,7 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		return nil
 	}
 	t := c.typer(sc)
-	fa, fb := valueFamily(t.of(a)), valueFamily(t.of(b))
+	fa, fb := valueFamily(t.reduce(t.of(a))), valueFamily(t.reduce(t.of(b)))
 	if fa == "" || fb == "" || fa == fb {
 		return nil
 	}

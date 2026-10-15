@@ -1012,6 +1012,23 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "checks beside a domain cast or a scalar subquery of one read its base type",
+		Schema: []string{
+			`CREATE DOMAIN num AS int`,
+			`CREATE DOMAIN flag AS boolean`,
+			`CREATE DOMAIN word AS text`,
+			`CREATE TABLE t (id int PRIMARY KEY, n int, f boolean, w text)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2, true, 'A')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT n::num = ANY('{2}'::int[]) FROM t`),
+			difftest.Q(0, `SELECT (SELECT n::num FROM t LIMIT 1) = ANY('{2}'::int[]) FROM t`),
+			difftest.Q(0, `SELECT (SELECT f::flag FROM t LIMIT 1) = 'x' FROM t WHERE false`),
+			difftest.Q(0, `SELECT (SELECT w::word FROM t LIMIT 1) || 'x' = 'Ax' FROM t`),
+		},
+	},
+	{
 		Name: "text in arithmetic beside a literal or jsonb",
 		Schema: []string{
 			`CREATE TABLE tj (id int PRIMARY KEY, s text)`,
