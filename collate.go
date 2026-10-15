@@ -875,9 +875,9 @@ func (x *sqlExec) untypedText(e sqlir.Expr) (string, bool) {
 }
 
 // numberBranchType is the number kind noteNumberBranches recorded for e,
-// "" for any other.
+// in the statement or in an expression a table keeps, "" for any other.
 func (x *sqlExec) numberBranchType(e sqlir.Expr) string {
-	switch k := x.branchTypes[e]; k {
+	switch k := x.branchType(e); k {
 	case "integer", "numeric":
 		return k
 	}

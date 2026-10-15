@@ -461,18 +461,26 @@ func untypedBranch(e sqlir.Expr) bool {
 }
 
 // branchArgs are the arguments of f that Postgres resolves to one type, for
-// intervalBranchMismatch: all of them, or the value and the default of LAG
+// intervalBranchMismatch: all of them, or the value and any default of LAG
 // and LEAD, whose offset is an integer.
 func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 	switch f.Name {
 	case "coalesce", "greatest", "least", "nullif":
 		return f.Args
 	case "lag", "lead":
-		if len(f.Args) == 3 {
+		switch len(f.Args) {
+		case 1, 2:
+			return f.Args[:1]
+		case 3:
 			return []sqlir.Expr{f.Args[0], f.Args[2]}
 		}
 	}
 	return nil
+}
+
+func isNullConst(e sqlir.Expr) bool {
+	k, ok := e.(*sqlir.Const)
+	return ok && k.Value == nil
 }
 
 func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {

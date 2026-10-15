@@ -359,6 +359,14 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			return err
 		}
 		if t.Func.Name == "generate_series" {
+			typed := false
+			for _, a := range t.Func.Args {
+				typed = typed || !isNullConst(a) && !untypedExpr(a)
+			}
+			if !typed {
+				// Postgres fails the call as ambiguous (42725).
+				return c.x.unsupported("generate_series of no typed argument")
+			}
 			for _, a := range t.Func.Args {
 				// functionRows runs the integer overload only, and would
 				// read whole numeric bounds as integers.
@@ -1174,7 +1182,8 @@ func (c *columnChecker) subqueryType(q *sqlir.SubQuery, sc *colScope) string {
 	if len(q.Select.Targets) != 1 {
 		return ""
 	}
-	if untypedBranch(q.Select.Targets[0].Expr) {
+	if e := q.Select.Targets[0].Expr; untypedBranch(e) || isNullConst(e) {
+		// Postgres resolves the subquery's unknown column to text.
 		return "text"
 	}
 	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes}

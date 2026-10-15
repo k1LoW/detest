@@ -33,10 +33,13 @@ var derivedTypeCases = []difftest.Case{
 		},
 	},
 	{
-		Name:   "a number branch beside a NULL column of another number type, or beside text",
-		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY, n int, m numeric)`},
-		Seed:   []string{`INSERT INTO t VALUES (1, NULL, NULL), (2, 3, 1)`},
-		Conns:  1,
+		Name: "a number branch beside a NULL column of another number type, or beside text",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int, m numeric)`,
+			`CREATE TABLE k (id int PRIMARY KEY, m numeric, CHECK ((CASE WHEN true THEN 1 WHEN false THEN '0.5' ELSE m END) / 2 = 0.5))`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, NULL, NULL), (2, 3, 1)`},
+		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT (coalesce(m, 1) / 2 = 0.5)::text FROM t ORDER BY id`),
 			difftest.Q(0, `SELECT (coalesce(s.m, 1) / 2 = 0.5)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
@@ -59,6 +62,7 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT (coalesce(nullif(1, s.m), '0.5') = 1)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
 			difftest.Q(0, `SELECT (CASE WHEN true THEN 1 WHEN false THEN '0.5' ELSE s.m END = 1)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
 			difftest.Q(0, `SELECT (CASE WHEN id = 1 THEN '0.5' ELSE m END = 0.5)::text FROM t ORDER BY id`),
+			difftest.S(0, `INSERT INTO k VALUES (1, NULL)`),
 			difftest.Q(0, `SELECT coalesce(nullif('1', s.n), 'bogus') FROM (SELECT * FROM t) s WHERE false`),
 			difftest.Q(0, `SELECT (coalesce(nullif('1', s.m), '0.5') = 0.5)::text FROM (SELECT * FROM t) s ORDER BY s.id`),
 			difftest.Q(0, `SELECT (coalesce(nullif(NULL, m), 1) / 2 = 0.5)::text FROM t ORDER BY id`),
