@@ -60,6 +60,9 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		// in detest.
 		`SELECT coalesce(n, (SELECT n FROM seqv)) FROM u ORDER BY id`,
 		`SELECT coalesce(pg_advisory_xact_lock(1), pg_advisory_xact_lock(2))`,
+		`SELECT coalesce(CASE WHEN true THEN pg_advisory_xact_lock(1) END, CASE WHEN true THEN pg_advisory_xact_lock(2) END)`,
+		`SELECT coalesce(l.v, NULL) FROM (SELECT pg_advisory_xact_lock(1) AS v) l`,
+		`SELECT coalesce((SELECT pg_advisory_xact_lock(1)), NULL)`,
 		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {

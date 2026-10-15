@@ -2119,12 +2119,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						return
 					}
 					if e.Name == "coalesce" && slices.ContainsFunc(e.Args, func(a sqlir.Expr) bool {
-						f, ok := a.(*sqlir.FuncCall)
-						return ok && f.Name == "pg_advisory_xact_lock"
+						return expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }) == "void"
 					}) {
-						// Its void result is not NULL in Postgres, which stops
+						// A void value is not NULL in Postgres, which stops
 						// COALESCE there, while the evaluators hold it as NULL.
-						err = c.x.unsupported("COALESCE of pg_advisory_xact_lock, whose void result detest holds as NULL")
+						err = c.x.unsupported("COALESCE of a void value, which detest holds as NULL")
 						return
 					}
 					if e.Name == "coalesce" && len(e.Args) > 1 && slices.ContainsFunc(e.Args[1:], c.readsEffectfulCTE) {
