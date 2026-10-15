@@ -18,6 +18,8 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 	mustExec(t, db, `CREATE SEQUENCE sq`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 0)`)
 	mustExec(t, db, `CREATE VIEW seqv AS SELECT nextval('sq') AS n`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, NULL), (2, NULL)`)
 	for _, tt := range []struct {
 		q    string
 		want []string
@@ -54,6 +56,9 @@ func TestCoalesceStopsAtFirstValue(t *testing.T) {
 		`SELECT coalesce(sum(NULL::int), (SELECT n FROM t WHERE id = 1 FOR UPDATE) + sum(1 / n)) FROM t`,
 		`WITH c AS (SELECT n FROM seqv) SELECT coalesce(sum(NULL::int), (SELECT n FROM c) + sum(1 / n)) FROM t`,
 		`SELECT (SELECT coalesce(sum(NULL::int), (SELECT n FROM seqv) + sum(1 / n)) FROM t)`,
+		// An uncorrelated subquery runs once in Postgres and for each row
+		// in detest.
+		`SELECT coalesce(n, (SELECT n FROM seqv)) FROM u ORDER BY id`,
 		`SELECT coalesce(nextval('sq'), max((SELECT n FROM t WHERE id = 1 FOR UPDATE))) FROM t`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {

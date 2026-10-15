@@ -125,6 +125,11 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.c, 'a '::bpchar) = 'a'::bpchar FROM (SELECT * FROM ch) s`,
 		// evalSetOp does not convert the integer side to a numeric.
 		`SELECT coalesce(u.v / 2, 0) FROM (SELECT 1 AS v UNION ALL SELECT m FROM nm) u`,
+		// A subquery runs for each row, where Postgres runs an
+		// uncorrelated one once, so a view's sequence call in one is
+		// refused.
+		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
+		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
 		// The evaluators run a CTE the fallback reads before any row,
 		// where Postgres runs it only when a row reaches the fallback.
 		`WITH c AS (SELECT nextval('seq') AS n) SELECT coalesce(s.id, (SELECT n FROM c)) FROM (SELECT * FROM t) s`,
@@ -234,12 +239,10 @@ func TestDerivedColumnTypes(t *testing.T) {
 		t.Errorf("a bigint series bound parameter: %v", err)
 	}
 	// Postgres stops at the first argument that is not NULL, so the
-	// fallback's sequence call and row lock never happen, in a view too.
+	// fallback's sequence call and row lock never happen.
 	for _, q := range []string{
 		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
-		`SELECT coalesce(s.id, (SELECT n FROM seqv)) FROM (SELECT * FROM t) s`,
-		`WITH seqv AS (SELECT 0 AS n) SELECT coalesce(s.id, (SELECT n FROM seqw)) FROM (SELECT * FROM t) s`,
 	} {
 		if _, err := db.Query(q, 1); err != nil {
 			t.Errorf("%s: %v", q, err)
