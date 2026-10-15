@@ -992,6 +992,26 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "checks beside a scalar subquery type its target in its own scope",
+		Schema: []string{
+			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,
+			`CREATE TABLE nums (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE words (id int PRIMARY KEY, n text)`,
+		},
+		Seed: []string{
+			`INSERT INTO flags VALUES (1, true)`,
+			`INSERT INTO nums VALUES (1, 2)`,
+			`INSERT INTO words VALUES (1, 'A')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT n FROM nums LIMIT 1) = 2 FROM flags`),
+			difftest.Q(0, `SELECT (SELECT n FROM nums LIMIT 1) = ANY('{2}'::int[]) FROM flags`),
+			difftest.Q(0, `SELECT (SELECT n FROM nums LIMIT 1) = 'true' FROM flags WHERE false`),
+			difftest.Q(0, `SELECT lower((SELECT n FROM words LIMIT 1)) = 'a' FROM nums`),
+		},
+	},
+	{
 		Name: "text in arithmetic beside a literal or jsonb",
 		Schema: []string{
 			`CREATE TABLE tj (id int PRIMARY KEY, s text)`,

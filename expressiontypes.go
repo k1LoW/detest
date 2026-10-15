@@ -406,9 +406,9 @@ func numberBranchKind(exprs []sqlir.Expr, t typer) (kind string, mismatch bool) 
 	return kind, false
 }
 
-func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string) string {
+func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	if f.Name == "left" && len(f.Args) == 2 {
-		switch typ := expressionType(f.Args[1], column); typ {
+		switch typ := expressionTypeIn(f.Args[1], column, subquery); typ {
 		case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
 		default:
 			return "left with a " + typ + " length argument"
@@ -417,7 +417,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 	switch f.Name {
 	case "lower", "upper", "left", "length", "char_length", "octet_length", "hashtext":
 		if len(f.Args) > 0 {
-			typ := expressionType(f.Args[0], column)
+			typ := expressionTypeIn(f.Args[0], column, subquery)
 			if typ != "" && typ != "unresolved column type" && typ != "text" && typ != "varchar" && typ != "bpchar" {
 				return f.Name + " with a " + typ + " argument"
 			}
@@ -427,7 +427,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		// Postgres defines; it rejects any other key type before locking,
 		// where callFunc would otherwise key the lock on the value as given.
 		for _, a := range f.Args {
-			switch typ := expressionType(a, column); typ {
+			switch typ := expressionTypeIn(a, column, subquery); typ {
 			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
 			default:
 				return f.Name + " with a " + typ + " key argument"
@@ -437,7 +437,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		if len(f.Args) != 2 {
 			break
 		}
-		switch typ := expressionType(f.Args[0], column); typ {
+		switch typ := expressionTypeIn(f.Args[0], column, subquery); typ {
 		case "", "unresolved column type", "text", "varchar":
 		default:
 			return f.Name + " with a " + typ + " unit"
@@ -465,7 +465,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		if untypedExpr(f.Args[1]) {
 			return f.Name + " of a parameter or a string literal of no type"
 		}
-		switch typ := expressionType(f.Args[1], column); typ {
+		switch typ := expressionTypeIn(f.Args[1], column, subquery); typ {
 		case "", "unresolved column type", "timestamp", "timestamptz":
 		case "date":
 			// extract from a date fails for a unit of the time of day, which
@@ -496,7 +496,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 		// callFunc would otherwise evaluate a side-effecting argument
 		// (nextval) and only then find it cannot convert the result.
 		for _, a := range f.Args {
-			switch typ := expressionType(a, column); typ {
+			switch typ := expressionTypeIn(a, column, subquery); typ {
 			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "float4", "float8", "real", "double precision":
 			default:
 				return f.Name + " with a " + typ + " argument"
@@ -509,11 +509,11 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 // dateDifferenceMismatch refuses date - date, which Postgres gives as an
 // integer of days. A date is a time at midnight to detest, so the difference
 // would come out an interval.
-func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
+func dateDifferenceMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	if b.Op != "-" {
 		return ""
 	}
-	l, r := expressionType(b.L, column), expressionType(b.R, column)
+	l, r := expressionTypeIn(b.L, column, subquery), expressionTypeIn(b.R, column, subquery)
 	// A parameter or a string literal beside a date is read as a date too.
 	if l == "date" && (r == "date" || untypedExpr(b.R)) || r == "date" && untypedExpr(b.L) {
 		return "date - date"
@@ -624,12 +624,12 @@ func isNullConst(e sqlir.Expr) bool {
 	return ok && k.Value == nil
 }
 
-func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string) string {
+func concatTypeMismatch(b *sqlir.BinaryExpr, column func(*sqlir.ColumnRef) string, subquery func(*sqlir.SubQuery) string) string {
 	if b.Op != "||" {
 		return ""
 	}
 	for _, e := range []sqlir.Expr{b.L, b.R} {
-		switch typ := expressionType(e, column); typ {
+		switch typ := expressionTypeIn(e, column, subquery); typ {
 		case "", "text", "varchar", "bpchar", "bool", "boolean", "int", "int2", "int4", "int8", "integer", "smallint", "bigint":
 		default:
 			return "|| with a " + typ + " operand"

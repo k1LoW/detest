@@ -343,7 +343,7 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			return unsupported(what, c.query)
 		}
 		if !c.innodb && !c.namesOnly {
-			if what := textArgumentMismatch(v, nil); what != "" {
+			if what := textArgumentMismatch(v, nil, nil); what != "" {
 				return c.refuse(what)
 			}
 			if what := intervalBranchMismatch(branchArgs(v), nil, nil); what != "" {
@@ -369,10 +369,10 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 		return c.orderKeys(v.Order)
 	case *sqlir.BinaryExpr:
 		if !c.innodb && !c.namesOnly {
-			if what := concatTypeMismatch(v, nil); what != "" {
+			if what := concatTypeMismatch(v, nil, nil); what != "" {
 				return c.refuse(what)
 			}
-			if what := dateDifferenceMismatch(v, nil); what != "" {
+			if what := dateDifferenceMismatch(v, nil, nil); what != "" {
 				return c.refuse(what)
 			}
 		}

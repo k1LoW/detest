@@ -2274,7 +2274,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			}
 			switch e := v.Interface().(type) {
 			case *sqlir.ArrayCmp:
-				typ := typer{column: sc.columnType, base: c.x.tx.db.baseType}.of(e.X)
+				typ := c.typer(sc).of(e.X)
 				// CheckSQL has no schema, so an operand of a type the
 				// statement does not show is left to the run.
 				known := typ != "" && typ != "unresolved column type" || !c.x.tx.checking
@@ -2329,11 +2329,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						}
 					}
 				}
-				if what := concatTypeMismatch(e, sc.columnType); what != "" {
+				if what := concatTypeMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
-				if what := dateDifferenceMismatch(e, sc.columnType); what != "" {
+				if what := dateDifferenceMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
@@ -2413,7 +2413,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported("an aggregate in a subquery of no column surely the subquery's, which Postgres may compute in the outer query")
 					return
 				}
-				if what := textArgumentMismatch(e, sc.columnType); what != "" {
+				if what := textArgumentMismatch(e, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
 					return
 				}
@@ -2671,7 +2671,7 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	typ := typer{column: sc.columnType, base: c.x.tx.db.baseType}.of(b)
+	typ := c.typer(sc).of(b)
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
@@ -3024,7 +3024,7 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
-	t := typer{column: sc.columnType, base: c.x.tx.db.baseType}
+	t := c.typer(sc)
 	fa, fb := valueFamily(t.of(a)), valueFamily(t.of(b))
 	if fa == "" || fb == "" || fa == fb {
 		return nil
