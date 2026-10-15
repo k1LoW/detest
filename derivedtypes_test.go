@@ -114,6 +114,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		`SELECT coalesce(s.id, nextval('seq')) FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, (SELECT n FROM t WHERE id = 2 FOR UPDATE)) FROM (SELECT * FROM t WHERE id = 1) s`,
 		`SELECT coalesce(s.n, NULL COLLATE "C", 0) FROM (SELECT * FROM t) s`,
+		`SELECT coalesce(s.n, 1 COLLATE "C") FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.n, abs(NULL)) / 2 FROM (SELECT * FROM t) s`,
 		`SELECT lag(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
 		`SELECT lead(s.n, abs(NULL), 0) OVER () FROM (SELECT * FROM t) s`,
@@ -195,6 +196,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT CASE WHEN true THEN (SELECT $1) ELSE s.name END = '\x41' FROM (SELECT * FROM t) s`, []byte("A")},
 		{`SELECT coalesce(s.v, 'x') = '01' FROM (SELECT t.*, $1 COLLATE "C" AS v FROM t) s`, int64(1)},
 		{`SELECT coalesce((SELECT $1 COLLATE "C"), 'x') = '01' FROM t`, int64(1)},
+		{`SELECT coalesce(s.name, $1 COLLATE "C") FROM (SELECT * FROM t) s WHERE s.n = $1`, "5"},
 		// generate_series and a LAG offset type the parameter as int4.
 		{`SELECT * FROM generate_series(1, $1) g WHERE $1 = '1'::text ORDER BY 1`, int64(1)},
 		{`SELECT lag(s.n, $1, 0) OVER (ORDER BY s.id) FROM (SELECT * FROM t) s WHERE $1 = '1'::text`, int64(1)},

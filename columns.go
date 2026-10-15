@@ -2167,6 +2167,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				c.x.collates = true
+				if !c.x.tx.db.kind.InnoDB() {
+					// Postgres fails COLLATE on a type of no collation
+					// (42804) before any row.
+					typ := expressionTypeIn(e.X, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) })
+					if typ != "" && typ != "unresolved column type" && !untypedExpr(e.X) && !c.x.tx.db.collatable(typ) {
+						err = c.x.unsupported("COLLATE on a " + typ)
+						return
+					}
+				}
 				if p, ok := e.X.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) && !c.x.tx.db.kind.InnoDB() {
 					switch v := derefValue(c.x.args[p.Index]).(type) {
 					case nil, string, []byte:
@@ -2176,6 +2185,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						err = c.x.unsupported(fmt.Sprintf("a %T parameter under COLLATE", v))
 						return
 					}
+					// COLLATE types it text for its other uses.
+					c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
 				}
 			case *sqlir.Cast:
 				if err = c.literalInput(e); err != nil {
