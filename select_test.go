@@ -1793,6 +1793,8 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	for _, q := range []string{
 		`SELECT lower(floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT length(avg(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(-floor(s.v)) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT lower(floor((SELECT f FROM t)))`,
 		`SELECT coalesce(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT nullif(s.v, 0::numeric) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 	} {

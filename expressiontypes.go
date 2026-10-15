@@ -417,8 +417,8 @@ func textArgumentMismatch(f *sqlir.FuncCall, column func(*sqlir.ColumnRef) strin
 			if typ != "" && typ != "unresolved column type" && typ != "text" && typ != "varchar" && typ != "bpchar" {
 				return f.Name + " with a " + typ + " argument"
 			}
-			if g, ok := f.Args[0].(*sqlir.FuncCall); ok && typ == unresolvedType && numberFuncs[g.Name] {
-				// Its form is unresolved, but every form is a number.
+			if (typ == "" || typ == unresolvedType) && alwaysNumber(f.Args[0]) {
+				// Its form is unknown, but every form is a number.
 				return f.Name + " with a number argument"
 			}
 		}
@@ -623,6 +623,18 @@ func takesOtherType(e sqlir.Expr) bool {
 // arguments, so a text function over one fails in Postgres even where the
 // check cannot tell which form it is.
 var numberFuncs = map[string]bool{"floor": true, "ceil": true, "ceiling": true, "round": true, "power": true, "pow": true, "avg": true, "sum": true, "abs": true}
+
+// alwaysNumber reports whether e is a number whatever its form, as a call
+// of one of numberFuncs or its negation.
+func alwaysNumber(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.FuncCall:
+		return numberFuncs[e.Name]
+	case *sqlir.UnaryExpr:
+		return e.Op == "-" && alwaysNumber(e.X)
+	}
+	return false
+}
 
 // unresolvedType is the type of a column, or of an expression over one,
 // that has a type of its own the check does not know, as of a * it cannot
