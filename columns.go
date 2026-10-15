@@ -115,6 +115,9 @@ type columnChecker struct {
 	valuesTypes map[*sqlir.SelectStmt][]string
 	// numberParams are the parameters among number branches.
 	numberParams map[int]bool
+	// rowSubqueries are the subqueries a row is compared with, which take
+	// as many columns as the row rather than one.
+	rowSubqueries map[*sqlir.SubQuery]bool
 	// cteDefs are the queries of the CTEs in scope, as ctes holds their
 	// names, which the COALESCE CTE effect check follows.
 	cteDefs []map[string]*sqlir.SelectStmt
@@ -761,6 +764,13 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, error) {
 	if sel == nil {
 		return nil, nil
+	}
+	if sel.Lock != nil {
+		// Postgres refuses these when it analyzes the statement, which
+		// planLocking refuses only where a run reaches the query.
+		if isAggregate(sel) || sel.Distinct || len(sel.DistinctOn) > 0 || len(windowsOf(sel)) > 0 {
+			return nil, c.x.unsupported("FOR UPDATE with GROUP BY, DISTINCT or window functions")
+		}
 	}
 	pop, err := c.with(sel.With, outer)
 	if err != nil {
@@ -2059,6 +2069,14 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.typedParam(p) // IS NULL gives it no type to differ from
 				}
 			case *sqlir.BinaryExpr:
+				if _, row := e.L.(*sqlir.RowExpr); row {
+					if q, ok := e.R.(*sqlir.SubQuery); ok {
+						if c.rowSubqueries == nil {
+							c.rowSubqueries = map[*sqlir.SubQuery]bool{}
+						}
+						c.rowSubqueries[q] = true
+					}
+				}
 				if what := concatTypeMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
@@ -2254,6 +2272,18 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				return
 			case *sqlir.SelectStmt:
 				_, err = c.query(e, sc)
+				return
+			case *sqlir.SubQuery:
+				if _, err = c.query(e.Select, sc); err != nil {
+					return
+				}
+				// Postgres fails a scalar subquery of other than one column
+				// when it analyzes the statement, which the run refuses only
+				// where a row reaches it. A row compared with a subquery
+				// takes as many columns, and is checked there.
+				if w, ok := c.knownWidth(e.Select); ok && w != 1 && !c.rowSubqueries[e] {
+					err = c.x.unsupported("a scalar subquery of other than one column")
+				}
 				return
 			}
 			walk(v.Elem())
