@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/k1LoW/detest/internal/sqlir"
@@ -25,7 +26,10 @@ func (x *sqlExec) foldConstants(stmt sqlir.Statement) error {
 	case *sqlir.SelectStmt:
 		return f.query(st)
 	case *sqlir.InsertStmt:
-		return f.node(reflect.ValueOf(st))
+		if err := f.node(reflect.ValueOf(st)); err != nil {
+			return err
+		}
+		return f.insertDefaults(st)
 	case *sqlir.CreateTableAsStmt:
 		if st.NoData || st.IfNotExists && x.relationExists(st.Table) {
 			return nil // Postgres does not plan the query
@@ -34,13 +38,89 @@ func (x *sqlExec) foldConstants(stmt sqlir.Statement) error {
 	case *sqlir.UpdateStmt:
 		body := *st
 		body.With = nil
-		return f.with(st.With, &body, func() error { return f.node(reflect.ValueOf(&body)) })
+		if err := f.with(st.With, &body, func() error { return f.node(reflect.ValueOf(&body)) }); err != nil {
+			return err
+		}
+		return f.setDefaults(st.Table, st.Set)
 	case *sqlir.DeleteStmt:
 		body := *st
 		body.With = nil
 		return f.with(st.With, &body, func() error { return f.node(reflect.ValueOf(&body)) })
 	}
 	return nil
+}
+
+// insertDefaults folds the defaults Postgres writes into the plan of an
+// INSERT, those of the columns it leaves out and those DEFAULT names.
+func (f *folder) insertDefaults(st *sqlir.InsertStmt) error {
+	def := f.x.tx.db.defs[f.x.tx.db.resolve(st.Table)]
+	if def == nil {
+		return nil
+	}
+	cols := st.Columns
+	if len(cols) == 0 {
+		n := len(def.columns)
+		switch {
+		case len(st.Rows) > 0:
+			n = len(st.Rows[0])
+		case st.Select != nil && st.Select.SetOp == "" && !slices.ContainsFunc(st.Select.Targets, func(t sqlir.Target) bool { return t.Star }):
+			n = len(st.Select.Targets)
+		}
+		cols = def.columns[:min(n, len(def.columns))]
+	}
+	for _, c := range def.columns {
+		if !slices.Contains(cols, c) {
+			if err := f.columnDefault(def, c); err != nil {
+				return err
+			}
+		}
+	}
+	for _, row := range st.Rows {
+		for i, e := range row {
+			if _, ok := e.(*sqlir.Default); ok && i < len(cols) {
+				if err := f.columnDefault(def, cols[i]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if st.OnConflict != nil {
+		return f.setDefaults(st.Table, st.OnConflict.Set)
+	}
+	return nil
+}
+
+// setDefaults folds the defaults DEFAULT names in SET.
+func (f *folder) setDefaults(table string, set []sqlir.Assignment) error {
+	def := f.x.tx.db.defs[f.x.tx.db.resolve(table)]
+	if def == nil {
+		return nil
+	}
+	for _, a := range set {
+		if _, ok := a.Value.(*sqlir.Default); ok {
+			if err := f.columnDefault(def, a.Column); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// columnDefault folds the default of col. Only an error Postgres raises
+// for sure is kept. A default detest cannot evaluate is written as the
+// Unknown marker rather than refused (columnDefault in schema.go), so
+// refusing one here, or one whose folding detest cannot tell, would make
+// every INSERT that leaves the column out unsupported.
+func (f *folder) columnDefault(def *tableDef, col string) error {
+	d, ok := def.defaults[col]
+	if !ok || def.generated[col] != nil {
+		return nil
+	}
+	_, err := f.expr(d)
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+		return nil
+	}
+	return err
 }
 
 type folder struct {
@@ -269,7 +349,7 @@ func (f *folder) exists(sel *sqlir.SelectStmt) error {
 // set-returning function in the query block of an EXISTS, which keeps
 // Postgres from dropping its select list.
 func existsNeedsTargets(sel *sqlir.SelectStmt) bool {
-	if len(windowsOf(sel)) > 0 || orderOnlyAggregate(sel) {
+	if len(windowsOf(sel)) > 0 || orderOnlyAggregate(sel) || slices.ContainsFunc(sel.DistinctOn, hasAggregate) {
 		return true
 	}
 	for _, t := range sel.Targets {
@@ -319,10 +399,15 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		if err != nil {
 			return folded{}, err
 		}
-		if b, ok := derefValue(kids[0].val).(bool); ok && kids[0].c != varies && kids[0].e == nil && v.Op == "NOT" {
-			// A reduced AND or OR detest cannot evaluate, whose value it
-			// knows.
-			return folded{c: kids[0].c, val: !b, hasVal: true}, nil
+		if k := kids[0]; v.Op == "NOT" && k.c != varies {
+			if !boolOrNull(k) {
+				return folded{c: k.c}, nil // see logic
+			}
+			if b, ok := derefValue(k.val).(bool); ok && k.e == nil {
+				// A reduced AND or OR detest cannot evaluate, whose value
+				// it knows.
+				return folded{c: k.c, val: !b, hasVal: true}, nil
+			}
 		}
 		return f.apply(v, kids, plainOperands(kids...), strict)
 	case *sqlir.IsNull:
@@ -611,7 +696,17 @@ func (f *folder) call(v *sqlir.FuncCall) (folded, error) {
 	if err != nil {
 		return folded{}, err
 	}
-	if isAggregateCall(v) || effectFuncs[v.Name] || sessionFuncs[v.Name] {
+	if isAggregateCall(v) {
+		return folded{}, nil
+	}
+	if effectFuncs[v.Name] || sessionFuncs[v.Name] {
+		// Strict, so Postgres reduces one with a NULL argument to NULL
+		// without calling it, its volatility notwithstanding.
+		for _, k := range kids {
+			if k.null() {
+				return folded{c: k.c, hasVal: true}, nil
+			}
+		}
 		return folded{}, nil
 	}
 	c, s := plainOperands(kids...), strict
@@ -659,6 +754,19 @@ func condOf(r folded, take bool) cond {
 	return out
 }
 
+// boolOrNull reports a constant whose value detest knows to be a boolean
+// or NULL.
+func boolOrNull(r folded) bool {
+	if !r.hasVal {
+		return false
+	}
+	switch derefValue(r.val).(type) {
+	case nil, bool:
+		return true
+	}
+	return false
+}
+
 func (c cond) uncertain() bool {
 	n := 0
 	for _, b := range []bool{c.keep, c.take, c.drop} {
@@ -698,6 +806,21 @@ func (f *folder) logic(v *sqlir.BinaryExpr) (folded, error) {
 			// Reduced if Postgres folds r, which its value would decide.
 			reduced = reduced || !c.drop
 			defer f.enter()()
+		}
+	}
+	for _, k := range kids {
+		if k.c != varies && !boolOrNull(k) {
+			// Postgres reads a string literal operand as a boolean when it
+			// parses the statement, and the evaluators read it as NULL
+			// (#118), so the value is not known.
+			c := fixed
+			for _, k := range kids {
+				c = max(c, k.c)
+			}
+			if c == varies {
+				c = maybe
+			}
+			return folded{c: c}, nil
 		}
 	}
 	if !uncertain {
@@ -800,13 +923,18 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 // it, so it is evaluated from a new one, whose operands are constants of
 // the types they are written with.
 func (f *folder) caseTest(arg, when folded) (folded, error) {
+	// = is strict, so a NULL on either side reduces it to NULL whatever
+	// the other is.
+	if arg.null() {
+		return folded{c: arg.c, hasVal: true}, nil
+	}
+	if when.null() {
+		return folded{c: when.c, hasVal: true}, nil
+	}
 	if arg.c == varies || when.c == varies {
 		return folded{}, nil
 	}
 	c := max(arg.c, when.c)
-	if arg.null() || when.null() {
-		return folded{c: c, hasVal: true}, nil
-	}
 	if arg.e == nil || when.e == nil {
 		return folded{c: maybe}, nil
 	}

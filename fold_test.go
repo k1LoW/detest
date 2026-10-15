@@ -70,6 +70,10 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT 1 FROM (SELECT 1 / 0 AS unused FROM t WHERE false) q`,
 		`WITH c AS (SELECT 1 / 0 AS v FROM t WHERE false) SELECT 1 FROM c, c c2`,
 		`WITH a AS (SELECT * FROM fv), fv AS (SELECT 1 AS v) SELECT v FROM a`,
+		// The evaluators read a string literal under AND, OR or NOT as NULL
+		// (#118), where Postgres reads it as a boolean.
+		`SELECT CASE WHEN ('true' AND true) THEN 0 ELSE 1 / 0 END FROM t WHERE false`,
+		`SELECT CASE WHEN NOT 'false' THEN 0 ELSE 1 / 0 END FROM t WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,
 	} {

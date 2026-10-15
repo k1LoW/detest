@@ -78,6 +78,7 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT EXISTS (SELECT n FROM t WHERE false GROUP BY n, 1 / 0)`),
 			difftest.Q(0, `SELECT EXISTS (SELECT 1 / 0 WHERE false ORDER BY row_number() OVER ())`),
 			difftest.Q(0, `SELECT EXISTS (SELECT (SELECT row_number() OVER () + 1 / 0) WHERE false)`),
+			difftest.Q(0, `SELECT EXISTS (SELECT DISTINCT ON (sum(n)) 1 / 0 FROM t WHERE false)`),
 		},
 	},
 	{
@@ -97,6 +98,20 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN greatest(NULL, n) > 0 THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN coalesce(1, n) / 2 = 0 THEN 1 / 0 ELSE 1 END FROM tn WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN (CASE WHEN true THEN 1 ELSE n END) / 2 = 0 THEN 1 / 0 ELSE 1 END FROM tn WHERE false`),
+			difftest.Q(0, `SELECT CASE n WHEN NULL THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN nextval(NULL) IS NULL THEN 0 ELSE 1 / 0 END FROM t WHERE false`),
+		},
+	},
+	{
+		Name:   "the default of a column a write leaves out or names by DEFAULT, folded when the statement is planned",
+		Schema: []string{`CREATE TABLE d (id int, n int DEFAULT (1 / 0))`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.S(0, `UPDATE d SET n = DEFAULT WHERE false`),
+			difftest.Q(0, `INSERT INTO d (id) SELECT 1 WHERE false`),
+			difftest.Q(0, `INSERT INTO d SELECT 1 WHERE false`),
+			difftest.Q(0, `INSERT INTO d (id, n) SELECT 1, 2 WHERE false`),
+			difftest.S(0, `UPDATE d SET n = 1 WHERE false`),
 		},
 	},
 	{
