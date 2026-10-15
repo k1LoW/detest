@@ -697,6 +697,23 @@ var cases = []difftest.Case{
 			difftest.S(1, `COMMIT`),
 		},
 	},
+	{
+		Name: "an aggregate in a subquery reading its own query's columns",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, m int)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 3)`, `INSERT INTO u VALUES (1, 10)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT sum(u.m) FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(u.m + t.n) FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT count(*) FROM u WHERE u.m > t.n) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(m) FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(t.n) OVER () FROM u) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT (SELECT sum(k) FROM generate_series(1, 2) WITH ORDINALITY AS g(k, ord)) FROM t ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

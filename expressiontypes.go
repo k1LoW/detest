@@ -119,7 +119,48 @@ func (t typer) of(e sqlir.Expr) string {
 		}
 	case *sqlir.FuncCall:
 		switch e.Name {
-		case "floor", "ceil", "ceiling", "round", "power", "pow", "avg":
+		case "floor", "ceil", "ceiling", "round", "power", "pow":
+			if e.Name == "round" && len(e.Args) == 2 {
+				return "numeric" // round(numeric, int) has no float form
+			}
+			// Postgres has a numeric and a float8 form of each, and takes
+			// the float8 one for an integer, as its preferred number type.
+			kind := ""
+			for _, a := range e.Args {
+				if untypedExpr(a) || isNullConst(a) {
+					continue // it takes the form the other arguments pick
+				}
+				switch typ := t.reduce(t.of(a)); {
+				case numberCategory(typ) == numberCategory("float8"):
+					return "float8"
+				case typ == "numeric" || typ == "decimal":
+					kind = "numeric"
+				case numberRank[typ] > 0:
+					if kind == "" {
+						kind = "float8"
+					}
+				default:
+					// A type the check does not know, or one no form takes,
+					// which Postgres fails; the checks of the arguments go
+					// by numeric, as they did before the forms were told
+					// apart.
+					kind = "numeric"
+				}
+			}
+			if kind == "" && len(e.Args) > 0 {
+				// Untyped arguments alone take float8, the preferred
+				// number type.
+				return "float8"
+			}
+			return kind
+		case "avg":
+			if len(e.Args) == 0 {
+				break
+			}
+			switch typ := t.reduce(t.of(e.Args[0])); {
+			case numberCategory(typ) == numberCategory("float8"):
+				return "float8"
+			}
 			return "numeric"
 		case "pg_try_advisory_xact_lock":
 			return "bool"
@@ -141,6 +182,9 @@ func (t typer) of(e sqlir.Expr) string {
 				}
 			}
 		case "min", "max", "abs":
+			if e.Name == "abs" && len(e.Args) == 1 && untypedExpr(e.Args[0]) {
+				return "float8" // the preferred number type's form
+			}
 			return t.reduce(t.common(e.Args))
 		case "coalesce", "greatest", "least":
 			return t.common(e.Args)
@@ -543,6 +587,13 @@ func branchArgs(f *sqlir.FuncCall) []sqlir.Expr {
 		}
 	}
 	return nil
+}
+
+// takesOtherType reports whether e is typed by what stands beside it, as
+// Postgres types an untyped literal, a parameter, a NULL, or a CASE or
+// COALESCE of those alone.
+func takesOtherType(e sqlir.Expr) bool {
+	return untypedExpr(e) || isNullConst(e) || untypedBranch(e)
 }
 
 func isNullConst(e sqlir.Expr) bool {
