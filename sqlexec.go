@@ -110,6 +110,11 @@ type sqlExec struct {
 	// or a float, such as one by the sum of a bigint, which Postgres
 	// returns as a numeric where the fold gives an integer.
 	numericDivs map[*sqlir.BinaryExpr]bool
+	// foldValues are the values foldConstants found Postgres reduces
+	// expressions to without evaluating their operands, which evaluating
+	// them while it folds gives instead, so that an operand Postgres drops
+	// is not evaluated. It is nil outside foldConstants.
+	foldValues map[sqlir.Expr]any
 	// checkedDefaults are the column defaults the column check has run
 	// over, with what it returned (checkDefault).
 	checkedDefaults map[sqlir.Expr]error
@@ -373,6 +378,9 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			}
 		}
 	}
+	if err := x.foldConstants(stmt); err != nil {
+		return nil, err
+	}
 	// After the column check, which refuses what Postgres refuses when it
 	// plans the statement, as Postgres reads the arrays only at bind time.
 	if err := x.checkArrays(stmt); err != nil {
@@ -598,11 +606,19 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 
 // execCreateTableAs declares the table, without keys, and fills it with the
 // query's rows.
+// relationExists reports a table, a view, a sequence or an index named
+// name.
+func (x *sqlExec) relationExists(name string) bool {
+	db := x.tx.db
+	_, isView := db.views[db.resolve(name)]
+	_, isSeq := db.seqDefs[sequenceName(db.resolve(name))]
+	_, isTable := db.defs[db.resolve(name)]
+	return isTable || isView || isSeq || db.isIndex(db.resolve(name))
+}
+
 func (x *sqlExec) execCreateTableAs(st *sqlir.CreateTableAsStmt) (*sqlResult, error) {
 	db := x.tx.db
-	_, isView := db.views[db.resolve(st.Table)]
-	_, isSeq := db.seqDefs[sequenceName(db.resolve(st.Table))]
-	if _, isTable := db.defs[db.resolve(st.Table)]; (isTable || isView || isSeq || db.isIndex(db.resolve(st.Table))) && st.IfNotExists {
+	if st.IfNotExists && x.relationExists(st.Table) {
 		// Postgres leaves the table as it is, without running the query.
 		return &sqlResult{}, nil
 	}
@@ -1394,8 +1410,9 @@ type aggEnv struct {
 // plannedAggregates are the aggregates of e's own query block that Postgres
 // computes: not those it drops with the arguments of a COALESCE after a
 // literal that is not NULL, or with a CASE branch behind a literal
-// condition, when it plans the statement. A condition it folds from an
-// expression is not followed, as detest folds none (#98).
+// condition, when it plans the statement. An argument or a condition it
+// folds from an expression of constants, such as 1 = 1, is not followed:
+// foldConstants raises what folding it raises, not where it cuts off.
 func plannedAggregates(e sqlir.Expr) []*sqlir.FuncCall {
 	var out []*sqlir.FuncCall
 	var walk func(v reflect.Value)
