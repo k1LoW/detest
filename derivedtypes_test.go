@@ -21,6 +21,7 @@ func TestDerivedColumnTypes(t *testing.T) {
 	mustExec(t, db, `INSERT INTO f VALUES (1, NULL, NULL)`)
 	mustExec(t, db, `CREATE DOMAIN span AS interval`)
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
+	mustExec(t, db, `CREATE DOMAIN wall AS timestamp`)
 	mustExec(t, db, `CREATE TABLE b (id int PRIMARY KEY, payload bytea)`)
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, NULL)`)
@@ -98,6 +99,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		// COLLATE makes a literal text.
 		`SELECT coalesce(s.n, 'bogus' COLLATE "C", 0) FROM (SELECT * FROM t) s`,
 		`SELECT coalesce(s.flag, 'true' COLLATE "C") FROM (SELECT * FROM f) s`,
+		// The time readers take the type's own name, not a domain's base.
+		`SELECT coalesce(s.ts, NULL::timestamptz) FROM (SELECT t.* FROM (SELECT '2024-05-20 00:30'::wall AS ts) t) s`,
 		// The NULL of a scalar subquery is text, beside an integer.
 		`SELECT coalesce(s.n, (SELECT NULL), 0) FROM (SELECT * FROM t) s`,
 		`SELECT s.id FROM t CROSS JOIN LATERAL (SELECT t.*) s`,
@@ -140,6 +143,8 @@ func TestDerivedColumnTypes(t *testing.T) {
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, true},
 		{`SELECT coalesce(s.name, lag($1) OVER (ORDER BY s.id), 'x') = '01' FROM (SELECT * FROM t) s ORDER BY s.id`, int64(1)},
 		{`SELECT coalesce(s.name, $1 COLLATE "C", 'x') = '01' FROM (SELECT * FROM t) s`, int64(1)},
+		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, true},
+		{`SELECT * FROM generate_series(NULL::int, $1) g ORDER BY 1`, 1.5},
 		{`SELECT coalesce(s.d, $1) FROM (SELECT * FROM d) s WHERE false`, []byte("bogus")},
 		{`SELECT coalesce(u.v, 'x') = '01' FROM (SELECT NULL AS v UNION ALL SELECT $1) u`, int64(1)},
 		{`SELECT coalesce(s.n, $1) FROM (SELECT * FROM t) s`, true},

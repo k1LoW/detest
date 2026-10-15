@@ -812,6 +812,7 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 	untyped := false
 	kinds := map[string]bool{}
 	unconverted := ""
+	names, domain := map[string]bool{}, ""
 	for _, e := range exprs {
 		if k, ok := e.(*sqlir.Const); ok && k.Value == nil {
 			continue
@@ -851,8 +852,16 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, column func(*sqlir.Col
 			kinds[base] = true
 			unconverted = base
 		}
+		names[typ] = true
+		if base != typ && (numberRank[base] > 0 || timeRank[base] > 0) {
+			domain = typ
+		}
 	}
 	switch {
+	case domain != "" && len(names) > 1:
+		// commonType and the time and number readers take the type's own
+		// name, so a domain beside another type resolves to neither.
+		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain))
 	case len(kinds) > 1:
 		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them")
 	case untyped && unconverted != "":

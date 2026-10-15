@@ -135,7 +135,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		for _, p := range sqlir.Params(stmt) {
 			uses[p.Index]++
 		}
-		for i := range c.numberParams {
+		for _, i := range slices.Sorted(maps.Keys(c.numberParams)) {
 			if uses[i] > 1 {
 				// Postgres binds the parameter as the number the branches
 				// resolve to, which every other use then reads, as $1 / 2
@@ -374,6 +374,13 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 					// Postgres reads it as the integer bound before the
 					// call, which functionRows skips on a NULL bound.
 					return c.x.unsupported("generate_series over a string literal or parameter")
+				}
+				if p, ok := a.(*sqlir.Param); ok && p.Index >= 0 && p.Index < len(c.x.args) {
+					if v := derefValue(c.x.args[p.Index]); v != nil {
+						if _, isInt := integer(v); !isInt {
+							return c.x.unsupported(fmt.Sprintf("generate_series over a %T parameter", v))
+						}
+					}
 				}
 			}
 			if !typed {
