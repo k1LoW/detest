@@ -293,30 +293,16 @@ func (f *folder) query(sel *sqlir.SelectStmt) error {
 	return f.with(sel.With, &body, func() error { return f.node(reflect.ValueOf(&body).Elem()) })
 }
 
-// derived folds the query of a table in FROM, a view or a CTE, whose
-// select list is folded in doubt. Postgres removes the outputs the query
-// around it does not read before it plans it, and which those are depends
-// on how it reads them, whether it inlines the query, and how many times
-// a CTE is read, which detest does not model.
+// derived folds the query of a table in FROM, a view or a CTE in doubt.
+// Postgres removes the outputs the query around it does not read before
+// it plans it, and plans none of it when a constant false condition of
+// the query around it empties it, as for one it does not pull up into
+// that query. Which it does depends on how the outer query reads it,
+// whether it inlines it and how many times a CTE is read, which detest
+// does not model.
 func (f *folder) derived(sel *sqlir.SelectStmt) error {
-	body := *sel
-	body.With = nil
-	return f.with(sel.With, &body, func() error {
-		rest := body
-		rest.Targets = nil
-		rest.Larg, rest.Rarg = nil, nil
-		if err := f.node(reflect.ValueOf(&rest).Elem()); err != nil {
-			return err
-		}
-		if sel.SetOp != "" {
-			if err := f.derived(sel.Larg); err != nil {
-				return err
-			}
-			return f.derived(sel.Rarg)
-		}
-		defer f.enter()()
-		return f.node(reflect.ValueOf(sel.Targets))
-	})
+	defer f.enter()()
+	return f.query(sel)
 }
 
 // with folds the CTEs of with that body reads, leaving out the others,
@@ -508,12 +494,11 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		}
 		s := notStrict
 		if !v.Array && (kids[0].null() || len(v.List) == 1 && kids[1].null()) {
-			// Postgres compares the left operand with the list by =, each
-			// of which a NULL reduces to NULL, and an IN list of one item
-			// is that comparison alone. A NULL in a longer list reduces
-			// nothing, as Postgres compares the constants of the list in
-			// one array, and nor does any NULL under = ANY (ARRAY[...]),
-			// which is that array comparison as written.
+			// Postgres compares the left operand with such a list by =,
+			// each of which a NULL reduces to NULL, and a list of one item
+			// is that comparison alone. It folds the array comparison only
+			// when every operand is a constant, so a NULL reduces nothing
+			// there.
 			s = strict
 		}
 		return f.apply(v, kids, plainOperands(kids...), s)
@@ -604,7 +589,7 @@ func (f *folder) apply(e sqlir.Expr, kids []folded, c constness, s strictness) (
 				if s == maybeStrict {
 					r.c = maybe
 				}
-				if constant {
+				if constant || harmless(e) {
 					r.e = e
 				}
 				return r, nil
@@ -711,6 +696,21 @@ func pure(e sqlir.Expr) bool {
 	return true
 }
 
+// harmless reports that evaluating e, which a NULL operand reduces to
+// NULL, gives NULL and runs nothing Postgres does not. It may read a
+// column or a parameter, which with no row is NULL, beside the NULL.
+func harmless(e sqlir.Expr) bool {
+	if len(sqlir.Selects(e)) > 0 || len(sqlir.WindowFuncs(e)) > 0 {
+		return false
+	}
+	for _, c := range sqlir.FuncCalls(e) {
+		if isAggregateCall(c) || effectFuncs[c.Name] || sessionFuncs[c.Name] {
+			return false
+		}
+	}
+	return true
+}
+
 func sameKind(a, b folded) bool {
 	if derefValue(a.val) == nil || derefValue(b.val) == nil {
 		return true
@@ -772,6 +772,15 @@ func (f *folder) call(v *sqlir.FuncCall) (folded, error) {
 			}
 		}
 		return folded{}, nil
+	}
+	if v.Name == "nullif" && len(kids) == 2 && kids[0].null() && (kids[1].c == varies || kids[1].e == nil) {
+		// Postgres reduces a NULLIF of a NULL to NULL whatever the other
+		// argument is.
+		r := folded{c: kids[0].c, hasVal: true}
+		if harmless(v) {
+			r.e = v
+		}
+		return r, nil
 	}
 	c, s := plainOperands(kids...), strict
 	if nonStrictFuncs[v.Name] {

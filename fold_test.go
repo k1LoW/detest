@@ -69,6 +69,10 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT 1 FROM (SELECT 1 / 0 AS unused FROM t WHERE false) q`,
 		`WITH c AS (SELECT 1 / 0 AS v FROM t WHERE false) SELECT 1 FROM c, c c2`,
 		`WITH a AS (SELECT * FROM fv), fv AS (SELECT 1 AS v) SELECT v FROM a`,
+		// Nor plans a table in FROM a constant false condition of the
+		// query around it empties, unless it pulls it up into that query.
+		`SELECT 1 FROM (SELECT n FROM t WHERE 1 / 0 = 1 LIMIT 1) q WHERE false`,
+		`SELECT 1 FROM (SELECT n FROM t WHERE 1 / 0 = 1) q WHERE false`,
 		// A row comparison of constants, which detest cannot tell Postgres
 		// folds.
 		`SELECT CASE WHEN (NOT 'false', 1) = (true, 1) THEN 0 ELSE 1 / 0 END WHERE false`,

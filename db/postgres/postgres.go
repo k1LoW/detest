@@ -2454,7 +2454,15 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			}
 			list = []sqlir.Expr{r}
 		}
-		return &sqlir.InExpr{X: l, List: list, Not: op == "<>"}, nil
+		// Postgres's parser compares the items that read no column as one
+		// array when there are two or more (transformAExprIn).
+		array := len(list) >= 2
+		for _, item := range list {
+			if len(sqlir.ColumnRefs(item)) > 0 || len(sqlir.Selects(item)) > 0 {
+				array = false
+			}
+		}
+		return &sqlir.InExpr{X: l, List: list, Not: op == "<>", Array: array}, nil
 	case pg.A_Expr_Kind_AEXPR_OP_ANY, pg.A_Expr_Kind_AEXPR_OP_ALL:
 		// Postgres stores IN (...) as = ANY (ARRAY[...]), so pg_dump writes a
 		// CHECK (status IN ('a', 'b')) back in this form. Only the two forms

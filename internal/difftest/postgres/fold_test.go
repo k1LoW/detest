@@ -99,6 +99,9 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN n NOT IN (NULL) THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN s = ANY (ARRAY[NULL]) THEN 1 / 0 ELSE 0 END FROM ts WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN s IN (NULL) THEN 1 / 0 ELSE 0 END FROM ts WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN NULL::int IN (1, 2, n) THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN nullif(NULL::int, n) IS NULL THEN 0 ELSE 1 / 0 END FROM t WHERE false`),
+			difftest.Q(0, `SELECT CASE WHEN nullif(n, NULL::int) IS NULL THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN abs(NULL::int + n) > 0 THEN 1 / 0 ELSE 0 END FROM t`),
 			difftest.Q(0, `SELECT CASE WHEN greatest(NULL, n) > 0 THEN 1 / 0 ELSE 0 END FROM t WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN coalesce(1, n) / 2 = 0 THEN 1 / 0 ELSE 1 END FROM tn WHERE false`),
@@ -135,6 +138,19 @@ var foldCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN (CASE WHEN NOT 'false' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`),
 			difftest.Q(0, `SELECT coalesce('true' AND NULL, 1 / 0 = 1) WHERE false`),
 			difftest.Q(0, `SELECT CASE WHEN (CASE WHEN 'true' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`),
+		},
+	},
+	{
+		Name: "an IN list of constants, which Postgres compares as one array as = ANY (ARRAY[...]) does",
+		Schema: []string{
+			`CREATE TABLE ti (n int)`,
+			`CREATE UNIQUE INDEX ux ON ti ((n IN (1, 2)))`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO ti VALUES (1) ON CONFLICT ((n = ANY (ARRAY[1, 2]))) DO NOTHING`),
+			difftest.S(0, `INSERT INTO ti VALUES (2) ON CONFLICT ((n IN (1, 2))) DO NOTHING`),
+			difftest.Q(0, `SELECT count(*) FROM ti`),
 		},
 	},
 	{
