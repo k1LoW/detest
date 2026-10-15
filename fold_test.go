@@ -77,6 +77,7 @@ func TestFoldConstantsBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN (CASE WHEN NOT 'false' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`,
 		`SELECT coalesce('true' AND NULL, 1 / 0 = 1) WHERE false`,
 		`SELECT CASE WHEN (NOT 'false', 1) = (true, 1) THEN 0 ELSE 1 / 0 END WHERE false`,
+		`SELECT CASE WHEN (CASE WHEN 'true' THEN true ELSE false END) THEN 0 ELSE 1 / 0 END WHERE false`,
 		// A function detest does not list may or may not be strict.
 		`SELECT CASE WHEN md5(NULL || n) IS NULL THEN 1 / 0 END FROM t`,
 	} {
@@ -123,6 +124,7 @@ func TestFoldConstantsDefaults(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE d (id int, n int DEFAULT (1 / 0))`)
 	mustExec(t, db, `CREATE TABLE src (id int)`)
 	mustExec(t, db, `CREATE TABLE dn (id int, n numeric DEFAULT (1 / (extract(year FROM interval '1 year') / 2)))`)
+	mustExec(t, db, `CREATE TABLE db (id int, n int DEFAULT (CASE WHEN NOT 'false' THEN 1 / 0 ELSE 0 END))`)
 	for _, q := range []string{
 		`UPDATE d SET n = DEFAULT WHERE false`,
 		`INSERT INTO d (id) SELECT 1 WHERE false`,
@@ -130,6 +132,7 @@ func TestFoldConstantsDefaults(t *testing.T) {
 		`INSERT INTO d SELECT * FROM src WHERE false`,
 		`INSERT INTO d SELECT 1 WHERE false UNION ALL SELECT 2 WHERE false`,
 		`INSERT INTO dn (id) SELECT 1 WHERE false`,
+		`INSERT INTO db (id) SELECT 1 WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

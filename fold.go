@@ -118,9 +118,13 @@ func (f *folder) columnDefault(def *tableDef, col string) error {
 	if !ok || def.generated[col] != nil {
 		return nil
 	}
+	f.doubted = false
 	_, err := f.expr(d)
-	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok || err == nil {
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok && !f.doubted || err == nil {
 		return nil
+	}
+	if f.doubted {
+		return err
 	}
 	return f.x.unsupported(foldDoubt)
 }
@@ -167,6 +171,14 @@ type folder struct {
 	// doubt counts the parts being folded that Postgres may drop before it
 	// folds them, by what detest does not model.
 	doubt int
+	// doubted is set by a refusal for what detest does not model, which a
+	// default keeps, unlike one for an expression detest cannot evaluate.
+	doubted bool
+}
+
+func (f *folder) doubtful() error {
+	f.doubted = true
+	return f.x.unsupported(foldDoubt)
 }
 
 // constness is whether Postgres folds an expression when it plans the
@@ -450,6 +462,11 @@ func (f *folder) expr(e sqlir.Expr) (folded, error) {
 		if err != nil {
 			return folded{}, err
 		}
+		if _, ok := v.X.(*sqlir.RowExpr); ok {
+			// Postgres does not fold a NULL test of a row, whatever its
+			// items are.
+			return folded{}, nil
+		}
 		if k := kids[0]; k.c != varies && k.e == nil && k.hasVal {
 			// An operand detest cannot evaluate, whose value it knows to
 			// be NULL or a boolean.
@@ -599,7 +616,7 @@ func (f *folder) apply(e sqlir.Expr, kids []folded, c constness, s strictness) (
 		if k.e == nil {
 			// An operand is a constant detest cannot evaluate, so whether
 			// this one fails folding is not known.
-			return folded{}, f.x.unsupported(foldDoubt)
+			return folded{}, f.doubtful()
 		}
 	}
 	return f.eval(e, c)
@@ -618,7 +635,7 @@ func (f *folder) eval(e sqlir.Expr, c constness) (folded, error) {
 			return folded{}, f.x.unsupportedExpr(err, "of constants")
 		}
 		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); !ok && (c == maybe || f.doubt > 0) {
-			return folded{}, f.x.unsupported(foldDoubt)
+			return folded{}, f.doubtful()
 		}
 		return folded{}, err
 	}
@@ -794,6 +811,16 @@ func condOf(r folded, take bool) cond {
 	return out
 }
 
+// boolean is r read as a boolean. A constant whose value is not one, a
+// string literal Postgres reads as a boolean when it parses the statement
+// and the evaluators read as NULL (#118), has a value detest does not know.
+func boolean(r folded) folded {
+	if r.c != varies && r.hasVal && !boolOrNull(r) {
+		return folded{c: r.c}
+	}
+	return r
+}
+
 // boolOrNull reports a constant whose value detest knows to be a boolean
 // or NULL.
 func boolOrNull(r folded) bool {
@@ -899,6 +926,9 @@ func (f *folder) caseExpr(v *sqlir.CaseExpr) (folded, error) {
 		when, err := f.expr(w.When)
 		if err != nil {
 			return folded{}, err
+		}
+		if v.Arg == nil {
+			when = boolean(when)
 		}
 		test := when
 		if v.Arg != nil {
