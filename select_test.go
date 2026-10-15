@@ -1761,6 +1761,7 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		`SELECT v FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
 		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
 		`SELECT avg(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s`,
+		`SELECT floor(s.v) FROM (SELECT f AS v FROM t UNION ALL SELECT 0::numeric WHERE false) s UNION ALL SELECT 0::numeric WHERE false`,
 	} {
 		var v any
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != float64(5000000) {
@@ -1776,6 +1777,18 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		if err := db.QueryRow(q).Scan(&v); err != nil || v != "2000000" {
 			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
 		}
+	}
+	// A statement of a script does not read an earlier one's types.
+	if _, err := db.Exec(`SELECT 1::numeric; SELECT 2::numeric`); err != nil {
+		t.Fatal(err)
+	}
+	var sv any
+	if err := db.QueryRow(`SELECT 2000000::numeric; SELECT * FROM (SELECT f FROM t) s UNION ALL SELECT 0::numeric WHERE false`).Scan(&sv); err != nil || sv != float64(5000000) {
+		t.Errorf("a script's last statement: got %#v, %v, want a float64", sv, err)
+	}
+	// A NULL or an untyped literal takes the other query's type.
+	if err := db.QueryRow(`SELECT 2000000::numeric UNION ALL SELECT NULL WHERE false`).Scan(&sv); err != nil || sv != "2000000" {
+		t.Errorf("beside a NULL: got %#v, %v, want the text 2000000", sv, err)
 	}
 	// An untyped parameter takes the form the other argument picks.
 	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {

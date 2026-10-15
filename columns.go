@@ -121,6 +121,9 @@ type columnChecker struct {
 }
 
 func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
+	// A script runs its statements on one executor, so the types of an
+	// earlier statement's output must not reach a later one's.
+	x.selectTypes, x.selectNamed, x.returningTypes, x.returningStar = nil, nil, nil, nil
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
@@ -1051,16 +1054,38 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 }
 
 // leavesTyped reports whether every query of the set operation sel has its
-// output types by position, none of them a column of unresolved type.
+// output types by position, apart from untyped literals, parameters and
+// NULLs, which take the other queries' type.
 func (c *columnChecker) leavesTyped(sel *sqlir.SelectStmt) bool {
 	if sel.SetOp != "" && sel.Larg != nil && sel.Rarg != nil {
 		return c.leavesTyped(sel.Larg) && c.leavesTyped(sel.Rarg)
 	}
+	inherits := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) || untypedBranch(e) }
 	if len(sel.Values) > 0 {
+		for i, typ := range c.setOpTypes(sel) {
+			if typ == "" && !slices.ContainsFunc(sel.Values, func(row []sqlir.Expr) bool { return i < len(row) && !inherits(row[i]) }) {
+				continue
+			}
+			if typ == "" {
+				return false
+			}
+		}
 		return true
 	}
-	_, ok := c.outTypes[sel]
-	return ok && len(c.outUnresolved[sel]) == 0
+	types, ok := c.outTypes[sel]
+	if !ok || len(c.outUnresolved[sel]) > 0 {
+		return false
+	}
+	star := slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return t.Star })
+	for i, typ := range types {
+		// Only an untyped literal, parameter or NULL takes the other
+		// query's type; an expression the check could not type has one
+		// of its own.
+		if typ == "" && (star || i >= len(sel.Targets) || !inherits(sel.Targets[i].Expr)) {
+			return false
+		}
+	}
+	return true
 }
 
 // starColumns are the types of the columns the * t of sel gives, in order,
