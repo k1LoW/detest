@@ -174,3 +174,19 @@ func TestDerivedColumnTypes(t *testing.T) {
 		t.Errorf("a parameter's text beside an integer column: got %v", got)
 	}
 }
+
+// NULLIF of a date and a timestamp is a date, which date_trunc reads at
+// midnight in the session's TimeZone.
+func TestDerivedNullifDate(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.TimeZone("Asia/Tokyo")))
+	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, d date)`)
+	mustExec(t, db, `INSERT INTO d VALUES (1, '2025-01-02')`)
+	var at time.Time
+	if err := db.QueryRow(`SELECT date_trunc('day', nullif(s.d, NULL::timestamp)) FROM (SELECT * FROM d) s`).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2025, 1, 1, 15, 0, 0, 0, time.UTC); !at.Equal(want) {
+		t.Errorf("got %v, want %v", at, want)
+	}
+}

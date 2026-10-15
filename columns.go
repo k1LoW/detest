@@ -1619,7 +1619,13 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 		typ = commonType(exprs, sc.columnType, subquery)
 	}
 	c.timeParams(typ, exprs...)
-	c.x.noteType(e, typ)
+	if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "nullif" {
+		// NULLIF returns its first argument, of its own type, which a
+		// reader of the result such as date_trunc goes by.
+		c.x.noteType(e, expressionTypeIn(e, sc.columnType, subquery))
+	} else {
+		c.x.noteType(e, typ)
+	}
 	if err := c.x.noteBranchType(e, resolvedType(typ, exprs), exprs); err != nil {
 		return err
 	}
