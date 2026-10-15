@@ -1941,6 +1941,51 @@ func (sc *colScope) lookupItem(alias string) (colSet, bool) {
 	return nil, false
 }
 
+// outerAggregate reports an aggregate whose arguments read columns, none
+// of them surely of sc's own query, which Postgres may make an aggregate of
+// an outer query (agglevelsup).
+func outerAggregate(f *sqlir.FuncCall, sc *colScope) bool {
+	refs := sqlir.BlockColumnRefs(f)
+	if len(refs) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(refs, func(r *sqlir.ColumnRef) bool { return ownColumn(r, sc) })
+}
+
+// ownColumn reports a column that resolves in sc's own query, or in no
+// query, which resolve reports. An unqualified column an item of unknown
+// columns in sc may have is sc's only where no outer query may have it
+// too, as the item may lack it and Postgres would then take the outer one.
+func ownColumn(r *sqlir.ColumnRef, sc *colScope) bool {
+	if r.Table != "" {
+		for s := sc; s != nil; s = s.outer {
+			if _, ok := s.items[r.Table]; ok || r.Table == "excluded" && s.hasExcluded {
+				return s == sc
+			}
+		}
+		return true
+	}
+	may := func(s *colScope) (has, unknown bool) {
+		for _, cols := range s.items {
+			if cols == nil {
+				unknown = true
+			} else if h, _ := cols.has(r.Column); h {
+				has = true
+			}
+		}
+		return has, unknown
+	}
+	if has, _ := may(sc); has {
+		return true
+	}
+	for s := sc.outer; s != nil; s = s.outer {
+		if h, u := may(s); h || u {
+			return false
+		}
+	}
+	return true
+}
+
 // resolve reports a column reference no FROM item in scope has.
 func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 	if r.Table != "" {
@@ -2003,6 +2048,9 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 // with their own scopes.
 func (c *columnChecker) exprs(n any, sc *colScope) error {
 	var err error
+	// windowed are the functions windows wrap, which Postgres computes in
+	// the window's own query whatever columns they read.
+	windowed := map[*sqlir.FuncCall]bool{}
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		if err != nil {
@@ -2111,7 +2159,25 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				}
+			case *sqlir.WindowFunc:
+				windowed[e.Func] = true
 			case *sqlir.FuncCall:
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && len(sqlir.Selects(e.Args)) > 0 {
+					// A subquery's columns may be of any query out from it,
+					// and the aggregate's level with them, which the check
+					// below does not follow, as rowSequenceCalls refuses
+					// the form outside a subquery.
+					err = c.x.unsupported("a subquery in an aggregate's argument")
+					return
+				}
+				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && outerAggregate(e, sc) {
+					// Postgres computes an aggregate whose arguments read
+					// only outer columns in the outer query, which then
+					// aggregates, while the evaluators compute it over the
+					// subquery's rows.
+					err = c.x.unsupported("an aggregate in a subquery of no column surely the subquery's, which Postgres may compute in the outer query")
+					return
+				}
 				if what := textArgumentMismatch(e, sc.columnType); what != "" {
 					err = c.x.unsupported(what)
 					return
