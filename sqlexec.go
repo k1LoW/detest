@@ -282,6 +282,13 @@ func (s *parsedStatement) exec(tx *Tx, args []driver.Value) (*sqlResult, error) 
 	if err := tx.check(); err != nil {
 		return nil, err
 	}
+	// Postgres resolves every function and operator when it parses the
+	// statement, so one detest does not know fails before any expression
+	// runs, wherever it stands: in a COALESCE argument or a CASE branch no
+	// row reaches, or over no rows at all.
+	if err := s.static(tx.db.kind.InnoDB()); err != nil {
+		return nil, err
+	}
 	x := &sqlExec{tx: tx, query: s.query, args: args, ctes: map[string][]Row{}, start: time.Now()}
 	if !tx.block && !tx.start.IsZero() {
 		x.start = tx.start // the statement is its own transaction, begun at the same instant

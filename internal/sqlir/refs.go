@@ -67,9 +67,6 @@ func BlockFuncCalls(e Expr) []*FuncCall {
 // or an expression, subqueries included.
 func ArrayCmps(n any) []*ArrayCmp { return find[*ArrayCmp](n) }
 
-// WindowFuncs returns the window functions under n, subqueries included.
-func WindowFuncs(n any) []*WindowFunc { return find[*WindowFunc](n) }
-
 // Params returns the parameter references under n, a statement or an
 // expression, subqueries included.
 func Params(n any) []*Param { return find[*Param](n) }

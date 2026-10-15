@@ -573,17 +573,11 @@ func TestSearchPathSetBySQL(t *testing.T) {
 			t.Errorf("%s: %d rows affected, want 1", tc.setConfig, n)
 		}
 		// With a clause, the statement is an ordinary SELECT of a function
-		// detest does not run: with WHERE false the server never evaluates
-		// it and returns no rows, and so does detest, while CheckSQL
-		// refuses the call wherever it stands.
-		rows, err = db.Query(`SELECT set_config('search_path', 'tenant_1', true) WHERE false`)
-		if err != nil {
-			t.Errorf("set_config WHERE false: %v", err)
-		} else {
-			if rows.Next() {
-				t.Error("set_config WHERE false: got a row, want none")
-			}
-			rows.Close()
+		// detest does not run, refused wherever it stands, as CheckSQL
+		// refuses it, even with WHERE false, where the server never
+		// evaluates it.
+		if _, err := db.Query(`SELECT set_config('search_path', 'tenant_1', true) WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("set_config WHERE false: got %v, want ErrUnsupportedSQL", err)
 		}
 		if err := CheckSQL(tc.srv, `SELECT set_config('search_path', 'public', true) WHERE false`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL set_config WHERE false: got %v, want ErrUnsupportedSQL", err)

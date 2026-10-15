@@ -333,27 +333,40 @@ func (x *sqlExec) aggregateEffects(sel *sqlir.SelectStmt) error {
 // a view into the statement before it plans it. seen guards against a view
 // checked twice.
 func (x *sqlExec) viewSequenceChecks(n any, seen map[string]bool) error {
+	var refs []*sqlir.TableRef
+	// The FROM of an UPDATE and the USING of a DELETE name tables outside
+	// any query.
+	switch st := n.(type) {
+	case *sqlir.UpdateStmt:
+		for i := range st.From {
+			refs = append(refs, &st.From[i])
+		}
+	case *sqlir.DeleteStmt:
+		for i := range st.Using {
+			refs = append(refs, &st.Using[i])
+		}
+	}
 	for _, q := range sqlir.Selects(n) {
-		refs := []*sqlir.TableRef{q.From}
+		refs = append(refs, q.From)
 		for i := range q.Joins {
 			refs = append(refs, &q.Joins[i].Table)
 		}
-		for _, t := range refs {
-			if t == nil || t.Name == "" {
-				continue
-			}
-			name := x.tx.db.resolve(t.Name)
-			v := x.tx.db.views[name]
-			if v == nil || v.View == nil || seen[name] {
-				continue
-			}
-			seen[name] = true
-			if err := x.topSequenceCalls(v.View); err != nil {
-				return err
-			}
-			if err := x.viewSequenceChecks(v.View, seen); err != nil {
-				return err
-			}
+	}
+	for _, t := range refs {
+		if t == nil || t.Name == "" {
+			continue
+		}
+		name := x.tx.db.resolve(t.Name)
+		v := x.tx.db.views[name]
+		if v == nil || v.View == nil || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if err := x.topSequenceCalls(v.View); err != nil {
+			return err
+		}
+		if err := x.viewSequenceChecks(v.View, seen); err != nil {
+			return err
 		}
 	}
 	return nil

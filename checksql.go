@@ -92,12 +92,14 @@ var knownBinaryOps = map[string]bool{
 }
 
 // checkStatic refuses the functions and operators in a statement that the
-// executor cannot evaluate, wherever they appear. A run reaches only the
-// expressions it evaluates, so a statement over a table CheckSQL has no rows
-// for would pass with an unknown function in its WHERE and fail in the
-// exploration. The schema statements are left alone: an expression in a
-// default or a CHECK loads unconverted and is refused by the write that reads
-// it, as README's Approximate rules say.
+// executor cannot evaluate, wherever they appear. The evaluators reach only
+// the expressions they evaluate, so a statement over a table with no rows, a
+// CASE branch or a COALESCE argument no row reaches would otherwise pass with
+// an unknown function or a call of another signature, which Postgres fails
+// when it parses the statement. CheckSQL and every run of a statement check
+// it. The schema statements are left alone: an expression in a default or a
+// CHECK loads unconverted and is refused by the write that reads it, as
+// README's Approximate rules say.
 func checkStatic(st sqlir.Statement, query string, innodb bool) error {
 	c := &staticCheck{query: query, innodb: innodb}
 	return c.statement(st)
