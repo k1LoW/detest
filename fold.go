@@ -593,12 +593,18 @@ func (f *folder) apply(e sqlir.Expr, kids []folded, c constness, s strictness) (
 			constant = false
 		}
 	}
-	if !constant && s != notStrict {
+	if s != notStrict {
+		// Postgres returns NULL without calling a strict operator or
+		// function, so nothing about the other operands, nor what detest
+		// can evaluate, matters.
 		for _, k := range kids {
 			if k.null() {
 				r := folded{c: k.c, hasVal: true}
 				if s == maybeStrict {
 					r.c = maybe
+				}
+				if constant {
+					r.e = e
 				}
 				return r, nil
 			}
