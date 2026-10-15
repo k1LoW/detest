@@ -193,6 +193,14 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		`SELECT x = 1 FROM v WHERE false`,
 		`SELECT y + 1 FROM v WHERE false`,
 		`SELECT n FROM t WHERE n = (SELECT max('1'))`,
+		// These take anyelement, whose type Postgres cannot determine
+		// from an untyped value (42804).
+		`SELECT first_value('1') OVER ()`,
+		`SELECT last_value(NULL) OVER ()`,
+		`SELECT nth_value('1', 1) OVER ()`,
+		`SELECT lag('1') OVER ()`,
+		`SELECT lead(NULL, 1) OVER ()`,
+		`SELECT x.v || 'a' FROM (SELECT first_value('1') OVER () AS v) x WHERE false`,
 		// Text has no assignment cast to an integer (42804).
 		`INSERT INTO t (id, n) SELECT 1, x.v FROM (SELECT '1' AS v) x`,
 		`INSERT INTO t (id, n) SELECT 1, min(NULL) OVER ()`,

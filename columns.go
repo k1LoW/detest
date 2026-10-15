@@ -1184,6 +1184,26 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 	c.outNamed[sel] = named
 }
 
+// unknownPolymorphic names a window function that takes anyelement given a
+// string literal, a parameter or a NULL alone for it, of which Postgres
+// cannot determine the type (42804), and "" otherwise. LAG and LEAD with a
+// default take anycompatible, which resolves such values to text.
+func unknownPolymorphic(f *sqlir.FuncCall) string {
+	switch f.Name {
+	case "first_value", "last_value", "nth_value":
+	case "lag", "lead":
+		if len(f.Args) > 2 {
+			return ""
+		}
+	default:
+		return ""
+	}
+	if len(f.Args) == 0 || !untypedExpr(f.Args[0]) && !isNullConst(f.Args[0]) {
+		return ""
+	}
+	return f.Name + " of a string literal, a parameter or NULL, whose type Postgres cannot determine"
+}
+
 // untypedLeaves are the parameters of e when e is made of string literals,
 // parameters and NULLs alone, through the CASE branches and the arguments
 // of the functions Postgres resolves to one type, which it resolves to
@@ -2615,6 +2635,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
 				if what := intervalBranchMismatch(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
+				if what := unknownPolymorphic(e); what != "" && !c.x.tx.db.kind.InnoDB() {
 					err = c.x.unsupported(what)
 					return
 				}

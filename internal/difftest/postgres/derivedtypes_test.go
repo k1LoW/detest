@@ -118,6 +118,7 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT x.v::int + 1 FROM (SELECT '1' AS v) x`),
 			difftest.Q(0, `SELECT upper((SELECT 'a')), ((SELECT '1') = '1')::text, (SELECT max('1')) || 'x'`),
 			difftest.Q(0, `SELECT x.v || 'd' FROM t, LATERAL (SELECT '1' AS v) x`),
+			difftest.Q(0, `SELECT x.a || 'e', x.b || 'f', x.c || 'g' FROM (SELECT first_value('1'::text) OVER () AS a, lead('1', 1, '2') OVER () AS b, first_value(coalesce('1', NULL)) OVER () AS c) x`),
 		},
 	},
 }
