@@ -68,6 +68,7 @@ var viewBindCases = []difftest.Case{
 			difftest.Q(0, `SELECT * FROM dv`),
 			difftest.Q(0, `SELECT * FROM xv`),
 			difftest.Q(0, `SELECT a, b, n, id FROM (SELECT * FROM t JOIN u ON true) d(a, b)`),
+			difftest.Q(0, `SELECT * FROM (SELECT 0 AS z, t.*, 3 AS x FROM (SELECT 1 AS x) t) d(a)`),
 			difftest.Q(0, `SELECT id FROM pv`),
 			difftest.Q(0, `SELECT k FROM sv`),
 		},

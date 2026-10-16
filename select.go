@@ -2013,11 +2013,14 @@ func renamedCols(cols, names []string) []string {
 	// A column the list leaves unnamed keeps the name its query gives it,
 	// which outputKeys suffixed only to tell it from a column the list
 	// has renamed away.
+	for _, c := range out[min(len(out), len(names)):] {
+		used[c] = true
+	}
 	for i := len(names); i < len(out); i++ {
 		if j := strings.IndexByte(out[i], 0); j > 0 && !used[out[i][:j]] {
 			out[i] = out[i][:j]
+			used[out[i]] = true
 		}
-		used[out[i]] = true
 	}
 	return out
 }
