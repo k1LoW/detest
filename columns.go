@@ -1811,15 +1811,14 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 // renaming, and a set operation's by the types its queries agree on.
 func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[string]string {
 	if sel.SetOp != "" {
-		types := c.agreedTypes(sel)
-		if types == nil {
-			// pairType leaves a VALUES query unresolved, but a column of
-			// rows is a record whatever the other queries give.
-			types = make([]string, len(outputNames(sel)))
+		// pairType leaves a VALUES query or a * unresolved, but a column of
+		// rows is a record whatever the other queries give.
+		types, rows := c.agreedTypes(sel), c.setOpTypes(sel)
+		if len(types) < len(rows) {
+			types = append(slices.Clone(types), make([]string, len(rows)-len(types))...)
 		}
-		rows := c.setOpTypes(sel)
-		for i := range types {
-			if types[i] == "" && i < len(rows) && rows[i] == "record" {
+		for i, typ := range rows {
+			if typ == "record" && types[i] == "" {
 				types[i] = "record"
 			}
 		}
