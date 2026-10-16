@@ -795,6 +795,10 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT lower($1) FROM t WHERE n = $1`, []any{int64(1)}},
 		{`SELECT power($1, NULL), $1 = s FROM t WHERE false`, []any{"1"}},
 		{`SELECT power($1, abs(NULL)), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT power($1, abs(NULL)), round($1, 1), $1::numeric WHERE false`, []any{int64(1)}},
+		// Postgres takes power's numeric form only where no use it meets
+		// earlier typed the parameter, so the result's type is unknown.
+		{`SELECT floor(power($1, 1::numeric)), $1::numeric`, []any{int64(2000000)}},
 		{`SELECT round($1, b), $1::numeric FROM t WHERE false`, []any{float64(2.46)}},
 		{`SELECT round(1.5, b) FROM t`, nil},
 		{`SELECT round(s, $1), $1::int FROM t WHERE false`, []any{int64(1)}},
@@ -848,7 +852,7 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT left($1, $2), length($1) FROM t`, []any{"abc", int64(2)}},
 		{`SELECT pg_try_advisory_xact_lock($1)`, []any{int64(1)}},
 		{`SELECT setval('seq', $1, $2)`, []any{int64(10), true}},
-		{`SELECT floor($1), power($1, 1::numeric)`, []any{int64(2)}},
+		{`SELECT power($1, 1::numeric)`, []any{int64(2)}},
 	} {
 		if _, err := db.Query(c.q, c.args...); err != nil {
 			t.Errorf("%s: %v", c.q, err)

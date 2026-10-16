@@ -3737,9 +3737,13 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 			// Postgres meets earlier has typed a float8, and would take the
 			// float8 one after floor($1), an order detest does not follow,
 			// and beside an argument the typer leaves untyped it may be
-			// either, so the type is not recorded as a number type for the
-			// order checks. Its input is read as numeric, which takes the
-			// text float8 does but at the edges of the range.
+			// either. A parameter used again is refused, as the result's
+			// type, numeric or float8, would then be a guess. One used
+			// here alone is read as numeric, which takes the text float8
+			// does but at the edges of the range.
+			if c.paramCount[p.Index] > 1 {
+				return c.x.unsupported(fmt.Sprintf("parameter $%d of power, whose form detest cannot tell, used again", p.Index+1))
+			}
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.typedParam(p)
 			c.readParam(p)

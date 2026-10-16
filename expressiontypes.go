@@ -592,6 +592,9 @@ func functionParamType(f *sqlir.FuncCall, i int, t typer) string {
 		if untypedExpr(other) || isNullConst(other) {
 			return "float8"
 		}
+		// Postgres resolves an argument of literals and NULLs alone, such
+		// as abs(NULL), before it picks power's form.
+		t.untypedText = true
 		if typ := t.reduce(t.of(other)); numberRank[typ] > 0 && typ != "numeric" && typ != "decimal" {
 			return "float8"
 		}
