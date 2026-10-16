@@ -38,6 +38,9 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
+	if _, err := db.Exec(`SELECT n FROM t UNION SELECT n FROM t ORDER BY t.n`); !errors.Is(err, ErrUndefinedTable) {
+		t.Errorf("qualified name: got %v, want ErrUndefinedTable", err)
+	}
 	for _, q := range []string{
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY n`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY (n)`,

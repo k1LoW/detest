@@ -2884,7 +2884,7 @@ func misplacedCall(n any) string {
 // own type and typmod is the one expression Postgres takes as the column, and
 // it is refused with the rest rather than told apart by its typmod. A
 // qualified name fails in Postgres too (42P01), so it is left to the name
-// resolution, which fails it with another code.
+// resolution, which fails it with the same code.
 func setOpOrderExpr(n any) string {
 	for _, sel := range sqlir.Selects(n) {
 		if sel.SetOp == "" {
