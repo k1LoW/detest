@@ -1,5 +1,29 @@
 # Changelog
 
+## [v0.6.2](https://github.com/k1LoW/detest/compare/v0.6.1...v0.6.2) - 2026-10-16
+
+### Fix bug 🐛
+- fix: refuse an aggregate or a window function in another's arguments before any row by @k1LoW in https://github.com/k1LoW/detest/pull/145
+- fix: refuse a text expression assigned to a non-text column in UPDATE SET and INSERT VALUES by @k1LoW in https://github.com/k1LoW/detest/pull/143
+- fix: refuse a value of a non-boolean type where Postgres wants a boolean by @k1LoW in https://github.com/k1LoW/detest/pull/142
+- fix: refuse sum and avg of an argument type Postgres has no form of by @k1LoW in https://github.com/k1LoW/detest/pull/144
+- fix: type the fields of a row comparison and of IN (SELECT ...) before any row by @k1LoW in https://github.com/k1LoW/detest/pull/147
+- fix: refuse a number compared with a CASE, COALESCE or aggregate of string literals by @k1LoW in https://github.com/k1LoW/detest/pull/153
+- fix: fail a relation that does not exist where no row reaches it by @k1LoW in https://github.com/k1LoW/detest/pull/152
+- fix: refuse an aggregate or a window function in a clause that allows none before any row by @k1LoW in https://github.com/k1LoW/detest/pull/160
+- fix: type a subquery whose select list is a * over a derived table, a CTE or a view by @k1LoW in https://github.com/k1LoW/detest/pull/158
+- fix: type a query output that is a row as a record to the query around it by @k1LoW in https://github.com/k1LoW/detest/pull/159
+- fix: compute only the rows a query pulls, and refuse FROM items with effects read in part by @k1LoW in https://github.com/k1LoW/detest/pull/137
+- fix: refuse a non-string parameter in a column of VALUES Postgres resolves to text by @k1LoW in https://github.com/k1LoW/detest/pull/167
+- fix: refuse LIKE and ILIKE over an operand Postgres has no operator for by @k1LoW in https://github.com/k1LoW/detest/pull/168
+- fix: refuse a WINDOW definition that no OVER uses, and resolve one that copies another by @k1LoW in https://github.com/k1LoW/detest/pull/169
+- fix: refuse an ORDER BY key of a set operation other than an output column by @k1LoW in https://github.com/k1LoW/detest/pull/170
+- fix: fail a MySQL table that does not exist where no row reaches it by @k1LoW in https://github.com/k1LoW/detest/pull/172
+- fix: type a set operation whose first query is a * over a derived table, a CTE or a view by @k1LoW in https://github.com/k1LoW/detest/pull/171
+- fix: write a row read back or cast to text as Postgres's record output by @k1LoW in https://github.com/k1LoW/detest/pull/175
+### Other Changes
+- fix: refuse a row of columns in arithmetic, unary minus and the typed-argument functions by @k1LoW in https://github.com/k1LoW/detest/pull/165
+
 ## [v0.6.1](https://github.com/k1LoW/detest/compare/v0.6.0...v0.6.1) - 2026-10-15
 
 ### Fix bug 🐛
