@@ -44,8 +44,8 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(maps.Clone(x.ctes))
 	}
 	var locking lockPlan
-	if len(sel.GroupBy) == 0 && sel.Having == nil && orderOnlyAggregate(sel) && !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
-		return nil, nil, x.unsupported("an aggregate only in ORDER BY")
+	if clauseOnlyAggregate(sel) {
+		return nil, nil, x.unsupported("an aggregate only in ORDER BY, DISTINCT ON or a window")
 	}
 	if sel.Lock != nil && (sel.SetOp != "" || sel.Values != nil) {
 		return nil, nil, x.unsupported("FOR UPDATE on a set operation or VALUES")
@@ -336,8 +336,8 @@ func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
 			return err
 		}
 	}
-	if len(q.GroupBy) == 0 && q.Having == nil && orderOnlyAggregate(q) && !slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
-		return x.unsupported("an aggregate only in ORDER BY") // as evalSelect refuses it
+	if clauseOnlyAggregate(q) {
+		return x.unsupported("an aggregate only in ORDER BY, DISTINCT ON or a window") // as evalSelect refuses it
 	}
 	if q.Lock != nil {
 		// planLocking resolves the tables of FOR UPDATE OF, which Postgres
@@ -638,23 +638,35 @@ func (x *sqlExec) where(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]jrow,
 }
 
 func isAggregate(sel *sqlir.SelectStmt) bool {
-	if len(sel.GroupBy) > 0 || sel.Having != nil {
-		return true
-	}
-	for _, t := range sel.Targets {
-		if hasAggregate(t.Expr) {
-			return true
-		}
-	}
-	return orderOnlyAggregate(sel)
+	return len(sel.GroupBy) > 0 || sel.Having != nil || blockAggregate(sel)
 }
 
-// orderOnlyAggregate reports an aggregate in ORDER BY of a query that has
-// none elsewhere. Postgres makes such a query one group and refuses any
-// column the select list reads outside an aggregate, a check detest does
-// not make, so evalSelect refuses the query instead.
-func orderOnlyAggregate(sel *sqlir.SelectStmt) bool {
-	return slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool { return hasAggregate(k.Expr) })
+// blockAggregate reports an aggregate of the query block anywhere Postgres
+// lets one stand, which makes the block one group without GROUP BY: in the
+// select list, ORDER BY or DISTINCT ON, a window's arguments, PARTITION BY
+// and ORDER BY included.
+func blockAggregate(sel *sqlir.SelectStmt) bool {
+	exprs := make([]sqlir.Expr, 0, len(sel.Targets)+len(sel.OrderBy)+len(sel.DistinctOn))
+	for _, t := range sel.Targets {
+		exprs = append(exprs, t.Expr)
+	}
+	for _, k := range sel.OrderBy {
+		exprs = append(exprs, k.Expr)
+	}
+	exprs = append(exprs, sel.DistinctOn...)
+	return slices.ContainsFunc(exprs, func(e sqlir.Expr) bool {
+		return slices.ContainsFunc(sqlir.BlockFuncCalls(e), isAggregateCall)
+	})
+}
+
+// clauseOnlyAggregate reports a query that groups only by an aggregate
+// outside its select list's own, in ORDER BY, DISTINCT ON or a window.
+// Postgres makes such a query one group and refuses any column the rest of
+// it reads outside an aggregate, a check detest does not make, so the query
+// is refused rather than computed over one group without that check.
+func clauseOnlyAggregate(sel *sqlir.SelectStmt) bool {
+	return len(sel.GroupBy) == 0 && sel.Having == nil && blockAggregate(sel) &&
+		!slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) })
 }
 
 // groups folds the rows into groups by GROUP BY and keeps those HAVING
