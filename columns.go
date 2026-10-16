@@ -163,6 +163,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if what := nestedCall(stmt); what != "" {
 		return x.unsupported(what)
 	}
+	if what := misplacedCall(stmt); what != "" {
+		return x.unsupported(what)
+	}
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
@@ -2393,6 +2396,12 @@ func (c *columnChecker) groupExpr(e sqlir.Expr, sc *colScope) error {
 			return c.resolve(r, sc)
 		}
 	}
+	if found, once := sc.outputs.has(r.Column); found && once && !sc.anyOutput {
+		if call := blockCall(sc.outputExprs[r.Column], false, false); call != "" {
+			// misplacedCall cannot tell this name from an input column.
+			return c.x.unsupported(call + " in GROUP BY")
+		}
+	}
 	return c.orderExpr(e, sc)
 }
 
@@ -2654,6 +2663,145 @@ func nestedCall(n any) string {
 		}
 	}
 	walk(reflect.ValueOf(n), nil, false)
+	return what
+}
+
+// misplacedCall describes the first aggregate or window function under n in
+// a clause of its own query that allows none, such as WHERE or the SET of an
+// UPDATE, and is empty when there is none. Both servers fail one there
+// whatever rows the statement reads (42803 or 42P20 in Postgres, 1111 or
+// 3593 in MySQL), while the evaluators meet it only where a row reaches it.
+// A GROUP BY output name is resolved by the column check, as only the
+// schema tells it from an input column, which wins in Postgres.
+func misplacedCall(n any) string {
+	var what string
+	in := func(clause string, aggregates, windows bool, nodes ...any) {
+		for _, node := range nodes {
+			if what != "" {
+				return
+			}
+			if call := blockCall(node, aggregates, windows); call != "" {
+				what = call + " in " + clause
+			}
+		}
+	}
+	none := func(clause string, nodes ...any) { in(clause, false, false, nodes...) }
+	fromFuncs := func(items ...sqlir.TableRef) {
+		for _, t := range items {
+			if t.Func != nil {
+				none("a function in FROM", t.Func.Args)
+			}
+		}
+	}
+	switch st := n.(type) {
+	case *sqlir.InsertStmt:
+		none("VALUES", st.Rows)
+		if oc := st.OnConflict; oc != nil {
+			none("ON CONFLICT", oc.Elems, oc.InferWhere, oc.Set, oc.Where)
+		}
+		none("RETURNING", st.Returning)
+	case *sqlir.UpdateStmt:
+		none("the SET of an UPDATE", st.Set)
+		fromFuncs(st.From...)
+		none("WHERE", st.Where)
+		none("ORDER BY of an UPDATE", st.OrderBy)
+		none("LIMIT", st.Limit)
+		none("RETURNING", st.Returning)
+	case *sqlir.DeleteStmt:
+		fromFuncs(st.Using...)
+		none("WHERE", st.Where)
+		none("ORDER BY of a DELETE", st.OrderBy)
+		none("LIMIT", st.Limit)
+		none("RETURNING", st.Returning)
+	}
+	for _, sel := range sqlir.Selects(n) {
+		none("VALUES", sel.Values)
+		in("the select list", true, true, sel.Targets)
+		if sel.From != nil {
+			fromFuncs(*sel.From)
+		}
+		for _, j := range sel.Joins {
+			fromFuncs(j.Table)
+			none("JOIN conditions", j.On)
+		}
+		none("WHERE", sel.Where)
+		for _, g := range sel.GroupBy {
+			// A position names an item of the select list, which Postgres
+			// and MySQL group by as the item's expression.
+			if k, ok := g.(*sqlir.Const); ok {
+				if i, ok := k.Value.(int64); ok && i >= 1 && int(i) <= len(sel.Targets) && !sel.Targets[i-1].Star {
+					g = sel.Targets[i-1].Expr
+				}
+			}
+			none("GROUP BY", g)
+		}
+		in("HAVING", true, false, sel.Having)
+		in("DISTINCT ON", true, true, sel.DistinctOn)
+		in("ORDER BY", true, true, sel.OrderBy)
+		none("LIMIT", sel.Limit)
+		none("OFFSET", sel.Offset)
+	}
+	return what
+}
+
+// blockCall describes the first aggregate, unless aggregates are allowed,
+// or window function, unless windows are, of n's own query, and is empty
+// when there is none. A window's PARTITION BY and ORDER BY allow no window
+// function in either server.
+func blockCall(n any, aggregates, windows bool) string {
+	var what string
+	inWindow := false
+	var walk func(v reflect.Value, windows bool)
+	walk = func(v reflect.Value, windows bool) {
+		if what != "" {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem(), windows)
+			}
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			switch e := v.Interface().(type) {
+			case *sqlir.SelectStmt:
+				return
+			case *sqlir.WindowFunc:
+				if !windows {
+					what = "a window function"
+					if inWindow {
+						what += " in a window definition"
+					}
+					return
+				}
+				// nestedCall refuses a call in the function's arguments.
+				inWindow = true
+				walk(reflect.ValueOf(e.Partition), false)
+				walk(reflect.ValueOf(e.Order), false)
+				inWindow = false
+				return
+			case *sqlir.FuncCall:
+				if !aggregates && isAggregateCall(e) {
+					what = "an aggregate"
+					return
+				}
+			}
+			walk(v.Elem(), windows)
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i), windows)
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i), windows)
+			}
+		}
+	}
+	walk(reflect.ValueOf(n), windows)
 	return what
 }
 
