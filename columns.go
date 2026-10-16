@@ -3405,6 +3405,11 @@ func (c *columnChecker) condition(e sqlir.Expr, sc *colScope, clause string) err
 	case "", "bool", "boolean", "unresolved column type", ambiguousDomain, constrainedDomain:
 		return nil
 	default:
+		if c.x.tx.checking && valueFamily(typ) == "" && !collatableType(typ) {
+			// CheckSQL has no schema, so a type it does not know may be a
+			// domain over boolean, which the run reduces.
+			return nil
+		}
 		return c.x.unsupported(fmt.Sprintf("a %s as the argument of %s, which Postgres wants a boolean for", typ, clause))
 	}
 }
