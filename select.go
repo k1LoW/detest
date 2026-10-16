@@ -177,28 +177,39 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 			conds = append(conds, cond{e, true})
 		}
 	}
-	// Postgres folds a condition of literals alone when it plans the
-	// statement, so a false one empties the filter before a subquery
-	// beside it runs. The others it tests in their written order.
-	literal := func(e sqlir.Expr) bool {
-		for _, n := range sqlir.Exprs(e) {
-			switch n.(type) {
-			case *sqlir.FuncCall, *sqlir.Param, *sqlir.SubQuery, *sqlir.Exists, *sqlir.InExpr, *sqlir.ColumnRef:
-				return false
-			}
+	// Postgres folds a condition of constants when it plans the statement,
+	// so a false one empties the filter before a subquery beside it runs.
+	// The others it tests in their written order.
+	constant := func(e sqlir.Expr) (any, bool) {
+		if len(sqlir.Selects(e)) > 0 {
+			return nil, false
 		}
-		return true
+		defer func(v map[sqlir.Expr]any) { x.foldValues = v }(x.foldValues)
+		x.foldValues = map[sqlir.Expr]any{}
+		r, err := (&folder{x: x, views: map[string]bool{}}).expr(e)
+		if err != nil || r.c != fixed || !r.hasVal {
+			return nil, false
+		}
+		return r.val, true
 	}
-	slices.SortStableFunc(conds, func(a, b cond) int {
-		switch la, lb := literal(a.e), literal(b.e); {
-		case la && !lb:
-			return -1
-		case lb && !la:
-			return 1
-		}
-		return 0
-	})
+	var rest []cond
 	for _, c := range conds {
+		v, ok := constant(c.e)
+		switch {
+		case !ok:
+			rest = append(rest, c)
+		case derefValue(v) != true:
+			return false, !c.having, nil
+		}
+	}
+	if len(rest) > 0 {
+		// Postgres resolves every relation when it parses the statement,
+		// before a subquery of the filter may lock rows.
+		if err := x.checkRelations(sel); err != nil {
+			return false, false, err
+		}
+	}
+	for _, c := range rest {
 		if ok, err := x.evalBool(c.e, &env{outer: outer}); err != nil || !ok {
 			return false, !c.having, err
 		}
@@ -224,7 +235,18 @@ func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
 // own definition, where it is not in scope, reads what the name meant
 // around sel.
 func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
+	funcs := map[string]bool{}
+	for _, q := range sqlir.Selects(sel) {
+		for _, t := range fromRefs(q) {
+			if t.Func != nil {
+				funcs[t.Name] = true
+			}
+		}
+	}
 	for _, name := range freeNames(sel) {
+		if funcs[name] {
+			continue
+		}
 		if c := x.ctes[name]; c != nil {
 			if !slices.ContainsFunc(sel.With, func(cte sqlir.CTE) bool { return cte.Name == name }) || c.scope[name] != nil {
 				continue
@@ -263,7 +285,14 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 			if t.Sub == nil {
 				continue
 			}
-			if names := outputNames(t.Sub); names != nil && len(t.Columns) > len(names) {
+			if len(t.Columns) == 0 {
+				continue
+			}
+			names := outputNames(t.Sub)
+			if names == nil {
+				names = x.columnsOf(t.Sub) // a * whose width only its items give
+			}
+			if len(t.Columns) > len(names) {
 				return x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", t.Alias, len(names), len(t.Columns)), t.Alias, "", "")
 			}
 		}
@@ -445,6 +474,17 @@ func (x *sqlExec) compute(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]str
 	if wins := windowsOf(sel); len(wins) > 0 {
 		if err := x.computeWindows(wins, items); err != nil {
 			return nil, nil, err
+		}
+	}
+	if !x.tx.db.kind.InnoDB() && len(sel.OrderBy) == 0 && !sel.Distinct && len(sel.DistinctOn) == 0 {
+		// Postgres projects a group or a row of the window functions as
+		// LIMIT pulls it, so one past LIMIT is never computed.
+		offset, limit, err := x.offsetLimit(sel, outer)
+		if err != nil {
+			return nil, nil, err
+		}
+		if limit >= 0 && offset+limit < len(items) {
+			items = items[:offset+limit]
 		}
 	}
 	cols, err := x.projectItems(sel, items, rows)

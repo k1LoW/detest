@@ -924,6 +924,14 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE EXISTS (SELECT 1 / n FROM u WHERE u.id = e.id + 2)`),
 			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE id > 0 AND false`),
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND 1 IN (2)`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND abs(1) = 0`),
+			difftest.Q(0, `SELECT 1 FROM missing WHERE EXISTS (SELECT id FROM u)`),
+			difftest.Q(0, `SELECT * FROM (SELECT * FROM u) s(a, b, c) LIMIT 0`),
+			// A group or a row of window functions past LIMIT is never
+			// projected.
+			difftest.Q(0, `SELECT 1 / (row_number() OVER () - 2) FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT 1 / (count(*) - 1) + 1 FROM u GROUP BY id LIMIT 0 OFFSET 1`),
 			difftest.Q(0, `SELECT nextval('missing') LIMIT 0`),
 			difftest.Q(0, `WITH unused AS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1) SELECT 1`),
 			difftest.Q(0, `WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c UNION ALL SELECT 1`),
