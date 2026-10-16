@@ -877,6 +877,7 @@ var cases = []difftest.Case{
 			`CREATE TABLE e (id int PRIMARY KEY)`,
 			`CREATE TABLE w (v bigint PRIMARY KEY, id int)`,
 			`CREATE SEQUENCE sq`,
+			`CREATE VIEW uv AS SELECT * FROM u`,
 		},
 		Seed:  []string{`INSERT INTO u VALUES (1, 1), (2, 0), (3, 0)`},
 		Conns: 1,
@@ -910,6 +911,8 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS v) SELECT * FROM c) s UNION ALL SELECT 2 LIMIT 0`),
 			difftest.Q(0, `SELECT 1 FROM missing LIMIT 0`),
 			difftest.Q(0, `SELECT 1 FROM e, (SELECT * FROM missing) s WHERE false`),
+			difftest.Q(0, `WITH missing AS (SELECT 1 FROM missing) SELECT 1 FROM missing LIMIT 0`),
+			difftest.Q(0, `WITH u AS (SELECT 1 AS x) SELECT uv.* FROM uv, u LIMIT 0`),
 			difftest.Q(0, `SELECT nextval('sq')`),
 			// Under ORDER BY, a volatile item no key reads is computed
 			// after the sort, for the rows OFFSET and LIMIT let through.
@@ -925,6 +928,8 @@ var cases = []difftest.Case{
 			// joined to it by equalities, runs in full under any plan.
 			difftest.S(0, `UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id`),
 			difftest.Q(0, `SELECT id, n FROM u ORDER BY id`),
+			// A write's CTE that did not run still gives its columns.
+			difftest.Q(0, `WITH c AS (SELECT id FROM u) UPDATE u SET n = (SELECT count(*) FROM ((SELECT * FROM c LIMIT 0) UNION ALL SELECT 1) s) WHERE id = 1 RETURNING n`),
 		},
 	},
 }

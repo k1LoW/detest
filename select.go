@@ -192,23 +192,22 @@ func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
 }
 
 // checkRelations fails on a table sel or a query inside it reads that does
-// not exist, without running anything. A name some WITH of the statement
-// declares is taken for its CTE.
+// not exist, without running anything. A name is a CTE where a WITH
+// declares it in scope, as freeNames finds, or where one around sel does.
+// sel's own CTEs are declared already, and a name of one read inside its
+// own definition, where it is not in scope, reads what the name meant
+// around sel.
 func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
-	declared := map[string]bool{}
-	for _, q := range sqlir.Selects(sel) {
-		for _, cte := range q.With {
-			declared[cte.Name] = true
-		}
-	}
-	for _, q := range sqlir.Selects(sel) {
-		for _, t := range fromRefs(q) {
-			if t.Name == "" || t.Sub != nil || t.Func != nil || declared[t.Name] || x.ctes[t.Name] != nil || x.isCTE(t.Name) {
+	for _, name := range freeNames(sel) {
+		if c := x.ctes[name]; c != nil {
+			if !slices.ContainsFunc(sel.With, func(cte sqlir.CTE) bool { return cte.Name == name }) || c.scope[name] != nil {
 				continue
 			}
-			if err := x.tx.db.checkTable(x.tx.db.resolve(t.Name)); err != nil {
-				return err
-			}
+		} else if x.isCTE(name) {
+			continue
+		}
+		if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1859,6 +1858,14 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 				x.ctes = saved
 				return cols
 			}
+			if cte, ok := x.pendingCTEs[t.Name]; ok && rows == nil {
+				// Without the reader's CTEs, as runPendingCTE runs it.
+				saved := x.ctes
+				x.ctes = map[string]*cteCell{}
+				cols := x.columnsOf(cte.Select)
+				x.ctes = saved
+				return cols
+			}
 			break
 		}
 		table := x.tx.db.resolve(t.Name)
@@ -1867,7 +1874,12 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 				return cols
 			}
 			if rows == nil {
-				return renamedCols(x.columnsOf(v.View), v.ViewColumns)
+				// Without the statement's CTEs, as viewRows runs it.
+				ctes, pending, wrows, wcols := x.ctes, x.pendingCTEs, x.writeRows, x.writeCols
+				x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = map[string]*cteCell{}, nil, nil, nil
+				cols := x.columnsOf(v.View)
+				x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = ctes, pending, wrows, wcols
+				return renamedCols(cols, v.ViewColumns)
 			}
 			break
 		}
