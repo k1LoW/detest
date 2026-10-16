@@ -688,6 +688,9 @@ func TestUntypedExpressionComparedAsText(t *testing.T) {
 		`SELECT (n, 2) IN ((coalesce('1', NULL), 2)) FROM t WHERE false`,
 		`SELECT (n, 2) = (SELECT coalesce('1', NULL), 2) FROM t WHERE false`,
 		`SELECT ROW(n, 2) = coalesce('1', NULL) FROM t WHERE false`,
+		`SELECT coalesce('1', NULL) IN (SELECT 1) WHERE false`,
+		`SELECT (coalesce('1', NULL), 2) = (SELECT 1, 2) WHERE false`,
+		`SELECT n = ANY (SELECT max('1')) FROM t WHERE false`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

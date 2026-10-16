@@ -3616,6 +3616,7 @@ func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sq
 		return nil
 	}
 	t := c.typer(sc)
+	t.untypedText = true
 	for i, f := range fields {
 		_, nested := f.(*sqlir.RowExpr)
 		if sel.SetOp == "" && len(sel.Values) == 0 && len(sel.Targets) == len(fields) && !sel.Targets[i].Star {
