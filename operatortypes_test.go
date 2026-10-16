@@ -577,6 +577,8 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 	mustExec(t, db, `CREATE TYPE mood AS ENUM ('a')`)
 	mustExec(t, db, `CREATE DOMAIN word AS text`)
 	mustExec(t, db, `CREATE DOMAIN num AS int`)
+	mustExec(t, db, `CREATE DOMAIN positive AS int CHECK (VALUE > 0)`)
+	mustExec(t, db, `CREATE TABLE p (k positive)`)
 	mustExec(t, db, `CREATE TABLE t (n int, b bool, s text, v varchar(3), c char(3), nm name, w word, k num, m mood, j jsonb, by bytea, a text[])`)
 	for _, q := range []string{
 		`SELECT 1 FROM t WHERE n LIKE 'a'`,
@@ -594,6 +596,9 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT 1 FROM t WHERE m LIKE 'a'`,
 		`SELECT 1 FROM t WHERE j LIKE 'a'`,
 		`SELECT 1 FROM t WHERE a LIKE 'a'`,
+		// A domain whose base type detest hides may be one over a type
+		// LIKE does not take.
+		`SELECT 1 FROM p WHERE k LIKE 'a'`,
 		// Postgres takes bytea beside another bytea only, and likeMatch
 		// reads a value as text, so detest refuses it.
 		`SELECT 1 FROM t WHERE by LIKE 'a'`,
@@ -641,6 +646,7 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT NULL::uuid ILIKE 'a' WHERE false`,
 		`SELECT NULL::date NOT LIKE 'a' WHERE false`,
 		`SELECT NULL::int4 NOT ILIKE 'a' WHERE false`,
+		`SELECT NULL::pg_catalog._int4 LIKE 'a' WHERE false`,
 		// Postgres takes this, as it reads the literal as a bytea, but
 		// detest refuses bytea.
 		`SELECT 'a' LIKE NULL::bytea WHERE false`,

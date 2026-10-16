@@ -695,9 +695,10 @@ func concatTypeMismatch(b *sqlir.BinaryExpr, t typer) string {
 // statement (42883), while the evaluator would match the printed value. Only
 // the character types are taken: bytea has an operator of its own too, but
 // only beside another bytea, and likeMatch reads a value as text, so it is
-// refused rather than modeled. A domain whose base type detest hides, and
-// without a schema a type that is not built in, may be a domain over text
-// and is left to run.
+// refused rather than modeled. A domain whose base type detest hides is
+// refused too, as a table with a column of one takes no write and so holds
+// no row a refusal could cost. Without a schema a type that is not built in
+// may be a domain over text and is left to run.
 func likeTypeMismatch(b *sqlir.BinaryExpr, t typer, schemaless bool) string {
 	switch b.Op {
 	case "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
@@ -710,7 +711,7 @@ func likeTypeMismatch(b *sqlir.BinaryExpr, t typer, schemaless bool) string {
 			typ = "record"
 		}
 		switch {
-		case typ == "" || collatableType(typ) || typ == ambiguousDomain || typ == constrainedDomain:
+		case typ == "" || collatableType(typ):
 		case schemaless && !sqlir.PostgresBuiltinType(typ):
 		default:
 			return b.Op + " with a " + typ + " operand"

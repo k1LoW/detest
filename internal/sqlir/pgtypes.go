@@ -1,5 +1,7 @@
 package sqlir
 
+import "strings"
+
 // postgresBuiltinTypes are the names of pg_catalog's types a column is commonly
 // declared with, as db/postgres's typeName gives them, which a domain of the name would
 // shadow by its bare name in detest but not in Postgres.
@@ -32,5 +34,8 @@ var postgresBuiltinTypes = func() map[string]bool {
 	return m
 }()
 
-// PostgresBuiltinType reports whether name is one of postgresBuiltinTypes.
-func PostgresBuiltinType(name string) bool { return postgresBuiltinTypes[name] }
+// PostgresBuiltinType reports whether name is one of postgresBuiltinTypes,
+// or the catalog name of an array of one, such as _int4.
+func PostgresBuiltinType(name string) bool {
+	return postgresBuiltinTypes[name] || strings.HasPrefix(name, "_") && postgresBuiltinTypes[name[1:]]
+}
