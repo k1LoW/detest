@@ -120,6 +120,10 @@ type sqlExec struct {
 	// returned (checkKept).
 	checkedDefaults map[sqlir.Expr]error
 	setOpColumns    map[*sqlir.SelectStmt]setOpColumns
+	// valuesKinds are the kinds of type, by asBranchType or a time type,
+	// the column check resolved the columns of a VALUES query to, "" for
+	// a column whose values the run keeps as they are.
+	valuesKinds map[*sqlir.SelectStmt][]string
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
 	// statement has a COLLATE clause.
