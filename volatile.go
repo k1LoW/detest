@@ -676,6 +676,71 @@ func freeNames(n any) []string {
 	return out
 }
 
+// openedTables are the names of the tables MySQL opens for the statement
+// under n, which it does for every table the statement reads before it runs
+// it, so a missing one fails it with 1146 even in a subquery no row reaches.
+// Unlike Postgres, MySQL does not open the tables of a CTE nothing reads, at
+// any depth, so freeNames, which walks every CTE, would refuse statements
+// that run.
+func openedTables(n any) []string {
+	var out []string
+	var walk func(v reflect.Value)
+	scope := func(with []sqlir.CTE, body any) {
+		index := map[string]int{}
+		for i, cte := range with {
+			index[cte.Name] = i
+		}
+		reached := map[int]bool{}
+		var visit func(names []string, before int)
+		visit = func(names []string, before int) {
+			for _, name := range names {
+				i, ok := index[name]
+				if !ok || i >= before {
+					out = append(out, name)
+					continue
+				}
+				if !reached[i] {
+					reached[i] = true
+					visit(openedTables(with[i].Select), i)
+				}
+			}
+		}
+		visit(openedTables(body), len(with))
+	}
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Interface, reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			// MySQL's UPDATE and DELETE take no CTEs in detest, which
+			// refuses them.
+			if s, ok := reflect.TypeAssert[*sqlir.SelectStmt](v); ok && len(s.With) > 0 {
+				body := *s
+				body.With = nil
+				scope(s.With, &body)
+				return
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			if t, ok := reflect.TypeAssert[sqlir.TableRef](v); ok && t.Name != "" {
+				out = append(out, t.Name)
+			}
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(n))
+	return out
+}
+
 // rowSequenceCalls checks expressions detest evaluates as often as Postgres,
 // which may call the functions, but not in a subquery other than a derived
 // table that is not LATERAL.
