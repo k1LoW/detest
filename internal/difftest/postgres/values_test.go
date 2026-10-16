@@ -429,6 +429,17 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a row of columns where Postgres takes a record, beside arithmetic and functions of its fields",
+		Schema: []string{`CREATE TABLE r (id int PRIMARY KEY, a int)`},
+		Seed:   []string{`INSERT INTO r VALUES (1, 1), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, ROW(id, a) IS NULL, ROW(id, a) = ROW(1, 1), -abs(id) + 1, lower(coalesce(a::text, 'x')) FROM r ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM r WHERE ROW(id, a) IS NOT NULL AND -a + 1 = 0`),
+			difftest.Q(0, `SELECT count(*) FROM r WHERE ROW(id, 1) IN (ROW(1, 1), ROW(2, 1))`),
+		},
+	},
+	{
 		Name:   "integer arithmetic and rounding",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{
