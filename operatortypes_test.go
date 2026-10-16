@@ -256,3 +256,67 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL 3]", got)
 	}
 }
+
+// Postgres resolves the operator of each pair of fields of a row comparison
+// when it plans the statement, so a pair it has no operator for fails it
+// (42883), as does IN (SELECT ...) of another width (42601), whatever rows
+// it reads.
+func TestRowComparisonFieldTypesBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int, b boolean)`)
+	for _, q := range []string{
+		`SELECT (1, 2) = (s, 2) FROM t WHERE false`,
+		`SELECT (1, 2) < (s, 2) FROM t WHERE false`,
+		`SELECT (1, b) = (n, 2) FROM t WHERE false`,
+		`SELECT (now(), 2) = (n, 2) FROM t WHERE false`,
+		`SELECT (1, 2) IN ((s, 2)) FROM t WHERE false`,
+		`SELECT (1, 2) IN ((2, 3), (n::text, 2)) FROM t WHERE false`,
+		`SELECT (1, 2) = (SELECT s, 2 FROM t) WHERE false`,
+		`SELECT (1, 2) = (SELECT x.s, 2 FROM (SELECT '1' AS s) x) WHERE false`,
+		`SELECT (1, 2) = (SELECT 1, max('1')) WHERE false`,
+		`SELECT 1 FROM t WHERE (1, 2) IN (SELECT s, 2 FROM t)`,
+		`SELECT 1 FROM t WHERE (1, 2) NOT IN (SELECT s, 2 FROM t)`,
+		`SELECT 1 FROM t WHERE (1, 2) = ANY (SELECT s, 2 FROM t)`,
+		`SELECT (s, 2) IN (SELECT n, 2 FROM t) FROM t WHERE false`,
+		`SELECT 1 FROM t WHERE 1 IN (SELECT s FROM t)`,
+		`SELECT 1 = ANY (SELECT s FROM t) WHERE false`,
+		// Postgres resolves a string literal or a NULL among a subquery's
+		// columns to text.
+		`SELECT (1, 2) = (SELECT '1', 2) WHERE false`,
+		`SELECT (1, 2) = (SELECT NULL, 2) WHERE false`,
+		`SELECT (1, 2) IN (SELECT '1', 2) WHERE false`,
+		`SELECT 1 IN (SELECT NULL) WHERE false`,
+		`SELECT (1, 2) IN (VALUES ('1', 2)) WHERE false`,
+		`SELECT 1 IN (VALUES ('1')) WHERE false`,
+		// Postgres fails IN (SELECT ...) of another width (42601).
+		`SELECT (1, 2) IN (SELECT s FROM t) WHERE false`,
+		`SELECT 1 IN (SELECT n, 2 FROM t) WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// So does a parameter among a subquery's columns, which Postgres
+	// resolves to text too.
+	for _, q := range []string{
+		`SELECT (1, 2) = (SELECT $1, 2) WHERE false`,
+		`SELECT (1, 2) IN (SELECT $1, 2) WHERE false`,
+		`SELECT 1 IN (SELECT $1) WHERE false`,
+	} {
+		if _, err := db.Query(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// A string literal among a row's fields is read as the type of its
+	// pair's before any row (22P02).
+	for _, q := range []string{
+		`SELECT (1, 'x') = (n, 2) FROM t WHERE false`,
+		`SELECT (1, 'x') = (SELECT 1, 2) WHERE false`,
+		`SELECT (1, 'x') IN (SELECT n, n FROM t) WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.Is(err, ErrInvalidTextRepresentation) {
+			t.Errorf("%s: got %v, want 22P02", q, err)
+		}
+	}
+}
