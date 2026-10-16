@@ -924,6 +924,7 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		{`SELECT CASE WHEN true THEN 1 ELSE (VALUES (n) UNION SELECT $1) END FROM t`, []any{"bad"}},
 		{`SELECT (SELECT u FROM t UNION ALL SELECT u FROM t) WHERE false UNION ALL SELECT 'bad' WHERE false`, nil},
 		{`SELECT coalesce((SELECT u FROM t UNION ALL SELECT u FROM t), 'bad')`, nil},
+		{`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`, nil},
 	} {
 		if _, err := db.Exec(tc.query, tc.args...); !errors.Is(err, ErrInvalidTextRepresentation) {
 			t.Errorf("%s: got %v, want invalid input", tc.query, err)
@@ -953,7 +954,6 @@ func TestTypedInputReadBeforeAnyRow(t *testing.T) {
 		`SELECT coalesce('1', NULL) WHERE false UNION SELECT 1 WHERE false`,
 		`VALUES ((SELECT 'bad' WHERE false)) UNION SELECT 1 WHERE false`,
 		`INSERT INTO t (id, u) SELECT *, 'bad' FROM (SELECT 1) s WHERE false`,
-		`(SELECT * FROM (SELECT u FROM t) a UNION ALL SELECT * FROM (SELECT u FROM t) b) UNION ALL SELECT 'bad' WHERE false`,
 		// Postgres resolves a column of untyped queries alone to text,
 		// which it does not assign to an integer.
 		`INSERT INTO t (id, n) SELECT 1, '1' WHERE false UNION ALL SELECT 2, '2' WHERE false`,
