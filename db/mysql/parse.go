@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -43,8 +42,6 @@ type conv struct {
 	// rowAlias is the alias INSERT ... AS alias gives the proposed row, which
 	// ON DUPLICATE KEY UPDATE refers to as the excluded row.
 	rowAlias string
-	// cteNames are the CTEs the statement declares, by lower-case name.
-	cteNames map[string]bool
 	// inLimit is set while LIMIT and OFFSET convert.
 	inLimit bool
 	// params numbers the ? placeholders in the order they appear.
@@ -90,7 +87,6 @@ func (c *conv) script(stmts []ast.StmtNode) (sqlir.Statement, error) {
 	out := &sqlir.Script{}
 	var locked map[string]bool // the tables a dump write-locked to load them, nil outside
 	for _, s := range stmts {
-		c.cteNames = nil // each statement declares its own
 		switch a := s.(type) {
 		case *ast.LockTablesStmt:
 			if locked != nil {
@@ -493,8 +489,6 @@ func (c *conv) setOpr(s *ast.SetOprStmt) (*sqlir.SelectStmt, error) {
 	if s.SelectList == nil || len(s.SelectList.Selects) == 0 {
 		return nil, c.unsupported("empty set operation")
 	}
-	// The CTEs come first, so the branches resolve the names they declare.
-	defer func(names map[string]bool) { c.cteNames = names }(maps.Clone(c.cteNames))
 	ctes, err := c.with(s.With)
 	if err != nil {
 		return nil, err
@@ -566,20 +560,12 @@ func (c *conv) with(w *ast.WithClause) ([]sqlir.CTE, error) {
 		if err != nil {
 			return nil, err
 		}
-		// MySQL's CTE names are case-insensitive; references to them are
-		// lowered to match (tableRef).
-		if c.cteNames == nil {
-			c.cteNames = map[string]bool{}
-		}
-		c.cteNames[cte.Name.L] = true
-		out = append(out, sqlir.CTE{Name: cte.Name.L, Select: sel})
+		out = append(out, sqlir.CTE{Name: cte.Name.O, Select: sel})
 	}
 	return out, nil
 }
 
 func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
-	// The CTEs a query block declares are its own and its nested blocks'.
-	defer func(names map[string]bool) { c.cteNames = names }(maps.Clone(c.cteNames))
 	out := &sqlir.SelectStmt{Distinct: s.Distinct}
 	var err error
 	if out.With, err = c.with(s.With); err != nil {
@@ -842,9 +828,6 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 			return out, c.unsupported("index hints")
 		}
 		out.Name = tableName(src)
-		if src.Schema.L == "" && c.cteNames[src.Name.L] {
-			out.Name = src.Name.L
-		}
 		if out.Alias == "" && src.Name.O != src.Name.L {
 			out.Alias = src.Name.L
 		}
