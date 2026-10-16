@@ -60,7 +60,8 @@ func dateIn(t time.Time, loc *time.Location) time.Time {
 
 // publicRow is r as the code under test reads it through the transaction
 // API and State: a timestamptz is a time.Time, as before detest told it from
-// a timestamp, and an enum is its label. r is copied only when it holds one.
+// a timestamp, an enum is its label, and a numeric is the number it holds
+// without its scale. r is copied only when it holds one.
 func publicRow(r Row) Row {
 	var out Row
 	for k, v := range r {
@@ -70,6 +71,8 @@ func publicRow(r Row) Row {
 			pub = v.Time
 		case enumValue:
 			pub = v.String()
+		case scaledNum:
+			pub = v.v
 		default:
 			continue
 		}
@@ -127,6 +130,13 @@ func (db *DB) typedValue(table, col string, v any) (any, bool) {
 	def := db.defs[db.resolve(table)]
 	if def == nil {
 		return v, false
+	}
+	if def.types[col] == "numeric" && isNumber(v) {
+		if _, ok := v.(scaledNum); !ok {
+			// A number keeps the scale of its text, as a parameter does,
+			// so that SQL reads it back.
+			return storedScaled(def, col, v, v), true
+		}
 	}
 	switch v := v.(type) {
 	case time.Time:

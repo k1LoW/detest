@@ -14,11 +14,13 @@ import (
 )
 
 func derefValue(v any) any {
-	switch v.(type) {
+	switch n := v.(type) {
 	case nil:
 		return nil
 	case string, int64, int, bool, float64, []byte:
 		return v // the common column types, without reflection
+	case scaledNum:
+		return n.v
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -49,6 +51,12 @@ func sameRow(a, b Row) bool {
 		// so a row changed from one to the other is a change.
 		if x, ok := derefValue(v).(pgInterval); ok {
 			if y, ok := derefValue(b[k]).(pgInterval); ok && x != y {
+				return false
+			}
+		}
+		// 1.0 and 1.00 are equal but read back apart.
+		if x, ok := v.(scaledNum); ok {
+			if y, ok := b[k].(scaledNum); ok && x.scale != y.scale {
 				return false
 			}
 		}
@@ -286,7 +294,7 @@ func isNaNValue(v any) bool {
 }
 
 func toFloat(v any) (float64, bool) {
-	rv := reflect.ValueOf(v)
+	rv := reflect.ValueOf(unscaled(v))
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return float64(rv.Int()), true

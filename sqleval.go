@@ -94,8 +94,18 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			// timestamp takes the time's own clock above.
 			return newInstant(t), nil
 		}
+		if f, ok := x.args[v.Index].(float64); ok && !x.tx.db.kind.InnoDB() && floatScale(f) < 0 && !math.IsInf(f, 0) && !math.IsNaN(f) {
+			// The driver sends the shortest text of the float, all of
+			// whose digits a numeric keeps, where a float8 of as many
+			// digits converts with 15; marked as a numeric, a write tells
+			// the two apart.
+			return scaledNum{f, textScale(strconv.FormatFloat(f, 'f', -1, 64))}, nil
+		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
+		if _, ok := v.Value.(float64); ok {
+			return x.withScale(v.Value, textScale(v.Text)), nil
+		}
 		return v.Value, nil
 	case *sqlir.WindowFunc:
 		for cur := en; cur != nil; cur = cur.outer {
@@ -114,8 +124,11 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		val, err := x.eval(v.X, en)
 		return paramText(v.X, val), err
 	case *sqlir.Cast:
-		val, err := x.eval(v.X, en)
+		val, err := x.evalRaw(v.X, en)
 		if err != nil {
+			return nil, err
+		}
+		if val, err = x.castRange(v, val); err != nil {
 			return nil, err
 		}
 		if err := x.byteaCast(v, val); err != nil {
@@ -127,7 +140,13 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, x.tx.db.baseType(v.Type), val))))
+		in := val
+		val = unscaled(val)
+		out, err := x.castTo(v, x.halfToInteger(v, paramDate(v, paramBool(v, x.tx.db.baseType(v.Type), val))))
+		if err != nil {
+			return nil, err
+		}
+		return x.castScaled(v, in, out)
 	case *sqlir.UnaryExpr:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -141,6 +160,13 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			}
 			return !b, nil
 		case "-":
+			if n, ok := val.(scaledNum); ok {
+				if i, ok := n.v.(int64); ok && i != math.MinInt64 {
+					return scaledNum{-i, n.scale}, nil
+				}
+				f, _ := toFloat(n.v)
+				return scaledNum{-f, n.scale}, nil
+			}
 			if n, ok := integer(derefValue(val)); ok {
 				if n == math.MinInt64 {
 					return nil, x.tx.db.kind.Error(sqlir.NumericValueOutOfRange, "bigint out of range", "", "", "")
@@ -196,6 +222,8 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		lw, rw := l, r
+		l, r = unscaled(l), unscaled(r)
 		if isRange(l) || isRange(r) {
 			return x.rangeBinary(v.Op, l, r)
 		}
@@ -224,7 +252,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return x.arithValue(v, l, r, res), nil
+		return x.arithScaled(v, lw, rw, x.arithValue(v, l, r, res)), nil
 	case *sqlir.IsNull:
 		val, err := x.eval(v.X, en)
 		if err != nil {
@@ -450,13 +478,16 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				if err != nil {
 					return nil, err
 				}
+				chosen := out
+				out = unscaled(out)
 				if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
 					return nil, err
 				}
 				if out, err = x.caseBranch(v, w.Then, out); err != nil {
 					return nil, err
 				}
-				return x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+				out, err = x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+				return x.chosenScaled(v, w.Then, chosen, out), err
 			}
 		}
 		if v.Else != nil {
@@ -464,13 +495,16 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			if err != nil {
 				return nil, err
 			}
+			chosen := out
+			out = unscaled(out)
 			if out, err = x.toTimeType(out, x.exprTypes[v]); err != nil {
 				return nil, err
 			}
 			if out, err = x.caseBranch(v, v.Else, out); err != nil {
 				return nil, err
 			}
-			return x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+			out, err = x.branchValue(v, caseBranches(v), x.columnBranches(caseBranches(v), en), out)
+			return x.chosenScaled(v, v.Else, chosen, out), err
 		}
 		return nil, nil
 	case *sqlir.FuncCall:
@@ -488,9 +522,21 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			// a function such as UUID() answers with another value.
 			return nil, x.unsupported("NULLIF of a function that returns another value each time")
 		}
-		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.eval(a, en) }, nil)
+		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) {
+			if x.roundsRange(v, a) {
+				return x.evalRaw(a, en)
+			}
+			return x.eval(a, en)
+		}, nil)
 		if err != nil {
 			return nil, err
+		}
+		if err := x.roundRange(v, args); err != nil {
+			return nil, err
+		}
+		written := slices.Clone(args)
+		for i := range args {
+			args[i] = unscaled(args[i])
 		}
 		if v.Name == "nullif" {
 			var err error
@@ -506,7 +552,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
-				return out, err
+				return x.funcScaled(v, written, out), err
 			}
 		}
 		out, err := x.callOrdered(v, args)
@@ -516,7 +562,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 				out, err = x.branchValue(v, v.Args, args, out)
 			}
 		}
-		return out, err
+		return x.funcScaled(v, written, out), err
 	}
 	return nil, errUnknownExpr{fmt.Sprintf("%T", e)}
 }
@@ -947,11 +993,19 @@ func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
 	case "text":
 		return paramText(e, v), nil
 	case "integer", "numeric":
+		if _, ok := v.(scaledNum); ok {
+			return v, nil
+		}
 		if s, ok := derefValue(v).(string); ok && untypedExpr(e) {
-			return x.branchNumber(s, kind == "numeric")
+			n, err := x.branchNumber(s, kind == "numeric")
+			if kind == "numeric" {
+				return x.withScale(n, textScale(s)), err
+			}
+			return n, err
 		}
 		if _, ok := integer(derefValue(v)); ok && kind == "numeric" {
-			return numericValue(derefValue(v)), nil
+			// An integer converts to a numeric of no places.
+			return x.withScale(numericValue(derefValue(v)), 0), nil
 		}
 		return v, nil
 	}
@@ -2024,7 +2078,8 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !exactAsFloat(dec) {
 			return nil, x.unsupported("an extract result with more digits than a float keeps")
 		}
-		return numericValue(f), nil
+		// funcScaled gives it the scale of its unit and source.
+		return x.withScale(numericValue(f), -1), nil
 	case "make_interval":
 		// make_interval(secs => x) is the form that appears in backoff SQL; a
 		// single argument is taken as seconds.

@@ -896,7 +896,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if !present {
 			continue
 		}
+		written := v
 		v = derefValue(v)
+		if _, ok := written.(scaledNum); ok {
+			row[col] = v // a numeric keeps its scale in a numeric column alone
+		}
 		if v == nil {
 			continue
 		}
@@ -964,6 +968,9 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			if isOtherNumberText(v) {
 				return x.unsupported(fmt.Sprintf("number text in a form detest does not model, written to column %q", col))
 			}
+			if t == "numeric" && !x.tx.db.kind.InnoDB() && float8Apart(written, def.nums, col) {
+				return x.unsupported(fmt.Sprintf("a float of more than 15 significant digits written to the numeric column %q", col))
+			}
 			if t == "numeric" && !exactAsFloat(v) {
 				return x.unsupported(fmt.Sprintf("a numeric value with more digits than a float keeps, written to column %q", col))
 			}
@@ -998,6 +1005,9 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 				}
 			}
 			row[col], v = n, n
+			if t == "numeric" {
+				row[col] = storedScaled(def, col, written, n)
+			}
 		}
 		if textTypes[t] {
 			// A number written to a text column is stored as its text, as

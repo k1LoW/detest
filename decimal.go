@@ -298,3 +298,57 @@ func (x *sqlExec) columnValue(table, col string, v any) (any, error) {
 	f, _ := lo.Float64()
 	return f, nil
 }
+
+// roundedRange is r rounded to scale places, half away from zero, as round
+// and a cast to numeric(p, s) round it, where every value in r rounds
+// alike, so that round(avg(x), 2) of a quotient detest cannot compute
+// exactly still has the value the server gives.
+func (x *sqlExec) roundedRange(r numRange, scale int) (any, error) {
+	l := numLimit{precision: 1000, scale: scale}
+	lo, errLo := scaledRat(r.lo, l)
+	hi, errHi := scaledRat(r.hi, l)
+	if errLo != nil || errHi != nil || lo.Cmp(hi) != 0 {
+		return nil, x.errInexact()
+	}
+	f, _ := lo.Float64()
+	return f, nil
+}
+
+// roundsRange reports that a of f is the value round(a, n) rounds, which
+// may be a numRange that roundRange resolves. MySQL rounds a DOUBLE half to
+// even, which a range of DECIMAL and DOUBLE readings does not tell apart.
+func (x *sqlExec) roundsRange(f *sqlir.FuncCall, a sqlir.Expr) bool {
+	return !x.tx.db.kind.InnoDB() && f.Name == "round" && len(f.Args) == 2 && f.Args[0] == a
+}
+
+// roundRange resolves a numRange as the value round(x, n) rounds, in args.
+func (x *sqlExec) roundRange(f *sqlir.FuncCall, args []any) error {
+	if f.Name != "round" || len(args) != 2 {
+		return nil
+	}
+	r, ok := args[0].(numRange)
+	if !ok {
+		return nil
+	}
+	n, ok := integer(derefValue(args[1]))
+	if !ok || n < 0 {
+		return x.errInexact()
+	}
+	v, err := x.roundedRange(r, int(min(n, 1000)))
+	// A range stands for a numeric's value, whose own scale round replaces.
+	args[0] = x.withScale(v, -1)
+	return err
+}
+
+// castRange resolves a numRange as the value a cast to numeric(p, s) rounds
+// it to, and refuses it under any other cast.
+func (x *sqlExec) castRange(c *sqlir.Cast, v any) (any, error) {
+	r, ok := v.(numRange)
+	if !ok {
+		return v, nil
+	}
+	if c.Precision == 0 || x.tx.db.baseType(c.Type) != "numeric" {
+		return nil, x.errInexact()
+	}
+	return x.roundedRange(r, c.Scale)
+}

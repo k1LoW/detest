@@ -2056,7 +2056,7 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 				return &sqlir.Const{Value: i}, nil
 			}
 			if f, err := strconv.ParseFloat(v.Fval.Fval, 64); err == nil {
-				return &sqlir.Const{Value: f}, nil
+				return &sqlir.Const{Value: f, Text: v.Fval.Fval}, nil
 			}
 			return &sqlir.Const{Value: v.Fval.Fval}, nil
 		case *pg.A_Const_Sval:
@@ -2107,6 +2107,17 @@ func (c *pgConv) expr(n *pg.Node) (sqlir.Expr, error) {
 					return nil, c.unsupported("a cast to varchar with a length other than a positive integer")
 				}
 				cast.Len = mods[0]
+			case "numeric", "decimal":
+				mods := typmods(e.TypeCast.TypeName)
+				if len(mods) == 1 {
+					mods = append(mods, 0)
+				}
+				// Postgres takes a scale below zero or above the precision
+				// too, which rounds to the left of the point.
+				if len(mods) != 2 || mods[0] < 1 || mods[0] > 1000 || mods[1] < 0 || mods[1] > mods[0] {
+					return nil, c.unsupported("a cast to numeric with a precision and scale other than 0 <= s <= p")
+				}
+				cast.Precision, cast.Scale = mods[0], mods[1]
 			}
 		}
 		return cast, nil

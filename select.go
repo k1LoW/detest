@@ -1026,6 +1026,13 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 					return nil, nil, err
 				}
 			}
+			if t := x.setOpCertain[sel]; i < len(t) && numberCategory(t[i]) == numberCategory("float8") {
+				v = unscaled(v) // converted to the column's float8
+			} else if n, ok := v.(scaledNum); ok && len(sel.Values) > 1 && (i >= len(t) || t[i] == "") {
+				// The column may be a float8 the check cannot tell, which
+				// drops the scale.
+				v = scaledNum{n.v, -1}
+			}
 			if i < len(cols) {
 				r[cols[i]] = v
 			}
@@ -1122,10 +1129,40 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		// so 1 UNION ALL 3.0 gives numerics and x / 2 is 0.5 for both. The
 		// type is the queries' whether or not a float row survives them.
 		rows := slices.Concat(lrows, rrows)
+		certain := ""
+		if t := x.setOpCertain[sel]; i < len(t) {
+			certain = t[i]
+		}
+		for _, r := range rows {
+			n, ok := r[c].(scaledNum)
+			switch {
+			case !ok:
+			case numberCategory(certain) == numberCategory("float8"):
+				// A numeric under a float8 is converted to one, without
+				// its scale.
+				r[c] = n.v
+			case certain == "":
+				// The column may be a float8 the check cannot tell.
+				r[c] = scaledNum{n.v, -1}
+			}
+		}
 		if kinds["number"] && (setColumnFloat(sel, i) || slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) })) {
+			// Under a numeric, which no float8 row makes a float8, the
+			// integer is a numeric of no places.
+			numeric := certain == "numeric" || slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(scaledNum); return ok }) &&
+				!slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(float64); return ok })
 			for _, r := range rows {
+				if n, ok := r[c].(scaledNum); ok {
+					if i, ok := n.v.(int64); ok {
+						r[c] = scaledNum{float64(i), n.scale}
+					}
+					continue
+				}
 				if n, ok := integer(derefValue(r[c])); ok {
 					r[c] = float64(n)
+					if numeric {
+						r[c] = scaledNum{float64(n), 0}
+					}
 				}
 			}
 		}
@@ -1882,6 +1919,9 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 					return err
 				}
 			}
+			if x.scaleTypes[w.Func] == "float8" {
+				v = unscaled(v) // converted to the float8 of the value or the default
+			}
 		default:
 			return x.unsupported("window function " + name)
 		}
@@ -1903,6 +1943,14 @@ func (x *sqlExec) aggOperand(name string, v any) any {
 // the row count, which count(*) returns, and kind the argument's number
 // kind, by which a sum or an average of floats is kept as it is computed.
 func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind numberKind, coll sqlir.Collation) (any, error) {
+	out, err := x.foldAggregateValue(name, star, vals, n, kind, coll)
+	if err != nil {
+		return nil, err
+	}
+	return x.aggScaled(name, vals, out), nil
+}
+
+func (x *sqlExec) foldAggregateValue(name string, star bool, vals []any, n int, kind numberKind, coll sqlir.Collation) (any, error) {
 	switch name {
 	case "count":
 		if star {

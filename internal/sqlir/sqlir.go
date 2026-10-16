@@ -483,7 +483,12 @@ type ColumnRef struct{ Table, Column string }
 type Param struct{ Index int }
 
 // Const is a literal: int64, float64, string, bool or nil.
-type Const struct{ Value any }
+type Const struct {
+	Value any
+	// Text is a Postgres numeric literal as written, whose digits give the
+	// scale it reads back with (1.50), which Value does not keep.
+	Text string
+}
 
 // BinaryExpr is a binary operator: comparison, arithmetic, AND, OR, LIKE.
 type BinaryExpr struct {
@@ -555,6 +560,10 @@ type Cast struct {
 	// Len is the length of a Postgres varchar(n) or char(n) cast, which
 	// cuts longer text to n characters; 0 for none.
 	Len int
+	// Precision and Scale are those of a Postgres numeric(p, s) cast, which
+	// rounds to s places and refuses more than p - s digits before the
+	// point; Precision is 0 for none.
+	Precision, Scale int
 }
 
 // Collate is x COLLATE "name", which orders x by the named collation.

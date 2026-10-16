@@ -33,7 +33,7 @@ func (r Row) Key() string {
 // keyString is fmt.Sprint(v), with the key types rows use most spelled out:
 // keys are built on every row access, and fmt allocates for each.
 func keyString(v any) string {
-	switch v := v.(type) {
+	switch v := unscaled(v).(type) {
 	case string:
 		return v
 	case int64:
@@ -75,7 +75,7 @@ func (r Row) Str(k string) string {
 
 // Int returns a column as an int (0 when absent).
 func (r Row) Int(k string) int {
-	switch v := r[k].(type) {
+	switch v := unscaled(r[k]).(type) {
 	case int:
 		return v
 	case int64:
@@ -86,7 +86,7 @@ func (r Row) Int(k string) int {
 
 // Int64 returns a column as an int64 (0 when absent).
 func (r Row) Int64(k string) int64 {
-	switch v := r[k].(type) {
+	switch v := unscaled(r[k]).(type) {
 	case int:
 		return int64(v)
 	case int64:
@@ -2186,7 +2186,7 @@ func (tx *Tx) CAS(table, key, field string, from, to any) (_ bool, err error) {
 	defer tx.enterOp(caller)()
 	from, _ = tx.db.typedValue(table, field, from)
 	to, _ = tx.db.typedValue(table, field, to)
-	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && r[field] == from }, Row{field: to},
+	n, err := tx.updateWhere(table, func(r Row) bool { return r.Key() == key && unscaled(r[field]) == unscaled(from) }, Row{field: to},
 		lazyString(func() string { return fmt.Sprintf("id=%s and %s=%v -> %v", key, field, from, to) }))
 	return n == 1, err
 }

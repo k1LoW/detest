@@ -5001,7 +5001,7 @@ func TestDecimalArithmetic(t *testing.T) {
 		{pg, "literal sum", "SELECT 0.1 + 0.2", "0.3"},
 		{pg, "literal comparison", "SELECT 0.1 + 0.2 = 0.3", "true"},
 		{pg, "float8 cast", "SELECT 0.1::float8 + 0.2::float8", "0.30000000000000004"},
-		{pg, "terminating quotient", "SELECT 1.0 / 32", "0.03125"},
+		{pg, "terminating quotient", "SELECT 1.0 / 32", "0.03125000000000000000"},
 		{pg, "repeating quotient", "SELECT 1.0 / 3", ""},
 		{pg, "repeating quotient compared", "SELECT 1.0 / 3 > 0.3333", "true"},
 		{pg, "inexact column arithmetic read back", "SELECT bal + 0.2 FROM acct WHERE id = 1", ""},
