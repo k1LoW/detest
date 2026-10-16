@@ -303,7 +303,9 @@ func (w *viewWalk) expandStars(targets []sqlir.Target, sc *viewScope) []sqlir.Ta
 				items = append(items, it)
 			}
 		}
-		if len(items) == 0 || slices.ContainsFunc(items, func(it viewItem) bool { return it.cols == nil }) {
+		// An item that gives one name twice is read by position, which a
+		// reference by name cannot tell apart.
+		if len(items) == 0 || slices.ContainsFunc(items, func(it viewItem) bool { return it.cols == nil || hasDuplicate(it.cols) }) {
 			w.loose["*"] = true
 			out = append(out, t)
 			continue
@@ -421,4 +423,15 @@ func innermostItem(sc *viewScope, alias string) *viewItem {
 		}
 	}
 	return nil
+}
+
+func hasDuplicate(names []string) bool {
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			return true
+		}
+		seen[n] = true
+	}
+	return false
 }

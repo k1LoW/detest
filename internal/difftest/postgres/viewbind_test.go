@@ -52,12 +52,14 @@ var viewBindCases = []difftest.Case{
 			`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
 			`CREATE TABLE u (id int PRIMARY KEY)`,
 			`CREATE VIEW dv(a, b) AS SELECT * FROM t JOIN u ON true`,
+			`CREATE VIEW xv(a, b) AS SELECT * FROM (SELECT 1 AS x, 2 AS x) d`,
 		},
 		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 2)`, `INSERT INTO u VALUES (5)`},
 		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT a, b, n, id FROM dv`),
 			difftest.Q(0, `SELECT * FROM dv`),
+			difftest.Q(0, `SELECT * FROM xv`),
 		},
 	},
 }
