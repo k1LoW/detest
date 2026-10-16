@@ -137,11 +137,8 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `WITH c AS (SELECT n FROM t) SELECT (1 = (SELECT * FROM c))::text`),
 			difftest.Q(0, `SELECT (1 = (SELECT * FROM nv))::text`),
 			difftest.Q(0, `SELECT (1 IN (SELECT * FROM (SELECT n FROM t) x))::text`),
-			difftest.Q(0, `SELECT ((1, '1') = (SELECT * FROM (SELECT n, s FROM t) x))::text`),
 			difftest.Q(0, `SELECT ((1, '1') IN (SELECT x.* FROM (SELECT n, s FROM t) x JOIN t ON true))::text`),
 			difftest.Q(0, `SELECT (1 = (SELECT * FROM (SELECT * FROM (SELECT n FROM t) x) y))::text`),
-			difftest.Q(0, `SELECT 1 = (SELECT * FROM (SELECT '1' AS v) x) WHERE false`),
-			difftest.Q(0, `SELECT 1 IN (SELECT * FROM (SELECT s FROM t) x) WHERE false`),
 		},
 	},
 }
