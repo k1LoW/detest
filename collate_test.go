@@ -758,3 +758,20 @@ func TestConstrainedDomains(t *testing.T) {
 		t.Errorf("a domain that declares only NULL: got %v", got)
 	}
 }
+
+// A volatile ORDER BY key that matches a select list item sorts by the
+// item's value under the key's collation.
+func TestVolatileOrderKeyCollation(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.Collations(map[string]Collation{"rev": reverse{}})))
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1), (2)`)
+	q := `SELECT nextval('sq')::text COLLATE "rev" FROM u ORDER BY nextval('sq')::text COLLATE "rev" LIMIT 1`
+	if got, want := rowsOf(t, db, q), []string{"2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("%s: got %v, want %v", q, got, want)
+	}
+	if got, want := rowsOf(t, db, `SELECT nextval('sq')`), []string{"3"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sequence after the sort: got %v, want %v", got, want)
+	}
+}
