@@ -22,6 +22,7 @@ func TestViewLeftUnboundRefusedAfterColumnChange(t *testing.T) {
 		`CREATE VIEW gv AS SELECT n AS k, count(*) AS c FROM t GROUP BY k`,
 		`CREATE VIEW ov AS SELECT * FROM t JOIN generate_series(1, 2) WITH ORDINALITY g ON true`,
 		`CREATE VIEW wv AS SELECT k FROM gv`,
+		`CREATE VIEW cv AS WITH t AS (SELECT 1 AS n) SELECT n AS k, count(*) AS c FROM t GROUP BY k`,
 		`ALTER TABLE t ADD COLUMN x int`,
 	} {
 		mustExec(t, db, q)
@@ -30,6 +31,10 @@ func TestViewLeftUnboundRefusedAfterColumnChange(t *testing.T) {
 		t.Errorf("SELECT * FROM gv: %v", err)
 	}
 	mustExec(t, db, `ALTER TABLE t ADD COLUMN k int`)
+	// A CTE of the table's name is not the table.
+	if _, err := db.Exec(`SELECT k FROM cv`); err != nil {
+		t.Errorf("SELECT k FROM cv: %v", err)
+	}
 	for _, q := range []string{
 		`SELECT * FROM gv`,
 		`SELECT k FROM wv`,

@@ -138,7 +138,7 @@ func (db *DB) staleView(name string, seen map[string]bool) string {
 }
 
 func (db *DB) viewReads(sel *sqlir.SelectStmt, table string) bool {
-	return slices.ContainsFunc(sqlir.TableNames(sel), func(n string) bool { return db.resolve(n) == table })
+	return slices.ContainsFunc(freeNames(sel), func(n string) bool { return db.resolve(n) == table })
 }
 
 // query walks sel, whose correlated references reach outer, and returns
