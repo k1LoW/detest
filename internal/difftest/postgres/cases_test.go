@@ -913,6 +913,8 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT 1 FROM e, (SELECT * FROM missing) s WHERE false`),
 			difftest.Q(0, `WITH missing AS (SELECT 1 FROM missing) SELECT 1 FROM missing LIMIT 0`),
 			difftest.Q(0, `WITH u AS (SELECT 1 AS x) SELECT uv.* FROM uv, u LIMIT 0`),
+			difftest.Q(0, `WITH a AS (SELECT * FROM u), u AS (SELECT 1 AS z) SELECT a.* FROM a, u LIMIT 0`),
+			difftest.Q(0, `SELECT * FROM (SELECT 1) AS s(a, b) LIMIT 0`),
 			difftest.Q(0, `SELECT nextval('sq')`),
 			// Under ORDER BY, a volatile item no key reads is computed
 			// after the sort, for the rows OFFSET and LIMIT let through.

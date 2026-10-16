@@ -188,7 +188,8 @@ func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
 	if err := x.checkRelations(sel); err != nil {
 		return nil, nil, err
 	}
-	return x.columnsOf(sel), nil, nil
+	// evalSelect declared sel's own CTEs already.
+	return x.columnsIn(sel), nil, nil
 }
 
 // checkRelations fails on a table sel or a query inside it reads that does
@@ -210,6 +211,18 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 			return err
 		}
 	}
+	// So does a column alias list longer than its query's columns, which
+	// tableRows checks before it runs the query.
+	for _, q := range sqlir.Selects(sel) {
+		for _, t := range fromRefs(q) {
+			if t.Sub == nil {
+				continue
+			}
+			if names := outputNames(t.Sub); names != nil && len(t.Columns) > len(names) {
+				return x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", t.Alias, len(names), len(t.Columns)), t.Alias, "", "")
+			}
+		}
+	}
 	return nil
 }
 
@@ -225,6 +238,11 @@ func (x *sqlExec) columnsOf(sel *sqlir.SelectStmt) []string {
 		}
 		x.withCTEs(sel, nil)
 	}
+	return x.columnsIn(sel)
+}
+
+// columnsIn is columnsOf for a query whose CTEs are declared already.
+func (x *sqlExec) columnsIn(sel *sqlir.SelectStmt) []string {
 	if sel.SetOp != "" && sel.Larg != nil {
 		return x.columnsOf(sel.Larg)
 	}
