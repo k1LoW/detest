@@ -2,6 +2,7 @@ package detest
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/k1LoW/detest/db/mysql"
@@ -67,5 +68,33 @@ func TestMySQLViewRefusedAfterColumnRename(t *testing.T) {
 	}
 	if _, err := db.Exec(`SELECT n FROM nv`); err != nil {
 		t.Errorf("SELECT n FROM nv: %v", err)
+	}
+}
+
+// A view reads the relation its name resolved to when it was created, so a
+// rename of that relation is followed, and a relation of the name created
+// later earlier in the search path does not take it over.
+func TestViewKeepsRelationOnSearchPath(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New(postgres.SearchPath("billing", "public")))
+	for _, q := range []string{
+		`CREATE SCHEMA billing`,
+		`CREATE TABLE public.t (id int PRIMARY KEY)`,
+		`CREATE TABLE public.u (id int PRIMARY KEY)`,
+		`CREATE VIEW public.tv AS SELECT id FROM t`,
+		`CREATE VIEW public.uv AS SELECT id FROM u`,
+		`ALTER TABLE public.t RENAME TO t2`,
+		`CREATE TABLE billing.u (id int PRIMARY KEY)`,
+		`INSERT INTO public.t2 VALUES (1)`,
+		`INSERT INTO public.u VALUES (2)`,
+		`INSERT INTO billing.u VALUES (3)`,
+	} {
+		mustExec(t, db, q)
+	}
+	if got, want := rowsOf(t, db, `SELECT id FROM tv`), []string{"1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tv: got %v, want %v", got, want)
+	}
+	if got, want := rowsOf(t, db, `SELECT id FROM uv`), []string{"2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("uv: got %v, want %v", got, want)
 	}
 }

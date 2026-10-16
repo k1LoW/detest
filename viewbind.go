@@ -277,6 +277,13 @@ func (w *viewWalk) item(ref *sqlir.TableRef, sc, outer *viewScope, ctes []map[st
 			ref.Name = rel[1]
 			table = rel[1]
 		}
+		if w.bind && (db.views[table] != nil || db.defs[table] != nil) {
+			// The server keeps the relation, not the name, so neither a
+			// later relation of the name earlier in the search path nor a
+			// rename resolves it elsewhere.
+			ref.Alias = alias
+			ref.Name = table
+		}
 		if v := db.views[table]; v != nil {
 			if v.View != nil {
 				cols = outputNames(v.View)
