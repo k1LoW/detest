@@ -143,6 +143,32 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "boolean typed condition",
+		Schema: []string{
+			`CREATE DOMAIN flag AS bool`,
+			`CREATE TABLE c (id int PRIMARY KEY, b bool, f flag, s text)`,
+		},
+		Seed:  []string{`INSERT INTO c VALUES (1, true, false, 'x'), (2, false, true, NULL), (3, NULL, NULL, 'y')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM c WHERE b ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM c WHERE NOT b ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM c WHERE f ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM c WHERE f OR b ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM c WHERE NULL`),
+			difftest.Q(0, `SELECT id FROM c WHERE NULL AND b`),
+			difftest.Q(0, `SELECT id, CASE WHEN b THEN 1 WHEN f THEN 2 ELSE 0 END FROM c ORDER BY id`),
+			difftest.Q(0, `SELECT count(*) FROM c HAVING count(*) > 0`),
+			difftest.Q(0, `SELECT a.id FROM c a JOIN c d ON a.b AND a.id = d.id ORDER BY a.id`),
+			difftest.Q(0, `SELECT id FROM (SELECT id, b AS v FROM c) x WHERE x.v ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM c WHERE (SELECT b FROM c WHERE id = 1) ORDER BY id`),
+			difftest.S(0, `UPDATE c SET s = 'z' WHERE f`),
+			difftest.S(0, `DELETE FROM c WHERE NOT f`),
+			difftest.Q(0, `SELECT id, s FROM c ORDER BY id`),
+			difftest.S(0, `INSERT INTO c VALUES (2, true, true, 'w') ON CONFLICT (id) WHERE s DO NOTHING`),
+		},
+	},
+	{
 		Name: "row comparison",
 		Schema: []string{
 			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,
