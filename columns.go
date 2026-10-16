@@ -3311,6 +3311,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if !c.x.tx.db.kind.InnoDB() {
+					if err = c.functionParams(e, sc); err != nil {
+						return
+					}
+				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
@@ -3663,6 +3668,47 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 		c.readParam(p)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
+}
+
+// functionParams types each parameter standing as an argument of f by the
+// signature Postgres resolves f to, for the whole statement as Postgres
+// does, so that another use of it as another type is refused, and reads its
+// input as that type, as Postgres does when it binds it.
+func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
+	for i, a := range f.Args {
+		p, ok := a.(*sqlir.Param)
+		if !ok {
+			continue
+		}
+		if f.Name == "concat" {
+			// concat takes "any", which gives a parameter no type (42P18)
+			// unless a use Postgres meets earlier gave it one, an order
+			// detest does not follow.
+			return c.x.unsupported(fmt.Sprintf("parameter $%d as an argument of concat without a cast", p.Index+1))
+		}
+		switch typ := functionParamType(f, i, c.typer(sc)); typ {
+		case "":
+		case "regclass":
+			// The name is read where the sequence is looked up, which is
+			// the run's, so only the type is recorded.
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+			c.typedParam(p)
+		case "numeric":
+			if f.Name == "round" {
+				c.inputAs(p, typ)
+				break
+			}
+			// power takes the numeric form only for a parameter no use
+			// Postgres meets earlier has typed a float8, and would take the
+			// float8 one after floor($1), an order detest does not follow,
+			// so the parameter is not read as either. Both are of one family.
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+			c.typedParam(p)
+		default:
+			c.inputAs(p, typ)
+		}
+	}
+	return nil
 }
 
 // typer types expressions in sc as Postgres resolves them, with a domain

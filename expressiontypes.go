@@ -442,9 +442,22 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		// where callFunc would otherwise key the lock on the value as given.
 		for _, a := range f.Args {
 			switch typ := operandType(t, a); typ {
-			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
+			case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
+			case "int8", "bigint":
+				if len(f.Args) == 2 {
+					return f.Name + " with a " + typ + " key argument beside another"
+				}
 			default:
 				return f.Name + " with a " + typ + " key argument"
+			}
+		}
+	case "round":
+		// round(x, n) is numeric only, and Postgres casts no float to
+		// numeric implicitly.
+		if len(f.Args) == 2 {
+			switch typ := operandType(t, f.Args[0]); typ {
+			case "float4", "float8", "real", "double precision":
+				return "round of a " + typ + " to a number of places"
 			}
 		}
 	case "date_trunc", "extract", "date_part":
@@ -516,6 +529,57 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	}
+	return ""
+}
+
+// functionParamType is the type Postgres gives a parameter that stands as
+// the i-th argument of f, by the signature it resolves f to, or "" where
+// detest does not know it. It is the check's own typing, apart from the
+// typer's, which leaves the parameter untyped.
+func functionParamType(f *sqlir.FuncCall, i int, t typer) string {
+	switch f.Name {
+	case "abs", "floor", "ceil", "ceiling":
+		return "float8"
+	case "round":
+		if len(f.Args) == 2 {
+			return []string{"numeric", "int4"}[i]
+		}
+		return "float8"
+	case "power", "pow":
+		if len(f.Args) != 2 {
+			return ""
+		}
+		other := f.Args[1-i]
+		if untypedExpr(other) {
+			return "float8"
+		}
+		switch t.reduce(t.of(other)) {
+		case "", "unresolved column type":
+			return ""
+		case "numeric", "decimal":
+			return "numeric"
+		}
+		return "float8"
+	case "lower", "upper", "length", "char_length", "octet_length", "hashtext":
+		return "text"
+	case "left":
+		return []string{"text", "int4"}[min(i, 1)]
+	case "date_trunc", "extract", "date_part":
+		if i == 0 {
+			return "text"
+		}
+	case "pg_advisory_xact_lock", "pg_try_advisory_xact_lock":
+		if len(f.Args) == 1 {
+			return "int8"
+		}
+		return "int4"
+	case "nextval":
+		return "regclass"
+	case "setval":
+		return []string{"regclass", "int8", "bool"}[min(i, 2)]
+	case "make_interval":
+		return "float8" // secs => n, the one form the translation takes
 	}
 	return ""
 }
