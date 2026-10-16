@@ -2353,8 +2353,12 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, ite
 		// leaves unnamed, and taking the set would keep names the list
 		// replaces, so a list shorter than a set of unknown order is
 		// refused.
-		if ordered.names == nil && cols != nil && len(cols) != len(v.ViewColumns) {
-			return nil, itemOrder{}, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
+		if ordered.names == nil && cols != nil {
+			// The set counts a name two items give once, so the width
+			// says whether the list names every column.
+			if w, ok := vc.knownWidth(v.View); !ok || w != len(v.ViewColumns) {
+				return nil, itemOrder{}, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
+			}
 		}
 		cols = namesSet(ordered.names)
 	}

@@ -88,10 +88,18 @@ func TestViewColumnListOverUnorderedStarRefused(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int)`)
 	mustExec(t, db, `CREATE VIEW jv(r) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
 	mustExec(t, db, `CREATE VIEW fv(r, a, b, c) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
-	if _, err := db.Exec(`SELECT s FROM jv`); !errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("got %v, want ErrUnsupportedSQL", err)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	// The join repeats id, so its set has fewer names than its columns.
+	mustExec(t, db, `CREATE VIEW dv(a, b) AS SELECT * FROM t JOIN u ON true`)
+	mustExec(t, db, `CREATE VIEW ev(a, b, c, d) AS SELECT * FROM t JOIN u ON true`)
+	for _, q := range []string{`SELECT s FROM jv`, `SELECT id FROM dv WHERE false`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
 	}
-	if _, err := db.Exec(`SELECT r, a, b, c FROM fv`); err != nil {
-		t.Error(err)
+	for _, q := range []string{`SELECT r, a, b, c FROM fv`, `SELECT a, b, c, d FROM ev`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
 	}
 }
