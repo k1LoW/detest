@@ -968,6 +968,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT nextval('sq')`),
 			difftest.Q(0, `SELECT id, nextval('sq') AS v FROM u ORDER BY v DESC`),
 			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY 2 DESC LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u ORDER BY nextval('sq') DESC`),
 			difftest.S(0, `INSERT INTO w SELECT nextval('sq'), id FROM u ORDER BY id DESC`),
 			difftest.Q(0, `SELECT v, id FROM w ORDER BY v`),
 			// A derived table of a write's FROM that reads the target alone,

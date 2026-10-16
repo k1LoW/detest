@@ -471,6 +471,21 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			}
 		}
 	}
+	for _, j := range sel.Joins {
+		// How many times Postgres tests a join condition depends on its
+		// plan, a hash join testing it only for the pairs its keys match,
+		// and a LIMIT may stop it early, where detest tests every pair.
+		for _, f := range sqlir.FuncCalls(j.On) {
+			if effectFuncs[f.Name] {
+				return x.unsupported(f.Name + " in a JOIN condition")
+			}
+		}
+		for _, q := range sqlir.Selects(j.On) {
+			if x.effectfulQuery(q, nil, map[string]bool{}) {
+				return x.unsupported("a subquery that locks rows in a JOIN condition")
+			}
+		}
+	}
 	if sel.Values != nil && (sel.Limit != nil || sel.Offset != nil) {
 		// Postgres reads the rows of VALUES as far as LIMIT asks, where
 		// detest computes every row first.

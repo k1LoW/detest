@@ -485,7 +485,22 @@ func (x *sqlExec) pull(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string
 		it.out = o
 		items = append(items, it)
 	}
-	if err := x.sortItems(sel.OrderBy, items, cols); err != nil {
+	// Postgres sorts by the select list item an ORDER BY key matches, so
+	// a volatile key is computed once with it, where outputValue would
+	// compute it again.
+	keys := slices.Clone(sel.OrderBy)
+	for i, k := range keys {
+		if !slices.ContainsFunc(sqlir.FuncCalls(k.Expr), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) {
+			continue
+		}
+		for p, c := range ocols {
+			if c.alias == "" && c.col == "" && reflect.DeepEqual(sel.Targets[c.target].Expr, k.Expr) {
+				keys[i].Expr = &sqlir.Const{Value: int64(p + 1)}
+				break
+			}
+		}
+	}
+	if err := x.sortItems(keys, items, cols); err != nil {
 		return nil, nil, err
 	}
 	if items, err = x.distinct(sel, items, cols); err != nil {

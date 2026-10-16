@@ -170,6 +170,9 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		// A query no row is pulled from is still refused for a form
 		// detest does not run.
 		`SELECT * FROM (SELECT id FROM u ORDER BY count(*)) s LIMIT 0`,
+		// How often a join condition is tested is up to the plan.
+		`SELECT a.id FROM u a JOIN u b ON nextval('sq') + a.id + b.id > 0 LIMIT 1`,
+		`SELECT a.id FROM u a JOIN u b ON a.id = (SELECT x.id FROM u x WHERE x.id = b.id FOR UPDATE)`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
