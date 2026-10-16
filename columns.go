@@ -1817,8 +1817,9 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 			// rows is a record whatever the other queries give.
 			types = make([]string, len(outputNames(sel)))
 		}
+		rows := c.setOpTypes(sel)
 		for i := range types {
-			if types[i] == "" && slices.ContainsFunc(setOpColumnExprs(sel, i), rowValued) {
+			if types[i] == "" && i < len(rows) && rows[i] == "record" {
 				types[i] = "record"
 			}
 		}

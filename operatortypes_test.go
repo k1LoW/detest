@@ -220,6 +220,9 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2)) UNION ALL VALUES (ROW(3, 4))) x(v) WHERE false`,
 		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2), 1) UNION ALL SELECT ROW(3, 4), 2) x(v, a) WHERE false`,
 		`SELECT 1 IN (VALUES (ROW(1, 2))) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES ((SELECT ROW(1, 2))) UNION ALL VALUES ((SELECT ROW(3, 4)))) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT y.v FROM (SELECT ROW(1, 2) AS v) y UNION ALL VALUES (NULL)) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (NULL) UNION ALL SELECT ROW(1, 2)) x(v) WHERE false`,
 		// A record has no comparison with a value of another type either.
 		`SELECT x.v = 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
 		`SELECT x.v < 'a' FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
