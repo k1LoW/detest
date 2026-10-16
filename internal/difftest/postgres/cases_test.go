@@ -934,6 +934,8 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT * FROM (SELECT * FROM u) s(a, b, c) LIMIT 0`),
 			difftest.Q(0, `SELECT a FROM generate_series(1, 2) AS s(a, b) LIMIT 0`),
 			difftest.Q(0, `SELECT 1 FROM u a JOIN u b ON (SELECT x FROM (SELECT 1) s(x, y)) = 1 LIMIT 0`),
+			difftest.Q(0, `SELECT (SELECT id FROM u FOR UPDATE OF missing) LIMIT 0`),
+			difftest.Q(0, `SELECT count(*) FROM u WHERE 1 / n > 0 HAVING CASE WHEN true THEN false ELSE count(*) > 0 END`),
 			difftest.Q(0, `WITH nt AS (SELECT 1 AS id) SELECT (WITH nt AS (SELECT * FROM nt) SELECT 1 LIMIT 0)`),
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND CASE WHEN true THEN false ELSE (SELECT true) END`),
 			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS a, 2 AS b) SELECT * FROM (SELECT * FROM c) s(x, y)) t LIMIT 0`),

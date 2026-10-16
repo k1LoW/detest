@@ -206,9 +206,6 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 		if c.e == nil {
 			continue
 		}
-		if c.having && hasAggregate(c.e) {
-			continue
-		}
 		v, ok := constant(c.e)
 		switch {
 		case !ok:
@@ -332,6 +329,13 @@ func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
 		err := x.aliasWidths(cte.Select, false)
 		x.ctes = saved
 		if err != nil {
+			return err
+		}
+	}
+	if q.Lock != nil {
+		// planLocking resolves the tables of FOR UPDATE OF, which Postgres
+		// fails on when it parses the statement.
+		if _, err := x.planLocking(q); err != nil {
 			return err
 		}
 	}
