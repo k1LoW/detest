@@ -2865,6 +2865,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if what := aggregateArgumentMismatch(e, c.typer(sc), !c.x.tx.checking); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				// Postgres compares two rows under NULLIF as records, whose
 				// operator it resolves only at a row, rather than field by
 				// field as a row comparison does.

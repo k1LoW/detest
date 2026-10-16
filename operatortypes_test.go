@@ -134,6 +134,59 @@ func TestArithmeticOperandTypesBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// Postgres has no sum or avg of a type other than a number or an interval,
+// and fails the statement when it plans it, whatever rows it reads.
+func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE DOMAIN word AS text`)
+	mustExec(t, db, `CREATE DOMAIN dint AS int`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, b boolean, d date, at timestamptz, u uuid, j jsonb, a int[], v varchar(10), w word, k int)`)
+	for _, q := range []string{
+		`SELECT sum(s) FROM t`,
+		`SELECT avg(s) FROM t`,
+		`SELECT sum(b) FROM t`,
+		`SELECT avg(b) FROM t`,
+		`SELECT sum(d) FROM t`,
+		`SELECT sum(at) FROM t`,
+		`SELECT sum(u) FROM t`,
+		`SELECT sum(j) FROM t`,
+		`SELECT sum(a) FROM t`,
+		`SELECT sum(v) FROM t`,
+		`SELECT sum(w) FROM t`,
+		`SELECT sum(s || 'a') FROM t`,
+		`SELECT sum(DISTINCT s) FROM t`,
+		`SELECT sum(s) OVER () FROM t`,
+		`SELECT count(*) FROM t HAVING sum(s) IS NULL`,
+		`SELECT (SELECT avg(b) FROM t)`,
+		`SELECT sum(x.v) FROM (SELECT '1' AS v) x WHERE false`,
+		`SELECT sum('1') FROM t`,
+		`SELECT avg(NULL) FROM t`,
+		`SELECT sum(coalesce(NULL, NULL)) FROM t`,
+		`SELECT avg(CASE WHEN b THEN '1' END) FROM t`,
+		`SELECT sum(ROW(1, 2)) FROM t`,
+		`SELECT avg(ROW(k, k)) FROM t`,
+		`SELECT sum(coalesce(ROW(1, 2), NULL)) FROM t`,
+		`SELECT avg(CASE WHEN true THEN ROW(1, 2) END) FROM t`,
+		`SELECT sum(nullif(ROW(k, k), ROW(1, 1))) FROM t`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT sum(k), avg(k), sum(b::int), sum(at - at) FROM t`,
+		`SELECT sum(x.k) FROM (SELECT k FROM t) x`,
+		`SELECT sum(CASE WHEN b THEN 1 END), sum(coalesce(k, NULL)) FROM t`,
+		`SELECT sum(k::dint), avg(k::dint) FROM t`,
+		`SELECT sum(CASE WHEN ROW(k, k) = ROW(1, 1) THEN 1 END) FROM t`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v, want nil", q, err)
+		}
+	}
+}
+
 // The type checks a statement gets before it runs read a scalar subquery's
 // target in the subquery's own scope, not as the outer column of that name.
 func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {

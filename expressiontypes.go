@@ -506,6 +506,51 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 	return ""
 }
 
+// aggregateArgumentMismatch refuses sum and avg of an argument Postgres has
+// no form of. It resolves the aggregate by the argument's type when it plans
+// the statement, so it fails such a call over no rows too, where the
+// evaluators see no value to refuse. typed is false where the check has no
+// schema, as in CheckSQL, which cannot tell a domain over a number from a
+// type no form takes, so only the forms that fail whatever the schema are
+// refused there.
+func aggregateArgumentMismatch(f *sqlir.FuncCall, t typer, typed bool) string {
+	if f.Name != "sum" && f.Name != "avg" || len(f.Args) != 1 {
+		return ""
+	}
+	switch a := f.Args[0]; {
+	case untypedBranch(a) || isNullConst(a):
+		// A string literal, a parameter or a NULL matches several forms
+		// (42725), and a CASE or COALESCE of them is text (42883).
+		return f.Name + " of a string literal, a parameter or NULL, or a CASE or COALESCE of them"
+	case rowValued(a):
+		return f.Name + " of a row"
+	case !typed:
+		return ""
+	}
+	switch typ := t.reduce(t.of(f.Args[0])); typ {
+	case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "decimal", "float4", "float8", "real", "double precision", "interval":
+		return ""
+	default:
+		// sum of money exists too, but detest does not model money, so it
+		// is refused with the rest.
+		return f.Name + " with a " + typ + " argument"
+	}
+}
+
+// rowValued reports a row, or a CASE, COALESCE, GREATEST, LEAST or NULLIF
+// one of whose branches is a row, which the typer gives no type.
+func rowValued(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.RowExpr:
+		return true
+	case *sqlir.CaseExpr:
+		return slices.ContainsFunc(caseBranches(e), rowValued)
+	case *sqlir.FuncCall:
+		return slices.ContainsFunc(branchArgs(e), rowValued)
+	}
+	return false
+}
+
 // dateDifferenceMismatch refuses date - date, which Postgres gives as an
 // integer of days. A date is a time at midnight to detest, so the difference
 // would come out an interval.
