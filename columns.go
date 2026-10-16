@@ -1486,6 +1486,23 @@ func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
 	}
 }
 
+// readValues types as text the parameters in the columns of the VALUES
+// query sel that Postgres resolves to a text type, as it does a column of
+// string literals, parameters and NULLs alone, where a query around sel
+// reads them as a FROM item or a CTE.
+func (c *columnChecker) readValues(sel *sqlir.SelectStmt) {
+	for i, typ := range c.itemTypes(sel) {
+		if c.x.tx.db.branchKind(typ) != "text" {
+			continue
+		}
+		for _, e := range setOpColumnExprs(sel, i) {
+			if params, ok := untypedLeaves(e); ok {
+				c.textParams(params, bytesUnread(e, false))
+			}
+		}
+	}
+}
+
 // readTypes are outTypes of sel as a query around it reads them, with the
 // columns of outText resolved to text.
 func (c *columnChecker) readTypes(sel *sqlir.SelectStmt) ([]string, bool) {
@@ -1881,6 +1898,7 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 		return c.namedTypes(sel, types, names)
 	}
 	if len(sel.Values) > 0 {
+		c.readValues(sel)
 		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
 	c.readOutputs(sel)
