@@ -797,6 +797,11 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer) (err, afterIn
 			continue
 		}
 		typ := t.of(e)
+		if typ == "" && rowValued(e) {
+			// A row beside a column made of one is the same record type,
+			// not one this check knows nothing of.
+			typ = "record"
+		}
 		if untypedBranch(e) {
 			// A CASE or COALESCE of those only is text already.
 			typ = "text"

@@ -187,6 +187,82 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// A query output that is a row is a record to the query around it, which
+// has no arithmetic, no function of a number or of text and no sum or avg,
+// so Postgres fails a statement using one so with 42883 whatever rows it
+// reads, and one testing it as a condition with 42804.
+func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	for _, q := range []string{
+		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT lower(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT sum(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT avg(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT -x.v FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT length(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT 1 FROM (SELECT ROW(1, 2) AS v) x WHERE x.v`,
+		`SELECT x.v + 1 FROM (SELECT (1, 2) AS v) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT ROW(k, k) AS v FROM t) x`,
+		`SELECT x.v + 1 FROM (SELECT CASE WHEN true THEN ROW(1, 2) END AS v) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT coalesce(ROW(1, 2), NULL) AS v) x WHERE false`,
+		`WITH c AS (SELECT ROW(1, 2) AS v) SELECT c.v + 1 FROM c WHERE false`,
+		`SELECT (SELECT ROW(1, 2)) + 1 WHERE false`,
+		`SELECT y.w + 1 FROM (SELECT x.v AS w FROM (SELECT ROW(1, 2) AS v) x) y WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT * FROM (SELECT ROW(1, 2) AS v) y) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT ROW(3, 4)) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT NULL) x WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2))) x(v) WHERE false`,
+		`SELECT abs((VALUES (ROW(1, 2)))) WHERE false`,
+		`SELECT abs((SELECT ROW(1, 2) UNION ALL SELECT ROW(3, 4))) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2)) UNION ALL VALUES (ROW(3, 4))) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2), 1) UNION ALL SELECT ROW(3, 4), 2) x(v, a) WHERE false`,
+		`SELECT 1 IN (VALUES (ROW(1, 2))) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES ((SELECT ROW(1, 2))) UNION ALL VALUES ((SELECT ROW(3, 4)))) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT y.v FROM (SELECT ROW(1, 2) AS v) y UNION ALL VALUES (NULL)) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (NULL) UNION ALL SELECT ROW(1, 2)) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT first_value(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT last_value(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT nth_value(ROW(k, k), 1) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT lag(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT lead(ROW(k, k), 1, NULL) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT max(ROW(k, k)) AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT min(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT *, ROW(1, 2) AS v FROM t UNION ALL SELECT 1, 2, ROW(3, 4)) x WHERE false`,
+		// A record has no comparison with a value of another type either.
+		`SELECT x.v = 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v < 'a' FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT (x.v, 1) = (1, 1) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v IN (1, 2) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v BETWEEN 1 AND 2 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT CASE x.v WHEN 1 THEN 1 END FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v IN (SELECT 1) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT 1 IN (SELECT x.v FROM (SELECT ROW(1, 2) AS v) x) WHERE false`,
+		`SELECT 1 IN (SELECT ROW(1, 2) UNION ALL SELECT ROW(3, 4)) WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT x.v IS NULL, count(x.v) FROM (SELECT ROW(1, 2) AS v) x GROUP BY x.v`,
+		`SELECT coalesce(x.v, ROW(3, 4)) IS NULL FROM (SELECT ROW(1, 2) AS v) x`,
+		`SELECT CASE WHEN x.v IS NULL THEN 0 ELSE 1 END FROM (SELECT ROW(1, 2) AS v) x`,
+		`SELECT x.v IS NULL FROM (VALUES (ROW(1, 2))) x(v)`,
+		`SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, 1 AS a) x`,
+		`SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a)`,
+		`SELECT (VALUES (ROW(1, 2))) IS NULL`,
+		`SELECT x.v IS NULL FROM (SELECT first_value(ROW(k, k)) OVER () AS v, max(ROW(k, k)) OVER () AS w FROM t) x`,
+		`SELECT x.v IS NULL FROM (SELECT *, ROW(1, 2) AS v FROM t UNION ALL SELECT 1, 2, ROW(3, 4)) x`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v, want nil", q, err)
+		}
+	}
+}
+
 // The type checks a statement gets before it runs read a scalar subquery's
 // target in the subquery's own scope, not as the outer column of that name.
 func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {
