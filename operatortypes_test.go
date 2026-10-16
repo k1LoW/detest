@@ -889,7 +889,8 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT left($1, $2), length($1) FROM t`, []any{"abc", int64(2)}},
 		{`SELECT pg_try_advisory_xact_lock($1)`, []any{int64(1)}},
 		{`SELECT setval('seq', $1, $2)`, []any{int64(10), true}},
-		{`SELECT power($1, 1::numeric)`, []any{int64(2)}},
+		// Compared, as detest does not follow the scale of power's numeric.
+		{`SELECT power($1, 1::numeric) = 2`, []any{int64(2)}},
 	} {
 		if _, err := db.Query(c.q, c.args...); err != nil {
 			t.Errorf("%s: %v", c.q, err)
