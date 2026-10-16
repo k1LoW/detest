@@ -1301,6 +1301,37 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		// Postgres writes a numeric with the scale it was written with or
+		// computed with, which the drivers return as text: 1.00 does not
+		// scan into an int64 where 1 does.
+		Name: "a numeric reads back with its scale",
+		Schema: []string{
+			`CREATE TABLE p (id int PRIMARY KEY, n int, nm numeric(10, 2), x numeric, z numeric DEFAULT 0.00, g numeric GENERATED ALWAYS AS (x * 2) STORED)`,
+		},
+		Seed:  []string{`INSERT INTO p (id, n, nm, x) VALUES (1, 1, 1, 1.50), (2, 2, 2.5, 2)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT '1.00'::numeric, 1.00, 1.5e2, 1e-2, 1.50e1, -1.50, 1::numeric`),
+			difftest.Q(0, `SELECT nm, x, z, g FROM p ORDER BY id`),
+			difftest.Q(0, `SELECT avg(n), sum(nm), sum(x), min(x), max(nm), avg(x) FROM p`),
+			difftest.Q(0, `SELECT 1.50 + 1, 1.5 * 1.50, 10 / 4::numeric, 1 / 1::numeric, 1.0 / 32, 7.0 % 2, 7 % 2.00`),
+			difftest.Q(0, `SELECT x + 0.10, nm * 2, nm / 2, -x, abs(-x), round(nm * 2 + 1), round(x, 3), floor(x), ceil(nm) FROM p ORDER BY id`),
+			difftest.Q(0, `SELECT coalesce(x, 0), CASE WHEN id = 1 THEN x ELSE 0 END, greatest(x, 1), nullif(x, 0) FROM p ORDER BY id`),
+			difftest.Q(0, `SELECT x FROM p UNION ALL SELECT 3.000 UNION ALL SELECT 4 ORDER BY 1`),
+			difftest.Q(0, `SELECT 1.234::numeric(10, 2), 5::numeric(10, 2), 1.5::numeric(10)`),
+			difftest.Q(0, `SELECT round(avg(nm), 2), avg(nm)::numeric(10, 1), round(sum(x) / 3, 4) FROM p`),
+			difftest.Q(0, `WITH v AS (SELECT 2500000.5 AS a, 1.50 AS b) SELECT a, b FROM v`),
+			difftest.Q(0, `WITH v AS (VALUES (1), (2500000.5)) SELECT column1 FROM v ORDER BY 1`),
+			difftest.Q(0, `SELECT * FROM (SELECT x + 0.10 AS s FROM p) d ORDER BY s`),
+			difftest.Q(0, `SELECT x, sum(x) OVER (ORDER BY id) FROM p ORDER BY id`),
+			difftest.Q(0, `UPDATE p SET x = x + 0.10 RETURNING x, g`),
+			difftest.Q(0, `INSERT INTO p (id, n, nm, x) VALUES (3, 3, '3.5', '3.50') RETURNING *`),
+			difftest.Q(0, `INSERT INTO p (id, x) VALUES (2, 7.000) ON CONFLICT (id) DO UPDATE SET x = excluded.x RETURNING x`),
+			difftest.Q(0, `INSERT INTO p (id, x) SELECT 9, x * 2 FROM p WHERE id = 1 RETURNING x, z`),
+			difftest.Q(0, `SELECT sum(x), max(x) FROM p`),
+		},
+	},
+	{
 		Name: "a derived table over a * with a column alias list",
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, a numeric, b text)`,

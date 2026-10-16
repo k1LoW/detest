@@ -33,7 +33,7 @@ func (r Row) Key() string {
 // keyString is fmt.Sprint(v), with the key types rows use most spelled out:
 // keys are built on every row access, and fmt allocates for each.
 func keyString(v any) string {
-	switch v := v.(type) {
+	switch v := unscaled(v).(type) {
 	case string:
 		return v
 	case int64:

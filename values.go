@@ -14,11 +14,13 @@ import (
 )
 
 func derefValue(v any) any {
-	switch v.(type) {
+	switch n := v.(type) {
 	case nil:
 		return nil
 	case string, int64, int, bool, float64, []byte:
 		return v // the common column types, without reflection
+	case scaledNum:
+		return n.v
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -286,7 +288,7 @@ func isNaNValue(v any) bool {
 }
 
 func toFloat(v any) (float64, bool) {
-	rv := reflect.ValueOf(v)
+	rv := reflect.ValueOf(unscaled(v))
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return float64(rv.Int()), true

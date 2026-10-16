@@ -1091,9 +1091,22 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		// type is the queries' whether or not a float row survives them.
 		rows := slices.Concat(lrows, rrows)
 		if kinds["number"] && (setColumnFloat(sel, i) || slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) })) {
+			// Under a numeric, which no float8 row makes a float8, the
+			// integer is a numeric of no places.
+			numeric := slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(scaledNum); return ok }) &&
+				!slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(float64); return ok })
 			for _, r := range rows {
+				if n, ok := r[c].(scaledNum); ok {
+					if i, ok := n.v.(int64); ok {
+						r[c] = scaledNum{float64(i), n.scale}
+					}
+					continue
+				}
 				if n, ok := integer(derefValue(r[c])); ok {
 					r[c] = float64(n)
+					if numeric {
+						r[c] = scaledNum{float64(n), 0}
+					}
 				}
 			}
 		}
@@ -1871,6 +1884,14 @@ func (x *sqlExec) aggOperand(name string, v any) any {
 // the row count, which count(*) returns, and kind the argument's number
 // kind, by which a sum or an average of floats is kept as it is computed.
 func (x *sqlExec) foldAggregate(name string, star bool, vals []any, n int, kind numberKind, coll sqlir.Collation) (any, error) {
+	out, err := x.foldAggregateValue(name, star, vals, n, kind, coll)
+	if err != nil {
+		return nil, err
+	}
+	return x.aggScaled(name, vals, out), nil
+}
+
+func (x *sqlExec) foldAggregateValue(name string, star bool, vals []any, n int, kind numberKind, coll sqlir.Collation) (any, error) {
 	switch name {
 	case "count":
 		if star {

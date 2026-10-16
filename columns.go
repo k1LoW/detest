@@ -90,6 +90,9 @@ type columnChecker struct {
 	cteTypes []map[string]map[string]string
 	// cteOrdered are the CTEs' itemOrders, as ctes holds their names.
 	cteOrdered []map[string]itemOrder
+	// cteCertain are the certain types of the CTEs' columns, as ctes holds
+	// their names.
+	cteCertain []map[string]map[string]string
 	// outTypes are the types of a query's output columns by position, ""
 	// where expressionType does not know one, for a FROM item, a CTE, a
 	// view or a scalar subquery made of it. A row is "record", which
@@ -726,6 +729,9 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 			sc.types[alias] = types
 			sc.noteOrdered(alias, c.cteOrderedOf(t.Name))
+			if len(t.Columns) == 0 {
+				sc.noteCertain(alias, c.cteCertainOf(t.Name))
+			}
 		} else if v := db.views[db.resolve(t.Name)]; v != nil {
 			types, ordered, cols, err := c.viewTypes(v)
 			if err != nil {
@@ -967,14 +973,16 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	if len(with) == 0 {
 		return func() {}, nil
 	}
-	m, tm, om := map[string]colSet{}, map[string]map[string]string{}, map[string]itemOrder{}
+	m, tm, om, cm := map[string]colSet{}, map[string]map[string]string{}, map[string]itemOrder{}, map[string]map[string]string{}
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
 	c.cteOrdered = append(c.cteOrdered, om)
+	c.cteCertain = append(c.cteCertain, cm)
 	pop = func() {
 		c.ctes = c.ctes[:len(c.ctes)-1]
 		c.cteTypes = c.cteTypes[:len(c.cteTypes)-1]
 		c.cteOrdered = c.cteOrdered[:len(c.cteOrdered)-1]
+		c.cteCertain = c.cteCertain[:len(c.cteCertain)-1]
 	}
 	for _, cte := range with {
 		s, err := c.query(cte.Select, outer)
@@ -995,6 +1003,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 		m[cte.Name] = s
 		tm[cte.Name] = c.derivedTypes(cte.Select, nil)
 		om[cte.Name] = c.itemOrderOf(cte.Select, nil)
+		cm[cte.Name] = c.certainItem(cte.Select, nil)
 	}
 	return pop, nil
 }
@@ -2278,7 +2287,7 @@ func (c *columnChecker) checkedSubqueryType(q *sqlir.SubQuery, sc *colScope) str
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, cteOrdered: c.cteOrdered, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, cteOrdered: c.cteOrdered, cteCertain: c.cteCertain, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -2299,7 +2308,7 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 	if c.subTypes == nil {
 		c.subTypes = map[*sqlir.SubQuery]string{}
 	}
-	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, cteOrdered: c.cteOrdered, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
+	vc := &columnChecker{x: c.x, ctes: c.ctes, cteTypes: c.cteTypes, cteOrdered: c.cteOrdered, cteCertain: c.cteCertain, subTypes: c.subTypes, paramCount: c.paramCount, outCertain: c.outCertain, outCertainNamed: c.outCertainNamed}
 	if _, err := vc.query(q.Select, sc); err != nil {
 		return ""
 	}
@@ -2374,6 +2383,17 @@ func (c *columnChecker) cteTypesOf(name string) (map[string]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+// cteCertainOf are the certain types of the columns of the CTE name, the
+// innermost of that name.
+func (c *columnChecker) cteCertainOf(name string) map[string]string {
+	for i, m := range slices.Backward(c.ctes) {
+		if _, ok := m[name]; ok {
+			return c.cteCertain[i][name]
+		}
+	}
+	return nil
 }
 
 // cteOrderedOf are the itemOrder of the CTE name, the innermost of that

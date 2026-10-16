@@ -1657,7 +1657,12 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		// Postgres computes the aggregates of the query block before any
 		// expression over them, so those of an argument COALESCE does not
 		// reach still fail or run their effects.
-		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) { return x.evalAgg(a, g) }, func(a sqlir.Expr) error {
+		args, err := x.callArgs(v, func(a sqlir.Expr) (any, error) {
+			if x.roundsRange(v, a) {
+				return x.evalAggRaw(a, g)
+			}
+			return x.evalAgg(a, g)
+		}, func(a sqlir.Expr) error {
 			for _, f := range plannedAggregates(a) {
 				if _, err := x.evalAgg(f, g); err != nil {
 					return err
@@ -1667,6 +1672,13 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		})
 		if err != nil {
 			return nil, err
+		}
+		if err := x.roundRange(v, args); err != nil {
+			return nil, err
+		}
+		written := slices.Clone(args)
+		for i := range args {
+			args[i] = unscaled(args[i])
 		}
 		if v.Name == "nullif" {
 			var err error
@@ -1682,7 +1694,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		}
 		if v.Name == "round" && len(args) == 1 {
 			if out, ok, err := x.roundHalf(v.Args[0], args[0]); ok || err != nil {
-				return out, err
+				return x.funcScaled(v, written, out), err
 			}
 		}
 		out, err := x.callOrdered(v, args)
@@ -1692,7 +1704,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 				out, err = x.branchValue(v, v.Args, args, out)
 			}
 		}
-		return out, err
+		return x.funcScaled(v, written, out), err
 	case *sqlir.BinaryExpr:
 		if v.Op == "AND" || v.Op == "OR" {
 			// Three-valued, as eval does for a row.
@@ -1726,6 +1738,8 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		lw, rw := l, r
+		l, r = unscaled(l), unscaled(r)
 		if isRange(l) || isRange(r) {
 			return x.rangeBinary(v.Op, l, r)
 		}
@@ -1754,7 +1768,7 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return x.arithValue(v, l, r, res), nil
+		return x.arithScaled(v, lw, rw, x.arithValue(v, l, r, res)), nil
 	case *sqlir.RowExpr:
 		vals := make([]any, len(v.Items))
 		for i, it := range v.Items {
@@ -1769,8 +1783,11 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		val, err := x.evalAggRaw(v.X, g)
 		return paramText(v.X, val), err
 	case *sqlir.Cast:
-		val, err := x.evalAgg(v.X, g)
+		val, err := x.evalAggRaw(v.X, g)
 		if err != nil {
+			return nil, err
+		}
+		if val, err = x.castRange(v, val); err != nil {
 			return nil, err
 		}
 		if err := x.byteaCast(v, val); err != nil {
@@ -1782,7 +1799,13 @@ func (x *sqlExec) evalAggRaw(e sqlir.Expr, g *aggEnv) (any, error) {
 		if err := x.boolCastSource(v); err != nil {
 			return nil, err
 		}
-		return x.castTo(v, x.halfToInteger(v, paramBool(v, x.tx.db.baseType(v.Type), val)))
+		in := val
+		val = unscaled(val)
+		out, err := x.castTo(v, x.halfToInteger(v, paramBool(v, x.tx.db.baseType(v.Type), val)))
+		if err != nil {
+			return nil, err
+		}
+		return x.castScaled(v, in, out)
 	}
 	if hasAggregate(e) {
 		// eval would take the aggregate for a function of one row.
@@ -2825,13 +2848,20 @@ func (x *sqlExec) driverValueAs(v any, typ string) (driver.Value, error) {
 	if typ == "" || numberRank[x.tx.db.baseType(typ)] != numberRank["numeric"] {
 		return toDriverValue(v), nil
 	}
+	if n, ok := v.(scaledNum); ok {
+		if s, ok := scaledText(n.v, n.scale); ok && n.scale >= 0 {
+			return s, nil
+		}
+		return nil, x.unsupported("a numeric whose scale detest cannot tell, read back without a cast to numeric(p, s) or round(x, n)")
+	}
 	switch n := derefValue(v).(type) {
 	case int64:
+		// An integer converts to a numeric of no places.
 		return strconv.FormatInt(n, 10), nil
 	case float64:
-		if !math.IsInf(n, 0) && !math.IsNaN(n) {
-			return strconv.FormatFloat(n, 'f', -1, 64), nil
-		}
+		// Every numeric detest computes carries its scale, so a float here
+		// came from where detest did not follow one.
+		return nil, x.unsupported("a numeric whose scale detest cannot tell, read back without a cast to numeric(p, s) or round(x, n)")
 	}
 	return toDriverValue(v), nil
 }
@@ -2910,7 +2940,7 @@ func assignedValues(set []sqlir.Assignment) []sqlir.Expr {
 }
 
 func integer(v any) (int64, bool) {
-	switch n := v.(type) {
+	switch n := unscaled(v).(type) {
 	case int64:
 		return n, true
 	case int:

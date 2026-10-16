@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -534,7 +536,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 		{`SELECT id FROM t WHERE id = $1`, []any{[]byte("02")}, []string{"2"}},
 		{`SELECT id FROM t WHERE ratio > 1 ORDER BY id`, nil, []string{"2"}},
 		{`SELECT id FROM t WHERE amount < 100 ORDER BY id`, nil, []string{"1", "2"}},
-		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99"}},
+		{`SELECT id, amount FROM t ORDER BY amount`, nil, []string{"2,7", "1,99.00"}},
 	} {
 		if got := rowsOf(t, db, tc.query, tc.args...); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.query, got, tc.want)
@@ -558,7 +560,7 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	// A numeric is not divided as an integer, however it was written.
 	mustExec(t, db, `CREATE TABLE d (id int PRIMARY KEY, n numeric)`)
 	mustExec(t, db, `INSERT INTO d VALUES (1, '1'), (2, $1), (3, $2)`, 1.0, int64(1))
-	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.5", "0.5", "0.5"}) {
+	if got := rowsOf(t, db, `SELECT n / 2 FROM d ORDER BY id`); !reflect.DeepEqual(got, []string{"0.50000000000000000000", "0.50000000000000000000", "0.50000000000000000000"}) {
 		t.Errorf("numeric division: got %v", got)
 	}
 	// A numeric is kept as a float, so an integer a float cannot keep
@@ -597,8 +599,8 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	// Arithmetic on a numeric stays float arithmetic, even through a whole
 	// intermediate result.
 	for _, tc := range []struct{ query, want string }{
-		{`SELECT (n * 2) / 2 FROM s WHERE id = 1`, "1.5"},
-		{`SELECT sum(n) / 4 FROM s`, "0.5"},
+		{`SELECT (n * 2) / 2 FROM s WHERE id = 1`, "1.5000000000000000"},
+		{`SELECT sum(n) / 4 FROM s`, "0.50000000000000000000"},
 	} {
 		if got := rowsOf(t, db, tc.query); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
@@ -1499,13 +1501,13 @@ func TestCastToNumber(t *testing.T) {
 		{`SELECT '1.50'::numeric = 1.5`, nil, "true"},
 		{`SELECT 1.6::int`, nil, "2"},
 		{`SELECT (-1.4)::smallint`, nil, "-1"},
-		{`SELECT (1.5 * 2) / 2`, nil, "1.5"},
+		{`SELECT (1.5 * 2) / 2`, nil, "1.5000000000000000"},
 		{`SELECT true::int + false::int`, nil, "1"},
-		{`SELECT floor(1.5) / 2`, nil, "0.5"},
+		{`SELECT floor(1.5) / 2`, nil, "0.50000000000000000000"},
 		{`SELECT floor(3) / 2`, nil, "1.5"},
 		{`SELECT round(3) / 2`, nil, "1.5"},
 		{`SELECT abs(-3) / 2`, nil, "1"},
-		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5"},
+		{`SELECT -(1.5 * 2) / 2`, nil, "-1.5000000000000000"},
 	} {
 		if got := rowsOf(t, db, tc.query, tc.args...); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s: got %v, want %s", tc.query, got, tc.want)
@@ -1580,7 +1582,7 @@ func TestNumberKeysByValue(t *testing.T) {
 	}
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
-	if got := rowsOf(t, db, `SELECT '-0.0'::numeric`); !reflect.DeepEqual(got, []string{"0"}) {
+	if got := rowsOf(t, db, `SELECT '-0.0'::numeric`); !reflect.DeepEqual(got, []string{"0.0"}) {
 		t.Errorf("'-0.0'::numeric: got %v", got)
 	}
 }
@@ -1830,7 +1832,7 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE DOMAIN amount AS numeric`)
-	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a numeric(12, 2), b bigint, c amount, f float8)`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, a numeric, b bigint, c amount, f float8)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 2000000, 3000000, 2000000, 5000000)`)
 	// pq and pgx return a numeric as its text, which scans into an int64,
 	// where a float64 scans by its %g text, 2e+06.
@@ -1909,7 +1911,6 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	}
 	for _, q := range []string{
 		`SELECT floor(a) FROM t`,
-		`SELECT avg(b) - 1000000 FROM t`,
 		`SELECT 2000000::numeric UNION ALL SELECT 1::numeric WHERE false`,
 		`SELECT s.v + 1 FROM (SELECT 1999999::numeric AS v) s`,
 		`SELECT floor(c) FROM t`,
@@ -2022,7 +2023,7 @@ func TestNumericReadsBackAsText(t *testing.T) {
 	}
 	rows2.Close()
 	// An untyped parameter takes the form the other argument picks.
-	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`, `SELECT power($1, 1::numeric) FROM t`} {
+	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`} {
 		var v any
 		if err := db.QueryRow(q, int64(2000000)).Scan(&v); err != nil || v != "2000000" {
 			t.Errorf("%s: got %#v, %v, want the text 2000000", q, v, err)
@@ -2054,4 +2055,106 @@ func TestParameterAsCondition(t *testing.T) {
 	if _, err := db.Query(`SELECT count(*) FROM t WHERE $1 AND id = 99`, "maybe"); !errors.Is(err, ErrInvalidTextRepresentation) {
 		t.Errorf("text that is no boolean input: got %v, want invalid input", err)
 	}
+}
+
+// decimalScanner is a sql.Scanner as decimal types implement one, from the
+// text the drivers return for a numeric.
+type decimalScanner struct{ r *big.Rat }
+
+func (d *decimalScanner) Scan(src any) error {
+	s, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("decimal from a %T", src)
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return fmt.Errorf("decimal from %q", s)
+	}
+	d.r = r
+	return nil
+}
+
+func TestNumericReadsBackWithScale(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, nm numeric(10, 2), x numeric)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 1, 1, $1), (2, 2, 2.5, $2)`, int64(7), 2.25)
+	// A numeric of places is its text with them, which scans into a
+	// string, a float64 and a decimal, and not into an int64.
+	for _, tc := range []struct{ q, want string }{
+		{`SELECT nm FROM t WHERE id = 1`, "1.00"},
+		{`SELECT '1.00'::numeric`, "1.00"},
+		{`SELECT avg(n) FROM t WHERE id = 1`, "1.00000000000000000000"},
+		{`SELECT sum(nm) FROM t`, "3.50"},
+		{`SELECT $1::numeric`, "1.50"},
+	} {
+		var args []any
+		if strings.Contains(tc.q, "$1") {
+			args = []any{"1.50"}
+		}
+		var str string
+		if err := db.QueryRow(tc.q, args...).Scan(&str); err != nil || str != tc.want {
+			t.Errorf("%s into a string: got %q, %v, want %q", tc.q, str, err, tc.want)
+		}
+		var f float64
+		if err := db.QueryRow(tc.q, args...).Scan(&f); err != nil || strconv.FormatFloat(f, 'f', -1, 64) != strings.TrimRight(strings.TrimRight(tc.want, "0"), ".") {
+			t.Errorf("%s into a float64: got %v, %v", tc.q, f, err)
+		}
+		var d decimalScanner
+		if err := db.QueryRow(tc.q, args...).Scan(&d); err != nil || d.r.Cmp(mustRat(t, tc.want)) != 0 {
+			t.Errorf("%s into a decimal: got %v, %v", tc.q, d.r, err)
+		}
+		var i int64
+		if err := db.QueryRow(tc.q, args...).Scan(&i); err == nil || !strings.Contains(err.Error(), "invalid syntax") {
+			t.Errorf("%s into an int64: got %d, %v, want database/sql's invalid syntax", tc.q, i, err)
+		}
+	}
+	// A numeric of no places scans into an int64, as Postgres's does.
+	for _, q := range []string{
+		`SELECT x FROM t WHERE id = 1`,
+		`SELECT 7::numeric`,
+		`SELECT sum(x) FROM t WHERE id = 1`,
+		`SELECT round(nm) + 6 FROM t WHERE id = 1`,
+		`SELECT 7.00::numeric(10, 0)`,
+	} {
+		var i int64
+		if err := db.QueryRow(q).Scan(&i); err != nil || i != 7 {
+			t.Errorf("%s into an int64: got %d, %v, want 7", q, i, err)
+		}
+	}
+	// A numeric(p, s) cast rounds to s places and refuses more than p - s
+	// digits before the point.
+	if _, err := db.Exec(`SELECT 123456.5::numeric(5, 2)`); !errors.Is(err, ErrNumericValueOutOfRange) {
+		t.Errorf("numeric(5, 2) of 123456.5: got %v, want 22003", err)
+	}
+	// A numeric whose scale detest does not follow is refused where it is
+	// read back, as is one written to a column from such a value, and a
+	// cast with a scale Postgres takes but detest does not model.
+	mustExec(t, db, `UPDATE t SET x = power(x, 2) WHERE id = 2`)
+	for _, q := range []string{
+		`SELECT power(x, 2) FROM t WHERE id = 1`,
+		`SELECT (0.1::float8 + 0.2::float8)::numeric`,
+		`SELECT x FROM t WHERE id = 2`,
+		`SELECT x + 1 FROM t WHERE id = 2`,
+		`SELECT 1.5::numeric(2, 3)`,
+	} {
+		var str string
+		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %q, %v, want unsupported", q, str, err)
+		}
+	}
+	// Such a value still compares and computes.
+	var ok bool
+	if err := db.QueryRow(`SELECT x = 5.0625 FROM t WHERE id = 2`).Scan(&ok); err != nil || !ok {
+		t.Errorf("a numeric of unknown scale compared: got %v, %v", ok, err)
+	}
+}
+
+func mustRat(t *testing.T, s string) *big.Rat {
+	t.Helper()
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		t.Fatalf("not a decimal: %q", s)
+	}
+	return r
 }

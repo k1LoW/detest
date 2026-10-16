@@ -896,7 +896,11 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 		if !present {
 			continue
 		}
+		written := v
 		v = derefValue(v)
+		if _, ok := written.(scaledNum); ok {
+			row[col] = v // a numeric keeps its scale in a numeric column alone
+		}
 		if v == nil {
 			continue
 		}
@@ -998,6 +1002,9 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 				}
 			}
 			row[col], v = n, n
+			if t == "numeric" {
+				row[col] = storedScaled(def, col, written, n)
+			}
 		}
 		if textTypes[t] {
 			// A number written to a text column is stored as its text, as
