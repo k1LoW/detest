@@ -986,11 +986,19 @@ func (x *sqlExec) asBranchType(kind string, e sqlir.Expr, v any) (any, error) {
 	case "text":
 		return paramText(e, v), nil
 	case "integer", "numeric":
+		if _, ok := v.(scaledNum); ok {
+			return v, nil
+		}
 		if s, ok := derefValue(v).(string); ok && untypedExpr(e) {
-			return x.branchNumber(s, kind == "numeric")
+			n, err := x.branchNumber(s, kind == "numeric")
+			if kind == "numeric" {
+				return x.withScale(n, textScale(s)), err
+			}
+			return n, err
 		}
 		if _, ok := integer(derefValue(v)); ok && kind == "numeric" {
-			return numericValue(derefValue(v)), nil
+			// An integer converts to a numeric of no places.
+			return x.withScale(numericValue(derefValue(v)), 0), nil
 		}
 		return v, nil
 	}

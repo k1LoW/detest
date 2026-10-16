@@ -40,6 +40,15 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		switch e.Op {
 		case "+", "-", "*", "/", "%":
 			l, r := c.certainType(e.L, sc), c.certainType(e.R, sc)
+			// An untyped literal or parameter takes the other operand's
+			// type, a parameter used once only, as one used again is typed
+			// at the use Postgres meets first.
+			if c.untypedOnce(e.R) {
+				r = l
+			}
+			if c.untypedOnce(e.L) {
+				l = r
+			}
 			if numberRank[l] == 0 || numberRank[r] == 0 {
 				return ""
 			}
@@ -285,8 +294,20 @@ func (c *columnChecker) certainOutput(sel *sqlir.SelectStmt) []string {
 // row may read a column of an outer query.
 func (c *columnChecker) noteValuesCertain(sel *sqlir.SelectStmt, sc *colScope) {
 	out := make([]string, len(sel.Values[0]))
+	float := false
 	for i := range out {
 		out[i] = c.certainBranches(setOpColumnExprs(sel, i), sc)
+		for _, e := range setOpColumnExprs(sel, i) {
+			if numberCategory(c.certainType(e, sc)) == numberCategory("float8") {
+				out[i], float = "float8", true
+			}
+		}
+	}
+	if float {
+		if c.x.setOpCertain == nil {
+			c.x.setOpCertain = map[*sqlir.SelectStmt][]string{}
+		}
+		c.x.setOpCertain[sel] = out
 	}
 	if c.outCertain == nil {
 		c.outCertain = map[*sqlir.SelectStmt][]string{}
@@ -373,4 +394,13 @@ func (sc *colScope) certainSource(e sqlir.Expr) string {
 		return sc.certainColumn(e)
 	}
 	return ""
+}
+
+// untypedOnce reports an untyped literal or NULL, or a parameter used once,
+// which takes the type of what it stands beside.
+func (c *columnChecker) untypedOnce(e sqlir.Expr) bool {
+	if p, ok := e.(*sqlir.Param); ok && c.paramCount[p.Index] > 1 {
+		return false
+	}
+	return takesOtherType(e)
 }

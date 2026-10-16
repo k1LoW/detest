@@ -1005,6 +1005,9 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 					return nil, nil, err
 				}
 			}
+			if t := x.setOpCertain[sel]; i < len(t) && numberCategory(t[i]) == numberCategory("float8") {
+				v = unscaled(v) // converted to the column's float8
+			}
 			if i < len(cols) {
 				r[cols[i]] = v
 			}
@@ -1884,6 +1887,9 @@ func (x *sqlExec) computeWindow(w *sqlir.WindowFunc, part []*selItem) error {
 				if v, err = x.asBranchType(x.branchType(w.Func), w.Func.Args[from], v); err != nil {
 					return err
 				}
+			}
+			if x.scaleTypes[w.Func] == "float8" {
+				v = unscaled(v) // converted to the float8 of the value or the default
 			}
 		default:
 			return x.unsupported("window function " + name)
