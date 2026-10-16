@@ -1349,6 +1349,25 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// An alias that repeats the name of a column of a query around the
+		// scan is no column of the scan, so the scan orders by its value.
+		Name: "a limited locking scan ordered by an alias of an outer column",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY)` + binary,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1), (2), (3)`, `INSERT INTO u VALUES (1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT (SELECT u.id AS id FROM t WHERE t.id >= 1 ORDER BY id DESC LIMIT 1 FOR UPDATE) AS k FROM u`),
+			difftest.S(1, rr),
+			difftest.S(1, `DELETE FROM t WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		// A write whose target is a view is refused (TestWriteThroughViewRefused),
 		// and one that only reads a view writes the table as before.
 		Name: "a write that reads a view writes its own table",
