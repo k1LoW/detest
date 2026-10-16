@@ -296,6 +296,10 @@ func (x *sqlExec) branchScaled(e sqlir.Expr, exprs []sqlir.Expr, vals []any, out
 	if !numeric {
 		return out
 	}
+	// Of branches equal in value and apart in scale (1.5 and 1.50), the
+	// first is taken, where GREATEST and LEAST keep the one their
+	// comparison loop happens to keep. That is not followed, as such a tie
+	// needs one value written twice with other places.
 	for i, v := range vals {
 		if derefValue(v) != nil && sameValue(v, out) {
 			_, s := operandScale(exprs[i], v)
