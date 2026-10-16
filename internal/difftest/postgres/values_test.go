@@ -218,6 +218,7 @@ var valueCases = []difftest.Case{
 			// only at a row.
 			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = ((name, b), 1)`),
 			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = (NULL, 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = ((SELECT (9, 1)), 1)`),
 			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) IN (SELECT (name, 2), 1 FROM p)`),
 			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND CASE (a, b) WHEN (name, b) THEN true END`),
 			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND CASE (a, b) WHEN NULL::record THEN true ELSE false END`),

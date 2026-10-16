@@ -3512,8 +3512,8 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		if bRow {
 			other = a
 		}
-		if _, sub := other.(*sqlir.SubQuery); sub {
-			return nil // subqueryOperandTypes types a row against a subquery
+		if q, sub := other.(*sqlir.SubQuery); sub && c.rowSubqueries[q] != nil {
+			return nil // subqueryOperandTypes types a row against its subquery
 		}
 		return c.rowWithValue(c.typer(sc), other)
 	}

@@ -352,6 +352,7 @@ func TestRowComparisonFieldTypesBeforeAnyRow(t *testing.T) {
 		`SELECT ((n, 2), 3) IN (SELECT 1, 3) FROM t WHERE false`,
 		`SELECT ((n, 2), 3) = (SELECT s, 3 FROM t) FROM t WHERE false`,
 		`SELECT (1, 3) IN (SELECT (n, 2), 3 FROM t) WHERE false`,
+		`SELECT ((1, 2), 3) = ((SELECT 1), 3) WHERE false`,
 		// Postgres fails IN (SELECT ...) of another width (42601).
 		`SELECT (1, 2) IN (SELECT s FROM t) WHERE false`,
 		`SELECT 1 IN (SELECT n, 2 FROM t) WHERE false`,
