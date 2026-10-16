@@ -801,6 +801,29 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name: "aggregates and windows in the clauses that allow them, beside those that allow none",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, m int)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 3)`, `INSERT INTO u VALUES (1, 10)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(*) FROM t HAVING max(n) > 0`),
+			difftest.Q(0, `SELECT n FROM t GROUP BY n ORDER BY max(id), n`),
+			difftest.Q(0, `SELECT max(n) AS n FROM t GROUP BY id ORDER BY id`),
+			difftest.Q(0, `SELECT DISTINCT ON (max(n)) id FROM t GROUP BY id ORDER BY max(n), id`),
+			difftest.Q(0, `SELECT id, row_number() OVER (ORDER BY id) FROM t ORDER BY row_number() OVER (ORDER BY id)`),
+			difftest.Q(0, `SELECT id FROM t WHERE n < (SELECT max(m) FROM u) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM t WHERE false AND (SELECT max(m) FROM u) > 0`),
+			difftest.Q(0, `SELECT t.id FROM t JOIN u ON u.m > (SELECT max(n) FROM t) ORDER BY t.id`),
+			difftest.Q(0, `SELECT n FROM t LIMIT (SELECT count(*) FROM u)`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(m) FROM u) WHERE id = 1`),
+			difftest.S(0, `INSERT INTO t SELECT 3, max(m) FROM u`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
+	{
 		// A view's query is checked as a part of the statement that reads
 		// it, which lets through what the statement's own check would.
 		Name: "a view holding a subquery aggregate of its own query's columns",
