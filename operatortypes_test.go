@@ -421,6 +421,43 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 	}
 }
 
+// Postgres reads a string literal or a parameter in a column of VALUES as
+// the type of the column's other rows, which the run converts it to where
+// it can and refuses elsewhere.
+func TestValuesColumnUntypedTakesRowsType(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, tt := range []struct {
+		q    string
+		args []any
+	}{
+		{`SELECT column1 FROM (VALUES ('true'), (false)) v`, nil},
+		{`SELECT column1 FROM (VALUES ($1), (false)) v`, []any{"true"}},
+		{`SELECT column1 FROM (VALUES ('00000000-0000-0000-0000-000000000000'), (gen_random_uuid())) v`, nil},
+		{`SELECT column1 FROM (VALUES ($1), (2)) v`, []any{true}},
+		{`SELECT column1 FROM (VALUES ($1), (2)) v`, []any{1.5}},
+	} {
+		if _, err := db.Query(tt.q, tt.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s %v: got %v, want ErrUnsupportedSQL", tt.q, tt.args, err)
+		}
+	}
+	for _, tt := range []struct {
+		q    string
+		arg  any
+		want []string
+	}{
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1), (2)) v ORDER BY 1`, "1", []string{"false", "true"}},
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1), (2.5)) v ORDER BY 1`, "1.0", []string{"false", "true"}},
+	} {
+		if got := rowsOf(t, db, tt.q, tt.arg); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+	if _, err := db.Query(`SELECT column1 FROM (VALUES ($1), (2)) v`, "x"); !errors.Is(err, ErrInvalidTextRepresentation) {
+		t.Errorf("x beside an integer: got %v, want 22P02", err)
+	}
+}
+
 // Postgres resolves a column of VALUES of string literals, parameters and
 // NULLs alone to text, or one beside text to text, and reads a parameter
 // there as the text the driver sends, which the run does not reproduce for

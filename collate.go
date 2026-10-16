@@ -667,6 +667,26 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
+	if err := x.branchParamsSent(typ, exprs); err != nil {
+		return err
+	}
+	if timeRank[typ] > 0 {
+		return nil
+	}
+	k := x.tx.db.branchKind(typ)
+	if k == "" {
+		return nil
+	}
+	if x.branchTypes == nil {
+		x.branchTypes = map[sqlir.Expr]string{}
+	}
+	x.branchTypes[e] = k
+	return nil
+}
+
+// branchParamsSent refuses a parameter among the branches exprs of type typ
+// bound to a value the driver sends as text detest does not convert to typ.
+func (x *sqlExec) branchParamsSent(typ string, exprs []sqlir.Expr) error {
 	if timeRank[typ] > 0 || x.tx.db.branchKind(typ) != "" {
 		for _, b := range exprs {
 			if k, ok := b.(*sqlir.Collate); ok {
@@ -694,17 +714,6 @@ func (x *sqlExec) noteBranchType(e sqlir.Expr, typ string, exprs []sqlir.Expr) e
 			}
 		}
 	}
-	if timeRank[typ] > 0 {
-		return nil
-	}
-	k := x.tx.db.branchKind(typ)
-	if k == "" {
-		return nil
-	}
-	if x.branchTypes == nil {
-		x.branchTypes = map[sqlir.Expr]string{}
-	}
-	x.branchTypes[e] = k
 	return nil
 }
 
@@ -726,6 +735,21 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, t typer) 
 	if _, ok := x.branchTypes[e]; ok || k == "" {
 		return nil
 	}
+	if err := x.numberBranchInput(k, exprs); err != nil {
+		return err
+	}
+	if x.branchTypes == nil {
+		x.branchTypes = map[sqlir.Expr]string{}
+	}
+	x.branchTypes[e] = k
+	return nil
+}
+
+// numberBranchInput fails a string literal or a parameter's text among the
+// branches exprs that reads as no number of the kind k, and refuses a
+// parameter bound to a value the driver sends as input detest does not
+// model for k.
+func (x *sqlExec) numberBranchInput(k string, exprs []sqlir.Expr) error {
 	for _, b := range exprs {
 		var s string
 		switch b := b.(type) {
@@ -760,10 +784,6 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, t typer) 
 			return err
 		}
 	}
-	if x.branchTypes == nil {
-		x.branchTypes = map[sqlir.Expr]string{}
-	}
-	x.branchTypes[e] = k
 	return nil
 }
 
@@ -778,7 +798,7 @@ func (x *sqlExec) noteNumberBranches(e sqlir.Expr, exprs []sqlir.Expr, t typer) 
 // boolean as text, which evaluates as false, or return 'bogus' beside a
 // uuid. Converting each other type, with the check of every literal before
 // any row, is the work of a type at a time, so the class is refused.
-func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer) (err, afterInput error) {
+func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer, among string) (err, afterInput error) {
 	if x.tx.db.kind.InnoDB() {
 		return nil, nil
 	}
@@ -849,24 +869,24 @@ func (x *sqlExec) unconvertedBranches(exprs []sqlir.Expr, t typer) (err, afterIn
 	}
 	switch {
 	case char && branches > 1:
-		return x.unsupported(fmt.Sprintf("a branch beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted)), nil
+		return x.unsupported(fmt.Sprintf("a branch beside a %s among %s", unconverted, among)), nil
 	case unknown && len(kinds) > 0 && !x.tx.checking:
 		// The branches meet at a type the unknown one decides, such as
 		// abs(NULL)'s float8, or fail beside it, which branchValue cannot
 		// tell from the row's values. CheckSQL has no schema, so a
 		// column's type is unknown there.
-		return x.unsupported("a branch of a type detest does not know beside a typed one among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD"), nil
+		return x.unsupported("a branch of a type detest does not know beside a typed one among " + among), nil
 	case domain != "" && len(names) > 1:
 		// The time and number readers take the branch's own type, so a
 		// domain beside another type resolves to neither.
-		return x.unsupported(fmt.Sprintf("a %s beside another type among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", domain)), nil
+		return x.unsupported(fmt.Sprintf("a %s beside another type among %s", domain, among)), nil
 	case len(kinds) > 1:
-		return x.unsupported("branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD of types with no implicit cast between them"), nil
+		return x.unsupported("types with no implicit cast between them among " + among), nil
 	case untyped && unconverted != "":
 		// After inputAs reads the literal, so text that is no input of
 		// the type fails as in Postgres, and only valid input, which
 		// detest would keep as text, is refused.
-		return nil, x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD", unconverted))
+		return nil, x.unsupported(fmt.Sprintf("a string literal or parameter beside a %s among %s", unconverted, among))
 	}
 	return nil, nil
 }

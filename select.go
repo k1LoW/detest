@@ -974,6 +974,7 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if en == nil {
 		en = &env{}
 	}
+	kinds := x.valuesKinds[sel]
 	rows := make([]Row, 0, len(sel.Values))
 	for _, vs := range sel.Values {
 		r := Row{}
@@ -981,6 +982,16 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			v, err := x.eval(e, en)
 			if err != nil {
 				return nil, nil, err
+			}
+			if i < len(kinds) && kinds[i] != "" {
+				if timeRank[kinds[i]] > 0 {
+					v, err = x.toTimeType(v, kinds[i])
+				} else {
+					v, err = x.asBranchType(kinds[i], e, v)
+				}
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 			if i < len(cols) {
 				r[cols[i]] = v
