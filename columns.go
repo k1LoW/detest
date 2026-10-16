@@ -181,13 +181,25 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return x.unsupported(what)
 	}
 	if x.tx.db.kind.InnoDB() {
-		switch stmt.(type) {
+		switch st := stmt.(type) {
 		case *sqlir.SelectStmt, *sqlir.InsertStmt, *sqlir.UpdateStmt, *sqlir.DeleteStmt:
 			// A script checks each statement as it runs it, after the
 			// DDL before it.
 			for _, name := range openedTables(stmt) {
 				if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
 					return err
+				}
+				if why := x.tx.db.staleView(x.tx.db.resolve(name), map[string]bool{}); why != "" {
+					return x.unsupported(why)
+				}
+			}
+		case *sqlir.CreateTableAsStmt:
+			// IF NOT EXISTS over a table that exists runs no query.
+			if !st.IfNotExists || !x.tx.db.isRelation(x.tx.db.resolve(st.Table)) {
+				for _, name := range openedTables(st.Select) {
+					if why := x.tx.db.staleView(x.tx.db.resolve(name), map[string]bool{}); why != "" {
+						return x.unsupported(why)
+					}
 				}
 			}
 		}
@@ -2392,6 +2404,9 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 // shorter column list leaves unnamed included, nil where the walk does not
 // know them.
 func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, colSet, error) {
+	if b := c.x.tx.db.viewBinds[v]; b != nil && b.stale != "" {
+		return nil, itemOrder{}, nil, c.x.unsupported(b.stale)
+	}
 	vc := &columnChecker{x: c.x}
 	cols, err := vc.query(v.View, nil)
 	switch {

@@ -1306,6 +1306,68 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// MySQL keeps the columns a view's * covers when it creates the
+		// view, as Postgres does.
+		Name: "a view's * covers the columns its table had when it was created",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, m INT)` + binary,
+			`CREATE VIEW tv AS SELECT * FROM t`,
+			`CREATE VIEW jv AS SELECT m FROM t JOIN u ON t.id = u.id`,
+			`CREATE TABLE w (a INT)` + binary,
+			`CREATE VIEW ov AS SELECT (SELECT 2 AS a UNION ALL SELECT 1 ORDER BY a+0 LIMIT 1) AS k FROM w`,
+			`ALTER TABLE t ADD COLUMN x INT`,
+			`ALTER TABLE t ADD COLUMN m INT`,
+		},
+		Seed:  []string{`INSERT INTO t (id, n, m) VALUES (1, 2, 7)`, `INSERT INTO u VALUES (1, 5)`, `INSERT INTO w VALUES (5)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT * FROM tv`),
+			difftest.Q(0, `SELECT m FROM jv`),
+			difftest.Q(0, `SELECT k FROM ov`),
+		},
+	},
+	{
+		// A view names each bare column of its query after the column, which
+		// leaves a limited locking scan through it stopping after its rows.
+		Name: "a limited locking scan in a view locks only the rows it reads",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY)` + binary,
+			`CREATE VIEW lv AS SELECT * FROM (SELECT id FROM t WHERE id >= 1 ORDER BY id LIMIT 1 FOR UPDATE) d`,
+			`CREATE VIEW sv AS SELECT * FROM (SELECT * FROM t WHERE id >= 1 ORDER BY id LIMIT 1 FOR UPDATE) d`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1), (2), (3)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT id FROM lv`),
+			difftest.Q(0, `SELECT id FROM sv`),
+			difftest.S(1, rr),
+			difftest.S(1, `DELETE FROM t WHERE id = 3`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
+		// An alias that repeats the name of a column of a query around the
+		// scan is no column of the scan, so the scan orders by its value.
+		Name: "a limited locking scan ordered by an alias of an outer column",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY)` + binary,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1), (2), (3)`, `INSERT INTO u VALUES (1)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT (SELECT u.id AS id FROM t WHERE t.id >= 1 ORDER BY id DESC LIMIT 1 FOR UPDATE) AS k FROM u`),
+			difftest.S(1, rr),
+			difftest.S(1, `DELETE FROM t WHERE id = 1`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
+	{
 		// A write whose target is a view is refused (TestWriteThroughViewRefused),
 		// and one that only reads a view writes the table as before.
 		Name: "a write that reads a view writes its own table",
