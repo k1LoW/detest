@@ -278,6 +278,12 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 		}
 		return x.unsupported(fmt.Sprintf("%s, which locks rows or has effects, read where Postgres may run only part of it", what))
 	}
+	// A name some WITH declares reads its CTE where the WITH is in scope.
+	// One the statement also reads where none is may read the view.
+	free := map[string]bool{}
+	for _, name := range freeNames(stmt) {
+		free[name] = true
+	}
 	for _, q := range sqlir.Selects(stmt) {
 		read := reachableCTEs(q)
 		for _, cte := range q.With {
@@ -302,7 +308,7 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 				if err := check("a derived table", t.Sub, t.Sub); err != nil {
 					return err
 				}
-			} else if v := view(t); v != nil {
+			} else if v := view(t); v != nil && (ctes[t.Name] == nil || free[t.Name]) {
 				if err := check(fmt.Sprintf("view %q", t.Name), v, t); err != nil {
 					return err
 				}
@@ -415,14 +421,35 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			}
 		}
 	}
+	if sel.Values != nil && (sel.Limit != nil || sel.Offset != nil) {
+		// Postgres reads the rows of VALUES as far as LIMIT asks, where
+		// detest computes every row first.
+		if err := x.noSequenceCalls(sel.Values); err != nil {
+			return err
+		}
+		for _, q := range sqlir.Selects(sel.Values) {
+			if x.effectfulQuery(q, nil, map[string]bool{}) {
+				return x.unsupported("a subquery that locks rows in VALUES under LIMIT or OFFSET")
+			}
+		}
+	}
 	if len(windowsOf(sel)) > 0 && (len(sel.OrderBy) > 0 || sel.Limit != nil || sel.Offset != nil) {
 		// Postgres computes the select list after the window functions,
 		// row by row as ORDER BY and LIMIT pull them, where detest
 		// computes it for every row before.
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, c := range sel.With {
+			ctes[c.Name] = c.Select
+		}
 		for _, t := range sel.Targets {
 			for _, f := range sqlir.FuncCalls(t.Expr) {
 				if effectFuncs[f.Name] {
 					return x.unsupported(f.Name + " in the select list of a query with window functions and ORDER BY, LIMIT or OFFSET")
+				}
+			}
+			for _, q := range sqlir.Selects(t.Expr) {
+				if x.effectfulQuery(q, ctes, map[string]bool{}) {
+					return x.unsupported("a subquery that locks rows in the select list of a query with window functions and ORDER BY, LIMIT or OFFSET")
 				}
 			}
 		}

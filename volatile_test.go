@@ -134,6 +134,9 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		// and below the row locks, for a row SKIP LOCKED skips too.
 		`SELECT nextval('sq'), row_number() OVER () FROM u LIMIT 1`,
 		`SELECT nextval('sq'), row_number() OVER () FROM u ORDER BY 1`,
+		`SELECT row_number() OVER (), (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u LIMIT 1`,
+		// So are the rows of VALUES.
+		`VALUES (nextval('sq')), (nextval('sq')) LIMIT 1`,
 		`SELECT id, nextval('sq') FROM u LIMIT 1 FOR UPDATE SKIP LOCKED`,
 		`SELECT id FROM u WHERE nextval('sq') > 0 LIMIT 1 FOR UPDATE`,
 		// Whether it computes a subquery for a row past LIMIT depends on
@@ -169,6 +172,8 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		{`SELECT v FROM sv ORDER BY v`, []string{"5", "6"}},
 		{`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b ORDER BY v`, []string{"7", "8"}},
 		{`SELECT nextval('sq') FROM u UNION ALL SELECT 1`, []string{"9", "10", "1"}},
+		// A CTE of a view's name reads the CTE.
+		{`WITH sv AS (SELECT 1 AS v) SELECT v FROM sv`, []string{"1"}},
 		{`SELECT nextval('sq')`, []string{"11"}},
 		{`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id RETURNING u.n`, []string{"12", "13"}},
 	} {
