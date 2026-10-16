@@ -95,6 +95,8 @@ var datetimeCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM ev WHERE extract(epoch FROM (SELECT max(at) FROM ev) - at) < 86400 * 7 ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM ev WHERE extract(year FROM at) = 2024 AND extract(dow FROM at) IN (0, 6) ORDER BY id`),
 			difftest.Q(0, `SELECT id, extract(mm FROM at)::int, date_part('mm', at)::int FROM ev ORDER BY id`),
+			difftest.Q(0, `SELECT id, extract(second FROM at)::text, extract(milliseconds FROM at)::text, extract(microseconds FROM at)::text, extract(hour FROM at)::text, extract(day FROM on_day)::text, extract(second FROM interval '1 day 1 second')::varchar(3) FROM ev ORDER BY id`),
+			difftest.Q(0, `SELECT id, extract(day FROM at) / 2 = 7.5, extract(day FROM at) / 4 * 4 = extract(day FROM at), extract(hour FROM at) / 2 > 6 FROM ev ORDER BY id`),
 			difftest.Q(0, `SELECT date_trunc('mm', at) FROM ev`),
 			difftest.Q(0, `SELECT extract(fortnight FROM at) FROM ev`),
 			difftest.Q(0, `SELECT extract(fortnight FROM on_day) FROM ev`),
