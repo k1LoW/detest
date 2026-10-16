@@ -193,6 +193,15 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 					return x.unsupported(why)
 				}
 			}
+		case *sqlir.CreateTableAsStmt:
+			// IF NOT EXISTS over a table that exists runs no query.
+			if st := stmt.(*sqlir.CreateTableAsStmt); !st.IfNotExists || !x.tx.db.isRelation(x.tx.db.resolve(st.Table)) {
+				for _, name := range openedTables(st.Select) {
+					if why := x.tx.db.staleView(x.tx.db.resolve(name), map[string]bool{}); why != "" {
+						return x.unsupported(why)
+					}
+				}
+			}
 		}
 		return nil
 	}

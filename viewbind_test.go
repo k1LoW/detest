@@ -63,7 +63,8 @@ func TestMySQLViewRefusedAfterColumnRename(t *testing.T) {
 	} {
 		mustExec(t, db, q)
 	}
-	for _, q := range []string{`SELECT id FROM tv`, `SELECT s FROM wv`} {
+	mustExec(t, db, `INSERT INTO t VALUES (1, 'a', 2)`)
+	for _, q := range []string{`SELECT id FROM tv`, `SELECT s FROM wv`, `CREATE TABLE copied AS SELECT s FROM tv`} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
