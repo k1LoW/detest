@@ -662,6 +662,42 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	}
 }
 
+// Postgres resolves a CASE, a COALESCE or an aggregate of string literals and
+// NULLs alone to text, and fails a comparison of it with another type when it
+// plans the statement, whatever rows the statement reads.
+func TestUntypedExpressionComparedAsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, b boolean, u uuid, i interval, ts timestamp, f float8)`)
+	for _, q := range []string{
+		`SELECT n = coalesce('1', NULL) FROM t WHERE false`,
+		`SELECT n = CASE WHEN true THEN '1' END FROM t WHERE false`,
+		`SELECT n IN (coalesce('1', NULL), 2) FROM t WHERE false`,
+		`SELECT n = max('1') FROM t WHERE false`,
+		`SELECT CASE n WHEN coalesce('1', NULL) THEN 1 END FROM t WHERE false`,
+		`SELECT coalesce('1', NULL) = n FROM t WHERE false`,
+		`SELECT 1 = coalesce('1', NULL)`,
+		`SELECT n = coalesce(NULL, NULL) FROM t WHERE false`,
+		`SELECT n = (SELECT max('1')) FROM t WHERE false`,
+		`SELECT f < nullif('1', NULL) FROM t WHERE false`,
+		`SELECT b = coalesce('t', NULL) FROM t WHERE false`,
+		`SELECT u = coalesce('a', NULL) FROM t WHERE false`,
+		`SELECT i = coalesce('1 day', NULL) FROM t WHERE false`,
+		`SELECT ts = coalesce('2020-01-01', NULL) FROM t WHERE false`,
+		`SELECT (n, 2) = (coalesce('1', NULL), 2) FROM t WHERE false`,
+		`SELECT (n, 2) IN ((coalesce('1', NULL), 2)) FROM t WHERE false`,
+		`SELECT (n, 2) = (SELECT coalesce('1', NULL), 2) FROM t WHERE false`,
+		`SELECT ROW(n, 2) = coalesce('1', NULL) FROM t WHERE false`,
+		`SELECT coalesce('1', NULL) IN (SELECT 1) WHERE false`,
+		`SELECT (coalesce('1', NULL), 2) = (SELECT 1, 2) WHERE false`,
+		`SELECT n = ANY (SELECT max('1')) FROM t WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
 // Postgres has no operator comparing text with a number, and resolves only an
 // untyped literal or a parameter to the other side's type.
 func TestTextComparedWithNumber(t *testing.T) {
@@ -1680,6 +1716,27 @@ func TestUndeclaredSequenceIsUndefined(t *testing.T) {
 			t.Errorf("%s: %v", q, err)
 		}
 	}
+}
+
+func TestUndefinedTableWhereNoRowReaches(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SELECT (SELECT 1 FROM missing) FROM e`,
+		`SELECT 1 FROM e WHERE EXISTS (SELECT 1 FROM missing WHERE missing.id = e.id)`,
+		`SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1`,
+		`WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT 1`,
+		`UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`,
+		`DELETE FROM e WHERE id IN (SELECT id FROM missing)`,
+		`INSERT INTO e VALUES (1) RETURNING (SELECT 1 FROM missing)`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	mustExec(t, db, `WITH missing AS (SELECT 1 AS id) SELECT (SELECT id FROM missing) FROM e`)
 }
 
 func TestInsertColumnChecks(t *testing.T) {
