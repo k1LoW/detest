@@ -1417,6 +1417,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		delete(db.history, table) // a table created again under the name starts with no versions
 		db.moveAutoInc(table, "")
 		delete(db.matviews, table)
+		delete(db.viewBinds, db.views[table])
 		delete(db.views, table)
 		tx.pending(table, func(lk lockKey, _ Row) { delete(tx.writes, lk) })
 		return nil
