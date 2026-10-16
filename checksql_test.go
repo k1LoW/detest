@@ -71,6 +71,9 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT abs(nextval('s')::text)`,
 			`SELECT floor('x'::text)`,
 			`SELECT power(1, true)`,
+			`SELECT sum('1')`,
+			`SELECT avg(NULL)`,
+			`SELECT sum(ROW(1, 2))`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",
@@ -89,6 +92,8 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT pg_advisory_xact_lock(1)`,
 			`SELECT pg_try_advisory_xact_lock(1, 2)`,
 			`SELECT abs(-1), floor(1.5), ceil(n), power(n, 2) FROM t`,
+			// The cast may be to a domain over a number.
+			`SELECT sum(n::dint), avg(n::dint) FROM t`,
 			`SELECT * FROM t WHERE id = ANY(ARRAY[1, 2]) AND name LIKE 'x%' AND a BETWEEN 1 AND 2`,
 			`UPDATE t SET n = n + 1, updated_at = now() WHERE id = $1 AND version = $2`,
 			`SELECT * FROM generate_series(1, 3)`,
