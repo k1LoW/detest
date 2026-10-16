@@ -949,6 +949,12 @@ func (x *sqlExec) checkTypes(table string, row Row) error {
 			row[col] = stored
 			continue
 		}
+		if (t == "time" || t == "timetz") && v != sqlir.Unknown {
+			// A time of day is held as the text it was written in, which
+			// neither prints (10:00 for 10:00:00) nor compares ('10:00' <
+			// '9:00') as the time does.
+			return x.unsupported(fmt.Sprintf("a value written to the %s column %q", t, col))
+		}
 		// Unknown stands for a value detest could not compute, not one the
 		// statement wrote, so it is kept to be reported where it is read.
 		if name, ok := numberTypes[t]; ok && !x.tx.db.kind.InnoDB() && v != sqlir.Unknown {
