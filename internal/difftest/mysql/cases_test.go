@@ -1328,6 +1328,27 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// A view names each bare column of its query after the column, which
+		// leaves a limited locking scan through it stopping after its rows.
+		Name: "a limited locking scan in a view locks only the rows it reads",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY)` + binary,
+			`CREATE VIEW lv AS SELECT * FROM (SELECT id FROM t WHERE id >= 1 ORDER BY id LIMIT 1 FOR UPDATE) d`,
+			`CREATE VIEW sv AS SELECT * FROM (SELECT * FROM t WHERE id >= 1 ORDER BY id LIMIT 1 FOR UPDATE) d`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1), (2), (3)`},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT id FROM lv`),
+			difftest.Q(0, `SELECT id FROM sv`),
+			difftest.S(1, rr),
+			difftest.S(1, `DELETE FROM t WHERE id = 3`),
+			difftest.S(1, `COMMIT`),
+			difftest.S(0, `COMMIT`),
+		},
+	},
+	{
 		// A write whose target is a view is refused (TestWriteThroughViewRefused),
 		// and one that only reads a view writes the table as before.
 		Name: "a write that reads a view writes its own table",

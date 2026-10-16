@@ -905,6 +905,11 @@ func ordersByAlias(sel *sqlir.SelectStmt) bool {
 			continue
 		}
 		for _, t := range sel.Targets {
+			// An alias that only repeats the column's own name, as a bound
+			// view gives each bare column, orders by that column.
+			if r, ok := t.Expr.(*sqlir.ColumnRef); ok && strings.EqualFold(r.Column, t.Alias) {
+				continue
+			}
 			if t.Alias != "" && strings.EqualFold(t.Alias, c.Column) {
 				return true
 			}
