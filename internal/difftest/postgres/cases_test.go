@@ -783,6 +783,24 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name: "aggregates beside one another, under functions or a window, or in a subquery of another, which do not nest",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (id int PRIMARY KEY, m int)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 3)`, `INSERT INTO u VALUES (1, 10)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT max(abs(n)) + min(n) FROM t`),
+			difftest.Q(0, `SELECT coalesce(max(n), 0) FROM t WHERE false`),
+			difftest.Q(0, `SELECT count(*) FROM t HAVING max(n) > 2`),
+			difftest.Q(0, `SELECT (SELECT max(u.m) FROM u), max(n) FROM t`),
+			difftest.Q(0, `SELECT (SELECT max(u.m) FROM u), max(n) FROM t WHERE false`),
+			difftest.Q(0, `SELECT id, sum(n) OVER (ORDER BY id) FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT id, rank() OVER (ORDER BY max(n) DESC) FROM t GROUP BY id ORDER BY id`),
+		},
+	},
+	{
 		// A view's query is checked as a part of the statement that reads
 		// it, which lets through what the statement's own check would.
 		Name: "a view holding a subquery aggregate of its own query's columns",
