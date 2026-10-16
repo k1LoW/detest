@@ -155,6 +155,25 @@ var derivedTypeCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "a set operation whose first query is a * over a derived table, a CTE or a view",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
+			`CREATE VIEW sv(w) AS SELECT * FROM (SELECT s FROM t) y`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 1)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT x.v || 'z' FROM (SELECT * FROM (SELECT s AS v FROM t) y UNION ALL SELECT 'b'::text) x ORDER BY 1`),
+			difftest.Q(0, `SELECT x.v || 'z' FROM (SELECT y.* FROM (SELECT s AS v FROM t) y JOIN t ON true UNION ALL SELECT 'b'::text) x ORDER BY 1`),
+			difftest.Q(0, `SELECT x.w || 'z' FROM (SELECT * FROM (SELECT s AS v FROM t) y(w) UNION ALL SELECT 'b'::text) x ORDER BY 1`),
+			difftest.Q(0, `WITH c AS (SELECT n FROM t) SELECT x.n + 1 FROM (SELECT * FROM c UNION ALL SELECT 2) x ORDER BY 1`),
+			difftest.Q(0, `WITH u AS (SELECT * FROM (SELECT s AS v FROM t) y UNION ALL SELECT 'b'::text) SELECT v || 'z' FROM u ORDER BY 1`),
+			difftest.Q(0, `SELECT x.w || 'z' FROM (SELECT * FROM sv UNION ALL SELECT 'b'::text) x ORDER BY 1`),
+			difftest.Q(0, `SELECT a FROM (SELECT * FROM (SELECT n AS v FROM t) y) z(a)`),
+			difftest.Q(0, `SELECT v FROM (SELECT * FROM (SELECT n AS v FROM t) y) z(a)`),
+		},
+	},
+	{
 		Name:  "a column of VALUES in FROM that Postgres resolves to text",
 		Conns: 1,
 		Steps: []difftest.Step{

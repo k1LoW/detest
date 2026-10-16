@@ -36,6 +36,10 @@ type colScope struct {
 	// columns by position, which a * over the item gives in that order, nil
 	// where the check does not know each one.
 	ordered map[string][]string
+	// names are the names of a derived table's, a CTE's or a view's
+	// columns in order, which a * over the item gives, nil where the check
+	// does not know their order.
+	names map[string][]string
 	// certain are the types of the columns a statement shows without a
 	// guess, by item: a table's declared ones and a derived table's
 	// certainItem, which the output goes by.
@@ -84,8 +88,8 @@ type columnChecker struct {
 	// cteTypes are the types of the CTEs' columns, by CTE and column, as
 	// ctes holds their names.
 	cteTypes []map[string]map[string]string
-	// cteOrdered are the CTEs' orderedTypes, as ctes holds their names.
-	cteOrdered []map[string][]string
+	// cteOrdered are the CTEs' itemOrders, as ctes holds their names.
+	cteOrdered []map[string]itemOrder
 	// outTypes are the types of a query's output columns by position, ""
 	// where expressionType does not know one, for a FROM item, a CTE, a
 	// view or a scalar subquery made of it. A row is "record", which
@@ -711,7 +715,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		}
 	case t.Sub != nil:
 		sc.types[alias] = c.derivedTypes(t.Sub, t.Columns)
-		sc.noteOrdered(alias, c.orderedTypes(t.Sub))
+		sc.noteOrdered(alias, c.itemOrderOf(t.Sub, t.Columns))
 		sc.noteCertain(alias, c.certainItem(t.Sub, t.Columns))
 	default:
 		db := c.x.tx.db
@@ -960,7 +964,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 	if len(with) == 0 {
 		return func() {}, nil
 	}
-	m, tm, om := map[string]colSet{}, map[string]map[string]string{}, map[string][]string{}
+	m, tm, om := map[string]colSet{}, map[string]map[string]string{}, map[string]itemOrder{}
 	c.ctes = append(c.ctes, m)
 	c.cteTypes = append(c.cteTypes, tm)
 	c.cteOrdered = append(c.cteOrdered, om)
@@ -987,7 +991,7 @@ func (c *columnChecker) with(with []sqlir.CTE, outer *colScope) (pop func(), err
 		}
 		m[cte.Name] = s
 		tm[cte.Name] = c.derivedTypes(cte.Select, nil)
-		om[cte.Name] = c.orderedTypes(cte.Select)
+		om[cte.Name] = c.itemOrderOf(cte.Select, nil)
 	}
 	return pop, nil
 }
@@ -1193,7 +1197,7 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	}
 	c.noteOutputTypes(sel, sc)
 	c.noteCertain(sel, sc)
-	c.noteExpanded(sel)
+	c.noteExpanded(sel, sc)
 	if out := outputColumns(sel); out != nil {
 		return out, nil
 	}
@@ -1232,29 +1236,67 @@ func starColumns(sel *sqlir.SelectStmt, sc *colScope) colSet {
 // order, when it covers one derived table, CTE or view whose orderedTypes
 // the scope holds, and nil otherwise.
 func starItemTypes(sel *sqlir.SelectStmt, t sqlir.Target, sc *colScope) []string {
+	if alias, ok := starItem(sel, t, sc); ok {
+		return sc.ordered[alias]
+	}
+	return nil
+}
+
+// starItemNames are the names of the columns the * t of sel gives, in
+// order, when it covers one derived table, CTE or view whose names the
+// scope holds, and nil otherwise.
+func starItemNames(sel *sqlir.SelectStmt, t sqlir.Target, sc *colScope) []string {
+	if alias, ok := starItem(sel, t, sc); ok {
+		return sc.names[alias]
+	}
+	return nil
+}
+
+// starItem is the alias of the one item of sc the * t of sel covers, false
+// when it covers several or one of an outer query.
+func starItem(sel *sqlir.SelectStmt, t sqlir.Target, sc *colScope) (string, bool) {
 	alias := t.Table
 	if alias == "" {
 		from := sel.From
 		if from == nil || len(sel.Joins) > 0 || from.Func != nil {
-			return nil
+			return "", false
 		}
 		alias = targetAlias(from.Name, from.Alias)
 	}
-	if _, local := sc.items[alias]; !local {
-		return nil
-	}
-	return sc.ordered[alias]
+	_, local := sc.items[alias]
+	return alias, local
 }
 
-// noteOrdered records the orderedTypes of the item alias, if any.
-func (sc *colScope) noteOrdered(alias string, types []string) {
-	if types == nil {
-		return
+// itemOrder are the orderedTypes and the expandedNames of a derived table,
+// a CTE or a view, which a * over the item gives in that order.
+type itemOrder struct {
+	types, names []string
+}
+
+// itemOrderOf is the itemOrder of an item made of sel, whose first columns
+// names renames.
+func (c *columnChecker) itemOrderOf(sel *sqlir.SelectStmt, names []string) itemOrder {
+	o := itemOrder{types: c.orderedTypes(sel)}
+	if cols := c.expandedNames(sel); cols != nil {
+		o.names = renamedCols(cols, names)
 	}
-	if sc.ordered == nil {
-		sc.ordered = map[string][]string{}
+	return o
+}
+
+// noteOrdered records the itemOrder of the item alias, if any.
+func (sc *colScope) noteOrdered(alias string, o itemOrder) {
+	if o.types != nil {
+		if sc.ordered == nil {
+			sc.ordered = map[string][]string{}
+		}
+		sc.ordered[alias] = o.types
 	}
-	sc.ordered[alias] = types
+	if o.names != nil {
+		if sc.names == nil {
+			sc.names = map[string][]string{}
+		}
+		sc.names[alias] = o.names
+	}
 }
 
 // noteOutputTypes records the types of a query's select list items that
@@ -1559,7 +1601,8 @@ func (c *columnChecker) starTable(sel *sqlir.SelectStmt, t sqlir.Target) *tableD
 }
 
 // expandedNames are the names of sel's columns in order, as outputNames
-// gives them, with a * over a table starTable finds expanded to its
+// gives them, with a * over a table starTable finds, or over a derived
+// table, a CTE or a view whose names the scope holds, expanded to its
 // columns, and nil where a * gives columns of no known order.
 func (c *columnChecker) expandedNames(sel *sqlir.SelectStmt) []string {
 	if names := outputNames(sel); names != nil {
@@ -1575,25 +1618,29 @@ func (c *columnChecker) expandedNames(sel *sqlir.SelectStmt) []string {
 
 // noteExpanded records expandedNames' names of sel while its CTEs are in
 // scope, nil where a * gives columns of no known order.
-func (c *columnChecker) noteExpanded(sel *sqlir.SelectStmt) {
+func (c *columnChecker) noteExpanded(sel *sqlir.SelectStmt, sc *colScope) {
 	if c.outExpanded == nil {
 		c.outExpanded = map[*sqlir.SelectStmt][]string{}
 	}
-	c.outExpanded[sel] = c.expandNames(sel)
+	c.outExpanded[sel] = c.expandNames(sel, sc)
 }
 
-func (c *columnChecker) expandNames(sel *sqlir.SelectStmt) []string {
+func (c *columnChecker) expandNames(sel *sqlir.SelectStmt, sc *colScope) []string {
 	var out []string
 	for _, t := range sel.Targets {
 		if !t.Star {
 			out = append(out, targetName(t))
 			continue
 		}
-		def := c.starTable(sel, t)
-		if def == nil {
+		if def := c.starTable(sel, t); def != nil {
+			out = append(out, def.columns...)
+			continue
+		}
+		names := starItemNames(sel, t, sc)
+		if names == nil {
 			return nil
 		}
-		out = append(out, def.columns...)
+		out = append(out, names...)
 	}
 	return out
 }
@@ -2269,7 +2316,7 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 // Postgres expands the view into the statement and runs the query as one of
 // its own. The checks the statement makes after its walk apply too, apart
 // from those of parameters, which a view's query cannot hold.
-func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, []string, error) {
+func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, error) {
 	vc := &columnChecker{x: c.x}
 	_, err := vc.query(v.View, nil)
 	switch {
@@ -2287,13 +2334,13 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, []s
 	}
 	if err != nil {
 		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
-			return nil, nil, err
+			return nil, itemOrder{}, err
 		}
 		// Any other failure is one Postgres makes when the view is created,
 		// so it cannot be the answer to a statement reading the view.
-		return map[string]string{}, nil, nil
+		return map[string]string{}, itemOrder{}, nil
 	}
-	return vc.derivedTypes(v.View, v.ViewColumns), vc.orderedTypes(v.View), nil
+	return vc.derivedTypes(v.View, v.ViewColumns), vc.itemOrderOf(v.View, v.ViewColumns), nil
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that
@@ -2307,15 +2354,15 @@ func (c *columnChecker) cteTypesOf(name string) (map[string]string, bool) {
 	return nil, false
 }
 
-// cteOrderedOf are the orderedTypes of the CTE name, the innermost of that
+// cteOrderedOf are the itemOrder of the CTE name, the innermost of that
 // name.
-func (c *columnChecker) cteOrderedOf(name string) []string {
+func (c *columnChecker) cteOrderedOf(name string) itemOrder {
 	for i, m := range slices.Backward(c.ctes) {
 		if _, ok := m[name]; ok {
 			return c.cteOrdered[i][name]
 		}
 	}
-	return nil
+	return itemOrder{}
 }
 
 // position fails an integer GROUP BY or ORDER BY item that is no position

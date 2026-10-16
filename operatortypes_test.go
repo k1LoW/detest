@@ -581,6 +581,30 @@ func TestStarOverDerivedItemTypedBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// A set operation takes its column names from its first query, so where
+// that is a * over a derived table, a CTE or a view, the * gives the names
+// and types of the item's columns in order, and Postgres types the set
+// operation read as a FROM item or a CTE when it plans the statement.
+func TestSetOpOfStarOverDerivedItemTypedBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int)`)
+	mustExec(t, db, `CREATE VIEW sv(w) AS SELECT * FROM (SELECT s FROM t) y`)
+	for _, q := range []string{
+		`SELECT abs(x.v) FROM (SELECT * FROM (SELECT 'a'::text AS v) y UNION ALL SELECT 'b'::text) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT * FROM (SELECT ROW(1, 2) AS v) y UNION ALL SELECT ROW(3, 4)) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT y.* FROM (SELECT 'a'::text AS v) y JOIN t ON true UNION ALL SELECT 'b'::text) x WHERE false`,
+		`SELECT abs(x.w) FROM (SELECT * FROM (SELECT 'a'::text AS v) y(w) UNION ALL SELECT 'b'::text) x WHERE false`,
+		`WITH c AS (SELECT 'a'::text AS v) SELECT abs(x.v) FROM (SELECT * FROM c UNION ALL SELECT 'b'::text) x WHERE false`,
+		`WITH u AS (SELECT * FROM (SELECT 'a'::text AS v) y UNION ALL SELECT 'b'::text) SELECT abs(v) FROM u WHERE false`,
+		`SELECT abs(x.w) FROM (SELECT * FROM sv UNION ALL SELECT 'b'::text) x WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
 // Text has no assignment cast to a number, a boolean, a uuid, a time, an
 // enum or json, so Postgres fails an UPDATE's SET, an INSERT's VALUES or an
 // ON CONFLICT DO UPDATE's SET that writes text to such a column when it
