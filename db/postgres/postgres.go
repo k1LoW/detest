@@ -234,7 +234,7 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 
 type pgConv struct {
 	query   string
-	windows map[string]*pg.WindowDef // the WINDOW clause of the query being converted
+	windows map[string]*namedWindow // the WINDOW clause of the query being converted
 	// lockKey is set while the arguments of an advisory lock function are
 	// converted, where hashtext may stand.
 	lockKey bool
@@ -1374,6 +1374,13 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if out.With, err = c.with(s.WithClause); err != nil {
 		return nil, err
 	}
+	saved := c.windows
+	defer func() { c.windows = saved }()
+	// A window name is visible only in the query that defines it, not in
+	// its subqueries or in the queries of a set operation around it.
+	if c.windows, err = c.windowClause(s.WindowClause); err != nil {
+		return nil, err
+	}
 	if len(s.LockingClause) > 0 && (s.Op != pg.SetOperation_SETOP_NONE || len(s.ValuesLists) > 0) {
 		return nil, c.unsupported("FOR UPDATE on a set operation or VALUES")
 	}
@@ -1411,14 +1418,6 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 			return nil, err
 		}
 		out.DistinctOn = append(out.DistinctOn, e)
-	}
-	saved := c.windows
-	defer func() { c.windows = saved }()
-	c.windows = map[string]*pg.WindowDef{}
-	for _, w := range s.WindowClause {
-		if wd := w.GetWindowDef(); wd != nil {
-			c.windows[wd.Name] = wd
-		}
 	}
 	for _, t := range s.TargetList {
 		rt := t.GetResTarget()
@@ -1496,6 +1495,15 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 			}
 		}
 	}
+	for _, w := range s.WindowClause {
+		if wd := w.GetWindowDef(); wd != nil && !c.windows[wd.Name].used {
+			// Postgres analyses every definition, so one no OVER uses still
+			// fails on a missing column or a window function, makes the
+			// query an aggregate one, and has its expressions evaluated for
+			// each row. Modeling that needs the definition in the IR.
+			return nil, c.unsupported("a WINDOW definition that no OVER uses")
+		}
+	}
 	return out, nil
 }
 
@@ -1547,25 +1555,86 @@ const (
 	frameEndUnboundedFollowing   = 0x00100
 )
 
+// namedWindow is a definition of the WINDOW clause, with the clauses it
+// copies from the window it names already in place.
+type namedWindow struct {
+	partition, order []*pg.Node
+	frame            int32
+	base             *namedWindow
+	used             bool
+}
+
+// windowClause resolves the definitions of a WINDOW clause in order, as
+// Postgres does, so that one may copy only a window defined before it.
+func (c *pgConv) windowClause(defs []*pg.Node) (map[string]*namedWindow, error) {
+	out := map[string]*namedWindow{}
+	for _, n := range defs {
+		wd := n.GetWindowDef()
+		if wd == nil {
+			continue
+		}
+		if _, ok := out[wd.Name]; ok {
+			return nil, c.unsupported("window " + wd.Name + " defined twice")
+		}
+		w := &namedWindow{partition: wd.PartitionClause, order: wd.OrderClause, frame: wd.FrameOptions}
+		if wd.Refname != "" {
+			var err error
+			if w, err = c.copyWindow(out, wd); err != nil {
+				return nil, err
+			}
+		}
+		out[wd.Name] = w
+	}
+	return out, nil
+}
+
+// copyWindow resolves a window specification that names another window,
+// which lends it its PARTITION BY and its ORDER BY when it has none.
+func (c *pgConv) copyWindow(windows map[string]*namedWindow, wd *pg.WindowDef) (*namedWindow, error) {
+	base, ok := windows[wd.Refname]
+	if !ok {
+		return nil, c.unsupported("window " + wd.Refname + " is not defined")
+	}
+	// Postgres fails each of these with 42P20 rather than letting the
+	// specification override the window it copies.
+	if len(wd.PartitionClause) > 0 {
+		return nil, c.unsupported("PARTITION BY beside a copied window")
+	}
+	if len(wd.OrderClause) > 0 && len(base.order) > 0 {
+		return nil, c.unsupported("ORDER BY beside a copied window that has one")
+	}
+	if base.frame&frameNondefault != 0 {
+		return nil, c.unsupported("a copied window that has a frame clause")
+	}
+	w := &namedWindow{partition: base.partition, order: wd.OrderClause, frame: wd.FrameOptions, base: base}
+	if len(w.order) == 0 {
+		w.order = base.order
+	}
+	return w, nil
+}
+
 // window converts the OVER clause of a function call, resolving a named
 // window from the query's WINDOW clause.
 func (c *pgConv) window(fc *sqlir.FuncCall, over *pg.WindowDef) (sqlir.Expr, error) {
 	partition, order, frame := over.PartitionClause, over.OrderClause, over.FrameOptions
-	if over.Refname != "" || (over.Name != "" && len(partition) == 0 && len(order) == 0 && frame&frameNondefault == 0) {
-		name := over.Refname
-		if name == "" {
-			name = over.Name
+	var named *namedWindow
+	switch {
+	case over.Refname != "":
+		var err error
+		if named, err = c.copyWindow(c.windows, over); err != nil {
+			return nil, err
 		}
-		named, ok := c.windows[name]
-		if !ok {
-			return nil, c.unsupported("window " + name + " is not defined")
+	case over.Name != "":
+		// OVER w, with no parentheses, takes the window whole, frame and all.
+		var ok bool
+		if named, ok = c.windows[over.Name]; !ok {
+			return nil, c.unsupported("window " + over.Name + " is not defined")
 		}
-		partition = named.PartitionClause
-		if len(order) == 0 {
-			order = named.OrderClause
-		}
-		if frame&frameNondefault == 0 {
-			frame = named.FrameOptions
+	}
+	if named != nil {
+		partition, order, frame = named.partition, named.order, named.frame
+		for w := named; w != nil; w = w.base {
+			w.used = true
 		}
 	}
 	w := &sqlir.WindowFunc{Func: fc}

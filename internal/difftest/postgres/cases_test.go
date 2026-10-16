@@ -824,6 +824,23 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name: "named windows that copy another, as an OVER or a WINDOW definition",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 1), (2, 1), (3, 2)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, row_number() OVER x FROM t WINDOW w AS (PARTITION BY n), x AS (w ORDER BY id DESC) ORDER BY id`),
+			difftest.Q(0, `SELECT id, row_number() OVER (w ORDER BY id DESC) FROM t WINDOW w AS (PARTITION BY n) ORDER BY id`),
+			difftest.Q(0, `SELECT id, rank() OVER y FROM t WINDOW w AS (PARTITION BY n), x AS (w), y AS (x ORDER BY id) ORDER BY id`),
+			difftest.Q(0, `SELECT id, count(*) OVER w FROM t WINDOW w AS (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY id`),
+			difftest.Q(0, `SELECT id, count(*) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t WINDOW w AS (ORDER BY id) ORDER BY id`),
+			difftest.Q(0, `SELECT DISTINCT ON (row_number() OVER w) id FROM t WINDOW w AS (ORDER BY id) ORDER BY row_number() OVER w`),
+			difftest.Q(0, `SELECT id, (SELECT count(*) OVER w FROM t AS u WHERE u.id = t.id WINDOW w AS (PARTITION BY n)) FROM t ORDER BY id`),
+		},
+	},
+	{
 		// A view's query is checked as a part of the statement that reads
 		// it, which lets through what the statement's own check would.
 		Name: "a view holding a subquery aggregate of its own query's columns",

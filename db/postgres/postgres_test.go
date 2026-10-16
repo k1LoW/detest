@@ -152,3 +152,39 @@ func TestAnyKeepsArrayCast(t *testing.T) {
 		}
 	}
 }
+
+// Postgres analyses every definition of a WINDOW clause, used or not, and
+// fails one that overrides or copies what the window it names forbids.
+func TestWindowClause(t *testing.T) {
+	for _, q := range []string{
+		`SELECT 1 FROM t WINDOW w AS (ORDER BY nosuch)`,
+		`SELECT 1 FROM t WINDOW w AS (PARTITION BY row_number() OVER ())`,
+		`SELECT 1 FROM t WINDOW w AS (PARTITION BY max(n))`,
+		`SELECT row_number() OVER w FROM t WINDOW w AS (PARTITION BY n), x AS (ORDER BY id)`,
+		`SELECT (SELECT 1 FROM u WINDOW w AS (ORDER BY id)) FROM t`,
+		`SELECT row_number() OVER w FROM t WINDOW w AS (PARTITION BY n), w AS (ORDER BY n)`,
+		`SELECT row_number() OVER x FROM t WINDOW x AS (w), w AS (PARTITION BY n)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (ORDER BY n), x AS (w PARTITION BY id)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (ORDER BY n), x AS (w ORDER BY id)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (ROWS UNBOUNDED PRECEDING), x AS (w)`,
+		`SELECT row_number() OVER (w) FROM t WINDOW w AS (ROWS UNBOUNDED PRECEDING)`,
+		`SELECT row_number() OVER (w PARTITION BY id) FROM t WINDOW w AS (ORDER BY n)`,
+		`SELECT row_number() OVER (w ORDER BY id) FROM t WINDOW w AS (ORDER BY n)`,
+		`SELECT (SELECT row_number() OVER w) FROM t WINDOW w AS (PARTITION BY n)`,
+	} {
+		_, err := parser{}.Parse(q)
+		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT count(*) OVER w FROM t WINDOW w AS (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (PARTITION BY n), x AS (w ORDER BY id)`,
+		`SELECT row_number() OVER (w ORDER BY id) FROM t WINDOW w AS (PARTITION BY n)`,
+		`SELECT DISTINCT ON (row_number() OVER w) id FROM t WINDOW w AS (ORDER BY id)`,
+	} {
+		if _, err := (parser{}).Parse(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
