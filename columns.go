@@ -648,6 +648,14 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		if alias == "" {
 			alias = relname(t.Name)
 		}
+		if _, isCTE := c.cteTypesOf(t.Name); !isCTE {
+			// Postgres resolves every relation when it analyzes the
+			// statement, so a missing one fails it even in a subquery no
+			// row reaches, which tableRows alone would never open.
+			if err := c.x.tx.db.checkTable(c.x.tx.db.resolve(t.Name)); err != nil {
+				return err
+			}
+		}
 		cols = c.tableColumns(t.Name)
 	}
 	if len(t.Columns) > 0 && t.Func == nil {
@@ -3526,9 +3534,13 @@ func typeSample(typ string) any {
 }
 
 // operandTypes refuses a comparison of two typed operands Postgres has no
-// operator for, which untypedPair refuses only when it reaches a row.
+// operator for, which untypedPair refuses only when it reaches a row. An
+// expression of string literals and NULLs alone, such as COALESCE('1', NULL)
+// or max('1'), is text, which Postgres resolves it to before it looks for the
+// operator.
 func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	t := c.typer(sc)
+	t.untypedText = true
 	// A column made of a row, which noteOutputTypes types as a record,
 	// compares as the row itself.
 	isRow := func(e sqlir.Expr) bool {
@@ -3640,6 +3652,7 @@ func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sq
 		return nil
 	}
 	t := c.typer(sc)
+	t.untypedText = true
 	for i, f := range fields {
 		_, nested := f.(*sqlir.RowExpr)
 		nested = nested || t.of(f) == "record"
