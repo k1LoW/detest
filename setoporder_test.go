@@ -15,8 +15,11 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, m int)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT * FROM u`)
 	for _, q := range []string{
 		`SELECT 1 UNION SELECT 2 ORDER BY abs(1)`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT * FROM v UNION SELECT 2, 3 ORDER BY n)`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY random()`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY n + 1`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY 1 + 0`,
@@ -38,8 +41,17 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	if _, err := db.Exec(`SELECT n FROM t UNION SELECT n FROM t ORDER BY t.n`); !errors.Is(err, ErrUndefinedTable) {
-		t.Errorf("qualified name: got %v, want ErrUndefinedTable", err)
+	// A name of a query around fails in Postgres too, where detest finds
+	// no output of the name.
+	for _, q := range []string{
+		`SELECT n FROM t UNION SELECT n FROM t ORDER BY t.n`,
+		`SELECT (SELECT 1 UNION SELECT 2 ORDER BY t.n LIMIT 1) FROM t`,
+		`SELECT (SELECT 1 UNION SELECT 2 ORDER BY n LIMIT 1) FROM t`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT 1 UNION SELECT 2 ORDER BY n)`,
+	} {
+		if _, err := db.Exec(q); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want a server error", q, err)
+		}
 	}
 	for _, q := range []string{
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY n`,
@@ -47,6 +59,10 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY 1 DESC`,
 		`SELECT n AS m FROM t UNION SELECT n FROM t ORDER BY m DESC NULLS LAST`,
 		`(SELECT n FROM t ORDER BY n + 1 LIMIT 1) UNION SELECT n FROM t`,
+		`SELECT (SELECT 1 AS n UNION SELECT 2 ORDER BY n LIMIT 1) FROM t`,
+		`SELECT (SELECT n UNION SELECT 2 ORDER BY n LIMIT 1) FROM t`,
+		`SELECT (SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT n) FROM t`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT * FROM v UNION SELECT 2, 3 ORDER BY m)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Errorf("%s: %v", q, err)

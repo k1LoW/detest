@@ -1008,11 +1008,19 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		for first.SetOp != "" && first.Larg != nil {
 			first = first.Larg
 		}
+		// Postgres sorts the rows only by an output column and fails a name
+		// of a query around (0A000), so the keys see no outer scope, where a
+		// name would resolve to it, and fail as a name of nothing.
+		orderSc := *sc
+		orderSc.outer = nil
 		for _, o := range sel.OrderBy {
 			if err := c.position(first, nil, o.Expr, "ORDER BY"); err != nil {
 				return nil, err
 			}
-			if err := c.orderExpr(o.Expr, sc); err != nil {
+			if r, ok := o.Expr.(*sqlir.ColumnRef); ok && r.Table == "" && sc.anyOutput && outer.mayHave(r.Column) {
+				return nil, c.x.unsupported(fmt.Sprintf("ORDER BY name %q of a set operation whose output names are unknown, which a query around has", r.Column))
+			}
+			if err := c.orderExpr(o.Expr, &orderSc); err != nil {
 				return nil, err
 			}
 		}
@@ -2490,6 +2498,17 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 	return c.exprs(e, sc)
 }
 
+// mayHave reports whether an item of sc or of a scope around it has, or may
+// have, a column of the name.
+func (sc *colScope) mayHave(name string) bool {
+	for ; sc != nil; sc = sc.outer {
+		if sc.inputMay(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // inputMay reports whether an item of the scope has, or may have, a column
 // of the name.
 func (sc *colScope) inputMay(name string) bool {
@@ -2883,8 +2902,9 @@ func misplacedCall(n any) string {
 // MySQL sorts by an expression over the outputs. A cast of an output to its
 // own type and typmod is the one expression Postgres takes as the column, and
 // it is refused with the rest rather than told apart by its typmod. A
-// qualified name fails in Postgres too (42P01), so it is left to the name
-// resolution, which fails it with the same code.
+// qualified name fails in Postgres too, with 42P01 or with 0A000 where it
+// names a query around, so it is left to the name resolution, which sees no
+// query around and fails it with 42P01.
 func setOpOrderExpr(n any) string {
 	for _, sel := range sqlir.Selects(n) {
 		if sel.SetOp == "" {
