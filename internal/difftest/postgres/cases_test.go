@@ -816,7 +816,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id, row_number() OVER (ORDER BY id) FROM t ORDER BY row_number() OVER (ORDER BY id)`),
 			difftest.Q(0, `SELECT id FROM t WHERE n < (SELECT max(m) FROM u) ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM t WHERE false AND (SELECT max(m) FROM u) > 0`),
-			difftest.Q(0, `SELECT id FROM t JOIN u ON u.m > (SELECT max(n) FROM t) ORDER BY t.id`),
+			difftest.Q(0, `SELECT t.id FROM t JOIN u ON u.m > (SELECT max(n) FROM t) ORDER BY t.id`),
 			difftest.Q(0, `SELECT n FROM t LIMIT (SELECT count(*) FROM u)`),
 			difftest.S(0, `UPDATE t SET n = (SELECT max(m) FROM u) WHERE id = 1`),
 			difftest.S(0, `INSERT INTO t SELECT 3, max(m) FROM u`),
