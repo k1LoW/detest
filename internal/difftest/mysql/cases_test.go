@@ -1278,6 +1278,17 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a boolean written by CONCAT",
+		Schema: []string{`CREATE TABLE u (id INT PRIMARY KEY, b BOOL)` + binary},
+		Seed:   []string{`INSERT INTO u VALUES (1, true), (2, false), (3, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT CONCAT(TRUE, 'x'), CONCAT(FALSE), CONCAT(1 = 1, 'y')`),
+			difftest.Q(0, `SELECT id, CONCAT(b, 'x'), CONCAT(b = 1, 'x') FROM u ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM u WHERE CONCAT(b, id) = '02'`),
+		},
+	},
+	{
 		// A CTE's name matches as case-sensitively as a table's, so a
 		// reference spelled in another case reads the table.
 		Name: "a CTE stands only for a reference spelled in its case",

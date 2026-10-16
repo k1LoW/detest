@@ -488,6 +488,21 @@ func recordText(fields []any) (string, bool) {
 	return b.String(), true
 }
 
+// boolOutputText is a boolean as concat writes it, by the output function of
+// its type, so t or f on Postgres, where a cast to text and || write true or
+// false, and 1 or 0 on MySQL, where a boolean is a number.
+func boolOutputText(b, innoDB bool) string {
+	switch {
+	case innoDB && b:
+		return "1"
+	case innoDB:
+		return "0"
+	case b:
+		return "t"
+	}
+	return "f"
+}
+
 // fieldText is v as the output function of its type writes it inside a
 // record, where a boolean is t or f rather than the true or false of a cast
 // to text.

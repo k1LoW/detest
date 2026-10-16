@@ -429,6 +429,17 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a boolean written by concat",
+		Schema: []string{`CREATE TABLE u (id int PRIMARY KEY, b bool)`},
+		Seed:   []string{`INSERT INTO u VALUES (1, true), (2, false), (3, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT concat(true, 'x'), concat(false), concat(1 = 1, 'y', NULL), true || 'x'`),
+			difftest.Q(0, `SELECT id, concat(b, 'x'), concat(b, 'x') = 'tx', concat(ROW(b), b) FROM u ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM u WHERE concat(b, id) = 'f2'`),
+		},
+	},
+	{
 		Name: "a row read back or cast to text",
 		Schema: []string{
 			`CREATE TYPE mood AS ENUM ('ok', 'not ok')`,
