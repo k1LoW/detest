@@ -612,8 +612,24 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: %v", q, err)
 		}
 	}
-	if _, err := db.Query(`SELECT 1 FROM t WHERE $1 LIKE 'a'`, "a"); err != nil {
-		t.Errorf("$1 LIKE 'a': %v", err)
+	for _, q := range []string{
+		`SELECT 1 FROM t WHERE $1 LIKE 'a'`,
+		`SELECT 1 FROM t WHERE $1 = s AND $1 LIKE 'a'`,
+		`SELECT 1 FROM t WHERE c ILIKE $1 AND $1 = v`,
+	} {
+		if _, err := db.Query(q, "a"); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// LIKE types a parameter as text, which another use takes as another
+	// type.
+	for _, q := range []string{
+		`SELECT 1 FROM t WHERE $1 = n AND $1 LIKE 'a'`,
+		`SELECT 1 FROM t WHERE s NOT ILIKE $1 AND b = $1`,
+	} {
+		if _, err := db.Query(q, "1"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
 	}
 	for _, q := range []string{
 		`SELECT 1 LIKE 'a'`,
