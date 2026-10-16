@@ -3276,8 +3276,13 @@ func TestMySQLFortyFifthReviewFindings(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())
 	var n int
-	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM foo").Scan(&n); err != nil || n != 1 {
+	// A CTE's name matches as case-sensitively as a table's, so foo is the
+	// table, empty in a database without a declared schema.
+	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM foo").Scan(&n); err != nil || n != 0 {
 		t.Errorf("CTE named in another case: %d, %v", n, err)
+	}
+	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM Foo").Scan(&n); err != nil || n != 1 {
+		t.Errorf("CTE named in its case: %d, %v", n, err)
 	}
 	if _, err := db.Exec("CREATE TABLE two (a INT AUTO_INCREMENT, b INT AUTO_INCREMENT, PRIMARY KEY (a), UNIQUE KEY (b))"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("two AUTO_INCREMENT columns: %v", err)
@@ -5089,4 +5094,33 @@ func TestMySQLRowIsNullRefused(t *testing.T) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
 		}
 	}
+}
+
+func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SELECT (SELECT 1 FROM missing) FROM e`,
+		`SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		`UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`,
+		`DELETE FROM e WHERE id IN (SELECT id FROM missing)`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM c)`,
+		`WITH c AS (SELECT * FROM missing), c2 AS (SELECT * FROM c) SELECT 1 FROM c2 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`WITH c AS (SELECT * FROM missing) SELECT 1`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1 FROM (WITH d AS (SELECT * FROM c) SELECT 1) x`,
+		`WITH missing AS (SELECT 1 AS id) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		// A CTE stands only for a name spelled in its case.
+		`WITH E AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM e)`,
+	} {
+		mustExec(t, db, q)
+	}
+	// A script checks each statement after the DDL before it.
+	mustExec(t, db, `CREATE TABLE t (id int); INSERT INTO e SELECT id FROM t`)
 }

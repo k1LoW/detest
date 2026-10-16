@@ -429,6 +429,17 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a row of columns where Postgres takes a record, beside arithmetic and functions of its fields",
+		Schema: []string{`CREATE TABLE r (id int PRIMARY KEY, a int)`},
+		Seed:   []string{`INSERT INTO r VALUES (1, 1), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, ROW(id, a) IS NULL, ROW(id, a) = ROW(1, 1), -abs(id) + 1, lower(coalesce(a::text, 'x')) FROM r ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM r WHERE ROW(id, a) IS NOT NULL AND -a + 1 = 0`),
+			difftest.Q(0, `SELECT count(*) FROM r WHERE ROW(id, 1) IN (ROW(1, 1), ROW(2, 1))`),
+		},
+	},
+	{
 		Name:   "integer arithmetic and rounding",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{
@@ -1141,6 +1152,22 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "LIKE and ILIKE take the character types and a domain over one",
+		Schema: []string{
+			`CREATE DOMAIN word AS text`,
+			`CREATE TABLE l (id int PRIMARY KEY, s text, v varchar(3), c char(2), nm name, w word)`,
+		},
+		Seed:  []string{`INSERT INTO l VALUES (1, 'ab', 'Ab', 'ab', 'ab', 'ab'), (2, 'xy', 'XY', 'xy', 'xy', 'xy')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE 'a%' AND v ILIKE 'a%' AND c LIKE 'a%' AND nm LIKE 'a%' AND w LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE v NOT ILIKE 'a%' AND w NOT LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE v OR c ILIKE nm ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE id::text LIKE '2' ORDER BY id`),
+			difftest.Q(0, `SELECT (NULL LIKE NULL) IS NULL, ('a' LIKE NULL) IS NULL`),
+		},
+	},
+	{
 		Name: "arithmetic over a scalar subquery types its target in its own scope",
 		Schema: []string{
 			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,
@@ -1203,6 +1230,18 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM (SELECT coalesce('{}' - s, NULL) - 'b'::text FROM tj WHERE false) x`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT (SELECT '{}' - s) - 'b'::text FROM tj WHERE false) x`),
 			difftest.Q(0, `SELECT count(*) FROM (SELECT NULL - s FROM tj WHERE false) x`),
+		},
+	},
+	{
+		Name:   "ORDER BY of a set operation by an output column",
+		Schema: valueSchema, Seed: valueSeed, Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM t UNION SELECT 3 ORDER BY id DESC`),
+			difftest.Q(0, `SELECT id FROM t UNION SELECT 3 ORDER BY (id)`),
+			difftest.Q(0, `SELECT id AS k FROM t UNION ALL SELECT 3 ORDER BY k DESC`),
+			difftest.Q(0, `SELECT id, name FROM t EXCEPT SELECT 9, NULL ORDER BY 2 NULLS FIRST, 1`),
+			difftest.Q(0, `SELECT id FROM t INTERSECT SELECT id FROM t WHERE id > 1 ORDER BY 1 LIMIT 2`),
+			difftest.Q(0, `(SELECT id FROM t ORDER BY -id LIMIT 1) UNION SELECT 3 ORDER BY id`),
 		},
 	},
 	{

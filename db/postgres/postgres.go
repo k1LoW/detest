@@ -234,7 +234,7 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 
 type pgConv struct {
 	query   string
-	windows map[string]*pg.WindowDef // the WINDOW clause of the query being converted
+	windows map[string]*namedWindow // the WINDOW clause of the query being converted
 	// lockKey is set while the arguments of an advisory lock function are
 	// converted, where hashtext may stand.
 	lockKey bool
@@ -542,7 +542,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			if len(parts) == 0 {
 				return nil, true, nil
 			}
-			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && builtinTypes[r.Newname] {
+			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && sqlir.PostgresBuiltinType(r.Newname) {
 				return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", r.Newname))
 			}
 			// Columns[0].Name is the bare name, which a dot in a quoted
@@ -577,7 +577,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := names[len(names)-1].GetString_().GetSval()
-		if builtinTypes[name] {
+		if sqlir.PostgresBuiltinType(name) {
 			// Postgres finds the built-in type first by its bare name,
 			// which is all a column of the domain keeps in detest.
 			return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", name))
@@ -600,7 +600,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := parts[len(parts)-1]
-		if builtinTypes[name] || strings.HasPrefix(name, "pg_") {
+		if sqlir.PostgresBuiltinType(name) || strings.HasPrefix(name, "pg_") {
 			return nil, true, c.unsupported(fmt.Sprintf("an enum named %q, as a built-in type is", name))
 		}
 		if name != strings.ToLower(name) {
@@ -1374,6 +1374,13 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 	if out.With, err = c.with(s.WithClause); err != nil {
 		return nil, err
 	}
+	saved := c.windows
+	defer func() { c.windows = saved }()
+	// A window name is visible only in the query that defines it, not in
+	// its subqueries or in the queries of a set operation around it.
+	if c.windows, err = c.windowClause(s.WindowClause); err != nil {
+		return nil, err
+	}
 	if len(s.LockingClause) > 0 && (s.Op != pg.SetOperation_SETOP_NONE || len(s.ValuesLists) > 0) {
 		return nil, c.unsupported("FOR UPDATE on a set operation or VALUES")
 	}
@@ -1411,14 +1418,6 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 			return nil, err
 		}
 		out.DistinctOn = append(out.DistinctOn, e)
-	}
-	saved := c.windows
-	defer func() { c.windows = saved }()
-	c.windows = map[string]*pg.WindowDef{}
-	for _, w := range s.WindowClause {
-		if wd := w.GetWindowDef(); wd != nil {
-			c.windows[wd.Name] = wd
-		}
 	}
 	for _, t := range s.TargetList {
 		rt := t.GetResTarget()
@@ -1496,6 +1495,15 @@ func (c *pgConv) selectStmt(s *pg.SelectStmt) (*sqlir.SelectStmt, error) {
 			}
 		}
 	}
+	for _, w := range s.WindowClause {
+		if wd := w.GetWindowDef(); wd != nil && !c.windows[wd.Name].used {
+			// Postgres analyses every definition, so one no OVER uses still
+			// fails on a missing column or a window function, makes the
+			// query an aggregate one, and has its expressions evaluated for
+			// each row. Modeling that needs the definition in the IR.
+			return nil, c.unsupported("a WINDOW definition that no OVER uses")
+		}
+	}
 	return out, nil
 }
 
@@ -1547,28 +1555,95 @@ const (
 	frameEndUnboundedFollowing   = 0x00100
 )
 
+// namedWindow is a definition of the WINDOW clause, with the clauses it
+// copies from the window it names already in place.
+type namedWindow struct {
+	partition, order []*pg.Node
+	frame            int32
+	base             *namedWindow
+	used             bool
+}
+
+// windowClause resolves the definitions of a WINDOW clause in order, as
+// Postgres does, so that one may copy only a window defined before it.
+func (c *pgConv) windowClause(defs []*pg.Node) (map[string]*namedWindow, error) {
+	out := map[string]*namedWindow{}
+	for _, n := range defs {
+		wd := n.GetWindowDef()
+		if wd == nil {
+			continue
+		}
+		if _, ok := out[wd.Name]; ok {
+			return nil, c.unsupported("window " + wd.Name + " defined twice")
+		}
+		w := &namedWindow{partition: wd.PartitionClause, order: wd.OrderClause, frame: wd.FrameOptions}
+		if wd.Refname != "" {
+			var err error
+			if w, err = c.copyWindow(out, wd); err != nil {
+				return nil, err
+			}
+		}
+		out[wd.Name] = w
+	}
+	return out, nil
+}
+
+// copyWindow resolves a window specification that names another window,
+// which lends it its PARTITION BY and its ORDER BY when it has none.
+func (c *pgConv) copyWindow(windows map[string]*namedWindow, wd *pg.WindowDef) (*namedWindow, error) {
+	base, ok := windows[wd.Refname]
+	if !ok {
+		return nil, c.unsupported("window " + wd.Refname + " is not defined")
+	}
+	// Postgres fails each of these with 42P20 rather than letting the
+	// specification override the window it copies.
+	if len(wd.PartitionClause) > 0 {
+		return nil, c.unsupported("PARTITION BY beside a copied window")
+	}
+	if len(wd.OrderClause) > 0 && len(base.order) > 0 {
+		return nil, c.unsupported("ORDER BY beside a copied window that has one")
+	}
+	if base.frame&frameNondefault != 0 {
+		return nil, c.unsupported("a copied window that has a frame clause")
+	}
+	w := &namedWindow{partition: base.partition, order: wd.OrderClause, frame: wd.FrameOptions, base: base}
+	if len(w.order) == 0 {
+		w.order = base.order
+	}
+	return w, nil
+}
+
 // window converts the OVER clause of a function call, resolving a named
 // window from the query's WINDOW clause.
 func (c *pgConv) window(fc *sqlir.FuncCall, over *pg.WindowDef) (sqlir.Expr, error) {
 	partition, order, frame := over.PartitionClause, over.OrderClause, over.FrameOptions
-	if over.Refname != "" || (over.Name != "" && len(partition) == 0 && len(order) == 0 && frame&frameNondefault == 0) {
-		name := over.Refname
-		if name == "" {
-			name = over.Name
+	var named *namedWindow
+	switch {
+	case over.Refname != "":
+		var err error
+		if named, err = c.copyWindow(c.windows, over); err != nil {
+			return nil, err
 		}
-		named, ok := c.windows[name]
-		if !ok {
-			return nil, c.unsupported("window " + name + " is not defined")
+	case over.Name != "":
+		// OVER w, with no parentheses, takes the window whole, frame and all.
+		var ok bool
+		if named, ok = c.windows[over.Name]; !ok {
+			return nil, c.unsupported("window " + over.Name + " is not defined")
 		}
-		partition = named.PartitionClause
-		if len(order) == 0 {
-			order = named.OrderClause
-		}
-		if frame&frameNondefault == 0 {
-			frame = named.FrameOptions
+	}
+	if named != nil {
+		partition, order, frame = named.partition, named.order, named.frame
+		for w := named; w != nil; w = w.base {
+			w.used = true
 		}
 	}
 	w := &sqlir.WindowFunc{Func: fc}
+	// A window function in a window's own clauses fails on Postgres
+	// (42P20), and one there that names the window would expand it without
+	// end, so the names are hidden while the clauses are converted.
+	windows := c.windows
+	c.windows = nil
+	defer func() { c.windows = windows }()
 	var err error
 	if w.Partition, err = c.exprs(partition); err != nil {
 		return nil, err
@@ -2590,38 +2665,6 @@ func constrainedDomain(d *pg.CreateDomainStmt) bool {
 	}
 	return len(d.GetTypeName().GetTypmods()) > 0
 }
-
-// builtinTypes are the names of pg_catalog's types a column is commonly
-// declared with, as typeName gives them, which a domain of the name would
-// shadow by its bare name in detest but not in Postgres.
-var builtinTypes = func() map[string]bool {
-	m := map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
-	// The types of pg_catalog in Postgres 18, other than arrays and the
-	// catalogs' row types, which an unqualified name finds first.
-	for t := range map[string]bool{
-		"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
-		"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
-		"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
-		"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
-		"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
-		"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
-		"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
-		"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
-		"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
-		"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
-		"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
-		"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
-		"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
-		"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
-		"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
-		"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
-		"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
-		"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
-	} {
-		m[t] = true
-	}
-	return m
-}()
 
 // nodeNames are the strings of nodes, such as the parts of a qualified name.
 func nodeNames(nodes []*pg.Node) []string {

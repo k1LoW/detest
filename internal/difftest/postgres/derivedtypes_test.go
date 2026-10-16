@@ -173,6 +173,17 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT v FROM (SELECT * FROM (SELECT n AS v FROM t) y) z(a)`),
 		},
 	},
+	{
+		Name:  "a column of VALUES in FROM that Postgres resolves to text",
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (coalesce(v.column1, 'z') = '01')::text FROM (VALUES ('1')) v`),
+			difftest.Q(0, `SELECT (coalesce((SELECT column1 FROM (VALUES ('1')) v), 'z') = '01')::text`),
+			difftest.Q(0, `SELECT (coalesce((SELECT * FROM (VALUES ('1')) v), 'z') = '01')::text`),
+			difftest.Q(0, `WITH v AS (VALUES ('1'), (NULL)) SELECT (column1 = '01')::text FROM v ORDER BY 1`),
+			difftest.Q(0, `SELECT (x = '01')::text FROM (VALUES ('1'), ('a'::text)) v(x) ORDER BY 1`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {

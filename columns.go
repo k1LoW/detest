@@ -181,7 +181,20 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return x.unsupported(what)
 	}
 	if x.tx.db.kind.InnoDB() {
+		switch stmt.(type) {
+		case *sqlir.SelectStmt, *sqlir.InsertStmt, *sqlir.UpdateStmt, *sqlir.DeleteStmt:
+			// A script checks each statement as it runs it, after the
+			// DDL before it.
+			for _, name := range openedTables(stmt) {
+				if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
+	}
+	if what := setOpOrderExpr(stmt); what != "" {
+		return x.unsupported(what)
 	}
 	if err := x.checkSequenceCalls(stmt); err != nil {
 		return err
@@ -861,30 +874,44 @@ func (c *columnChecker) writeWith(with []sqlir.CTE, target, alias string, items 
 }
 
 // partlyRun names why Postgres might not run all of a CTE with effects that
-// item reads in a write's FROM or USING, or returns "". Postgres skips the
-// rest of a join, the CTE included, when the other side has no rows, which
-// side that is being its planner's choice. That cannot change what the CTE
-// does when the CTE reads only the target table and the WHERE only joins the
-// two on their columns: the target then has rows whenever the CTE has, as
-// both read the statement's snapshot, so the CTE runs in full under any plan.
-// That is the shape a job queue claims a job with.
+// item reads in a write's FROM or USING, or returns "", as partlyRunItem
+// does for the CTE's query.
 func (c *columnChecker) partlyRun(with []sqlir.CTE, item sqlir.TableRef, items []sqlir.TableRef, target, alias string, where sqlir.Expr) string {
-	if len(items) != 1 {
-		return "joined with other FROM or USING items"
-	}
 	var sel *sqlir.SelectStmt
 	for _, cte := range with {
 		if cte.Name == item.Name {
 			sel = cte.Select
 		}
 	}
+	itemAlias := item.Alias
+	if itemAlias == "" {
+		itemAlias = item.Name
+	}
+	isCTE := func(name string) bool {
+		return slices.ContainsFunc(with, func(cte sqlir.CTE) bool { return cte.Name == name })
+	}
+	return c.x.partlyRunItem(sel, isCTE, itemAlias, c.ctes[len(c.ctes)-1][item.Name], items, target, alias, where)
+}
+
+// partlyRunItem names why Postgres might not run all of sel, the query of
+// a FROM or USING item with effects of a write known by itemAlias with the
+// columns itemCols, or returns "". Postgres skips the rest of a join, the
+// item included, when the other side has no rows, which side that is being
+// its planner's choice. That cannot change what the item does when it
+// reads only the target table and the WHERE only joins the two on their
+// columns. The target then has rows whenever the item has, as both read
+// the statement's snapshot, so the item runs in full under any plan. That
+// is the shape a job queue claims a job with.
+func (x *sqlExec) partlyRunItem(sel *sqlir.SelectStmt, isCTE func(string) bool, itemAlias string, itemCols colSet, items []sqlir.TableRef, target, alias string, where sqlir.Expr) string {
+	if len(items) != 1 {
+		return "joined with other FROM or USING items"
+	}
 	// Its rows must come from the target's rows alone, so that it has none
 	// when the target has none. A table merely named in a branch, a nested
 	// WITH or a subquery does not make that so, and an aggregate gives a row
 	// over no rows.
 	if f := sel.From; sel.With != nil || sel.SetOp != "" || sel.Values != nil || len(sel.Joins) > 0 ||
-		f == nil || f.Sub != nil || f.Func != nil || c.x.tx.db.resolve(f.Name) != c.x.tx.db.resolve(target) ||
-		slices.ContainsFunc(with, func(cte sqlir.CTE) bool { return cte.Name == f.Name }) {
+		f == nil || f.Sub != nil || f.Func != nil || x.tx.db.resolve(f.Name) != x.tx.db.resolve(target) || isCTE(f.Name) {
 		return "reading other rows than the target's alone"
 	}
 	if len(sel.GroupBy) > 0 || sel.Having != nil || slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
@@ -894,27 +921,22 @@ func (c *columnChecker) partlyRun(with []sqlir.CTE, item sqlir.TableRef, items [
 	if hasEffects(sel.Limit) || hasEffects(sel.Offset) {
 		return "with effects in its LIMIT or OFFSET"
 	}
-	itemAlias := item.Alias
-	if itemAlias == "" {
-		itemAlias = item.Name
-	}
 	targetCols := colSet{}
-	for _, col := range c.x.tableCols(c.x.tx.db.resolve(target)) {
+	for _, col := range x.tableCols(x.tx.db.resolve(target)) {
 		targetCols[col] = true
 	}
-	cteCols := c.ctes[len(c.ctes)-1][item.Name]
 	side := func(e sqlir.Expr) string {
 		ref, ok := e.(*sqlir.ColumnRef)
 		if !ok {
 			return ""
 		}
 		inTarget, _ := targetCols.has(ref.Column)
-		inCTE, _ := cteCols.has(ref.Column)
+		inItem, _ := itemCols.has(ref.Column)
 		switch {
-		case ref.Table == alias || ref.Table == "" && inTarget && !inCTE:
+		case ref.Table == alias || ref.Table == "" && inTarget && !inItem:
 			return "target"
-		case ref.Table == itemAlias || ref.Table == "" && inCTE && !inTarget:
-			return "cte"
+		case ref.Table == itemAlias || ref.Table == "" && inItem && !inTarget:
+			return "item"
 		}
 		return ""
 	}
@@ -1009,11 +1031,19 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		for first.SetOp != "" && first.Larg != nil {
 			first = first.Larg
 		}
+		// Postgres sorts the rows only by an output column and fails a name
+		// of a query around (0A000), so the keys see no outer scope, where a
+		// name would resolve to it, and fail as a name of nothing.
+		orderSc := *sc
+		orderSc.outer = nil
 		for _, o := range sel.OrderBy {
 			if err := c.position(first, nil, o.Expr, "ORDER BY"); err != nil {
 				return nil, err
 			}
-			if err := c.orderExpr(o.Expr, sc); err != nil {
+			if r, ok := o.Expr.(*sqlir.ColumnRef); ok && r.Table == "" && sc.anyOutput && outer.mayHave(r.Column) {
+				return nil, c.x.unsupported(fmt.Sprintf("ORDER BY name %q of a set operation whose output names are unknown, which a query around has", r.Column))
+			}
+			if err := c.orderExpr(o.Expr, &orderSc); err != nil {
 				return nil, err
 			}
 		}
@@ -1519,6 +1549,23 @@ func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
 	}
 }
 
+// readValues types as text the parameters in the columns of the VALUES
+// query sel that Postgres resolves to a text type, as it does a column of
+// string literals, parameters and NULLs alone, where a query around sel
+// reads them as a FROM item or a CTE.
+func (c *columnChecker) readValues(sel *sqlir.SelectStmt) {
+	for i, typ := range c.itemTypes(sel) {
+		if c.x.tx.db.branchKind(typ) != "text" {
+			continue
+		}
+		for _, e := range setOpColumnExprs(sel, i) {
+			if params, ok := untypedLeaves(e); ok {
+				c.textParams(params, bytesUnread(e, false))
+			}
+		}
+	}
+}
+
 // readTypes are outTypes of sel as a query around it reads them, with the
 // columns of outText resolved to text.
 func (c *columnChecker) readTypes(sel *sqlir.SelectStmt) ([]string, bool) {
@@ -1919,6 +1966,7 @@ func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[
 		return c.namedTypes(sel, types, names)
 	}
 	if len(sel.Values) > 0 {
+		c.readValues(sel)
 		return c.namedTypes(sel, c.itemTypes(sel), names)
 	}
 	c.readOutputs(sel)
@@ -2534,6 +2582,17 @@ func (c *columnChecker) orderExpr(e sqlir.Expr, sc *colScope) error {
 	return c.exprs(e, sc)
 }
 
+// mayHave reports whether an item of sc or of a scope around it has, or may
+// have, a column of the name.
+func (sc *colScope) mayHave(name string) bool {
+	for ; sc != nil; sc = sc.outer {
+		if sc.inputMay(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // inputMay reports whether an item of the scope has, or may have, a column
 // of the name.
 func (sc *colScope) inputMay(name string) bool {
@@ -2920,6 +2979,36 @@ func misplacedCall(n any) string {
 	return what
 }
 
+// setOpOrderExpr describes the first ORDER BY key of a UNION, INTERSECT or
+// EXCEPT under n that is neither a name nor a position, and is empty when
+// there is none. Postgres sorts the combined rows only by an output column
+// and fails any other key with 0A000 whatever rows the statement reads, where
+// MySQL sorts by an expression over the outputs. A cast of an output to its
+// own type and typmod is the one expression Postgres takes as the column, and
+// it is refused with the rest rather than told apart by its typmod. A
+// qualified name fails in Postgres too, with 42P01 or with 0A000 where it
+// names a query around, so it is left to the name resolution, which sees no
+// query around and fails it with 42P01.
+func setOpOrderExpr(n any) string {
+	for _, sel := range sqlir.Selects(n) {
+		if sel.SetOp == "" {
+			continue
+		}
+		for _, k := range sel.OrderBy {
+			switch e := k.Expr.(type) {
+			case *sqlir.ColumnRef:
+				continue
+			case *sqlir.Const:
+				if _, ok := e.Value.(int64); ok {
+					continue
+				}
+			}
+			return "an ORDER BY key of a set operation other than an output column"
+		}
+	}
+	return ""
+}
+
 // blockCall describes the first aggregate, unless aggregates are allowed,
 // or window function, unless windows are, of n's own query, and is empty
 // when there is none. A window's PARTITION BY and ORDER BY allow no window
@@ -3077,6 +3166,22 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if what := dateDifferenceMismatch(e, c.typerWith(sc, subquery)); what != "" {
 					err = c.x.unsupported(what)
 					return
+				}
+				if !c.x.tx.db.kind.InnoDB() {
+					if what := likeTypeMismatch(e, c.typerWith(sc, subquery), c.x.tx.checking); what != "" {
+						err = c.x.unsupported(what)
+						return
+					}
+					if strings.HasSuffix(e.Op, "LIKE") {
+						for _, x := range []sqlir.Expr{e.L, e.R} {
+							if p, ok := x.(*sqlir.Param); ok {
+								// Every operator likeTypeMismatch takes
+								// types a parameter as text.
+								c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
+								c.typedParam(p)
+							}
+						}
+					}
 				}
 				if e.Op == "/" && slices.ContainsFunc([]sqlir.Expr{e, e.L, e.R}, func(x sqlir.Expr) bool {
 					// A numeric or a float operand divides as one whatever the
@@ -4016,7 +4121,7 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sql
 	t := c.typer(sc)
 	t.untypedText = true
 	untyped := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) }
-	typeOf := func(e sqlir.Expr) string { return t.reduce(t.of(e)) }
+	typeOf := func(e sqlir.Expr) string { return operandType(t, e) }
 	if len(operands) == 1 && untyped(operands[0]) {
 		// Several prefix operators take a number, and Postgres picks
 		// none for an operand of no type (42725), while the run would
