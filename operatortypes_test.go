@@ -256,3 +256,62 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 		t.Errorf("INSERT ... SELECT of literals: got %v, want [1 NULL 3]", got)
 	}
 }
+
+// Text has no assignment cast to a number, a boolean, a uuid, a time, an
+// enum or json, so Postgres fails an UPDATE's SET, an INSERT's VALUES or an
+// ON CONFLICT DO UPDATE's SET that writes text to such a column when it
+// plans the statement (42804), whatever rows it reads. A literal, a
+// parameter or a NULL is read as the column's input instead.
+func TestTextAssignedToNonTextColumn(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TYPE mood AS ENUM ('a', 'b')`)
+	mustExec(t, db, `CREATE DOMAIN dtext AS text`)
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, s text, v varchar(10), d dtext, m mood, u uuid, j jsonb, ts timestamp, nm name, b bool)`)
+	mustExec(t, db, `INSERT INTO t (id, n, s) VALUES (1, 0, '5')`)
+	for _, q := range []string{
+		`UPDATE t SET n = s WHERE false`,
+		`UPDATE t SET n = s`,
+		`UPDATE t SET n = v`,
+		`UPDATE t SET n = d`,
+		`UPDATE t SET n = '5'::text`,
+		`UPDATE t SET n = s || '1'`,
+		`UPDATE t SET n = '5' || '6'`,
+		`UPDATE t SET n = lower('5')`,
+		`UPDATE t SET n = CASE WHEN true THEN '5' END`,
+		`UPDATE t SET n = CASE WHEN true THEN NULL END`,
+		`UPDATE t SET n = COALESCE('5', NULL)`,
+		`UPDATE t SET n = (SELECT '7')`,
+		`UPDATE t SET n = (SELECT NULL)`,
+		`UPDATE t SET n = (SELECT s FROM t LIMIT 1)`,
+		`UPDATE t SET n = (SELECT max('1'))`,
+		`UPDATE t SET n = s COLLATE "C"`,
+		`UPDATE t SET m = s`,
+		`UPDATE t SET u = s`,
+		`UPDATE t SET j = s`,
+		`UPDATE t SET ts = s`,
+		`UPDATE t SET b = s`,
+		`INSERT INTO t (id, n) VALUES (9, '5'::text)`,
+		`INSERT INTO t (id, n) VALUES (10, '5'), (11, '6'::text)`,
+		`INSERT INTO t (id, n) VALUES (14, CASE WHEN true THEN NULL END)`,
+		`INSERT INTO t VALUES (9, '5'::text)`,
+		`INSERT INTO t (id, n) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = excluded.s`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE t SET n = (SELECT $1)`, "7"); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("UPDATE t SET n = (SELECT $1): got %v, want ErrUnsupportedSQL", err)
+	}
+	for _, q := range []string{
+		`UPDATE t SET n = '5'`,
+		`UPDATE t SET n = NULL`,
+		`UPDATE t SET n = '5' COLLATE "C"`,
+		`UPDATE t SET v = s, d = s, nm = s`,
+		`INSERT INTO t (id, n) VALUES (12, '5'), (13, NULL)`,
+	} {
+		mustExec(t, db, q)
+	}
+	mustExec(t, db, `UPDATE t SET n = $1`, "6")
+}
