@@ -283,7 +283,11 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 		if f.Name != "nextval" && f.Name != "setval" && f.Name != "currval" || len(f.Args) == 0 {
 			continue
 		}
-		c, ok := f.Args[0].(*sqlir.Const)
+		arg := f.Args[0]
+		if cast, ok := arg.(*sqlir.Cast); ok && strings.EqualFold(cast.Type, "regclass") {
+			arg = cast.X
+		}
+		c, ok := arg.(*sqlir.Const)
 		if !ok {
 			continue
 		}
@@ -331,6 +335,9 @@ func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
 		if err != nil {
 			return err
 		}
+	}
+	if len(q.GroupBy) == 0 && q.Having == nil && orderOnlyAggregate(q) && !slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return x.unsupported("an aggregate only in ORDER BY") // as evalSelect refuses it
 	}
 	if q.Lock != nil {
 		// planLocking resolves the tables of FOR UPDATE OF, which Postgres

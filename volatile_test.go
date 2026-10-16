@@ -167,6 +167,9 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		`SELECT DISTINCT ON (n) n, nextval('sq') FROM u ORDER BY n`,
 		`SELECT DISTINCT ON (n) n, (SELECT x.id FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY n, id`,
 		`SELECT row_number() OVER () FROM u WHERE nextval('sq') > 0 LIMIT 1`,
+		// A query no row is pulled from is still refused for a form
+		// detest does not run.
+		`SELECT * FROM (SELECT id FROM u ORDER BY count(*)) s LIMIT 0`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

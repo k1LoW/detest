@@ -946,6 +946,7 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT 1 / (row_number() OVER () - 2) FROM u LIMIT 1`),
 			difftest.Q(0, `SELECT 1 / (count(*) - 1) + 1 FROM u GROUP BY id LIMIT 0 OFFSET 1`),
 			difftest.Q(0, `SELECT nextval('missing') LIMIT 0`),
+			difftest.Q(0, `SELECT nextval('missing'::regclass) LIMIT 0`),
 			difftest.Q(0, `WITH unused AS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1) SELECT 1`),
 			difftest.Q(0, `WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c UNION ALL SELECT 1`),
 			// What is not run still gives its columns, and still fails on a
