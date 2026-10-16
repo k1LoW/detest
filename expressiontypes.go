@@ -452,12 +452,30 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 			}
 		}
 	case "round":
-		// round(x, n) is numeric only, and Postgres casts no float to
-		// numeric implicitly.
+		// round(x, n) is round(numeric, int4) only, and Postgres casts no
+		// float to numeric, nor a bigint to an integer, implicitly.
 		if len(f.Args) == 2 {
 			switch typ := operandType(t, f.Args[0]); typ {
 			case "float4", "float8", "real", "double precision":
 				return "round of a " + typ + " to a number of places"
+			}
+			switch typ := operandType(t, f.Args[1]); typ {
+			case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
+			default:
+				return "round to a " + typ + " number of places"
+			}
+		}
+	case "setval":
+		// setval(regclass, bigint) and setval(regclass, bigint, boolean)
+		// are the only signatures.
+		for i, a := range f.Args[min(1, len(f.Args)):] {
+			typ := operandType(t, a)
+			switch {
+			case typ == "" || typ == "unresolved column type":
+			case i == 0 && numberRank[typ] > 0 && numberRank[typ] <= numberRank["int8"]:
+			case i == 1 && (typ == "bool" || typ == "boolean"):
+			default:
+				return "setval with a " + typ + " argument"
 			}
 		}
 	case "date_trunc", "extract", "date_part":
@@ -554,13 +572,12 @@ func functionParamType(f *sqlir.FuncCall, i int, t typer) string {
 		if untypedExpr(other) || isNullConst(other) {
 			return "float8"
 		}
-		switch t.reduce(t.of(other)) {
-		case "", "unresolved column type":
-			return ""
-		case "numeric", "decimal":
-			return "numeric"
+		if typ := t.reduce(t.of(other)); numberRank[typ] > 0 && typ != "numeric" && typ != "decimal" {
+			return "float8"
 		}
-		return "float8"
+		// Beside a numeric, or an argument the typer leaves untyped, it is
+		// either form, which functionParams takes as one family.
+		return "numeric"
 	case "lower", "upper", "length", "char_length", "octet_length", "hashtext":
 		return "text"
 	case "left":

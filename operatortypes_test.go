@@ -794,6 +794,13 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT abs($1), $1 LIKE '1' WHERE false`, []any{"1"}},
 		{`SELECT lower($1) FROM t WHERE n = $1`, []any{int64(1)}},
 		{`SELECT power($1, NULL), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT power($1, abs(NULL)), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT round($1, b), $1::numeric FROM t WHERE false`, []any{float64(2.46)}},
+		{`SELECT round(1.5, b) FROM t`, nil},
+		{`SELECT setval('seq', $1, 0), $1::bigint`, []any{int64(10)}},
+		{`SELECT setval('seq', 10::numeric)`, nil},
+		// Postgres fails a name of no relation when it binds it (42P01).
+		{`SELECT nextval($1), $1::regclass WHERE false`, []any{"missing"}},
 		{`SELECT round(f, $1) FROM t`, []any{int64(1)}},
 		{`SELECT round(f, 2) FROM t`, nil},
 		{`SELECT pg_advisory_xact_lock(b, 1) FROM t`, nil},

@@ -3694,10 +3694,11 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 		switch typ {
 		case "":
 		case "regclass":
-			// The name is read where the sequence is looked up, which is
-			// the run's, so only the type is recorded.
+			// Postgres resolves the name when it binds it (42P01), and
+			// detest only where the run looks the sequence up, so the
+			// parameter is left untyped for untrackedParam to refuse a
+			// cast of it beside, and only its family is recorded.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
-			c.typedParam(p)
 		case "numeric":
 			if f.Name == "round" {
 				c.inputAs(p, typ)
@@ -3706,9 +3707,10 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 			// power takes the numeric form only for a parameter no use
 			// Postgres meets earlier has typed a float8, and would take the
 			// float8 one after floor($1), an order detest does not follow,
-			// so the type is not recorded as a number type for the order
-			// checks. Its input is read as numeric, which takes the text
-			// float8 does but at the edges of the range.
+			// and beside an argument the typer leaves untyped it may be
+			// either, so the type is not recorded as a number type for the
+			// order checks. Its input is read as numeric, which takes the
+			// text float8 does but at the edges of the range.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.typedParam(p)
 			c.readParam(p)
