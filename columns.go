@@ -2823,15 +2823,17 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if err = c.branches(e, caseBranches(e), sc); err != nil {
 					return
 				}
-				// Postgres compares a row argument with each WHEN as records,
-				// whose operator it resolves only at a row, and the run refuses
-				// the row there.
-				if _, row := e.Arg.(*sqlir.RowExpr); e.Arg != nil && !row {
-					for _, w := range e.Whens {
-						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
-							return
+				if e.Arg != nil {
+					// Postgres compares a row argument with each WHEN as
+					// records, whose operator it resolves only at a row, and
+					// the run refuses the row there.
+					if _, row := e.Arg.(*sqlir.RowExpr); !row {
+						for _, w := range e.Whens {
+							if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
+								return
+							}
+							c.untypedOperands(sc, e.Arg, w.When)
 						}
-						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				} else {
 					for _, w := range e.Whens {
