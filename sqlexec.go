@@ -120,6 +120,10 @@ type sqlExec struct {
 	// returned (checkKept).
 	checkedDefaults map[sqlir.Expr]error
 	setOpColumns    map[*sqlir.SelectStmt]setOpColumns
+	// valuesKinds are the kinds of type, by asBranchType or a time type,
+	// the column check resolved the columns of a VALUES query to, "" for
+	// a column whose values the run keeps as they are.
+	valuesKinds map[*sqlir.SelectStmt][]string
 	// colls are the collations the column check found the columns of the
 	// statement's column references to declare, and collates whether the
 	// statement has a COLLATE clause.
@@ -367,6 +371,9 @@ func (x *sqlExec) write(run func() (*sqlResult, error)) (*sqlResult, error) {
 
 func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	tx := x.tx
+	if err := x.checkWriteTarget(stmt); err != nil {
+		return nil, err
+	}
 	if err := x.checkColumns(stmt); err != nil {
 		return nil, err
 	}
@@ -795,6 +802,36 @@ func (x *sqlExec) fill(table string, st *sqlir.CreateTableAsStmt, selCols []stri
 }
 
 func (x *sqlExec) unsupported(what string) error { return unsupported(what, x.query) }
+
+// checkWriteTarget refuses an INSERT, UPDATE or DELETE whose target is a
+// view, and fails one whose target is a materialized view as Postgres does.
+// Postgres and MySQL write through an updatable view to the table under it,
+// where detest would write to no row. Modeling it would mean deciding which
+// views are updatable and mapping their columns and predicates onto the
+// table, as each server does by its own rules, so it is refused rather than
+// approximated.
+func (x *sqlExec) checkWriteTarget(stmt sqlir.Statement) error {
+	var target string
+	switch st := stmt.(type) {
+	case *sqlir.InsertStmt:
+		target = st.Table
+	case *sqlir.UpdateStmt:
+		target = st.Table
+	case *sqlir.DeleteStmt:
+		target = st.Table
+	default:
+		return nil
+	}
+	db := x.tx.db
+	table := db.resolve(target)
+	if _, ok := db.views[table]; ok {
+		return x.unsupported("a write through the view " + target)
+	}
+	if _, ok := db.matviews[table]; ok {
+		return db.kind.Error(sqlir.WrongObjectType, fmt.Sprintf("cannot change materialized view %q", relname(table)), relname(table), "", "")
+	}
+	return nil
+}
 
 // checkFunctionItem refuses a function in FROM detest does not run, and
 // fails on a column alias list wider than its columns, before any row.
