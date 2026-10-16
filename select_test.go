@@ -1682,6 +1682,27 @@ func TestUndeclaredSequenceIsUndefined(t *testing.T) {
 	}
 }
 
+func TestUndefinedTableWhereNoRowReaches(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SELECT (SELECT 1 FROM missing) FROM e`,
+		`SELECT 1 FROM e WHERE EXISTS (SELECT 1 FROM missing WHERE missing.id = e.id)`,
+		`SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1`,
+		`WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT 1`,
+		`UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`,
+		`DELETE FROM e WHERE id IN (SELECT id FROM missing)`,
+		`INSERT INTO e VALUES (1) RETURNING (SELECT 1 FROM missing)`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	mustExec(t, db, `WITH missing AS (SELECT 1 AS id) SELECT (SELECT id FROM missing) FROM e`)
+}
+
 func TestInsertColumnChecks(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
