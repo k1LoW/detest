@@ -78,3 +78,20 @@ func TestViewStarColumnsChecked(t *testing.T) {
 		}
 	}
 }
+
+// A view's column list renames its query's columns in order, so over a *
+// whose columns detest cannot order, a list shorter than the query is
+// refused rather than taken for the whole set.
+func TestViewColumnListOverUnorderedStarRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int)`)
+	mustExec(t, db, `CREATE VIEW jv(r) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
+	mustExec(t, db, `CREATE VIEW fv(r, a, b, c) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
+	if _, err := db.Exec(`SELECT s FROM jv`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("got %v, want ErrUnsupportedSQL", err)
+	}
+	if _, err := db.Exec(`SELECT r, a, b, c FROM fv`); err != nil {
+		t.Error(err)
+	}
+}

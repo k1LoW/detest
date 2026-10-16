@@ -2349,6 +2349,13 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, ite
 	ordered := vc.itemOrderOf(v.View, v.ViewColumns)
 	if len(v.ViewColumns) > 0 {
 		// Renaming takes the columns in order, which the set alone lacks.
+		// Taking the list for the whole set would drop the columns it
+		// leaves unnamed, and taking the set would keep names the list
+		// replaces, so a list shorter than a set of unknown order is
+		// refused.
+		if ordered.names == nil && cols != nil && len(cols) != len(v.ViewColumns) {
+			return nil, itemOrder{}, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
+		}
 		cols = namesSet(ordered.names)
 	}
 	return vc.derivedTypes(v.View, v.ViewColumns), ordered, cols, nil

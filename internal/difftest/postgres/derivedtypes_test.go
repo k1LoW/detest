@@ -198,6 +198,7 @@ var derivedTypeCases = []difftest.Case{
 			`CREATE VIEW jv AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`,
 			`CREATE VIEW rv(r) AS SELECT * FROM t`,
 			`CREATE VIEW wv AS SELECT * FROM w`,
+			`CREATE VIEW fv(r, a, b, c) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`,
 		},
 		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 2)`, `INSERT INTO u VALUES (1), (2)`, `INSERT INTO w VALUES (7)`},
 		Conns: 1,
@@ -216,6 +217,7 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT k, s || 'z' FROM jv`),
 			difftest.Q(0, `SELECT r, s || 'z', n FROM rv`),
 			difftest.Q(0, `SELECT (SELECT id FROM wv) FROM u ORDER BY 1`),
+			difftest.Q(0, `SELECT r, a, b, c FROM fv`),
 		},
 	},
 }
