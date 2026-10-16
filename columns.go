@@ -177,6 +177,11 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return x.unsupported(what)
 	}
 	if x.tx.db.kind.InnoDB() {
+		for _, name := range openedTables(stmt) {
+			if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if err := x.checkSequenceCalls(stmt); err != nil {

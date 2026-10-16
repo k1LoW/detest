@@ -5090,3 +5090,28 @@ func TestMySQLRowIsNullRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE e (id int PRIMARY KEY)`)
+	for _, q := range []string{
+		`SELECT (SELECT 1 FROM missing) FROM e`,
+		`SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		`UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`,
+		`DELETE FROM e WHERE id IN (SELECT id FROM missing)`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM c)`,
+		`WITH c AS (SELECT * FROM missing), c2 AS (SELECT * FROM c) SELECT 1 FROM c2 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedTable) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`WITH c AS (SELECT * FROM missing) SELECT 1`,
+		`WITH c AS (SELECT * FROM missing) SELECT 1 FROM (WITH d AS (SELECT * FROM c) SELECT 1) x`,
+		`WITH missing AS (SELECT 1 AS id) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+	} {
+		mustExec(t, db, q)
+	}
+}

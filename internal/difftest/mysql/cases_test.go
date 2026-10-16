@@ -1245,6 +1245,38 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
 		},
 	},
+	{
+		// MySQL opens every table a statement reads before it runs it, so a
+		// missing one fails it even where no row reaches it, but not the
+		// tables of a CTE nothing reads.
+		Name: "a table that does not exist fails the statement where no row reaches it",
+		Schema: []string{
+			`CREATE TABLE e (id INT PRIMARY KEY)` + binary,
+			`CREATE TABLE f (id INT PRIMARY KEY)` + binary,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT 1 FROM missing) FROM e`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE EXISTS (SELECT 1 FROM missing WHERE missing.id = e.id)`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`),
+			difftest.Q(0, `SELECT 1 FROM e LEFT JOIN missing ON false WHERE false`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE false UNION SELECT 1 FROM missing WHERE false`),
+			difftest.S(0, `UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`),
+			difftest.S(0, `DELETE FROM e WHERE id IN (SELECT id FROM missing)`),
+			difftest.S(0, `INSERT INTO f SELECT id FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`),
+			difftest.S(0, `INSERT INTO f VALUES (1) ON DUPLICATE KEY UPDATE id = (SELECT 1 FROM missing)`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM c)`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing), c2 AS (SELECT * FROM c) SELECT 1 FROM c2 WHERE false`),
+			// The tables of a CTE nothing reads are not opened, at any depth.
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing) SELECT 1`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing), c2 AS (SELECT * FROM c) SELECT 1`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE false AND EXISTS (WITH c AS (SELECT * FROM missing) SELECT 1)`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing) SELECT 1 FROM (WITH d AS (SELECT * FROM c) SELECT 1) x`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing) SELECT 1 FROM (WITH d AS (SELECT * FROM c) SELECT 1 FROM d) x WHERE false`),
+			// A CTE of the name stands for the table.
+			difftest.Q(0, `WITH missing AS (SELECT 1 AS id) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
