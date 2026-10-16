@@ -471,6 +471,39 @@ func TestRowComparisonFieldTypesBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// A * over a derived table, a CTE or a view gives the columns of the item
+// in order, so Postgres types a subquery whose select list it is when it
+// plans the statement, and fails text beside a number with 42883 whatever
+// rows the statement reads.
+func TestStarOverDerivedItemTypedBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int)`)
+	mustExec(t, db, `CREATE VIEW sv AS SELECT s FROM t`)
+	mustExec(t, db, `CREATE VIEW uv AS SELECT s FROM t UNION SELECT 'x'`)
+	for _, q := range []string{
+		`SELECT 1 = (SELECT * FROM (SELECT '1' AS v) x) WHERE false`,
+		`SELECT 1 = (SELECT x.* FROM (SELECT '1' AS v) x) WHERE false`,
+		`SELECT 1 = (SELECT * FROM (VALUES ('1')) v) WHERE false`,
+		`SELECT 1 IN (SELECT * FROM (SELECT '1' AS v) x) WHERE false`,
+		`SELECT 1 = (SELECT * FROM (SELECT s FROM t) x) WHERE false`,
+		`SELECT 1 = (SELECT * FROM (SELECT s FROM t UNION SELECT 'x') u) WHERE false`,
+		`SELECT 1 = (SELECT * FROM (SELECT * FROM (SELECT '1' AS v) x) y) WHERE false`,
+		`SELECT 1 = (SELECT x.* FROM (SELECT '1' AS v) x JOIN t ON true) WHERE false`,
+		`WITH c AS (SELECT '1' AS v) SELECT 1 = (SELECT * FROM c) WHERE false`,
+		`SELECT 1 = (SELECT * FROM sv) WHERE false`,
+		`SELECT 1 = (SELECT * FROM uv) WHERE false`,
+		`SELECT (1, 2) = (SELECT * FROM (SELECT 1 AS a, '2' AS b) x) WHERE false`,
+		`SELECT (1, 2) IN (SELECT x.* FROM (SELECT n, s FROM t) x) WHERE false`,
+		`WITH c AS (SELECT * FROM (VALUES ('1')) a UNION ALL SELECT * FROM (VALUES ('2')) b) SELECT 1 IN (SELECT * FROM c) WHERE false`,
+		`WITH c AS (SELECT * FROM sv UNION ALL SELECT * FROM sv) SELECT 1 = (SELECT * FROM c) WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
 // Text has no assignment cast to a number, a boolean, a uuid, a time, an
 // enum or json, so Postgres fails an UPDATE's SET, an INSERT's VALUES or an
 // ON CONFLICT DO UPDATE's SET that writes text to such a column when it

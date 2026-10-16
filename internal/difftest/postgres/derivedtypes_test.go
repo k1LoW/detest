@@ -133,6 +133,27 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM t WHERE n = coalesce('1', NULL)::int ORDER BY id`),
 		},
 	},
+	{
+		Name: "a subquery whose select list is a * over a derived table, a CTE or a view",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
+			`CREATE VIEW nv AS SELECT n FROM t`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, '1', 1)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (1 = (SELECT * FROM (SELECT 1 AS v) x))::text`),
+			difftest.Q(0, `SELECT (1 = (SELECT x.* FROM (SELECT n FROM t) x))::text`),
+			difftest.Q(0, `SELECT coalesce((SELECT * FROM (SELECT '1' AS v) x), 'z')`),
+			difftest.Q(0, `SELECT ((SELECT * FROM (VALUES ('1')) v) = '1')::text`),
+			difftest.Q(0, `WITH c AS (SELECT n FROM t) SELECT (1 = (SELECT * FROM c))::text`),
+			difftest.Q(0, `SELECT (1 = (SELECT * FROM nv))::text`),
+			difftest.Q(0, `SELECT (1 IN (SELECT * FROM (SELECT n FROM t) x))::text`),
+			difftest.Q(0, `SELECT ((1, '1') IN (SELECT x.* FROM (SELECT n, s FROM t) x JOIN t ON true))::text`),
+			difftest.Q(0, `SELECT (1 = (SELECT * FROM (SELECT * FROM (SELECT n FROM t) x) y))::text`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM (VALUES (1)) a UNION ALL SELECT * FROM (VALUES (2)) b) SELECT (1 IN (SELECT * FROM c))::text`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {
