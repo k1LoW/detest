@@ -194,6 +194,38 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		// Postgres resolves the operator of each pair of fields when it plans
+		// the statement, so these run whatever rows they read, while a pair
+		// of text with a number fails before any row (operatortypes_test.go).
+		Name: "the fields of a row compared pair by pair with a row or a subquery",
+		Schema: []string{
+			`CREATE TABLE p (a int, b int, name text, PRIMARY KEY (a, b))`,
+		},
+		Seed:  []string{`INSERT INTO p VALUES (9, 1, 'x'), (10, 1, 'y'), (2, 5, 'z')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, name) = ('9', 'x')`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a * 1.5, b) = (13.5, 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) IN ((2, 5), ('10', 1))`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) IN (SELECT a, b FROM p WHERE name = 'x')`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) NOT IN (SELECT a, b FROM p WHERE name = 'x')`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, b) = ANY (SELECT 9, 1 UNION SELECT 10, 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE a IN (SELECT a FROM p WHERE b = 5)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE ('9', b) IN (SELECT a, b FROM p)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE (a, 'x') = (SELECT a, name FROM p WHERE a = 9)`),
+			// Postgres compares a field that is itself a row, and a row
+			// under CASE or NULLIF, as records, whose operator it resolves
+			// only at a row.
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = ((name, b), 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = (NULL, 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) = ((SELECT (9, 1)), 1)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND ((a, b), 1) IN (SELECT (name, 2), 1 FROM p)`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND CASE (a, b) WHEN (name, b) THEN true END`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND CASE (a, b) WHEN NULL::record THEN true ELSE false END`),
+			difftest.Q(0, `SELECT count(*) FROM p WHERE b = 99 AND NULLIF((a, 'x'), (a, b)) IS NULL`),
+		},
+	},
+	{
 		Name: "AND, OR and row comparisons over aggregates in HAVING",
 		Schema: []string{
 			`CREATE TABLE l (id int PRIMARY KEY, g int NOT NULL, k text, at int)`,
