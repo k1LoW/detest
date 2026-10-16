@@ -1795,8 +1795,6 @@ func TestUnknownColumnOwnerUnsupported(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (1, 10, 1)`)
 	mustExec(t, db, `INSERT INTO v VALUES (7)`)
 	for _, q := range []string{
-		`SELECT (SELECT id FROM vv) FROM u`,
-		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE n IS NOT NULL)) FROM u`,
 		`SELECT (WITH c AS (SELECT id FROM vv) SELECT id FROM c) FROM u`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) || !strings.Contains(err.Error(), "may have") && !strings.Contains(err.Error(), "around the one declaring it") {
@@ -1805,6 +1803,9 @@ func TestUnknownColumnOwnerUnsupported(t *testing.T) {
 	}
 	for _, q := range []string{
 		`SELECT (SELECT n FROM vv) FROM u`,
+		// vv's columns are known, so id and n resolve as they do in Postgres.
+		`SELECT (SELECT id FROM vv) FROM u`,
+		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE n IS NOT NULL)) FROM u`,
 		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE vv.n IS NOT NULL)) FROM u`,
 	} {
 		if _, err := db.Exec(q); err != nil {

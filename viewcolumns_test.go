@@ -52,3 +52,54 @@ func TestViewColumnCheckRefused(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// A view whose query has a * gives its columns the names and the types the
+// * expands to, so a check over them refuses what it refuses over a table.
+func TestViewStarColumnsChecked(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
+		`CREATE VIEW tv AS SELECT * FROM t`,
+		`CREATE VIEW pv AS SELECT * FROM (SELECT 'a'::text AS v) y`,
+		`CREATE VIEW uv AS SELECT * FROM (SELECT 'a'::text AS v) y UNION ALL SELECT 'b'::text`,
+		`CREATE VIEW vv AS SELECT * FROM tv`,
+	} {
+		mustExec(t, db, q)
+	}
+	for _, q := range []string{
+		`SELECT abs(s) FROM tv WHERE false`,
+		`SELECT abs(v) FROM pv WHERE false`,
+		`SELECT abs(v) FROM uv WHERE false`,
+		`SELECT abs(s) FROM vv WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
+// A view's column list renames its query's columns in order, so over a *
+// whose columns detest cannot order, a list shorter than the query is
+// refused rather than taken for the whole set.
+func TestViewColumnListOverUnorderedStarRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, n int)`)
+	mustExec(t, db, `CREATE VIEW jv(r) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
+	mustExec(t, db, `CREATE VIEW fv(r, a, b, c) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY)`)
+	// The join repeats id, so its set has fewer names than its columns.
+	mustExec(t, db, `CREATE VIEW dv(a, b) AS SELECT * FROM t JOIN u ON true`)
+	mustExec(t, db, `CREATE VIEW ev(a, b, c, d) AS SELECT * FROM t JOIN u ON true`)
+	for _, q := range []string{`SELECT s FROM jv`, `SELECT id FROM dv WHERE false`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{`SELECT r, a, b, c FROM fv`, `SELECT a, b, c, d FROM ev`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}

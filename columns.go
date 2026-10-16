@@ -727,12 +727,15 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			sc.types[alias] = types
 			sc.noteOrdered(alias, c.cteOrderedOf(t.Name))
 		} else if v := db.views[db.resolve(t.Name)]; v != nil {
-			types, ordered, err := c.viewTypes(v)
+			types, ordered, cols, err := c.viewTypes(v)
 			if err != nil {
 				return err
 			}
 			if len(t.Columns) > 0 {
 				types = map[string]string{}
+			}
+			if cols != nil {
+				sc.items[alias] = cols
 			}
 			sc.types[alias] = types
 			sc.noteOrdered(alias, ordered)
@@ -2315,10 +2318,13 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 // statement that reads the view, or the check's refusal of the query, as
 // Postgres expands the view into the statement and runs the query as one of
 // its own. The checks the statement makes after its walk apply too, apart
-// from those of parameters, which a view's query cannot hold.
-func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, error) {
+// from those of parameters, which a view's query cannot hold. It also gives
+// the view's column set as the walk finds it, a *'s columns and those a
+// shorter column list leaves unnamed included, nil where the walk does not
+// know them.
+func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, colSet, error) {
 	vc := &columnChecker{x: c.x}
-	_, err := vc.query(v.View, nil)
+	cols, err := vc.query(v.View, nil)
 	switch {
 	case err != nil:
 	case vc.timeConflict != "":
@@ -2334,13 +2340,29 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, ite
 	}
 	if err != nil {
 		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
-			return nil, itemOrder{}, err
+			return nil, itemOrder{}, nil, err
 		}
 		// Any other failure is one Postgres makes when the view is created,
 		// so it cannot be the answer to a statement reading the view.
-		return map[string]string{}, itemOrder{}, nil
+		return map[string]string{}, itemOrder{}, nil, nil
 	}
-	return vc.derivedTypes(v.View, v.ViewColumns), vc.itemOrderOf(v.View, v.ViewColumns), nil
+	ordered := vc.itemOrderOf(v.View, v.ViewColumns)
+	if len(v.ViewColumns) > 0 {
+		// Renaming takes the columns in order, which the set alone lacks.
+		// Taking the list for the whole set would drop the columns it
+		// leaves unnamed, and taking the set would keep names the list
+		// replaces, so a list shorter than a set of unknown order is
+		// refused.
+		if ordered.names == nil && cols != nil {
+			// The set counts a name two items give once, so the width
+			// says whether the list names every column.
+			if w, ok := vc.knownWidth(v.View); !ok || w != len(v.ViewColumns) {
+				return nil, itemOrder{}, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
+			}
+		}
+		cols = namesSet(ordered.names)
+	}
+	return vc.derivedTypes(v.View, v.ViewColumns), ordered, cols, nil
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that
