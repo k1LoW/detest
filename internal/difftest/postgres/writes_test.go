@@ -1024,7 +1024,7 @@ var writeCases = []difftest.Case{
 		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 2), (2, 'b', 1), (3, 'c', 3)`},
 		Conns: 1,
 		Steps: []difftest.Step{
-			difftest.Q(0, `UPDATE t SET n = n + 10 FROM tv WHERE t.id = tv.id RETURNING t.id, t.n`),
+			difftest.Q(0, `UPDATE t SET n = t.n + 10 FROM tv WHERE t.id = tv.id RETURNING t.id, t.n`),
 			difftest.Q(0, `UPDATE t SET n = (SELECT count(*) FROM tv) WHERE id = 2 RETURNING id, n`),
 			difftest.Q(0, `DELETE FROM t USING tv WHERE t.id = tv.id AND tv.id = 3 RETURNING t.id`),
 			difftest.Q(0, `INSERT INTO t SELECT id + 10, s, n FROM tv RETURNING id, n`),
