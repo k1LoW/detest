@@ -421,6 +421,10 @@ func operandType(t typer, e sqlir.Expr) string {
 }
 
 func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
+	// A CASE or COALESCE of string literals and NULLs alone is text to
+	// Postgres when it resolves the function, as COALESCE('true', NULL)
+	// for setval's is_called, which no signature takes.
+	t.untypedText = true
 	if f.Name == "left" && len(f.Args) == 2 {
 		switch typ := operandType(t, f.Args[1]); typ {
 		case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
@@ -442,9 +446,56 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		// where callFunc would otherwise key the lock on the value as given.
 		for _, a := range f.Args {
 			switch typ := operandType(t, a); typ {
-			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
+			case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
+			case "int8", "bigint":
+				if len(f.Args) == 2 {
+					return f.Name + " with a " + typ + " key argument beside another"
+				}
 			default:
 				return f.Name + " with a " + typ + " key argument"
+			}
+		}
+	case "round":
+		// round(x, n) is round(numeric, int4) only, and Postgres casts no
+		// float to numeric, nor a bigint to an integer, implicitly.
+		if len(f.Args) > 0 {
+			switch typ := operandType(t, f.Args[0]); {
+			case typ == "" || typ == "unresolved column type":
+			case len(f.Args) == 2 && numberCategory(typ) == numberCategory("float8"):
+				return "round of a " + typ + " to a number of places"
+			case numberRank[typ] == 0:
+				return "round of a " + typ
+			}
+		}
+		if len(f.Args) == 2 {
+			switch typ := operandType(t, f.Args[1]); typ {
+			case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
+			default:
+				return "round to a " + typ + " number of places"
+			}
+		}
+	case "nextval", "setval":
+		// The sequence is a regclass, which Postgres casts implicitly from
+		// these types only. setval(regclass, bigint) and setval(regclass,
+		// bigint, boolean) are setval's only signatures.
+		if len(f.Args) > 0 {
+			switch typ := operandType(t, f.Args[0]); typ {
+			case "", "unresolved column type", "regclass", "oid", "text", "varchar", "int", "int2", "int4", "int8", "integer", "smallint", "bigint":
+			default:
+				return f.Name + " of a " + typ + " sequence"
+			}
+		}
+		if f.Name == "nextval" {
+			break
+		}
+		for i, a := range f.Args[min(1, len(f.Args)):] {
+			typ := operandType(t, a)
+			switch {
+			case typ == "" || typ == "unresolved column type":
+			case i == 0 && numberRank[typ] > 0 && numberRank[typ] <= numberRank["int8"]:
+			case i == 1 && (typ == "bool" || typ == "boolean"):
+			default:
+				return "setval with a " + typ + " argument"
 			}
 		}
 	case "date_trunc", "extract", "date_part":
@@ -516,6 +567,59 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	}
+	return ""
+}
+
+// functionParamType is the type Postgres gives a parameter that stands as
+// the i-th argument of f, by the signature it resolves f to, or "" where
+// detest does not know it. It is the check's own typing, apart from the
+// typer's, which leaves the parameter untyped.
+func functionParamType(f *sqlir.FuncCall, i int, t typer) string {
+	switch f.Name {
+	case "abs", "floor", "ceil", "ceiling":
+		return "float8"
+	case "round":
+		if len(f.Args) == 2 {
+			return []string{"numeric", "int4"}[i]
+		}
+		return "float8"
+	case "power", "pow":
+		if len(f.Args) != 2 {
+			return ""
+		}
+		other := f.Args[1-i]
+		if untypedExpr(other) || isNullConst(other) {
+			return "float8"
+		}
+		// Postgres resolves an argument of literals and NULLs alone, such
+		// as abs(NULL), before it picks power's form.
+		t.untypedText = true
+		if typ := t.reduce(t.of(other)); numberRank[typ] > 0 && typ != "numeric" && typ != "decimal" {
+			return "float8"
+		}
+		// Beside a numeric, or an argument the typer leaves untyped, it is
+		// either form, which functionParams takes as one family.
+		return "numeric"
+	case "lower", "upper", "length", "char_length", "octet_length", "hashtext":
+		return "text"
+	case "left":
+		return []string{"text", "int4"}[min(i, 1)]
+	case "date_trunc", "extract", "date_part":
+		if i == 0 {
+			return "text"
+		}
+	case "pg_advisory_xact_lock", "pg_try_advisory_xact_lock":
+		if len(f.Args) == 1 {
+			return "int8"
+		}
+		return "int4"
+	case "nextval":
+		return "regclass"
+	case "setval":
+		return []string{"regclass", "int8", "bool"}[min(i, 2)]
+	case "make_interval":
+		return "float8" // secs => n, the one form the translation takes
 	}
 	return ""
 }

@@ -2009,19 +2009,15 @@ func TestNumericReadsBackAsText(t *testing.T) {
 		t.Errorf("division by a numeric beside an unresolved column: got %#v, %v, want true", sv, err)
 	}
 	// A parameter used again takes the type of the use Postgres meets
-	// first, which may be another form than this call's, so the output is
-	// left as it was: floor($1) makes it a float8 here.
-	rows2, err := db.Query(`SELECT floor($1), power($1, 1::numeric)`, int64(2000000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows2.Next() {
-		var a, b any
-		if err := rows2.Scan(&a, &b); err != nil || b != float64(2000000) {
-			t.Errorf("power of a reused parameter: got %#v, %v, want a float64", b, err)
+	// first, which may be another form than this call's, so beside a
+	// numeric, where the form is power's own, the output type would be a
+	// guess: floor($1) makes it a float8 here, but $1::numeric after would
+	// not.
+	for _, q := range []string{`SELECT floor($1), power($1, 1::numeric)`, `SELECT floor(power($1, 1::numeric)), $1::numeric`} {
+		if _, err := db.Query(q, int64(2000000)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	rows2.Close()
 	// An untyped parameter takes the form the other argument picks.
 	for _, q := range []string{`SELECT floor(power($1, 1::numeric))`} {
 		var v any

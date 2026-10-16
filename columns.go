@@ -3422,6 +3422,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if !c.x.tx.db.kind.InnoDB() {
+					if err = c.functionParams(e, sc); err != nil {
+						return
+					}
+				}
 				switch e.Name {
 				case "coalesce", "greatest", "least", "nullif":
 					if err = c.branchTypes(e.Args, sc, "branches"); err != nil {
@@ -3774,6 +3779,96 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 		c.readParam(p)
 	}
 	c.castInput(&sqlir.Cast{X: e, Type: typ})
+}
+
+// functionParams types each parameter standing as an argument of f by the
+// signature Postgres resolves f to, for the whole statement as Postgres
+// does, so that another use of it as another type is refused, and reads its
+// input as that type, as Postgres does when it binds it.
+func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
+	for i, a := range f.Args {
+		if k, ok := a.(*sqlir.Const); ok {
+			if what := rawFunctionArg(f, i, functionParamType(f, i, c.typer(sc)), k.Value, "literal"); what != "" {
+				return c.x.unsupported(what)
+			}
+			continue
+		}
+		p, ok := a.(*sqlir.Param)
+		if !ok {
+			continue
+		}
+		if f.Name == "concat" {
+			// concat takes "any", which gives a parameter no type (42P18)
+			// unless a use Postgres meets earlier gave it one, an order
+			// detest does not follow.
+			return c.x.unsupported(fmt.Sprintf("parameter $%d as an argument of concat without a cast", p.Index+1))
+		}
+		typ := functionParamType(f, i, c.typer(sc))
+		if p.Index >= 0 && p.Index < len(c.x.args) {
+			if what := rawFunctionArg(f, i, typ, c.x.args[p.Index], "parameter"); what != "" {
+				return c.x.unsupported(what)
+			}
+		}
+		switch typ {
+		case "":
+		case "regclass":
+			// Postgres resolves the name when it binds it (42P01), and
+			// detest only where the run looks the sequence up, so the
+			// parameter is left untyped for untrackedParam to refuse a
+			// cast of it beside, and only its family is recorded.
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+		case "numeric":
+			if f.Name == "round" {
+				c.inputAs(p, typ)
+				break
+			}
+			// power takes the numeric form only for a parameter no use
+			// Postgres meets earlier has typed a float8, and would take the
+			// float8 one after floor($1), an order detest does not follow,
+			// and beside an argument the typer leaves untyped it may be
+			// either. A parameter used again is refused, as the result's
+			// type, numeric or float8, would then be a guess. One used
+			// here alone is read as numeric, which takes the text float8
+			// does but at the edges of the range.
+			if c.paramCount[p.Index] > 1 {
+				return c.x.unsupported(fmt.Sprintf("parameter $%d of power, whose form detest cannot tell, used again", p.Index+1))
+			}
+			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
+			c.typedParam(p)
+			c.readParam(p)
+			c.castInput(&sqlir.Cast{X: p, Type: typ})
+		default:
+			c.inputAs(p, typ)
+		}
+	}
+	return nil
+}
+
+// rawFunctionArg names a value v, bound to a parameter or written as a
+// literal as the i-th argument of f typed typ, that callFunc would take as it
+// is, where Postgres converts it to typ, so that a string such as "true" for
+// setval's is_called or "7" for an advisory lock's key would give another
+// sequence state or lock. kind says what v is.
+func rawFunctionArg(f *sqlir.FuncCall, i int, typ string, v any, kind string) string {
+	switch {
+	case f.Name == "setval" && i > 0, f.Name == "pg_advisory_xact_lock", f.Name == "pg_try_advisory_xact_lock":
+	default:
+		return ""
+	}
+	v = derefValue(v)
+	if v == nil {
+		return ""
+	}
+	ok := false
+	if typ == "bool" {
+		_, ok = v.(bool)
+	} else {
+		_, ok = integer(v)
+	}
+	if ok {
+		return ""
+	}
+	return fmt.Sprintf("%s with a %T %s as its %s argument", f.Name, v, kind, typ)
 }
 
 // typer types expressions in sc as Postgres resolves them, with a domain
