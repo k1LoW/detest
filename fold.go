@@ -409,7 +409,7 @@ func (f *folder) exists(sel *sqlir.SelectStmt) error {
 // set-returning function in the query block of an EXISTS, which keeps
 // Postgres from dropping its select list.
 func existsNeedsTargets(sel *sqlir.SelectStmt) bool {
-	if len(windowsOf(sel)) > 0 || orderOnlyAggregate(sel) || slices.ContainsFunc(sel.DistinctOn, hasAggregate) {
+	if len(windowsOf(sel)) > 0 || blockAggregate(sel) {
 		return true
 	}
 	for _, t := range sel.Targets {
