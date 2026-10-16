@@ -217,12 +217,14 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 		}
 		full[q] = true
 		if q.SetOp != "" {
+			// Its queries are read one after the other, so the effects of
+			// one do not fall between the rows of another.
 			visit(q.Larg, effects)
 			visit(q.Rarg, effects)
-			return
+		} else {
+			effects = effects || own(q)
 		}
-		effects = effects || own(q)
-		if f := q.From; f != nil && len(q.Joins) == 0 && !f.Lateral {
+		if f := q.From; q.SetOp == "" && f != nil && len(q.Joins) == 0 && !f.Lateral {
 			// A view's query is shared by every reference to it, so it is
 			// the reference that is read in full.
 			var key any
@@ -284,7 +286,22 @@ func (x *sqlExec) partlyRead(stmt sqlir.Statement, consumed bool) error {
 	for _, name := range freeNames(stmt) {
 		free[name] = true
 	}
+	// The query of a CTE no one reads never runs.
+	unread := map[*sqlir.SelectStmt]bool{}
 	for _, q := range sqlir.Selects(stmt) {
+		read := reachableCTEs(q)
+		for _, cte := range q.With {
+			if !read[cte.Name] {
+				for _, in := range sqlir.Selects(cte.Select) {
+					unread[in] = true
+				}
+			}
+		}
+	}
+	for _, q := range sqlir.Selects(stmt) {
+		if unread[q] {
+			continue
+		}
 		read := reachableCTEs(q)
 		for _, cte := range q.With {
 			if !read[cte.Name] {
@@ -458,10 +475,19 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 		// Postgres computes the select list below the row locks, for a
 		// row SKIP LOCKED skips too and again for a row it re-checks after
 		// a lock wait, where detest computes it for the rows it locked.
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, c := range sel.With {
+			ctes[c.Name] = c.Select
+		}
 		for _, t := range sel.Targets {
 			for _, f := range sqlir.FuncCalls(t.Expr) {
 				if effectFuncs[f.Name] {
 					return x.unsupported(f.Name + " in the select list of a locking read")
+				}
+			}
+			for _, q := range sqlir.Selects(t.Expr) {
+				if x.effectfulQuery(q, ctes, map[string]bool{}) {
+					return x.unsupported("a subquery that locks rows in the select list of a locking read")
 				}
 			}
 		}

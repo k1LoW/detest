@@ -162,20 +162,45 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 		}
 		return !slices.ContainsFunc(subs, func(q *sqlir.SelectStmt) bool { return !covered[q] })
 	}
+	type cond struct {
+		e      sqlir.Expr
+		having bool
+	}
+	var conds []cond
 	for _, e := range splitAnd(sel.Where) {
-		if !once(e, false) {
-			continue
-		}
-		if ok, err := x.evalBool(e, &env{outer: outer}); err != nil || !ok {
-			return false, true, err
+		if once(e, false) {
+			conds = append(conds, cond{e, false})
 		}
 	}
 	for _, e := range splitAnd(sel.Having) {
-		if !once(e, true) {
-			continue
+		if once(e, true) {
+			conds = append(conds, cond{e, true})
 		}
-		if ok, err := x.evalBool(e, &env{outer: outer}); err != nil || !ok {
-			return false, false, err
+	}
+	// Postgres folds a condition of literals alone when it plans the
+	// statement, so a false one empties the filter before a subquery
+	// beside it runs. The others it tests in their written order.
+	literal := func(e sqlir.Expr) bool {
+		for _, n := range sqlir.Exprs(e) {
+			switch n.(type) {
+			case *sqlir.FuncCall, *sqlir.Param, *sqlir.SubQuery, *sqlir.Exists, *sqlir.InExpr, *sqlir.ColumnRef:
+				return false
+			}
+		}
+		return true
+	}
+	slices.SortStableFunc(conds, func(a, b cond) int {
+		switch la, lb := literal(a.e), literal(b.e); {
+		case la && !lb:
+			return -1
+		case lb && !la:
+			return 1
+		}
+		return 0
+	})
+	for _, c := range conds {
+		if ok, err := x.evalBool(c.e, &env{outer: outer}); err != nil || !ok {
+			return false, !c.having, err
 		}
 	}
 	return true, true, nil
@@ -209,6 +234,26 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 		}
 		if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
 			return err
+		}
+	}
+	// So does a sequence named by a literal, which Postgres reads as a
+	// regclass when it parses the call.
+	for _, f := range sqlir.FuncCallsIn(sel) {
+		if f.Name != "nextval" && f.Name != "setval" && f.Name != "currval" || len(f.Args) == 0 {
+			continue
+		}
+		c, ok := f.Args[0].(*sqlir.Const)
+		if !ok {
+			continue
+		}
+		name, ok := c.Value.(string)
+		if !ok {
+			continue
+		}
+		if seq := x.tx.db.seqName(name); !x.tx.db.isRelation(seq) {
+			if err := x.tx.db.missingSequence(seq); err != nil {
+				return err
+			}
 		}
 	}
 	// So does a column alias list longer than its query's columns, which
@@ -954,6 +999,24 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) 
 		x.consistent = false
 		if stop, err = x.rangeLocks(sel, plan); err != nil {
 			return nil, nil, err
+		}
+	}
+	if !x.tx.db.kind.InnoDB() && (sel.Limit != nil || sel.Offset != nil) {
+		// Its WHERE runs for the rows it pulls, which LIMIT stops, where
+		// detest tests every row before it locks any. A subquery that
+		// reads no column around it runs once in both.
+		once := map[*sqlir.SelectStmt]bool{}
+		for _, q := range sqlir.Selects(sel.Where) {
+			if x.uncorrelated[q] {
+				for _, in := range sqlir.Selects(q) {
+					once[in] = true
+				}
+			}
+		}
+		for _, q := range sqlir.Selects(sel.Where) {
+			if !once[q] && x.effectfulQuery(q, nil, map[string]bool{}) {
+				return nil, nil, x.unsupported("a correlated subquery that locks rows in the WHERE of a locking read with LIMIT or OFFSET")
+			}
 		}
 	}
 	rows, err := x.scan(sel, outer)

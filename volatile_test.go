@@ -139,6 +139,8 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		`VALUES (nextval('sq')), (nextval('sq')) LIMIT 1`,
 		`SELECT id, nextval('sq') FROM u LIMIT 1 FOR UPDATE SKIP LOCKED`,
 		`SELECT id FROM u WHERE nextval('sq') > 0 LIMIT 1 FOR UPDATE`,
+		`SELECT u.id, (SELECT x.n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u OFFSET 1 FOR UPDATE`,
+		`SELECT u.id FROM u WHERE (SELECT x.n FROM u x WHERE x.id = u.id FOR UPDATE) > 0 LIMIT 1 FOR UPDATE`,
 		// Whether it computes a subquery for a row past LIMIT depends on
 		// its plan.
 		`SELECT id, (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY id LIMIT 1`,

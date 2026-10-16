@@ -905,6 +905,10 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE u.id = e.id + 2) > 0`),
 			difftest.Q(0, `SELECT id FROM e WHERE EXISTS (SELECT 1 / n FROM u WHERE u.id = e.id + 2)`),
 			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE id > 0 AND false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
+			difftest.Q(0, `SELECT nextval('missing') LIMIT 0`),
+			difftest.Q(0, `WITH unused AS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1) SELECT 1`),
+			difftest.Q(0, `WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c UNION ALL SELECT 1`),
 			// What is not run still gives its columns, and still fails on a
 			// relation that does not exist.
 			difftest.Q(0, `WITH u AS (SELECT * FROM u) SELECT * FROM u LIMIT 0`),
