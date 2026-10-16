@@ -1350,6 +1350,12 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `INSERT INTO p (id, x) VALUES (2, 7.000) ON CONFLICT (id) DO UPDATE SET x = excluded.x RETURNING x`),
 			difftest.Q(0, `INSERT INTO p (id, x) SELECT 9, x * 2 FROM p WHERE id = 1 RETURNING x, z`),
 			difftest.Q(0, `SELECT sum(x), max(x) FROM p`),
+			difftest.Q(0, `SELECT COALESCE('1.00', 1.0), (CASE WHEN true THEN 1.50 ELSE 0::float8 END)::numeric, coalesce(1.50, 0::float8)::numeric`),
+			difftest.Q(0, `SELECT 1 UNION ALL SELECT 2.00 WHERE false`),
+			difftest.Q(0, `SELECT v::numeric FROM (SELECT 1.50 AS v UNION ALL SELECT 2::float8) s ORDER BY 1`),
+			difftest.Q(0, `SELECT sum(n::bigint) / 4 FROM p WHERE id < 3`),
+			difftest.Q(0, `VALUES (1), (1.50)`),
+			difftest.Q(0, `SELECT extract(second FROM interval '1 second'), extract(epoch FROM timestamp '2024-01-02'), extract(epoch FROM date '2024-01-02'), extract(milliseconds FROM timestamp '2024-01-02 00:00:01.5'), extract(day FROM timestamp '2024-01-02')`),
 		},
 	},
 	{

@@ -54,6 +54,12 @@ func sameRow(a, b Row) bool {
 				return false
 			}
 		}
+		// 1.0 and 1.00 are equal but read back apart.
+		if x, ok := v.(scaledNum); ok {
+			if y, ok := b[k].(scaledNum); ok && x.scale != y.scale {
+				return false
+			}
+		}
 		if !sameValue(v, b[k]) {
 			return false
 		}

@@ -110,6 +110,13 @@ type sqlExec struct {
 	// or a float, such as one by the sum of a bigint, which Postgres
 	// returns as a numeric where the fold gives an integer.
 	numericDivs map[*sqlir.BinaryExpr]bool
+	// scaleTypes are the certain types (certainType) the column check
+	// found for a division and for the branches of CASE, COALESCE and the
+	// like, "float8" where a branch is one, by which a numeric's scale is
+	// given or dropped where the values alone do not tell.
+	scaleTypes map[sqlir.Expr]string
+	// setOpCertain are the certain types of a set operation's columns.
+	setOpCertain map[*sqlir.SelectStmt][]string
 	// foldValues are the values foldConstants found Postgres reduces
 	// expressions to without evaluating their operands, which evaluating
 	// them while it folds gives instead, so that an operand Postgres drops

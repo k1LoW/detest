@@ -55,6 +55,8 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		return c.certainBranches(caseBranches(e), sc)
 	case *sqlir.FuncCall:
 		switch e.Name {
+		case "extract":
+			return "numeric"
 		case "count":
 			return "int8"
 		case "sum", "avg":
@@ -358,4 +360,17 @@ func (sc *colScope) noteCertain(alias string, types map[string]string) {
 		sc.certain = map[string]map[string]string{}
 	}
 	sc.certain[alias] = types
+}
+
+// certainSource is the type of e, an extract's source, that the statement
+// shows without a guess: a cast's or a table's declared column's, and ""
+// for any other.
+func (sc *colScope) certainSource(e sqlir.Expr) string {
+	switch e := e.(type) {
+	case *sqlir.Cast:
+		return e.Type
+	case *sqlir.ColumnRef:
+		return sc.certainColumn(e)
+	}
+	return ""
 }

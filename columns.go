@@ -357,6 +357,7 @@ func (x *sqlExec) forgetKept() {
 			}
 			delete(x.exprTypes, n)
 			delete(x.branchTypes, n)
+			delete(x.scaleTypes, n)
 		}
 	}
 	x.checkedDefaults = nil
@@ -1765,6 +1766,10 @@ func (c *columnChecker) noteSetOpColumns(sel *sqlir.SelectStmt) error {
 			return c.x.unsupported("a set operation of a query with a * beside a string literal or a parameter")
 		}
 	}
+	if c.x.setOpCertain == nil {
+		c.x.setOpCertain = map[*sqlir.SelectStmt][]string{}
+	}
+	c.x.setOpCertain[sel] = c.certainOutput(sel)
 	types := c.setOpTypes(sel)
 	cols := setOpColumns{byPos: make([]string, len(types)), byName: map[string]string{}}
 	for i, t := range types {
@@ -3304,6 +3309,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 					c.x.numericDivs[e] = true
 				}
+				if e.Op == "/" {
+					c.x.noteScaleType(e, c.certainType(e, sc))
+				}
 				switch e.Op {
 				case "AND", "OR":
 					for _, x := range []sqlir.Expr{e.L, e.R} {
@@ -3382,6 +3390,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			case *sqlir.WindowFunc:
 				windowed[e.Func] = true
 			case *sqlir.FuncCall:
+				if e.Name == "extract" && len(e.Args) == 2 {
+					// The scale of epoch is six from a timestamp and none
+					// from a date, which the value does not tell apart.
+					c.x.noteScaleType(e, c.x.tx.db.baseType(sc.certainSource(e.Args[1])))
+				}
 				if isAggregateCall(e) && sc.outer != nil && !windowed[e] && len(sqlir.Selects(e.Args)) > 0 {
 					// A subquery's columns may be of any query out from it,
 					// and the aggregate's level with them, which the check
@@ -3655,6 +3668,11 @@ func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope)
 		return err
 	}
 	c.branchParams(exprs, typ)
+	for _, b := range exprs {
+		if !takesOtherType(b) && numberCategory(c.certainType(b, sc)) == numberCategory("float8") {
+			c.x.noteScaleType(e, "float8")
+		}
+	}
 	return c.x.noteNumberBranches(e, exprs, c.typerWith(sc, subquery))
 }
 

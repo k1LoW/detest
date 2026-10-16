@@ -1101,10 +1101,21 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		// so 1 UNION ALL 3.0 gives numerics and x / 2 is 0.5 for both. The
 		// type is the queries' whether or not a float row survives them.
 		rows := slices.Concat(lrows, rrows)
+		certain := ""
+		if t := x.setOpCertain[sel]; i < len(t) {
+			certain = t[i]
+		}
+		if numberCategory(certain) == numberCategory("float8") {
+			// A numeric under a float8 is converted to one, without its
+			// scale.
+			for _, r := range rows {
+				r[c] = unscaled(r[c])
+			}
+		}
 		if kinds["number"] && (setColumnFloat(sel, i) || slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) })) {
 			// Under a numeric, which no float8 row makes a float8, the
 			// integer is a numeric of no places.
-			numeric := slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(scaledNum); return ok }) &&
+			numeric := certain == "numeric" || slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(scaledNum); return ok }) &&
 				!slices.ContainsFunc(rows, func(r Row) bool { _, ok := r[c].(float64); return ok })
 			for _, r := range rows {
 				if n, ok := r[c].(scaledNum); ok {

@@ -2133,11 +2133,17 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 		`SELECT x FROM t WHERE id = 2`,
 		`SELECT x + 1 FROM t WHERE id = 2`,
 		`SELECT 1.5::numeric(2, 3)`,
+		`SELECT (0.1::float8 + 0.2::float8)::numeric(20, 17)`,
+		`SELECT extract(epoch FROM coalesce(date '2024-01-02', date '2024-01-03'))`,
 	} {
 		var str string
 		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %q, %v, want unsupported", q, str, err)
 		}
+	}
+	// A change of scale alone is a change of the row, which a reader sees.
+	if sameRow(Row{"x": scaledNum{1.0, 1}}, Row{"x": scaledNum{1.0, 2}}) {
+		t.Error("1.0 and 1.00 taken for the same row")
 	}
 	// Such a value still compares and computes.
 	var ok bool

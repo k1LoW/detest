@@ -151,6 +151,10 @@ func (x *sqlExec) arithScaled(e *sqlir.BinaryExpr, l, r, out any) any {
 	}
 	lk, ls := operandScale(e.L, l)
 	rk, rs := operandScale(e.R, r)
+	if e.Op == "/" && lk == opInt && rk == opInt && x.scaleTypes[e] == "numeric" {
+		// An integer the statement types as a numeric, as sum of a bigint.
+		lk = opNumeric
+	}
 	if lk == opFloat || rk == opFloat || (lk != opNumeric && rk != opNumeric) {
 		return out
 	}
@@ -213,6 +217,11 @@ func (x *sqlExec) castScaled(c *sqlir.Cast, in, out any) (any, error) {
 	if x.tx.db.kind.InnoDB() || x.tx.db.baseType(c.Type) != "numeric" || derefValue(out) == nil {
 		return out, nil
 	}
+	if k, s := operandScale(c.X, in); k == opFloat && s < 0 {
+		// Postgres converts a float8 with 15 significant digits first,
+		// which gives another value than this float's.
+		return nil, x.unsupported("a float8 of more than 15 significant digits cast to numeric")
+	}
 	if c.Precision > 0 {
 		n, err := scaledNumeric(derefValue(out), numLimit{precision: c.Precision, scale: c.Scale})
 		if err != nil {
@@ -239,6 +248,11 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 		}
 	}
 	switch f.Name {
+	case "extract":
+		if unit, ok := derefValue(args[0]).(string); ok && len(args) == 2 {
+			return x.withScale(out, x.extractScale(f, unit, derefValue(args[1])))
+		}
+		return x.withScale(out, -1)
 	case "coalesce", "greatest", "least", "nullif":
 		return x.branchScaled(f, f.Args, args, out)
 	case "abs":
@@ -280,6 +294,9 @@ func (x *sqlExec) branchScaled(e sqlir.Expr, exprs []sqlir.Expr, vals []any, out
 	if x.tx.db.kind.InnoDB() || derefValue(out) == nil || isRange(out) || !isNumber(out) {
 		return out
 	}
+	if x.scaleTypes[e] == "float8" {
+		return out // the branches are converted to a float8
+	}
 	numeric := x.numberBranchType(e) == "numeric"
 	for i, v := range vals {
 		if derefValue(v) == nil {
@@ -295,6 +312,14 @@ func (x *sqlExec) branchScaled(e sqlir.Expr, exprs []sqlir.Expr, vals []any, out
 	}
 	if !numeric {
 		return out
+	}
+	if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "coalesce" {
+		for i, v := range vals {
+			if derefValue(v) != nil {
+				_, s := operandScale(exprs[i], v)
+				return x.withScale(out, s)
+			}
+		}
 	}
 	// Of branches equal in value and apart in scale (1.5 and 1.50), the
 	// first is taken, where GREATEST and LEAST keep the one their
@@ -403,8 +428,43 @@ func (x *sqlExec) chosenScaled(e sqlir.Expr, chosen sqlir.Expr, raw, out any) an
 		return out
 	}
 	k, s := operandScale(chosen, raw)
-	if k == opFloat || (k != opNumeric && x.numberBranchType(e) != "numeric") {
+	if k == opFloat || x.scaleTypes[e] == "float8" || (k != opNumeric && x.numberBranchType(e) != "numeric") {
 		return out
 	}
 	return x.withScale(out, s)
+}
+
+func (x *sqlExec) noteScaleType(e sqlir.Expr, typ string) {
+	if x.scaleTypes == nil {
+		x.scaleTypes = map[sqlir.Expr]string{}
+	}
+	x.scaleTypes[e] = typ
+}
+
+// extractScale is the scale of extract(unit FROM src), f: six places for
+// second, three for milliseconds and none for the other units, but for
+// epoch six from a timestamp, a timestamptz or an interval and none from a
+// date, which a time.Time does not tell apart, so the statement's type of
+// the source does, and -1 where it shows none.
+func (x *sqlExec) extractScale(f *sqlir.FuncCall, unit string, src any) int {
+	u, _ := extractUnit(unit)
+	switch u {
+	case "second":
+		return 6
+	case "milliseconds":
+		return 3
+	case "epoch":
+		switch src.(type) {
+		case instant, pgInterval:
+			return 6
+		}
+		switch x.scaleTypes[f] {
+		case "date":
+			return 0
+		case "timestamp", "timestamptz":
+			return 6
+		}
+		return -1
+	}
+	return 0
 }

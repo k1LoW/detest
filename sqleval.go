@@ -2063,8 +2063,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if !exactAsFloat(dec) {
 			return nil, x.unsupported("an extract result with more digits than a float keeps")
 		}
-		// Its scale is the unit's and, for epoch, the source's, which
-		// extractText follows for a cast to text alone.
+		// funcScaled gives it the scale of its unit and source.
 		return x.withScale(numericValue(f), -1), nil
 	case "make_interval":
 		// make_interval(secs => x) is the form that appears in backoff SQL; a
