@@ -141,8 +141,22 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 	if sel.SetOp != "" || sel.Values != nil {
 		return true, true, nil
 	}
+	// A column qualified by a name no FROM item of the block has is one of
+	// a query around it, which is a constant while the block runs. An
+	// unqualified one may be either, and counts as the block's.
+	own := map[string]bool{}
+	for _, t := range fromRefs(sel) {
+		own[t.Alias] = true
+		if t.Alias == "" {
+			own[relname(t.Name)] = true
+			if t.Func != nil {
+				own[t.Func.Name] = true
+			}
+		}
+	}
+	local := func(c *sqlir.ColumnRef) bool { return c.Table == "" || own[c.Table] }
 	once := func(e sqlir.Expr, having bool) bool {
-		if e == nil || len(sqlir.BlockColumnRefs(e)) > 0 || hasAggregate(e) {
+		if e == nil || slices.ContainsFunc(sqlir.BlockColumnRefs(e), local) || hasAggregate(e) {
 			return false
 		}
 		if slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) {
@@ -166,20 +180,10 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 		e      sqlir.Expr
 		having bool
 	}
-	var conds []cond
-	for _, e := range splitAnd(sel.Where) {
-		if once(e, false) {
-			conds = append(conds, cond{e, false})
-		}
-	}
-	for _, e := range splitAnd(sel.Having) {
-		if once(e, true) {
-			conds = append(conds, cond{e, true})
-		}
-	}
 	// Postgres folds a condition of constants when it plans the statement,
-	// so a false one empties the filter before a subquery beside it runs.
-	// The others it tests in their written order.
+	// so a false one empties the filter before a subquery beside it runs,
+	// even where the branch it drops reads a column. The others it tests
+	// in their written order.
 	constant := func(e sqlir.Expr) (any, bool) {
 		if len(sqlir.Selects(e)) > 0 {
 			return nil, false
@@ -192,13 +196,28 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 		}
 		return r.val, true
 	}
+	var conds []cond
+	for _, e := range splitAnd(sel.Where) {
+		conds = append(conds, cond{e, false})
+	}
+	for _, e := range splitAnd(sel.Having) {
+		conds = append(conds, cond{e, true})
+	}
 	var rest []cond
 	scan, out = true, true
 	for _, c := range conds {
+		if c.e == nil {
+			continue
+		}
+		if c.having && hasAggregate(c.e) {
+			continue
+		}
 		v, ok := constant(c.e)
 		switch {
 		case !ok:
-			rest = append(rest, c)
+			if once(c.e, c.having) {
+				rest = append(rest, c)
+			}
 		case derefValue(v) != true:
 			scan = false
 			out = out && !c.having

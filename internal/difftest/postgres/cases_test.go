@@ -926,6 +926,10 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND 1 IN (2)`),
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND abs(1) = 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND CASE WHEN true THEN false ELSE e.id > 0 END`),
+			// A condition of a query around the block only is tested once
+			// for each time the block runs.
+			difftest.Q(0, `SELECT (SELECT v FROM (SELECT 1 / n AS v FROM u) s WHERE o.id = 0) FROM u o WHERE o.id = 1`),
 			difftest.Q(0, `SELECT 1 FROM missing WHERE EXISTS (SELECT id FROM u)`),
 			difftest.Q(0, `SELECT * FROM (SELECT * FROM u) s(a, b, c) LIMIT 0`),
 			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS a, 2 AS b) SELECT * FROM (SELECT * FROM c) s(x, y)) t LIMIT 0`),
