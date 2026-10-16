@@ -1352,6 +1352,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `UPDATE t JOIN u ON u.id = t.id AND u.id IN (SELECT id FROM t) SET t.n = 5`),
 			difftest.S(0, `INSERT INTO t VALUES ((SELECT max(id) FROM t) + 1, 0)`),
 			difftest.S(0, `INSERT IGNORE INTO t VALUES ((SELECT max(id) FROM t) + 1, 0)`),
+			difftest.S(0, `INSERT INTO t SET id = 9, n = (SELECT max(n) FROM t)`),
 			difftest.S(0, `INSERT INTO t VALUES (1, 0) ON DUPLICATE KEY UPDATE n = (SELECT max(n) FROM t)`),
 			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
 			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM (SELECT n FROM t) x) WHERE id = 1`),
