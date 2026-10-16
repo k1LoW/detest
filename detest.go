@@ -57,6 +57,7 @@ var (
 	ErrStringDataRightTruncation = sqlir.ErrStringDataRightTruncation
 	ErrDataTruncated             = sqlir.ErrDataTruncated
 	ErrInvalidPowerArgument      = sqlir.ErrInvalidPowerArgument
+	ErrTargetTableRead           = sqlir.ErrTargetTableRead
 	ErrUnavailable               = errors.New("detest: external call failed (transport)")
 	ErrNotFound                  = errors.New("detest: not found")
 	ErrFailedPrecondition        = errors.New("detest: failed precondition")

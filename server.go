@@ -86,6 +86,7 @@ const (
 	DuplicateColumn           = sqlir.DuplicateColumn
 	InvalidDatetimeFormat     = sqlir.InvalidDatetimeFormat
 	InvalidPowerArgument      = sqlir.InvalidPowerArgument
+	TargetTableRead           = sqlir.TargetTableRead
 )
 
 // ErrUnsupportedSQL reports SQL detest cannot run.
