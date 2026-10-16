@@ -296,6 +296,11 @@ func TestTextAssignedToNonTextColumn(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (14, CASE WHEN true THEN NULL END)`,
 		`INSERT INTO t VALUES (9, '5'::text)`,
 		`INSERT INTO t (id, n) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = excluded.s`,
+		// Nor has name.
+		`UPDATE t SET n = nm WHERE false`,
+		`UPDATE t SET b = nm WHERE false`,
+		`UPDATE t SET n = (SELECT nm FROM t LIMIT 1) WHERE false`,
+		`INSERT INTO t (id, n) VALUES (20, '5'::name)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
@@ -309,6 +314,7 @@ func TestTextAssignedToNonTextColumn(t *testing.T) {
 		`UPDATE t SET n = NULL`,
 		`UPDATE t SET n = '5' COLLATE "C"`,
 		`UPDATE t SET v = s, d = s, nm = s`,
+		`UPDATE t SET s = nm, v = nm, d = nm`,
 		`INSERT INTO t (id, n) VALUES (12, '5'), (13, NULL)`,
 	} {
 		mustExec(t, db, q)

@@ -3710,14 +3710,14 @@ func (c *columnChecker) textInsert(ins *sqlir.InsertStmt) error {
 }
 
 // textAssigned refuses an UPDATE's SET, an INSERT's VALUES row or an ON
-// CONFLICT DO UPDATE's SET that writes an expression of a text type to
-// cols, a column of a type text has no assignment cast to, which Postgres
-// fails when it plans the statement (42804), as textInsert does for
-// INSERT ... SELECT. The run would read the text as the column's input at
-// each row, and write nothing over no rows. A string literal, a parameter
-// or a NULL is not text here, as Postgres reads it as the column's input,
-// while a CASE or COALESCE of those alone, or a scalar subquery returning
-// one, is, as Postgres resolves those to text first.
+// CONFLICT DO UPDATE's SET that writes an expression of a text type, or of
+// name, to cols, a column of a type neither has an assignment cast to,
+// which Postgres fails when it plans the statement (42804), as textInsert
+// does for INSERT ... SELECT. The run would read the text as the column's
+// input at each row, and write nothing over no rows. A string literal, a
+// parameter or a NULL is not text here, as Postgres reads it as the
+// column's input, while a CASE or COALESCE of those alone, or a scalar
+// subquery returning one, is, as Postgres resolves those to text first.
 func (c *columnChecker) textAssigned(table string, cols []string, exprs []sqlir.Expr, sc *colScope) error {
 	db := c.x.tx.db
 	def := db.defs[db.resolve(table)]
@@ -3739,11 +3739,12 @@ func (c *columnChecker) textAssigned(table string, cols []string, exprs []sqlir.
 			// column's input to read.
 			continue
 		}
-		if c.paramTypeFamily(t.reduce(t.of(e))) != "text" {
+		typ := t.reduce(t.of(e))
+		if c.paramTypeFamily(typ) != "text" && typ != "name" {
 			continue
 		}
 		if target := def.types[cols[i]]; noTextAssignment(db, target) {
-			return c.x.unsupported(fmt.Sprintf("an assignment of a text expression to the %s column %q", target, cols[i]))
+			return c.x.unsupported(fmt.Sprintf("an assignment of a %s expression to the %s column %q", typ, target, cols[i]))
 		}
 	}
 	return nil
