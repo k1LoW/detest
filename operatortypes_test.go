@@ -419,6 +419,8 @@ func TestStarOverDerivedItemTypedBeforeAnyRow(t *testing.T) {
 		`SELECT 1 = (SELECT * FROM uv) WHERE false`,
 		`SELECT (1, 2) = (SELECT * FROM (SELECT 1 AS a, '2' AS b) x) WHERE false`,
 		`SELECT (1, 2) IN (SELECT x.* FROM (SELECT n, s FROM t) x) WHERE false`,
+		`WITH c AS (SELECT * FROM (VALUES ('1')) a UNION ALL SELECT * FROM (VALUES ('2')) b) SELECT 1 IN (SELECT * FROM c) WHERE false`,
+		`WITH c AS (SELECT * FROM sv UNION ALL SELECT * FROM sv) SELECT 1 = (SELECT * FROM c) WHERE false`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

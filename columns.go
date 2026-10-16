@@ -1889,7 +1889,12 @@ func (c *columnChecker) orderedTypes(sel *sqlir.SelectStmt) []string {
 // it would be. setOpTypes takes the first type a query gives instead, which
 // is not the type of int UNION numeric.
 func (c *columnChecker) agreedTypes(sel *sqlir.SelectStmt) []string {
-	n := len(outputNames(sel))
+	// knownWidth counts the columns of a * the check expands, which
+	// outputNames does not.
+	n, ok := c.knownWidth(sel)
+	if !ok {
+		return nil
+	}
 	out := make([]string, n)
 	for i := range out {
 		typ, ok := c.pairType(sel, i, n)
