@@ -44,9 +44,8 @@ type viewWalk struct {
 	bind      bool
 	renameCol [3]string // table, old name, new name
 	renamed   bool      // a reference was renamed
-	// outputsOnly is set while walking the ORDER BY of a set operation,
-	// whose names are its output columns; MySQL reads them inside an
-	// expression too.
+	// outputsOnly is set while walking the ORDER BY of a set operation or
+	// VALUES, whose names are its output columns, inside an expression too.
 	outputsOnly bool
 	renameRel [2]string // relation, new name
 	loose     map[string]bool
@@ -170,7 +169,7 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 		for i := range sel.Values[0] {
 			names = append(names, fmt.Sprintf("column%d", i+1))
 		}
-		w.trailing(sel, names, sc, ctes, false)
+		w.trailing(sel, names, sc, ctes, true)
 		return names
 	}
 	sc := &viewScope{outer: outer}

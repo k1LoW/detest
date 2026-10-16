@@ -58,8 +58,10 @@ var viewBindCases = []difftest.Case{
 			`CREATE VIEW dv(a, b) AS SELECT * FROM t JOIN u ON true`,
 			`CREATE VIEW xv(a, b) AS SELECT * FROM (SELECT 1 AS x, 2 AS x) d`,
 			`CREATE VIEW pv AS SELECT * FROM (SELECT * FROM t JOIN u ON true) d(a, b)`,
+			`CREATE TABLE c (column1 int)`,
+			`CREATE VIEW sv AS SELECT (VALUES (2), (1) ORDER BY column1 + 0 LIMIT 1) AS k FROM c`,
 		},
-		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 2)`, `INSERT INTO u VALUES (5)`},
+		Seed:  []string{`INSERT INTO t VALUES (1, 'a', 2)`, `INSERT INTO u VALUES (5)`, `INSERT INTO c VALUES (9)`},
 		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT a, b, n, id FROM dv`),
@@ -67,6 +69,7 @@ var viewBindCases = []difftest.Case{
 			difftest.Q(0, `SELECT * FROM xv`),
 			difftest.Q(0, `SELECT a, b, n, id FROM (SELECT * FROM t JOIN u ON true) d(a, b)`),
 			difftest.Q(0, `SELECT id FROM pv`),
+			difftest.Q(0, `SELECT k FROM sv`),
 		},
 	},
 	{
