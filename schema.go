@@ -112,6 +112,24 @@ func (x *sqlExec) evalDefault(d sqlir.Expr) (any, error) {
 	return x.eval(d, &env{})
 }
 
+// typeTableExpr runs the column check over a CHECK constraint or a
+// generated column before a write evaluates it, as Postgres plans one with
+// the types of the columns it reads, so that a division by a numeric
+// divides as one. One the check refuses is refused when a write needs it
+// rather than when it is declared, so that a dump holding it still loads.
+func (x *sqlExec) typeTableExpr(table string, t *tableCheck, kind, name string) error {
+	err := x.checkTableExpr(table, t)
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
+		return err
+	}
+	// Postgres types the expression when it is declared, so one the check
+	// fails for could not have been.
+	return x.unsupported(fmt.Sprintf("%s %q, which detest cannot type: %v", kind, name, err))
+}
+
 // assignedValue evaluates the value a SET assigns, computing the column's
 // default for SET col = DEFAULT, which the evaluator alone takes as NULL.
 func (x *sqlExec) assignedValue(table string, a sqlir.Assignment, en *env, where string) (any, error) {
@@ -822,6 +840,9 @@ func (x *sqlExec) checkRow(table string, row Row) error {
 		}
 	}
 	for _, c := range def.checks {
+		if err := x.typeTableExpr(table, &c, "check constraint", c.Name); err != nil {
+			return err
+		}
 		v, err := x.eval(c.Expr, c.env(table, row))
 		if err != nil {
 			return x.unsupportedExpr(err, fmt.Sprintf("in check constraint %q", c.Name))
@@ -1600,6 +1621,9 @@ func (x *sqlExec) generate(table string, def *tableDef, row Row) error {
 		g := def.generated[col]
 		if g == nil {
 			continue
+		}
+		if err := x.typeTableExpr(table, g, "generated column", col); err != nil {
+			return err
 		}
 		// The schema loads with an expression detest cannot convert or
 		// evaluate, but a value it cannot compute must not be stored as if

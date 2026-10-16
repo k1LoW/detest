@@ -363,3 +363,55 @@ func TestSchemaDefaultCheckRefused(t *testing.T) {
 		t.Fatalf("nextval = %d, %v, want 1", n, err)
 	}
 }
+
+// The CHECK constraints and generated columns schemas routinely hold still
+// compute once the column check types them, the renamed columns and the
+// collations they read included.
+func TestSchemaCheckTypes(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE e (id serial PRIMARY KEY, status text NOT NULL CHECK (status IN ('a', 'b')), name text CHECK (char_length(name) <= 10 AND name < 'z'), code text COLLATE "C" CHECK (code > 'A'), qty int CHECK (qty BETWEEN 0 AND 100), price numeric CHECK (price > 0), total numeric GENERATED ALWAYS AS (price * qty) STORED, low text GENERATED ALWAYS AS (lower(name) || '-' || status) STORED, CHECK (total < 1000))`)
+	mustExec(t, db, `ALTER TABLE e RENAME COLUMN qty TO quantity`)
+	mustExec(t, db, `INSERT INTO e (status, name, code, quantity, price) VALUES ('a', 'abc', 'b', 3, 2.5)`)
+	var total float64
+	var low string
+	if err := db.QueryRow(`SELECT total, low FROM e`).Scan(&total, &low); err != nil {
+		t.Fatal(err)
+	}
+	if total != 7.5 || low != "abc-a" {
+		t.Fatalf("total, low = %v, %q, want 7.5, \"abc-a\"", total, low)
+	}
+	if _, err := db.Exec(`INSERT INTO e (status, name, code, quantity, price) VALUES ('a', 'abc', 'b', 101, 2.5)`); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("got %v, want a check violation", err)
+	}
+}
+
+// A CHECK constraint or a generated column the column check refuses loads
+// with the schema, so that a dump holding it builds, and a write that
+// evaluates it is refused, as the same expression is in a statement.
+func TestSchemaCheckRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE c (id int PRIMARY KEY, CHECK (coalesce(id, abs(NULL)) > 0))`)
+	mustExec(t, db, `CREATE TABLE g (id int PRIMARY KEY, n numeric GENERATED ALWAYS AS (coalesce(id, abs(NULL))) STORED)`)
+	for _, q := range []string{
+		`INSERT INTO c VALUES (1)`,
+		`INSERT INTO g (id) VALUES (1)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
+// A script's DDL that alters the columns a CHECK reads types the CHECK anew
+// for the statements after it, as Postgres plans it with the new types.
+func TestSchemaCheckTypesAcrossScript(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (a numeric, b numeric, c numeric, CHECK (a / b = c)); INSERT INTO t VALUES (4, 2, 2); ALTER TABLE t ALTER COLUMN a TYPE int, ALTER COLUMN b TYPE int, ALTER COLUMN c TYPE int; INSERT INTO t VALUES (3, 2, 1)`)
+	mustExec(t, db, `CREATE TABLE u (a int, b int, c numeric, CHECK (a / b = c)); INSERT INTO u VALUES (4, 2, 2); ALTER TABLE u ALTER COLUMN a TYPE numeric; INSERT INTO u VALUES (3, 2, 1.5)`)
+	if _, err := db.Exec(`INSERT INTO u VALUES (3, 2, 1)`); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Fatalf("got %v, want a check violation", err)
+	}
+}

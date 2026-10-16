@@ -842,6 +842,28 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		// Postgres types a division by a numeric in a CHECK constraint as
+		// numeric, as it does in a statement, under the name the
+		// constraint was written with after the column is renamed.
+		Name: "a numeric division in a check constraint",
+		Schema: []string{
+			`CREATE TABLE c (id int PRIMARY KEY, CHECK (id / (extract(year FROM interval '1 year') * 2) = 1.5))`,
+			`CREATE TABLE r (id int PRIMARY KEY, n int CHECK (n / (extract(year FROM interval '1 year') * 2) < 1.4))`,
+			`ALTER TABLE r RENAME COLUMN n TO m`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `INSERT INTO c (id) VALUES (3) RETURNING id`),
+			difftest.S(0, `INSERT INTO c (id) VALUES (4)`),
+			difftest.S(0, `UPDATE c SET id = 5 WHERE id = 3`),
+			difftest.Q(0, `INSERT INTO r VALUES (1, 2) RETURNING id, m`),
+			difftest.S(0, `INSERT INTO r VALUES (2, 3)`),
+			difftest.S(0, `UPDATE r SET m = 3 WHERE id = 1`),
+			difftest.Q(0, `SELECT id FROM c ORDER BY id`),
+			difftest.Q(0, `SELECT id, m FROM r ORDER BY id`),
+		},
+	},
+	{
 		// A string literal compared with a uuid is read by uuid input, so
 		// it matches the row in another case, in braces or without hyphens,
 		// and text that is no uuid fails the statement.

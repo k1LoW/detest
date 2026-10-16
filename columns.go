@@ -274,14 +274,69 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 // no column and holds no subquery or parameter, so only the walk over its
 // expression and the reads of its string literals apply.
 func (x *sqlExec) checkDefault(d sqlir.Expr) error {
+	return x.checkKept(d, func() *colScope { return &colScope{items: map[string]colSet{}} })
+}
+
+// checkTableExpr runs the column check over a CHECK constraint or a
+// generated column of table, once per statement, as checkDefault does over
+// a default. The expression reads the row being written, so its scope is
+// the table under the names the expression was written with, each with the
+// type and the collation of the column it now refers to.
+func (x *sqlExec) checkTableExpr(table string, t *tableCheck) error {
+	return x.checkKept(t.Expr, func() *colScope {
+		def := x.tx.db.defs[table]
+		cols := namesSet(def.columns)
+		types := maps.Clone(def.types)
+		colls := maps.Clone(def.collations)
+		for written, now := range t.alias {
+			cols[written] = true
+			if types == nil {
+				types = map[string]string{}
+			}
+			types[written] = def.types[now]
+			if colls == nil {
+				colls = map[string]string{}
+			}
+			colls[written] = def.collations[now]
+		}
+		alias := relname(table)
+		sc := &colScope{items: map[string]colSet{alias: cols}, types: map[string]map[string]string{alias: types}}
+		sc.noteCertain(alias, types)
+		sc.colls = map[string]map[string]string{alias: colls}
+		return sc
+	})
+}
+
+// forgetKept drops what the column check noted over the expressions tables
+// keep, for a script's next statement, whose DDL before it may have changed
+// the types of the columns they read. Each noted expression outlives the
+// statement in the schema, unlike a statement's own, so a note the check
+// would not make again, such as a division by a column altered from numeric
+// to integer, would otherwise stay.
+func (x *sqlExec) forgetKept() {
+	for e := range x.checkedDefaults {
+		for _, n := range sqlir.Exprs(e) {
+			if b, ok := n.(*sqlir.BinaryExpr); ok {
+				delete(x.numericDivs, b)
+			}
+			delete(x.exprTypes, n)
+			delete(x.branchTypes, n)
+		}
+	}
+	x.checkedDefaults = nil
+}
+
+// checkKept runs the column check over an expression a table keeps, in the
+// scope scope builds, and keeps what it returned for the statement.
+func (x *sqlExec) checkKept(e sqlir.Expr, scope func() *colScope) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
-	if err, ok := x.checkedDefaults[d]; ok {
+	if err, ok := x.checkedDefaults[e]; ok {
 		return err
 	}
 	c := &columnChecker{x: x, paramCount: map[int]int{}, outCertain: map[*sqlir.SelectStmt][]string{}, outCertainNamed: map[*sqlir.SelectStmt]map[string]string{}}
-	err := c.exprs(d, &colScope{items: map[string]colSet{}})
+	err := c.exprs(e, scope())
 	for _, read := range c.untyped {
 		if err != nil {
 			break
@@ -291,7 +346,7 @@ func (x *sqlExec) checkDefault(d sqlir.Expr) error {
 	if x.checkedDefaults == nil {
 		x.checkedDefaults = map[sqlir.Expr]error{}
 	}
-	x.checkedDefaults[d] = err
+	x.checkedDefaults[e] = err
 	return err
 }
 

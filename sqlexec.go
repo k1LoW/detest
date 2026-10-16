@@ -115,8 +115,9 @@ type sqlExec struct {
 	// them while it folds gives instead, so that an operand Postgres drops
 	// is not evaluated. It is nil outside foldConstants.
 	foldValues map[sqlir.Expr]any
-	// checkedDefaults are the column defaults the column check has run
-	// over, with what it returned (checkDefault).
+	// checkedDefaults are the column defaults, CHECK constraints and
+	// generated columns the column check has run over, with what it
+	// returned (checkKept).
 	checkedDefaults map[sqlir.Expr]error
 	setOpColumns    map[*sqlir.SelectStmt]setOpColumns
 	// colls are the collations the column check found the columns of the
@@ -397,6 +398,7 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 			x.ctes, x.frozen = map[string]*cteCell{}, nil
 			x.pendingCTEs, x.writeRows, x.writeCols = nil, nil, nil
 			x.uncorrelated, x.subqueries, x.uncertain = nil, nil, nil
+			x.forgetKept()
 			r, err := x.execStatement(sub)
 			if err != nil {
 				return nil, err
