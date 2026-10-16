@@ -263,6 +263,41 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// Postgres has no arithmetic, no unary minus and no function of a number,
+// of text, of a time or of a lock key that takes a record, so it fails a row
+// of columns used so with 42883 when it plans the statement, whatever rows
+// it reads.
+func TestRowOfColumnsAsOperandBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
+	for _, q := range []string{
+		`SELECT ROW(n, 1) + 1 FROM t`,
+		`SELECT 1 * ROW(n, 1) FROM t`,
+		`SELECT ROW(n, 1) - 'a'::text FROM t`,
+		`SELECT -ROW(n, 1) FROM t`,
+		`SELECT -(CASE WHEN n > 0 THEN ROW(n, 1) END) FROM t`,
+		`SELECT max(ROW(n, 1)) + 1 FROM t`,
+		`SELECT abs(ROW(n, 1)) FROM t`,
+		`SELECT floor(coalesce(ROW(n, 1), NULL)) FROM t`,
+		`SELECT power(2, ROW(n, 1)) FROM t`,
+		`SELECT lower(ROW(n, 1)) FROM t`,
+		`SELECT length(ROW(n, 1)) FROM t`,
+		`SELECT hashtext(ROW(n, 1)) FROM t`,
+		`SELECT left(ROW(n, 1), 1) FROM t`,
+		`SELECT left('a', ROW(n, 1)) FROM t`,
+		`SELECT date_trunc('day', ROW(n, 1)) FROM t`,
+		`SELECT date_trunc(ROW(n, 1), now()) FROM t`,
+		`SELECT pg_advisory_xact_lock(ROW(n, 1)) FROM t`,
+		`SELECT 1 FROM t WHERE false AND ROW(n, 1) + 1 IS NULL`,
+		`UPDATE t SET n = 1 WHERE abs(ROW(n, 1)) IS NULL`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+}
+
 // The type checks a statement gets before it runs read a scalar subquery's
 // target in the subquery's own scope, not as the outer column of that name.
 func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {

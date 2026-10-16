@@ -3969,7 +3969,7 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sql
 	t := c.typer(sc)
 	t.untypedText = true
 	untyped := func(e sqlir.Expr) bool { return untypedExpr(e) || isNullConst(e) }
-	typeOf := func(e sqlir.Expr) string { return t.reduce(t.of(e)) }
+	typeOf := func(e sqlir.Expr) string { return operandType(t, e) }
 	if len(operands) == 1 && untyped(operands[0]) {
 		// Several prefix operators take a number, and Postgres picks
 		// none for an operand of no type (42725), while the run would

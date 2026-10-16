@@ -406,9 +406,23 @@ func numberBranchKind(exprs []sqlir.Expr, t typer) (kind string, mismatch bool) 
 	return kind, false
 }
 
+// operandType is the base type of e for the checks that refuse an argument
+// or operand Postgres has no signature for, with a row taken as the record
+// it is. The typer gives a row no type, which the checks accept, so a row of
+// columns reached no check before any row, where Postgres fails it with
+// 42883 when it plans the statement. The shared typer is left as it is, as
+// a row comparison goes by a row being untyped there.
+func operandType(t typer, e sqlir.Expr) string {
+	typ := t.reduce(t.of(e))
+	if typ == "" && rowValued(e) {
+		return "record"
+	}
+	return typ
+}
+
 func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 	if f.Name == "left" && len(f.Args) == 2 {
-		switch typ := t.reduce(t.of(f.Args[1])); typ {
+		switch typ := operandType(t, f.Args[1]); typ {
 		case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
 		default:
 			return "left with a " + typ + " length argument"
@@ -417,7 +431,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 	switch f.Name {
 	case "lower", "upper", "left", "length", "char_length", "octet_length", "hashtext":
 		if len(f.Args) > 0 {
-			typ := t.reduce(t.of(f.Args[0]))
+			typ := operandType(t, f.Args[0])
 			if typ != "" && typ != "unresolved column type" && typ != "text" && typ != "varchar" && typ != "bpchar" {
 				return f.Name + " with a " + typ + " argument"
 			}
@@ -427,7 +441,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		// Postgres defines; it rejects any other key type before locking,
 		// where callFunc would otherwise key the lock on the value as given.
 		for _, a := range f.Args {
-			switch typ := t.reduce(t.of(a)); typ {
+			switch typ := operandType(t, a); typ {
 			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint":
 			default:
 				return f.Name + " with a " + typ + " key argument"
@@ -437,7 +451,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		if len(f.Args) != 2 {
 			break
 		}
-		switch typ := t.reduce(t.of(f.Args[0])); typ {
+		switch typ := operandType(t, f.Args[0]); typ {
 		case "", "unresolved column type", "text", "varchar":
 		default:
 			return f.Name + " with a " + typ + " unit"
@@ -465,7 +479,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		if untypedExpr(f.Args[1]) {
 			return f.Name + " of a parameter or a string literal of no type"
 		}
-		switch typ := t.reduce(t.of(f.Args[1])); typ {
+		switch typ := operandType(t, f.Args[1]); typ {
 		case "", "unresolved column type", "timestamp", "timestamptz":
 		case "date":
 			// extract from a date fails for a unit of the time of day, which
@@ -496,7 +510,7 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 		// callFunc would otherwise evaluate a side-effecting argument
 		// (nextval) and only then find it cannot convert the result.
 		for _, a := range f.Args {
-			switch typ := t.reduce(t.of(a)); typ {
+			switch typ := operandType(t, a); typ {
 			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "float4", "float8", "real", "double precision":
 			default:
 				return f.Name + " with a " + typ + " argument"
