@@ -841,6 +841,24 @@ func untypedExpr(e sqlir.Expr) bool {
 	return false
 }
 
+// rowAsText is v, or the record output of v when it is a row, for an
+// operation that writes its operand as text. MySQL fails a row there with
+// 1241, which detest does not raise of its own.
+func (x *sqlExec) rowAsText(v any) (any, error) {
+	row, ok := derefValue(v).([]any)
+	if !ok {
+		return derefValue(v), nil
+	}
+	if x.tx.db.kind.InnoDB() {
+		return nil, errUnknownExpr{"a row written as text"}
+	}
+	s, ok := recordText(row)
+	if !ok {
+		return nil, errUnknownExpr{"a row with a field detest cannot write as text"}
+	}
+	return s, nil
+}
+
 func asText(v any) any {
 	if isNumber(v) {
 		return fmt.Sprint(derefValue(v))
@@ -1195,7 +1213,15 @@ func (x *sqlExec) binary(op string, l, r any) (any, error) {
 		if isFloat(l) || isFloat(r) {
 			return nil, errUnknownExpr{"|| of a numeric or a float"}
 		}
-		return fmt.Sprint(derefValue(l)) + fmt.Sprint(derefValue(r)), nil
+		ls, err := x.rowAsText(l)
+		if err != nil {
+			return nil, err
+		}
+		rs, err := x.rowAsText(r)
+		if err != nil {
+			return nil, err
+		}
+		return fmt.Sprint(ls) + fmt.Sprint(rs), nil
 	}
 	return nil, errUnknownExpr{"operator " + op}
 }
@@ -1769,6 +1795,10 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		var b strings.Builder
 		for i := range args {
 			if v := d(i); v != nil {
+				v, err := x.rowAsText(v)
+				if err != nil {
+					return nil, err
+				}
 				fmt.Fprint(&b, v)
 			}
 		}
