@@ -191,6 +191,9 @@ func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
 	if typ == ambiguousDomain || typ == constrainedDomain {
 		return nil, x.unsupported("a cast to " + typ)
 	}
+	if s, ok := extractText(c.X, typ, v); ok && !x.tx.db.kind.InnoDB() {
+		v = s
+	}
 	out, err := x.cast(v, typ)
 	if err != nil || c.Len == 0 {
 		return out, err
@@ -201,6 +204,47 @@ func (x *sqlExec) castTo(c *sqlir.Cast, v any) (any, error) {
 		}
 	}
 	return out, nil
+}
+
+// extractText is the text Postgres writes for v, the numeric extract(unit
+// FROM ...) e returned, when typ is text: the scale is the unit's, six
+// places for second, three for milliseconds and none for the rest. epoch's
+// is six from a timestamp or an interval and none from a date, which the
+// value does not tell apart, so it is left to the cast, which refuses a
+// float, as is a unit given at run time.
+func extractText(e sqlir.Expr, typ string, v any) (string, bool) {
+	switch typ {
+	case "text", "varchar", "bpchar":
+	default:
+		return "", false
+	}
+	f, ok := e.(*sqlir.FuncCall)
+	if !ok || f.Name != "extract" || len(f.Args) != 2 {
+		return "", false
+	}
+	k, ok := f.Args[0].(*sqlir.Const)
+	if !ok {
+		return "", false
+	}
+	unit, ok := k.Value.(string)
+	if !ok {
+		return "", false
+	}
+	u, ok := extractUnit(unit)
+	n, isFloat := derefValue(v).(float64)
+	if !ok || !isFloat {
+		return "", false
+	}
+	scale := 0
+	switch u {
+	case "second":
+		scale = 6
+	case "milliseconds":
+		scale = 3
+	case "epoch":
+		return "", false
+	}
+	return strconv.FormatFloat(n, 'f', scale, 64), true
 }
 
 // castInteger casts v to an integer before the target type's width is
@@ -349,6 +393,11 @@ func castValue(v any, typ string) (any, error) {
 			return s, nil
 		}
 		return fmt.Sprint(v), nil
+	case "time", "timetz":
+		// A time of day is read from several spellings and written with
+		// its seconds (10:00:00), and compares by its value, none of which
+		// the text detest would keep does.
+		return nil, errUnknownExpr{"a cast to " + typ}
 	case "bool", "boolean":
 		// Text reads as boolean input does, and an integer is true unless
 		// zero; Postgres has no cast from a numeric or a float.
