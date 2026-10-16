@@ -410,6 +410,25 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a query output that is a row read by the query around it",
+		Schema: []string{`CREATE TABLE r (id int PRIMARY KEY, a int)`},
+		Seed:   []string{`INSERT INTO r VALUES (1, 1), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT x.v IS NULL, count(x.v) FROM (SELECT ROW(1, 2) AS v) x GROUP BY x.v`),
+			difftest.Q(0, `SELECT coalesce(x.v, ROW(3, 4)) IS NULL FROM (SELECT ROW(1, 2) AS v) x`),
+			difftest.Q(0, `SELECT CASE WHEN x.v IS NULL THEN 0 ELSE 1 END FROM (SELECT ROW(1, 2) AS v) x`),
+			difftest.Q(0, `SELECT x.v IS NULL FROM (VALUES (ROW(1, 2))) x(v)`),
+			difftest.Q(0, `SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, -1 AS a) x`),
+			difftest.Q(0, `SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a) ORDER BY 2`),
+			difftest.Q(0, `SELECT (VALUES (ROW(1, 2))) IS NULL`),
+			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT id, first_value(ROW(a, a)) OVER (ORDER BY id DESC) AS v FROM r) x ORDER BY x.id`),
+			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT *, ROW(1, 2) AS v FROM r UNION ALL SELECT 3, 4, ROW(3, 4)) x ORDER BY x.id`),
+			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT id, ROW(a, a) AS v FROM r) x ORDER BY x.id`),
+			difftest.Q(0, `WITH c AS (SELECT ROW(a) AS v FROM r) SELECT count(c.v) FROM c`),
+		},
+	},
+	{
 		Name:   "integer arithmetic and rounding",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{
