@@ -374,6 +374,9 @@ func (x *sqlExec) execStatement(stmt sqlir.Statement) (*sqlResult, error) {
 	if err := x.checkWriteTarget(stmt); err != nil {
 		return nil, err
 	}
+	if err := x.checkTargetRead(stmt); err != nil {
+		return nil, err
+	}
 	if err := x.checkColumns(stmt); err != nil {
 		return nil, err
 	}
