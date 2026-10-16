@@ -171,6 +171,11 @@ func TestWindowClause(t *testing.T) {
 		`SELECT row_number() OVER (w PARTITION BY id) FROM t WINDOW w AS (ORDER BY n)`,
 		`SELECT row_number() OVER (w ORDER BY id) FROM t WINDOW w AS (ORDER BY n)`,
 		`SELECT (SELECT row_number() OVER w) FROM t WINDOW w AS (PARTITION BY n)`,
+		`SELECT row_number() OVER w FROM t WINDOW w AS (ORDER BY row_number() OVER w)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (ORDER BY row_number() OVER x), x AS (w)`,
+		`SELECT row_number() OVER x FROM t WINDOW w AS (PARTITION BY rank() OVER x), x AS (w)`,
+		`SELECT DISTINCT ON (row_number() OVER w) id FROM t WINDOW w AS (ORDER BY row_number() OVER w)`,
+		`SELECT row_number() OVER (PARTITION BY rank() OVER w) FROM t WINDOW w AS (ORDER BY id)`,
 	} {
 		_, err := parser{}.Parse(q)
 		if !errors.As(err, new(*sqlir.ErrUnsupportedSQL)) {

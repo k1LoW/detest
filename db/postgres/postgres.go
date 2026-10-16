@@ -1638,6 +1638,12 @@ func (c *pgConv) window(fc *sqlir.FuncCall, over *pg.WindowDef) (sqlir.Expr, err
 		}
 	}
 	w := &sqlir.WindowFunc{Func: fc}
+	// A window function in a window's own clauses fails on Postgres
+	// (42P20), and one there that names the window would expand it without
+	// end, so the names are hidden while the clauses are converted.
+	windows := c.windows
+	c.windows = nil
+	defer func() { c.windows = windows }()
 	var err error
 	if w.Partition, err = c.exprs(partition); err != nil {
 		return nil, err
