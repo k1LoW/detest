@@ -215,6 +215,16 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT ROW(3, 4)) x WHERE false`,
 		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT NULL) x WHERE false`,
 		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2))) x(v) WHERE false`,
+		// A record has no comparison with a value of another type either.
+		`SELECT x.v = 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v < 'a' FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT (x.v, 1) = (1, 1) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v IN (1, 2) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v BETWEEN 1 AND 2 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT CASE x.v WHEN 1 THEN 1 END FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT x.v IN (SELECT 1) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT 1 IN (SELECT x.v FROM (SELECT ROW(1, 2) AS v) x) WHERE false`,
+		`SELECT 1 IN (SELECT ROW(1, 2) UNION ALL SELECT ROW(3, 4)) WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v, want unsupported", q, err)
