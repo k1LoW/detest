@@ -215,6 +215,11 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT ROW(3, 4)) x WHERE false`,
 		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT NULL) x WHERE false`,
 		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2))) x(v) WHERE false`,
+		`SELECT abs((VALUES (ROW(1, 2)))) WHERE false`,
+		`SELECT abs((SELECT ROW(1, 2) UNION ALL SELECT ROW(3, 4))) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2)) UNION ALL VALUES (ROW(3, 4))) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2), 1) UNION ALL SELECT ROW(3, 4), 2) x(v, a) WHERE false`,
+		`SELECT 1 IN (VALUES (ROW(1, 2))) WHERE false`,
 		// A record has no comparison with a value of another type either.
 		`SELECT x.v = 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
 		`SELECT x.v < 'a' FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
@@ -236,6 +241,8 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT CASE WHEN x.v IS NULL THEN 0 ELSE 1 END FROM (SELECT ROW(1, 2) AS v) x`,
 		`SELECT x.v IS NULL FROM (VALUES (ROW(1, 2))) x(v)`,
 		`SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, 1 AS a) x`,
+		`SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a)`,
+		`SELECT (VALUES (ROW(1, 2))) IS NULL`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Errorf("%s: %v, want nil", q, err)

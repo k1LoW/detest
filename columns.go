@@ -1765,6 +1765,9 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 				// as it is in a select list.
 				out[i] = "text"
 			}
+			if out[i] == "" && slices.ContainsFunc(col, rowValued) {
+				out[i] = "record" // as noteOutputTypes types a row
+			}
 		}
 		return out
 	}
@@ -1800,7 +1803,18 @@ func (c *columnChecker) setOpTypes(sel *sqlir.SelectStmt) []string {
 // renaming, and a set operation's by the types its queries agree on.
 func (c *columnChecker) derivedTypes(sel *sqlir.SelectStmt, names []string) map[string]string {
 	if sel.SetOp != "" {
-		return c.namedTypes(sel, c.agreedTypes(sel), names)
+		types := c.agreedTypes(sel)
+		if types == nil {
+			// pairType leaves a VALUES query unresolved, but a column of
+			// rows is a record whatever the other queries give.
+			types = make([]string, len(outputNames(sel)))
+		}
+		for i := range types {
+			if types[i] == "" && slices.ContainsFunc(setOpColumnExprs(sel, i), rowValued) {
+				types[i] = "record"
+			}
+		}
+		return c.namedTypes(sel, types, names)
 	}
 	if len(sel.Values) > 0 {
 		return c.namedTypes(sel, c.itemTypes(sel), names)
@@ -1987,11 +2001,7 @@ func (c *columnChecker) itemTypes(sel *sqlir.SelectStmt) []string {
 	}
 	types := slices.Clone(c.setOpTypes(sel))
 	for i := range types {
-		exprs := setOpColumnExprs(sel, i)
-		types[i] = resolvedType(types[i], exprs)
-		if types[i] == "" && slices.ContainsFunc(exprs, rowValued) {
-			types[i] = "record"
-		}
+		types[i] = resolvedType(types[i], setOpColumnExprs(sel, i))
 	}
 	return types
 }

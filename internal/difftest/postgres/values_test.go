@@ -420,6 +420,8 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT CASE WHEN x.v IS NULL THEN 0 ELSE 1 END FROM (SELECT ROW(1, 2) AS v) x`),
 			difftest.Q(0, `SELECT x.v IS NULL FROM (VALUES (ROW(1, 2))) x(v)`),
 			difftest.Q(0, `SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, -1 AS a) x`),
+			difftest.Q(0, `SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a) ORDER BY 2`),
+			difftest.Q(0, `SELECT (VALUES (ROW(1, 2))) IS NULL`),
 			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT id, ROW(a, a) AS v FROM r) x ORDER BY x.id`),
 			difftest.Q(0, `WITH c AS (SELECT ROW(a) AS v FROM r) SELECT count(c.v) FROM c`),
 		},
