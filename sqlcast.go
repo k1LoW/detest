@@ -171,6 +171,9 @@ func (x *sqlExec) cast(v any, typ string) (any, error) {
 			}
 		}
 	}
+	if _, row := derefValue(v).([]any); row && x.tx.db.kind.InnoDB() {
+		return nil, errUnknownExpr{"a cast of a row"}
+	}
 	out, err := castValue(v, typ)
 	if ke := (kindError{}); errors.As(err, &ke) {
 		return nil, x.tx.db.kind.Error(ke.kind, ke.msg, "", "", "")
@@ -338,6 +341,12 @@ func castValue(v any, typ string) (any, error) {
 			return nil, errUnknownExpr{"a cast of a timestamp to text"}
 		case pgInterval:
 			return x.String(), nil
+		case []any:
+			s, ok := recordText(x)
+			if !ok {
+				return nil, errUnknownExpr{"a cast to text of a row with a field detest cannot write as text"}
+			}
+			return s, nil
 		}
 		return fmt.Sprint(v), nil
 	case "bool", "boolean":
@@ -431,4 +440,77 @@ func castValue(v any, typ string) (any, error) {
 		return nil, errUnknownExpr{fmt.Sprintf("a cast of a %T to date", v)}
 	}
 	return v, nil
+}
+
+// recordText is a row as Postgres's record output writes it: its fields in
+// parentheses, separated by commas, a NULL left empty, and a field quoted
+// when it is empty or holds a quote, a backslash, a parenthesis, a comma or
+// a space, with quotes and backslashes doubled inside the quotes. A field
+// whose own text detest cannot write as the server does, such as a numeric,
+// a float, a timestamp or a bytea, gives ok false, as rendering it by Go's
+// rules would hand the application text production never gives it.
+func recordText(fields []any) (string, bool) {
+	var b strings.Builder
+	b.WriteByte('(')
+	for i, f := range fields {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		f = derefValue(f)
+		if f == nil {
+			continue
+		}
+		s, ok := fieldText(f)
+		if !ok {
+			return "", false
+		}
+		quote := s == ""
+		for _, c := range []byte(s) {
+			switch c {
+			case '"', '\\', '(', ')', ',', ' ', '\t', '\n', '\v', '\f', '\r':
+				quote = true
+			}
+		}
+		if !quote {
+			b.WriteString(s)
+			continue
+		}
+		b.WriteByte('"')
+		for _, c := range []byte(s) {
+			if c == '"' || c == '\\' {
+				b.WriteByte(c)
+			}
+			b.WriteByte(c)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte(')')
+	return b.String(), true
+}
+
+// fieldText is v as the output function of its type writes it inside a
+// record, where a boolean is t or f rather than the true or false of a cast
+// to text.
+func fieldText(v any) (string, bool) {
+	switch v := v.(type) {
+	case []any:
+		return recordText(v)
+	case string:
+		return v, true
+	case bool:
+		if v {
+			return "t", true
+		}
+		return "f", true
+	case uuidValue:
+		return string(v), true
+	case enumValue:
+		return v.String(), true
+	case pgInterval:
+		return v.String(), true
+	}
+	if n, ok := integer(v); ok {
+		return strconv.FormatInt(n, 10), true
+	}
+	return "", false
 }

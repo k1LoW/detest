@@ -922,7 +922,11 @@ func (x *sqlExec) execSelect(sel *sqlir.SelectStmt) (*sqlResult, error) {
 	for _, row := range rows {
 		vals := make([]driver.Value, len(cols))
 		for i, c := range cols {
-			vals[i] = x.driverValueAs(row[c], types[i])
+			v, err := x.driverValueAs(row[c], types[i])
+			if err != nil {
+				return nil, err
+			}
+			vals[i] = v
 		}
 		out.rows = append(out.rows, vals)
 	}
@@ -2317,7 +2321,11 @@ func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row,
 	for i, t := range ret {
 		if t.Star {
 			for _, c := range out.star {
-				vals = append(vals, x.driverValueAs(row[c], x.returningStar[c]))
+				v, err := x.driverValueAs(row[c], x.returningStar[c])
+				if err != nil {
+					return err
+				}
+				vals = append(vals, v)
 			}
 			continue
 		}
@@ -2329,7 +2337,11 @@ func (x *sqlExec) appendReturningIn(out *sqlResult, ret []sqlir.Target, row Row,
 		if i < len(x.returningTypes) {
 			typ = x.returningTypes[i]
 		}
-		vals = append(vals, x.driverValueAs(v, typ))
+		dv, err := x.driverValueAs(v, typ)
+		if err != nil {
+			return err
+		}
+		vals = append(vals, dv)
 	}
 	out.rows = append(out.rows, vals)
 	return nil
@@ -2800,19 +2812,32 @@ func seenDistinct(rows []Row, o Row, cols []string) bool {
 // detest holds it as. database/sql scans a float64 into an integer by its
 // %g text, which has an exponent from 1e6 and fails, where the text scans.
 // A float stays a float64, as both drivers return one.
-func (x *sqlExec) driverValueAs(v any, typ string) driver.Value {
+//
+// A row is the text of Postgres's record output, which both drivers return
+// for a record, and is refused where detest cannot write a field of it.
+func (x *sqlExec) driverValueAs(v any, typ string) (driver.Value, error) {
+	if row, ok := derefValue(v).([]any); ok {
+		if x.tx.db.kind.InnoDB() {
+			return nil, x.unsupported("a row in the result")
+		}
+		s, ok := recordText(row)
+		if !ok {
+			return nil, x.unsupported("a row with a field detest cannot write as text in the result")
+		}
+		return s, nil
+	}
 	if typ == "" || numberRank[x.tx.db.baseType(typ)] != numberRank["numeric"] {
-		return toDriverValue(v)
+		return toDriverValue(v), nil
 	}
 	switch n := derefValue(v).(type) {
 	case int64:
-		return strconv.FormatInt(n, 10)
+		return strconv.FormatInt(n, 10), nil
 	case float64:
 		if !math.IsInf(n, 0) && !math.IsNaN(n) {
-			return strconv.FormatFloat(n, 'f', -1, 64)
+			return strconv.FormatFloat(n, 'f', -1, 64), nil
 		}
 	}
-	return toDriverValue(v)
+	return toDriverValue(v), nil
 }
 
 func toDriverValue(v any) driver.Value {
