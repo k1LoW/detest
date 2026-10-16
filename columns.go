@@ -181,7 +181,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return x.unsupported(what)
 	}
 	if x.tx.db.kind.InnoDB() {
-		switch stmt.(type) {
+		switch st := stmt.(type) {
 		case *sqlir.SelectStmt, *sqlir.InsertStmt, *sqlir.UpdateStmt, *sqlir.DeleteStmt:
 			// A script checks each statement as it runs it, after the
 			// DDL before it.
@@ -195,7 +195,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 			}
 		case *sqlir.CreateTableAsStmt:
 			// IF NOT EXISTS over a table that exists runs no query.
-			if st := stmt.(*sqlir.CreateTableAsStmt); !st.IfNotExists || !x.tx.db.isRelation(x.tx.db.resolve(st.Table)) {
+			if !st.IfNotExists || !x.tx.db.isRelation(x.tx.db.resolve(st.Table)) {
 				for _, name := range openedTables(st.Select) {
 					if why := x.tx.db.staleView(x.tx.db.resolve(name), map[string]bool{}); why != "" {
 						return x.unsupported(why)
