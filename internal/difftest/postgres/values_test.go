@@ -1205,6 +1205,27 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "a parameter takes the type of the function argument it stands in",
+		Schema: []string{
+			`CREATE TABLE fp (id int PRIMARY KEY, s text, n int, m numeric)`,
+		},
+		Seed:  []string{`INSERT INTO fp VALUES (1, 'ab', -2, 1.5), (2, 'XY', 3, 2.5)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.QA(0, `SELECT id FROM fp WHERE lower(s) = lower($1) ORDER BY id`, "AB"),
+			difftest.QA(0, `SELECT id FROM fp WHERE s = $1 OR upper(s) = upper($1) ORDER BY id`, "xy"),
+			difftest.QA(0, `SELECT id FROM fp WHERE length(s) = length($1) AND left(s, $2) = left($1, $2) ORDER BY id`, "abc", int64(1)),
+			difftest.QA(0, `SELECT abs($1) = 2, floor($1) = ceil($1)`, int64(-2)),
+			difftest.QA(0, `SELECT abs($1), floor($1)`, int64(-2000000)),
+			difftest.QA(0, `SELECT abs($1) = abs($1), abs($1) > 1`, float64(-2.5)),
+			difftest.QA(0, `SELECT id FROM fp WHERE abs(n) = abs($1) ORDER BY id`, int64(2)),
+			difftest.QA(0, `SELECT id FROM fp WHERE m = round($1, $2) ORDER BY id`, float64(2.46), int64(1)),
+			difftest.QA(0, `SELECT date_trunc($1, timestamp '2024-01-02 03:04:05') = timestamp '2024-01-02'`, "day"),
+			difftest.QA(0, `SELECT pg_try_advisory_xact_lock($1), pg_try_advisory_xact_lock($2, $3)`, int64(7), int64(1), int64(2)),
+			difftest.QA(0, `SELECT abs($1) FROM fp WHERE false`, "abc"),
+		},
+	},
+	{
 		Name: "arithmetic over a scalar subquery types its target in its own scope",
 		Schema: []string{
 			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,

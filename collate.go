@@ -1103,6 +1103,13 @@ func (x *sqlExec) callOrdered(v *sqlir.FuncCall, args []any) (any, error) {
 	if x.branchType(v) == "bytea" {
 		return byteaCall(v.Name, args), nil
 	}
+	if v.Name == "abs" && len(args) == 1 && untypedExpr(v.Args[0]) && !x.tx.db.kind.InnoDB() {
+		// Postgres resolves abs of an argument of no type to abs(float8),
+		// whatever number is bound to it.
+		if n, ok := integer(derefValue(args[0])); ok {
+			args[0] = float64(n)
+		}
+	}
 	if (v.Name == "lower" || v.Name == "upper") && len(args) == 1 {
 		// A []byte argument is text a driver sent as bytes, which the
 		// collation maps as any text.

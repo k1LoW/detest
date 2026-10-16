@@ -816,3 +816,83 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 		}
 	}
 }
+
+func TestFunctionArgumentTypesParameter(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (n int, b bigint, f float8, s text)`)
+	mustExec(t, db, `CREATE SEQUENCE seq`)
+	for _, c := range []struct {
+		q    string
+		args []any
+	}{
+		// Postgres fails each with 42883 when it plans the statement.
+		{`SELECT abs($1), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT abs($1), $1 LIKE '1' WHERE false`, []any{"1"}},
+		{`SELECT lower($1) FROM t WHERE n = $1`, []any{int64(1)}},
+		{`SELECT power($1, NULL), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT power($1, abs(NULL)), $1 = s FROM t WHERE false`, []any{"1"}},
+		{`SELECT power($1, abs(NULL)), round($1, 1), $1::numeric WHERE false`, []any{int64(1)}},
+		// Postgres takes power's numeric form only where no use it meets
+		// earlier typed the parameter, so the result's type is unknown.
+		{`SELECT floor(power($1, 1::numeric)), $1::numeric`, []any{int64(2000000)}},
+		{`SELECT round($1, b), $1::numeric FROM t WHERE false`, []any{float64(2.46)}},
+		{`SELECT round(1.5, b) FROM t`, nil},
+		{`SELECT round(s, $1), $1::int FROM t WHERE false`, []any{int64(1)}},
+		{`SELECT round(s) FROM t WHERE false`, nil},
+		{`SELECT setval(false, $1), $1::bigint WHERE false`, []any{int64(10)}},
+		{`SELECT nextval(true) WHERE false`, nil},
+		{`SELECT setval('seq', $1, 0), $1::bigint`, []any{int64(10)}},
+		{`SELECT setval('seq', 10::numeric)`, nil},
+		// Postgres fails a name of no relation when it binds it (42P01).
+		{`SELECT nextval($1), $1::regclass WHERE false`, []any{"missing"}},
+		{`SELECT round(f, $1) FROM t`, []any{int64(1)}},
+		{`SELECT round(f, 2) FROM t`, nil},
+		{`SELECT pg_advisory_xact_lock(b, 1) FROM t`, nil},
+		{`SELECT pg_try_advisory_xact_lock($1, b) FROM t`, []any{int64(1)}},
+		// callFunc takes the value as bound, where Postgres converts it.
+		{`SELECT setval('seq', 10, $1)`, []any{"true"}},
+		{`SELECT setval('seq', 10, $1), $1::bool`, []any{"true"}},
+		{`SELECT pg_advisory_xact_lock($1), $1::bigint`, []any{"7"}},
+		{`SELECT pg_advisory_xact_lock($1, '7'), $1::int`, []any{int64(1)}},
+		{`SELECT setval('seq', $1, 'true'), $1::bigint`, []any{int64(10)}},
+		{`SELECT setval('seq', $1, COALESCE('true', NULL)), $1::bigint`, []any{int64(10)}},
+		{`SELECT pg_advisory_xact_lock(COALESCE('7', NULL))`, nil},
+		{`SELECT round(1.5, CASE WHEN true THEN '1' END)`, nil},
+		// Postgres fails it with 42P18, as concat gives the parameter no type.
+		{`SELECT concat($1, s) FROM t`, []any{"a"}},
+		// Postgres takes $1 as an integer here, met first in WHERE, but
+		// detest does not follow which use Postgres meets first.
+		{`SELECT 1 FROM t WHERE n = $1 AND abs($1) > 0`, []any{int64(1)}},
+	} {
+		if _, err := db.Query(c.q, c.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", c.q, err)
+		}
+	}
+	// abs of a parameter of no other type is abs(float8).
+	var v any
+	if err := db.QueryRow(`SELECT abs($1)`, int64(2000000)).Scan(&v); err != nil || v != float64(2000000) {
+		t.Errorf("abs($1): got %#v, %v, want a float64", v, err)
+	}
+	// Postgres fails the bind of input the argument's type does not take.
+	for _, q := range []string{`SELECT abs($1) FROM t WHERE false`, `SELECT power($1, 1::numeric) FROM t WHERE false`} {
+		if _, err := db.Query(q, "abc"); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s of abc: got %v, want 22P02", q, err)
+		}
+	}
+	for _, c := range []struct {
+		q    string
+		args []any
+	}{
+		{`SELECT 1 FROM t WHERE s = $1 OR lower(s) = lower($1)`, []any{"a"}},
+		{`SELECT abs($1), abs($1) + f FROM t`, []any{float64(1)}},
+		{`SELECT left($1, $2), length($1) FROM t`, []any{"abc", int64(2)}},
+		{`SELECT pg_try_advisory_xact_lock($1)`, []any{int64(1)}},
+		{`SELECT setval('seq', $1, $2)`, []any{int64(10), true}},
+		{`SELECT power($1, 1::numeric)`, []any{int64(2)}},
+	} {
+		if _, err := db.Query(c.q, c.args...); err != nil {
+			t.Errorf("%s: %v", c.q, err)
+		}
+	}
+}

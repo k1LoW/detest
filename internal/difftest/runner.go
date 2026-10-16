@@ -90,7 +90,11 @@ func transcript(c Case, res []stepResult) string {
 		if res[k].blocked {
 			waited = "(waited) "
 		}
-		fmt.Fprintf(&sb, "%2d conn%d %s\n     => %s%s\n", k, st.Conn, st.SQL, waited, res[k].text)
+		args := ""
+		if len(st.Args) > 0 {
+			args = fmt.Sprintf(" %v", st.Args)
+		}
+		fmt.Fprintf(&sb, "%2d conn%d %s%s\n     => %s%s\n", k, st.Conn, st.SQL, args, waited, res[k].text)
 	}
 	return sb.String()
 }
@@ -188,9 +192,9 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 		var rows *sql.Rows
 		var err error
 		if s.tx != nil {
-			rows, err = s.tx.QueryContext(ctx, st.SQL)
+			rows, err = s.tx.QueryContext(ctx, st.SQL, st.Args...)
 		} else {
-			rows, err = s.conn.QueryContext(ctx, st.SQL)
+			rows, err = s.conn.QueryContext(ctx, st.SQL, st.Args...)
 		}
 		if err != nil {
 			return "", err
@@ -201,9 +205,9 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 	var res sql.Result
 	var err error
 	if s.tx != nil {
-		res, err = s.tx.ExecContext(ctx, st.SQL)
+		res, err = s.tx.ExecContext(ctx, st.SQL, st.Args...)
 	} else {
-		res, err = s.conn.ExecContext(ctx, st.SQL)
+		res, err = s.conn.ExecContext(ctx, st.SQL, st.Args...)
 	}
 	if err != nil {
 		return "", err
