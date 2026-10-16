@@ -994,6 +994,23 @@ var writeCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM stock`),
 		},
 	},
+	{
+		Name: "an assignment reads a literal as the column's input and keeps text for a text column",
+		Schema: []string{
+			`CREATE DOMAIN dtext AS text`,
+			`CREATE TABLE t (id int PRIMARY KEY, n int, s text, v varchar(10), d dtext, nm name)`,
+		},
+		Seed:  []string{`INSERT INTO t (id, n, s) VALUES (1, 0, '5')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `UPDATE t SET n = '6' RETURNING n`),
+			difftest.Q(0, `UPDATE t SET n = '7' COLLATE "C" RETURNING n`),
+			difftest.Q(0, `UPDATE t SET n = NULL RETURNING n IS NULL`),
+			difftest.Q(0, `UPDATE t SET v = s, d = s || 'x', nm = s RETURNING v, d, nm::text`),
+			difftest.Q(0, `INSERT INTO t (id, n) VALUES (2, '5'), (3, NULL) RETURNING id, n`),
+			difftest.Q(0, `INSERT INTO t (id, n, s) VALUES (1, 1, 'a') ON CONFLICT (id) DO UPDATE SET v = excluded.s RETURNING id, v`),
+		},
+	},
 }
 
 func TestDiffWrites(t *testing.T) {
