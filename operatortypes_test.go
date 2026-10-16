@@ -223,6 +223,13 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT abs(x.v) FROM (VALUES ((SELECT ROW(1, 2))) UNION ALL VALUES ((SELECT ROW(3, 4)))) x(v) WHERE false`,
 		`SELECT abs(x.v) FROM (SELECT y.v FROM (SELECT ROW(1, 2) AS v) y UNION ALL VALUES (NULL)) x(v) WHERE false`,
 		`SELECT abs(x.v) FROM (VALUES (NULL) UNION ALL SELECT ROW(1, 2)) x(v) WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT first_value(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT last_value(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT nth_value(ROW(k, k), 1) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT lag(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT lead(ROW(k, k), 1, NULL) OVER () AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT max(ROW(k, k)) AS v FROM t) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT min(ROW(k, k)) OVER () AS v FROM t) x WHERE false`,
 		`SELECT abs(x.v) FROM (SELECT *, ROW(1, 2) AS v FROM t UNION ALL SELECT 1, 2, ROW(3, 4)) x WHERE false`,
 		// A record has no comparison with a value of another type either.
 		`SELECT x.v = 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
@@ -247,6 +254,7 @@ func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
 		`SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, 1 AS a) x`,
 		`SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a)`,
 		`SELECT (VALUES (ROW(1, 2))) IS NULL`,
+		`SELECT x.v IS NULL FROM (SELECT first_value(ROW(k, k)) OVER () AS v, max(ROW(k, k)) OVER () AS w FROM t) x`,
 		`SELECT x.v IS NULL FROM (SELECT *, ROW(1, 2) AS v FROM t UNION ALL SELECT 1, 2, ROW(3, 4)) x`,
 	} {
 		if _, err := db.Exec(q); err != nil {

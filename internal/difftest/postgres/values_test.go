@@ -422,6 +422,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, -1 AS a) x`),
 			difftest.Q(0, `SELECT x.v IS NULL, abs(x.a) FROM (VALUES (ROW(1, 2), -1) UNION ALL VALUES (ROW(3, 4), -2)) x(v, a) ORDER BY 2`),
 			difftest.Q(0, `SELECT (VALUES (ROW(1, 2))) IS NULL`),
+			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT id, first_value(ROW(a, a)) OVER (ORDER BY id DESC) AS v FROM r) x ORDER BY x.id`),
 			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT *, ROW(1, 2) AS v FROM r UNION ALL SELECT 3, 4, ROW(3, 4)) x ORDER BY x.id`),
 			difftest.Q(0, `SELECT x.id, x.v IS NULL FROM (SELECT id, ROW(a, a) AS v FROM r) x ORDER BY x.id`),
 			difftest.Q(0, `WITH c AS (SELECT ROW(a) AS v FROM r) SELECT count(c.v) FROM c`),

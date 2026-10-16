@@ -538,14 +538,21 @@ func aggregateArgumentMismatch(f *sqlir.FuncCall, t typer, typed bool) string {
 }
 
 // rowValued reports a row, or a CASE, COALESCE, GREATEST, LEAST or NULLIF
-// one of whose branches is a row, which the typer gives no type.
+// one of whose branches is a row, or a min, max or window function giving
+// the row it takes, which the typer gives no type.
 func rowValued(e sqlir.Expr) bool {
 	switch e := e.(type) {
 	case *sqlir.RowExpr:
 		return true
 	case *sqlir.CaseExpr:
 		return slices.ContainsFunc(caseBranches(e), rowValued)
+	case *sqlir.WindowFunc:
+		return rowValued(e.Func)
 	case *sqlir.FuncCall:
+		switch e.Name {
+		case "min", "max", "first_value", "last_value", "nth_value":
+			return len(e.Args) > 0 && rowValued(e.Args[0])
+		}
 		return slices.ContainsFunc(branchArgs(e), rowValued)
 	}
 	return false
