@@ -71,6 +71,11 @@ const (
 func operandScale(e sqlir.Expr, v any) (int, int) {
 	switch n := v.(type) {
 	case scaledNum:
+		if _, ok := e.(*sqlir.Param); ok {
+			// A float parameter of many digits is marked to be written
+			// with them, and still takes the type of what it stands beside.
+			return opUntyped, n.scale
+		}
 		return opNumeric, n.scale
 	case numRange:
 		return opNumeric, -1
@@ -239,7 +244,7 @@ func (x *sqlExec) castScaled(c *sqlir.Cast, in, out any) (any, error) {
 // gives a numeric of unknown scale.
 func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 	if x.tx.db.kind.InnoDB() || derefValue(out) == nil || isRange(out) || !isNumber(out) {
-		return out
+		return unscaled(out)
 	}
 	numericArg := false
 	for i, a := range args {
@@ -251,7 +256,7 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 			numericArg = true
 		case opFloat:
 			// A float8 argument picks the function's float8 form.
-			return out
+			return unscaled(out)
 		}
 	}
 	switch f.Name {
@@ -263,14 +268,14 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 	case "coalesce", "greatest", "least", "nullif":
 		return x.branchScaled(f, f.Args, args, out)
 	case "abs":
-		if n, ok := args[0].(scaledNum); ok {
-			return x.withScale(out, n.scale)
+		if k, s := operandScale(f.Args[0], args[0]); k == opNumeric {
+			return x.withScale(out, s)
 		}
-		return out
+		return unscaled(out)
 	case "round", "trunc":
 		if len(args) == 2 {
 			if k, _ := operandScale(f.Args[0], args[0]); k == opFloat {
-				return out
+				return unscaled(out)
 			}
 			n, ok := integer(derefValue(args[1]))
 			if !ok {
@@ -281,12 +286,12 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 		if numericArg {
 			return x.withScale(out, 0)
 		}
-		return out
+		return unscaled(out)
 	case "floor", "ceil", "ceiling":
 		if numericArg {
 			return x.withScale(out, 0)
 		}
-		return out
+		return unscaled(out)
 	}
 	if numericArg {
 		return x.withScale(out, -1)
@@ -299,10 +304,10 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 // branches resolve to a numeric.
 func (x *sqlExec) branchScaled(e sqlir.Expr, exprs []sqlir.Expr, vals []any, out any) any {
 	if x.tx.db.kind.InnoDB() || derefValue(out) == nil || isRange(out) || !isNumber(out) {
-		return out
+		return unscaled(out)
 	}
 	if x.scaleTypes[e] == "float8" {
-		return out // the branches are converted to a float8
+		return unscaled(out) // the branches are converted to a float8
 	}
 	numeric := x.numberBranchType(e) == "numeric"
 	for i, v := range vals {
@@ -311,14 +316,14 @@ func (x *sqlExec) branchScaled(e sqlir.Expr, exprs []sqlir.Expr, vals []any, out
 		}
 		k, _ := operandScale(exprs[i], v)
 		if k == opFloat {
-			return out
+			return unscaled(out)
 		}
 		if k == opNumeric {
 			numeric = true
 		}
 	}
 	if !numeric {
-		return out
+		return unscaled(out)
 	}
 	if f, ok := e.(*sqlir.FuncCall); ok && f.Name == "coalesce" {
 		for i, v := range vals {
@@ -400,6 +405,9 @@ func storedScaled(def *tableDef, col string, v, n any) any {
 // never holds.
 func scaledText(n any, scale int) (string, bool) {
 	var s string
+	if i, ok := integer(n); ok {
+		n = i // as the transaction API may write an int
+	}
 	switch v := n.(type) {
 	case int64:
 		s = strconv.FormatInt(v, 10)
@@ -432,11 +440,11 @@ func scaledText(n any, scale int) (string, bool) {
 // to a numeric.
 func (x *sqlExec) chosenScaled(e sqlir.Expr, chosen sqlir.Expr, raw, out any) any {
 	if x.tx.db.kind.InnoDB() || derefValue(out) == nil || isRange(out) || !isNumber(out) {
-		return out
+		return unscaled(out)
 	}
 	k, s := operandScale(chosen, raw)
 	if k == opFloat || x.scaleTypes[e] == "float8" || (k != opNumeric && x.numberBranchType(e) != "numeric") {
-		return out
+		return unscaled(out)
 	}
 	return x.withScale(out, s)
 }

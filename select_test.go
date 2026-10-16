@@ -2072,7 +2072,7 @@ func (d *decimalScanner) Scan(src any) error {
 
 func TestNumericReadsBackWithScale(t *testing.T) {
 	s := newSim(t)
-	db, _ := s.DB("app", postgres.New())
+	db, store := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, nm numeric(10, 2), x numeric)`)
 	mustExec(t, db, `INSERT INTO t VALUES (1, 1, 1, $1), (2, 2, 2.5, $2)`, int64(7), 2.25)
 	// A numeric of places is its text with them, which scans into a
@@ -2141,6 +2141,18 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %q, %v, want unsupported", q, str, err)
 		}
+	}
+	// abs of a parameter is abs(float8), whose many digits the cast to
+	// numeric does not keep, though a parameter written as is keeps them.
+	if _, err := db.Exec(`SELECT abs($1)::numeric`, 0.30000000000000004); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("abs($1)::numeric of a float of 17 digits: got %v, want unsupported", err)
+	}
+	// A seeded Go int reads back as a numeric of no places.
+	mustExec(t, db, `CREATE TABLE seeded (id text PRIMARY KEY, n numeric)`)
+	store.SeedRow("seeded", Row{"id": "a", "n": 1})
+	var seeded string
+	if err := db.QueryRow(`SELECT n FROM seeded`).Scan(&seeded); err != nil || seeded != "1" {
+		t.Errorf("a seeded int: got %q, %v", seeded, err)
 	}
 	// A change of scale alone is a change of the row, which a reader sees.
 	if sameRow(Row{"x": scaledNum{1.0, 1}}, Row{"x": scaledNum{1.0, 2}}) {

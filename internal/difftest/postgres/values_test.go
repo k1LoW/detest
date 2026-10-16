@@ -1360,6 +1360,7 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT v::numeric FROM (VALUES (1.50), (2::float8)) AS s(v) ORDER BY 1`),
 			difftest.QA(0, `SELECT 1.00 + $1`, int64(1)),
 			difftest.Q(0, `SELECT (floor(power(1.50, 1::float8)) + 1.00)::numeric`),
+			difftest.Q(0, `SELECT (coalesce(1, 0::float8) + 1.50)::numeric, (CASE WHEN true THEN 1 ELSE 0::float8 END + 1.50)::numeric, (coalesce('1.00', 0::float8) + 1.50)::numeric`),
 			difftest.Q(0, `INSERT INTO p (id, nm) VALUES (20, 0.1::float8 + 0.2::float8) RETURNING nm`),
 			difftest.Q(0, `SELECT extract(second FROM interval '1 second'), extract(epoch FROM timestamp '2024-01-02'), extract(epoch FROM date '2024-01-02'), extract(milliseconds FROM timestamp '2024-01-02 00:00:01.5'), extract(day FROM timestamp '2024-01-02')`),
 		},
