@@ -1305,6 +1305,25 @@ var cases = []difftest.Case{
 			difftest.Q(0, `WITH c AS (SELECT 5 AS id) SELECT id FROM C`),
 		},
 	},
+	{
+		// A write whose target is a view is refused (TestWriteThroughViewRefused),
+		// and one that only reads a view writes the table as before.
+		Name: "a write that reads a view writes its own table",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE VIEW tv AS SELECT * FROM t WHERE n > 1`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 1), (3, 3)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `UPDATE t JOIN tv ON tv.id = t.id SET t.n = t.n + 10`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+			// MySQL keeps the case of a table name on Linux, so TV names no
+			// relation rather than the view.
+			difftest.S(0, `UPDATE TV SET n = 5`),
+			difftest.S(0, `DELETE FROM TV`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
