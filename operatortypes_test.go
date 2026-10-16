@@ -619,6 +619,15 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT 1 LIKE 'a'`,
 		`SELECT 'a' ILIKE true`,
 		`SELECT ROW(1, 2) LIKE 'a'`,
+		// A built-in type is known without a schema, as no domain may
+		// take its name.
+		`SELECT NULL::jsonb LIKE 'a' WHERE false`,
+		`SELECT NULL::uuid ILIKE 'a' WHERE false`,
+		`SELECT NULL::date NOT LIKE 'a' WHERE false`,
+		`SELECT NULL::int4 NOT ILIKE 'a' WHERE false`,
+		// Postgres takes this, as it reads the literal as a bytea, but
+		// detest refuses bytea.
+		`SELECT 'a' LIKE NULL::bytea WHERE false`,
 	} {
 		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
