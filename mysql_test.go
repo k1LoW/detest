@@ -5121,4 +5121,6 @@ func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
 	} {
 		mustExec(t, db, q)
 	}
+	// A script checks each statement after the DDL before it.
+	mustExec(t, db, `CREATE TABLE t (id int); INSERT INTO e SELECT id FROM t`)
 }
