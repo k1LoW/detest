@@ -1559,7 +1559,10 @@ func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
 // typ, so '1' beside 2 is the integer 1 and '01' compares equal to it.
 func (c *columnChecker) valuesColumn(sel *sqlir.SelectStmt, i int, typ string, col []sqlir.Expr, sc *colScope) error {
 	x := c.x
-	if x.tx.db.kind.InnoDB() || typ == "" {
+	if x.tx.db.kind.InnoDB() || typ == "" || !slices.ContainsFunc(col, untypedExpr) {
+		// Typed rows alone keep their own values, as before, rather than
+		// being refused where one of them is of a type the check does
+		// not know.
 		return nil
 	}
 	t := c.typer(sc)
