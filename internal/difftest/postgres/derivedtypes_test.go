@@ -121,6 +121,18 @@ var derivedTypeCases = []difftest.Case{
 			difftest.Q(0, `SELECT x.a || 'e', x.b || 'f', x.c || 'g' FROM (SELECT first_value('1'::text) OVER () AS a, lead('1', 1, '2') OVER () AS b, first_value(coalesce('1', NULL)) OVER () AS c) x`),
 		},
 	},
+	{
+		Name:   "an expression of string literals or NULLs alone compared as text",
+		Schema: []string{`CREATE TABLE t (id int PRIMARY KEY, n int, s text, v varchar(10))`},
+		Seed:   []string{`INSERT INTO t VALUES (1, 1, '1', '1'), (2, 2, 'x', NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, s = coalesce('1', NULL), v = CASE WHEN true THEN '1' END FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT id, s IN (coalesce('1', NULL), 'x'), CASE s WHEN max('1') OVER () THEN 1 ELSE 0 END FROM t ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM t WHERE '1' = coalesce('1', NULL) AND n = coalesce(1, NULL) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM t WHERE n = coalesce('1', NULL)::int ORDER BY id`),
+		},
+	},
 }
 
 func TestDiffDerivedTypes(t *testing.T) {

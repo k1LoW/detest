@@ -3503,8 +3503,13 @@ func typeSample(typ string) any {
 }
 
 // operandTypes refuses a comparison of two typed operands Postgres has no
-// operator for, which untypedPair refuses only when it reaches a row.
+// operator for, which untypedPair refuses only when it reaches a row. An
+// expression of string literals and NULLs alone, such as COALESCE('1', NULL)
+// or max('1'), is text, which Postgres resolves it to before it looks for the
+// operator.
 func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
+	t := c.typer(sc)
+	t.untypedText = true
 	_, aRow := a.(*sqlir.RowExpr)
 	_, bRow := b.(*sqlir.RowExpr)
 	if aRow != bRow {
@@ -3515,7 +3520,7 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 		if q, sub := other.(*sqlir.SubQuery); sub && c.rowSubqueries[q] != nil {
 			return nil // subqueryOperandTypes types a row against its subquery
 		}
-		return c.rowWithValue(c.typer(sc), other)
+		return c.rowWithValue(t, other)
 	}
 	if ra, rb, ok := rowPair(a, b); ok {
 		// Postgres resolves the operator of each pair of fields.
@@ -3529,7 +3534,6 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
-	t := c.typer(sc)
 	return c.familyTypes(t.reduce(t.of(a)), t.reduce(t.of(b)))
 }
 
@@ -3612,6 +3616,7 @@ func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sq
 		return nil
 	}
 	t := c.typer(sc)
+	t.untypedText = true
 	for i, f := range fields {
 		_, nested := f.(*sqlir.RowExpr)
 		if sel.SetOp == "" && len(sel.Values) == 0 && len(sel.Targets) == len(fields) && !sel.Targets[i].Star {
