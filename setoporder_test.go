@@ -19,7 +19,6 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 	mustExec(t, db, `CREATE VIEW v AS SELECT * FROM u`)
 	for _, q := range []string{
 		`SELECT 1 UNION SELECT 2 ORDER BY abs(1)`,
-		`SELECT 1 FROM t WHERE EXISTS (SELECT * FROM v UNION SELECT 2, 3 ORDER BY n)`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY random()`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY n + 1`,
 		`SELECT n FROM t UNION SELECT n FROM t ORDER BY 1 + 0`,
@@ -48,6 +47,7 @@ func TestSetOpOrderExpressionRefused(t *testing.T) {
 		`SELECT (SELECT 1 UNION SELECT 2 ORDER BY t.n LIMIT 1) FROM t`,
 		`SELECT (SELECT 1 UNION SELECT 2 ORDER BY n LIMIT 1) FROM t`,
 		`SELECT 1 FROM t WHERE EXISTS (SELECT 1 UNION SELECT 2 ORDER BY n)`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT * FROM v UNION SELECT 2, 3 ORDER BY n)`,
 	} {
 		if _, err := db.Exec(q); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want a server error", q, err)

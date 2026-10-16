@@ -1799,6 +1799,9 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 				if err != nil {
 					return nil, err
 				}
+				if t, ok := v.(bool); ok {
+					v = boolOutputText(t, x.tx.db.kind.InnoDB())
+				}
 				fmt.Fprint(&b, v)
 			}
 		}

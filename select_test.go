@@ -303,9 +303,21 @@ func TestAggregateUnderUnsupportedExpression(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) + 1 FROM t`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("count(*) + 1: %d, %v", n, err)
 	}
-	// An aggregate only in ORDER BY is refused: Postgres makes the query one
-	// group and checks the select list against it, which detest does not.
-	for _, q := range []string{`SELECT 1 FROM t ORDER BY count(*)`, `SELECT id FROM t ORDER BY count(*)`} {
+	// An aggregate only in ORDER BY, DISTINCT ON or a window is refused:
+	// Postgres makes the query one group and checks the select list against
+	// it, which detest does not.
+	for _, q := range []string{
+		`SELECT 1 FROM t ORDER BY count(*)`,
+		`SELECT id FROM t ORDER BY count(*)`,
+		`SELECT DISTINCT ON (max(id)) 1 FROM t`,
+		`SELECT row_number() OVER (PARTITION BY max(id)) FROM t`,
+		`SELECT row_number() OVER (ORDER BY max(id)) FROM t`,
+		`SELECT 1 FROM t ORDER BY row_number() OVER (PARTITION BY max(id))`,
+		`SELECT count(*) OVER (PARTITION BY max(id)) FROM t`,
+		`SELECT sum(count(*)) OVER () FROM t`,
+		`SELECT DISTINCT ON (row_number() OVER w) 1 FROM t WINDOW w AS (PARTITION BY max(id))`,
+		`SELECT 1 WHERE EXISTS (SELECT row_number() OVER (PARTITION BY max(id)) FROM t)`,
+	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v", q, err)
 		}
@@ -1795,8 +1807,6 @@ func TestUnknownColumnOwnerUnsupported(t *testing.T) {
 	mustExec(t, db, `INSERT INTO t VALUES (1, 10, 1)`)
 	mustExec(t, db, `INSERT INTO v VALUES (7)`)
 	for _, q := range []string{
-		`SELECT (SELECT id FROM vv) FROM u`,
-		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE n IS NOT NULL)) FROM u`,
 		`SELECT (WITH c AS (SELECT id FROM vv) SELECT id FROM c) FROM u`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) || !strings.Contains(err.Error(), "may have") && !strings.Contains(err.Error(), "around the one declaring it") {
@@ -1805,6 +1815,9 @@ func TestUnknownColumnOwnerUnsupported(t *testing.T) {
 	}
 	for _, q := range []string{
 		`SELECT (SELECT n FROM vv) FROM u`,
+		// vv's columns are known, so id and n resolve as they do in Postgres.
+		`SELECT (SELECT id FROM vv) FROM u`,
+		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE n IS NOT NULL)) FROM u`,
 		`SELECT (SELECT t.v FROM t WHERE t.id = 1 AND EXISTS (SELECT 1 FROM vv WHERE vv.n IS NOT NULL)) FROM u`,
 	} {
 		if _, err := db.Exec(q); err != nil {

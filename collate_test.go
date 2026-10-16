@@ -434,16 +434,13 @@ func TestBytesAsText(t *testing.T) {
 			t.Errorf("bytea literal written to the empty CREATE TABLE AS table %s: got %v", tbl, got)
 		}
 	}
-	// A view of a * keeps its columns of unknown type, as Postgres fixes
-	// them when it creates the view.
+	// A view of a * tells its columns' types by the table's.
 	mustExec(t, db, `CREATE VIEW litv AS SELECT * FROM lit`)
-	mustExec(t, db, `CREATE TABLE untold AS SELECT payload FROM litv WHERE false`)
-	for _, arg := range []any{`\x41`, []byte("A"), 1} {
-		if _, err := db.Exec(`INSERT INTO untold VALUES ($1)`, arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
-			t.Errorf("%#v written to a CREATE TABLE AS column of untold type: got %v, want unsupported", arg, err)
-		}
+	mustExec(t, db, `CREATE TABLE viewed AS SELECT payload FROM litv WHERE false`)
+	mustExec(t, db, `INSERT INTO viewed VALUES ($1)`, `\x41`)
+	if got := rowsOf(t, db, `SELECT count(*) FROM viewed WHERE payload = 'A'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Errorf("bytea literal written to a CREATE TABLE AS column of a view of a *: got %v", got)
 	}
-	mustExec(t, db, `INSERT INTO untold VALUES (NULL)`)
 	// A text column of a CREATE TABLE AS stays text, so bytes written to it
 	// later are text, which orders by the collation.
 	mustExec(t, db, `CREATE TABLE ctext AS SELECT name FROM t WHERE false`)
@@ -460,9 +457,6 @@ func TestBytesAsText(t *testing.T) {
 	}
 	if got := rowsOf(t, db, `SELECT count(*) FROM lit WHERE payload::blob3 = 'a'::bytea`); !reflect.DeepEqual(got, []string{"1"}) {
 		t.Errorf("a bytea value cast to a domain over bytea: got %v", got)
-	}
-	if got := rowsOf(t, db, `SELECT count(*) FROM untold WHERE payload IS NULL`); !reflect.DeepEqual(got, []string{"1"}) {
-		t.Errorf("a CREATE TABLE AS column of untold type read: got %v", got)
 	}
 	// Two schemas' domains of one name with different base types leave a
 	// column of the name untyped, so a write to it is refused.
