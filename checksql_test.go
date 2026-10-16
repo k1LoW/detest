@@ -71,6 +71,8 @@ func TestCheckSQLRefusesUnknownFunctionsAndOperators(t *testing.T) {
 			`SELECT abs(nextval('s')::text)`,
 			`SELECT floor('x'::text)`,
 			`SELECT power(1, true)`,
+			`SELECT sum('1'::text)`,
+			`SELECT avg(true)`,
 		},
 		mysql.New(): {
 			"SELECT * FROM t WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY)",

@@ -502,6 +502,25 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 				return f.Name + " with a " + typ + " argument"
 			}
 		}
+	case "sum", "avg":
+		// Postgres resolves the aggregate by its argument's type when it
+		// plans the statement, so it fails one of another type over no
+		// rows too, where the evaluators see no value to refuse. sum of
+		// money exists too, but detest does not model money, so it is
+		// refused with the rest.
+		if len(f.Args) == 1 {
+			// A string literal, a parameter or a NULL of no type matches
+			// several forms (42725), and a CASE or COALESCE of them is
+			// text (42883).
+			if untypedBranch(f.Args[0]) || isNullConst(f.Args[0]) {
+				return f.Name + " of a string literal, a parameter or NULL, or a CASE or COALESCE of them"
+			}
+			switch typ := t.reduce(t.of(f.Args[0])); typ {
+			case "", "unresolved column type", "int", "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "decimal", "float4", "float8", "real", "double precision", "interval":
+			default:
+				return f.Name + " with a " + typ + " argument"
+			}
+		}
 	}
 	return ""
 }

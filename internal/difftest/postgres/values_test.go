@@ -334,6 +334,24 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "sum and avg of the argument types they take, over rows and over none",
+		Schema: []string{
+			`CREATE DOMAIN dint AS int`,
+			`CREATE TABLE a (id int PRIMARY KEY, k dint, n numeric, f float8, i interval, b bool, at timestamptz)`,
+			`CREATE TABLE e (id int PRIMARY KEY, k dint, i interval, b bool, at timestamptz)`,
+		},
+		Seed: []string{
+			`INSERT INTO a VALUES (1, 1, 1.5, 0.5, '1 day', true, '2026-01-01 00:00:00+00'), (2, 2, 2.5, 1.5, '2 days', false, '2026-01-02 00:00:00+00')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT sum(k), avg(k) = 1.5, sum(n) = 4, avg(f) = 1 FROM a`),
+			difftest.Q(0, `SELECT sum(b::int), sum(CASE WHEN b THEN 1 ELSE 0 END) FROM a`),
+			difftest.Q(0, `SELECT sum(k), avg(k), sum(i), avg(i), sum(b::int), sum(at - at) FROM e`),
+			difftest.Q(0, `SELECT sum(x.k) FROM (SELECT k FROM e) x`),
+		},
+	},
+	{
 		Name:   "integer arithmetic and rounding",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{
