@@ -1395,6 +1395,11 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 		v := ch
 		var b *viewBinding
 		v.View, b = db.bindView(ch.View)
+		if names := outputNames(v.View); len(v.ViewColumns) > 0 && len(v.ViewColumns) < len(names) {
+			// The list names the rest by position, which tells apart two
+			// columns of one name a join gives.
+			v.ViewColumns = append(slices.Clone(v.ViewColumns), names[len(v.ViewColumns):]...)
+		}
 		db.views[table] = &v
 		db.viewBinds[&v] = b
 		return nil
