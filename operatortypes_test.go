@@ -815,6 +815,9 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT pg_advisory_xact_lock($1), $1::bigint`, []any{"7"}},
 		{`SELECT pg_advisory_xact_lock($1, '7'), $1::int`, []any{int64(1)}},
 		{`SELECT setval('seq', $1, 'true'), $1::bigint`, []any{int64(10)}},
+		{`SELECT setval('seq', $1, COALESCE('true', NULL)), $1::bigint`, []any{int64(10)}},
+		{`SELECT pg_advisory_xact_lock(COALESCE('7', NULL))`, nil},
+		{`SELECT round(1.5, CASE WHEN true THEN '1' END)`, nil},
 		// Postgres fails it with 42P18, as concat gives the parameter no type.
 		{`SELECT concat($1, s) FROM t`, []any{"a"}},
 		// Postgres takes $1 as an integer here, met first in WHERE, but

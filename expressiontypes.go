@@ -421,6 +421,10 @@ func operandType(t typer, e sqlir.Expr) string {
 }
 
 func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
+	// A CASE or COALESCE of string literals and NULLs alone is text to
+	// Postgres when it resolves the function, as COALESCE('true', NULL)
+	// for setval's is_called, which no signature takes.
+	t.untypedText = true
 	if f.Name == "left" && len(f.Args) == 2 {
 		switch typ := operandType(t, f.Args[1]); typ {
 		case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
