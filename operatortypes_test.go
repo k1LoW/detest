@@ -568,3 +568,65 @@ func TestTextAssignedToNonTextColumn(t *testing.T) {
 	}
 	mustExec(t, db, `UPDATE t SET n = $1`, "6")
 }
+
+// Postgres has LIKE and ILIKE over the character types and bytea only, and
+// fails another operand when it plans the statement, whatever rows it reads.
+func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TYPE mood AS ENUM ('a')`)
+	mustExec(t, db, `CREATE DOMAIN word AS text`)
+	mustExec(t, db, `CREATE DOMAIN num AS int`)
+	mustExec(t, db, `CREATE TABLE t (n int, b bool, s text, v varchar(3), c char(3), nm name, w word, k num, m mood, j jsonb, by bytea, a text[])`)
+	for _, q := range []string{
+		`SELECT 1 FROM t WHERE n LIKE 'a'`,
+		`SELECT 1 FROM t WHERE b LIKE 'a'`,
+		`SELECT x.v LIKE 'a' FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT 1 FROM t WHERE ROW(n, s) LIKE 'a'`,
+		`SELECT 1 FROM t WHERE coalesce(ROW(n), NULL) LIKE 'a'`,
+		`SELECT 1 FROM t WHERE n ILIKE 'a'`,
+		`SELECT 1 FROM t WHERE n NOT LIKE 'a'`,
+		`SELECT 1 FROM t WHERE n NOT ILIKE 'a'`,
+		`SELECT 1 FROM t WHERE 'a' LIKE n`,
+		`SELECT 1 FROM t WHERE s LIKE n`,
+		`SELECT 1 LIKE 'a'`,
+		`SELECT 1 FROM t WHERE k LIKE 'a'`,
+		`SELECT 1 FROM t WHERE m LIKE 'a'`,
+		`SELECT 1 FROM t WHERE j LIKE 'a'`,
+		`SELECT 1 FROM t WHERE a LIKE 'a'`,
+		// Postgres takes bytea beside another bytea only, and likeMatch
+		// reads a value as text, so detest refuses it.
+		`SELECT 1 FROM t WHERE by LIKE 'a'`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT 1 FROM t WHERE s LIKE 'a' AND v ILIKE 'a' AND c NOT LIKE 'a' AND nm NOT ILIKE 'a' AND w LIKE 'a'`,
+		`SELECT 1 FROM t WHERE v LIKE s AND c ILIKE nm`,
+		`SELECT 1 FROM t WHERE n::text LIKE 'a'`,
+		`SELECT NULL LIKE NULL, 'a' LIKE NULL`,
+	} {
+		if _, err := db.Query(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	if _, err := db.Query(`SELECT 1 FROM t WHERE $1 LIKE 'a'`, "a"); err != nil {
+		t.Errorf("$1 LIKE 'a': %v", err)
+	}
+	for _, q := range []string{
+		`SELECT 1 LIKE 'a'`,
+		`SELECT 'a' ILIKE true`,
+		`SELECT ROW(1, 2) LIKE 'a'`,
+	} {
+		if err := CheckSQL(postgres.New(), q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("CheckSQL %s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// Without a schema a type CheckSQL does not know may be a domain over
+	// text.
+	if err := CheckSQL(postgres.New(), `SELECT 'a'::word LIKE 'a'`); err != nil {
+		t.Errorf("CheckSQL 'a'::word LIKE 'a': %v", err)
+	}
+}
