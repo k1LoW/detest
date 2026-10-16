@@ -3452,12 +3452,16 @@ func typeSample(typ string) any {
 }
 
 // operandTypes refuses a comparison of two typed operands Postgres has no
-// operator for, which untypedPair refuses only when it reaches a row.
+// operator for, which untypedPair refuses only when it reaches a row. An
+// expression of string literals and NULLs alone, such as COALESCE('1', NULL)
+// or max('1'), is text, which Postgres resolves it to before it looks for the
+// operator.
 func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
 	t := c.typer(sc)
+	t.untypedText = true
 	fa, fb := valueFamily(t.reduce(t.of(a))), valueFamily(t.reduce(t.of(b)))
 	if fa == "" || fb == "" || fa == fb {
 		return nil

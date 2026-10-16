@@ -662,6 +662,35 @@ func TestNumberColumnStoresNumbers(t *testing.T) {
 	}
 }
 
+// Postgres resolves a CASE, a COALESCE or an aggregate of string literals and
+// NULLs alone to text, and fails a comparison of it with another type when it
+// plans the statement, whatever rows the statement reads.
+func TestUntypedExpressionComparedAsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int, b boolean, u uuid, i interval, ts timestamp, f float8)`)
+	for _, q := range []string{
+		`SELECT n = coalesce('1', NULL) FROM t WHERE false`,
+		`SELECT n = CASE WHEN true THEN '1' END FROM t WHERE false`,
+		`SELECT n IN (coalesce('1', NULL), 2) FROM t WHERE false`,
+		`SELECT n = max('1') FROM t WHERE false`,
+		`SELECT CASE n WHEN coalesce('1', NULL) THEN 1 END FROM t WHERE false`,
+		`SELECT coalesce('1', NULL) = n FROM t WHERE false`,
+		`SELECT 1 = coalesce('1', NULL)`,
+		`SELECT n = coalesce(NULL, NULL) FROM t WHERE false`,
+		`SELECT n = (SELECT max('1')) FROM t WHERE false`,
+		`SELECT f < nullif('1', NULL) FROM t WHERE false`,
+		`SELECT b = coalesce('t', NULL) FROM t WHERE false`,
+		`SELECT u = coalesce('a', NULL) FROM t WHERE false`,
+		`SELECT i = coalesce('1 day', NULL) FROM t WHERE false`,
+		`SELECT ts = coalesce('2020-01-01', NULL) FROM t WHERE false`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
+
 // Postgres has no operator comparing text with a number, and resolves only an
 // untyped literal or a parameter to the other side's type.
 func TestTextComparedWithNumber(t *testing.T) {
