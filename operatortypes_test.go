@@ -386,6 +386,48 @@ func TestQueryOutputOfLiteralsIsText(t *testing.T) {
 	}
 }
 
+// Postgres resolves a column of VALUES of string literals, parameters and
+// NULLs alone to text, or one beside text to text, and reads a parameter
+// there as the text the driver sends, which the run does not reproduce for
+// a value bound to other than a string.
+func TestValuesColumnParamIsText(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, tt := range []struct {
+		q   string
+		arg any
+	}{
+		{`SELECT (coalesce(v.column1, 'z') = '01')::text FROM (VALUES ($1)) v`, int64(1)},
+		{`SELECT (coalesce((SELECT column1 FROM (VALUES ($1)) v), 'z') = '01')::text`, int64(1)},
+		{`SELECT (coalesce((SELECT * FROM (VALUES ($1)) v), 'z') = '01')::text`, int64(1)},
+		{`WITH v AS (VALUES ($1)) SELECT (column1 = '01')::text FROM v`, int64(1)},
+		{`SELECT (x = '01')::text FROM (VALUES ($1, 1)) v(x, y)`, int64(1)},
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1), (NULL)) v`, int64(1)},
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1), ('a'::text)) v`, int64(1)},
+		{`SELECT column1 FROM (VALUES ($1)) v`, true},
+		{`SELECT column1 || '' FROM (VALUES ($1)) v`, []byte("A")},
+	} {
+		if _, err := db.Query(tt.q, tt.arg); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", tt.q, err)
+		}
+	}
+	for _, tt := range []struct {
+		q    string
+		arg  any
+		want []string
+	}{
+		{`SELECT (coalesce(v.column1, 'z') = '01')::text FROM (VALUES ($1)) v`, "1", []string{"false"}},
+		// Postgres resolves the column to integer, and the parameter with
+		// it.
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1), (2)) v ORDER BY 1`, int64(1), []string{"false", "true"}},
+		{`SELECT (column1 = '01')::text FROM (VALUES ($1::int)) v`, int64(1), []string{"true"}},
+	} {
+		if got := rowsOf(t, db, tt.q, tt.arg); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+}
+
 // Postgres resolves the operator of each pair of fields of a row comparison
 // when it plans the statement, so a pair it has no operator for fails it
 // (42883), as does IN (SELECT ...) of another width (42601), whatever rows
