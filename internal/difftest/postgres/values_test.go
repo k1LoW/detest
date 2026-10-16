@@ -1233,6 +1233,18 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "ORDER BY of a set operation by an output column",
+		Schema: valueSchema, Seed: valueSeed, Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM t UNION SELECT 3 ORDER BY id DESC`),
+			difftest.Q(0, `SELECT id FROM t UNION SELECT 3 ORDER BY (id)`),
+			difftest.Q(0, `SELECT id AS k FROM t UNION ALL SELECT 3 ORDER BY k DESC`),
+			difftest.Q(0, `SELECT id, name FROM t EXCEPT SELECT 9, NULL ORDER BY 2 NULLS FIRST, 1`),
+			difftest.Q(0, `SELECT id FROM t INTERSECT SELECT id FROM t WHERE id > 1 ORDER BY 1 LIMIT 2`),
+			difftest.Q(0, `(SELECT id FROM t ORDER BY -id LIMIT 1) UNION SELECT 3 ORDER BY id`),
+		},
+	},
+	{
 		Name: "a numeric reads back as its text",
 		Schema: []string{
 			`CREATE DOMAIN amount AS numeric`,
