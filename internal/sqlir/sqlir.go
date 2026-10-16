@@ -881,6 +881,10 @@ const (
 	// InvalidPowerArgument is zero raised to a negative power or a negative
 	// number raised to a non-integer one.
 	InvalidPowerArgument
+	// TargetTableRead is a subquery of an UPDATE, a DELETE or an INSERT
+	// ... VALUES that reads the table the statement writes, which MySQL
+	// refuses.
+	TargetTableRead
 )
 
 // The errors a DBError of each kind matches with errors.Is.
@@ -913,6 +917,7 @@ var (
 	ErrAmbiguousColumn           = errors.New("detest: column reference is ambiguous")
 	ErrDuplicateColumn           = errors.New("detest: column specified more than once")
 	ErrInvalidPowerArgument      = errors.New("detest: invalid argument for power function")
+	ErrTargetTableRead           = errors.New("detest: a subquery reads the table the statement writes")
 	kindErrors                   = map[DBErrorKind]error{UniqueViolation: ErrUniqueViolation, NotNullViolation: ErrNotNullViolation, Deadlock: ErrDeadlock, InFailedTransaction: ErrInFailedTx, LockNotAvailable: ErrLockNotAvailable, UndefinedTable: ErrUndefinedTable, ForeignKeyViolation: ErrForeignKeyViolation,
 		DivisionByZero: ErrDivisionByZero, NumericValueOutOfRange: ErrNumericValueOutOfRange, InvalidTextRepresentation: ErrInvalidTextRepresentation,
 		SyntaxError: ErrSyntaxError, UndefinedParameter: ErrUndefinedParameter, InvalidColumnReference: ErrInvalidColumnReference, DuplicateTable: ErrDuplicateTable,
@@ -923,7 +928,7 @@ var (
 		CardinalityViolation: ErrCardinalityViolation, StringDataRightTruncation: ErrStringDataRightTruncation, DataTruncated: ErrDataTruncated,
 		RestrictViolation: ErrForeignKeyViolation, UndefinedColumn: ErrUndefinedColumn,
 		AmbiguousColumn: ErrAmbiguousColumn, DuplicateColumn: ErrDuplicateColumn, InvalidDatetimeFormat: ErrInvalidDatetimeFormat,
-		InvalidPowerArgument: ErrInvalidPowerArgument}
+		InvalidPowerArgument: ErrInvalidPowerArgument, TargetTableRead: ErrTargetTableRead}
 )
 
 // DBError is a database error detest's simulated database raises, with what drivers

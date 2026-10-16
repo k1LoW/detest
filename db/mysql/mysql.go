@@ -119,6 +119,8 @@ func codes(k sqlir.DBErrorKind) (string, int) {
 		return "22001", 1406 // ER_DATA_TOO_LONG
 	case sqlir.DataTruncated:
 		return "01000", 1265 // WARN_DATA_TRUNCATED, an error in strict mode
+	case sqlir.TargetTableRead:
+		return "HY000", 1093 // ER_UPDATE_TABLE_USED
 	}
 	return "", 0
 }

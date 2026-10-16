@@ -1324,6 +1324,50 @@ var cases = []difftest.Case{
 			difftest.S(0, `DELETE FROM TV`),
 		},
 	},
+	{
+		// A subquery of a write that reads the write's own table fails with
+		// 1093, at any depth and under any alias of the table. One that reads
+		// it through a derived table or a CTE runs, as does INSERT ... SELECT
+		// and a join of the table to itself. A view of the table in such a
+		// subquery is refused (TestTargetReadRefused).
+		Name: "a write whose subquery reads its own table",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE VIEW uv AS SELECT * FROM u`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 1), (3, 3)`, `INSERT INTO u VALUES (1, 1), (3, 3)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `DELETE FROM t WHERE id IN (SELECT id FROM t WHERE id = 3)`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM t)`),
+			difftest.S(0, `UPDATE t x SET n = (SELECT max(n) FROM t AS z)`),
+			difftest.S(0, `UPDATE t SET n = 1 WHERE EXISTS (SELECT 1 FROM t z WHERE z.id = t.id + 1)`),
+			difftest.S(0, `DELETE FROM t WHERE n > (SELECT avg(n) FROM t)`),
+			difftest.S(0, `DELETE FROM t WHERE id NOT IN (SELECT id FROM u UNION SELECT id FROM t)`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM u WHERE u.id IN (SELECT id FROM t))`),
+			difftest.S(0, `DELETE FROM t WHERE id IN (SELECT x.id FROM (SELECT id FROM u) x JOIN t ON t.id = x.id)`),
+			difftest.S(0, `DELETE FROM t ORDER BY (SELECT max(n) FROM t) LIMIT 1`),
+			difftest.S(0, `UPDATE t JOIN u ON u.id = t.id SET t.n = (SELECT max(n) FROM t)`),
+			difftest.S(0, `UPDATE t JOIN u ON u.id = t.id AND u.id IN (SELECT id FROM t) SET t.n = 5`),
+			difftest.S(0, `INSERT INTO t VALUES ((SELECT max(id) FROM t) + 1, 0)`),
+			difftest.S(0, `INSERT IGNORE INTO t VALUES ((SELECT max(id) FROM t) + 1, 0)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 0) ON DUPLICATE KEY UPDATE n = (SELECT max(n) FROM t)`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM (SELECT n FROM t) x) WHERE id = 1`),
+			difftest.S(0, `DELETE FROM t WHERE id IN (SELECT id FROM (SELECT id FROM t WHERE id IN (SELECT id FROM t)) x WHERE id = 3)`),
+			difftest.S(0, `UPDATE t SET n = 7 WHERE id IN (WITH c AS (SELECT id FROM t) SELECT id FROM c WHERE id = 2)`),
+			difftest.S(0, `UPDATE t JOIN u ON u.id = t.id SET t.n = 5 WHERE t.id IN (SELECT id FROM (SELECT id FROM t) d)`),
+			difftest.S(0, `UPDATE t JOIN t z ON z.id = t.id SET t.n = z.n + 1`),
+			difftest.S(0, `UPDATE t JOIN (SELECT id FROM t) x ON x.id = t.id SET t.n = t.n + 1 WHERE x.id = 2`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM uv) WHERE id = 2`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(n) FROM u) WHERE id IN (SELECT id FROM u)`),
+			difftest.S(0, `INSERT INTO t SELECT id + 10, n FROM t WHERE id IN (SELECT id FROM t)`),
+			difftest.S(0, `INSERT INTO t SELECT 1, 0 ON DUPLICATE KEY UPDATE n = (SELECT max(n) FROM t)`),
+			difftest.S(0, `INSERT INTO t VALUES (9, (SELECT 1 FROM (SELECT 1 FROM t LIMIT 1) d))`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
