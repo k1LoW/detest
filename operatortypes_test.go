@@ -647,6 +647,8 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 		`SELECT NULL::date NOT LIKE 'a' WHERE false`,
 		`SELECT NULL::int4 NOT ILIKE 'a' WHERE false`,
 		`SELECT NULL::pg_catalog._int4 LIKE 'a' WHERE false`,
+		`SELECT NULL::pg_lsn LIKE 'a' WHERE false`,
+		`SELECT NULL::pg_snapshot LIKE 'a' WHERE false`,
 		// Postgres takes this, as it reads the literal as a bytea, but
 		// detest refuses bytea.
 		`SELECT 'a' LIKE NULL::bytea WHERE false`,
@@ -657,7 +659,18 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 	}
 	// Without a schema a type CheckSQL does not know may be a domain over
 	// text.
-	if err := CheckSQL(postgres.New(), `SELECT 'a'::word LIKE 'a'`); err != nil {
-		t.Errorf("CheckSQL 'a'::word LIKE 'a': %v", err)
+	for _, q := range []string{
+		`SELECT 'a'::word LIKE 'a'`,
+		// An alias such as integer names no array, so _integer may be a
+		// domain.
+		`SELECT NULL::_integer LIKE 'a'`,
+	} {
+		if err := CheckSQL(postgres.New(), q); err != nil {
+			t.Errorf("CheckSQL %s: %v", q, err)
+		}
+	}
+	mustExec(t, db, `CREATE DOMAIN _integer AS text`)
+	if _, err := db.Query(`SELECT NULL::_integer LIKE 'a'`); err != nil {
+		t.Errorf("_integer LIKE 'a': %v", err)
 	}
 }

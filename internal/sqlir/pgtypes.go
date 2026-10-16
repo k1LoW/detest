@@ -2,13 +2,15 @@ package sqlir
 
 import "strings"
 
-// postgresBuiltinTypes are the names of pg_catalog's types a column is commonly
-// declared with, as db/postgres's typeName gives them, which a domain of the name would
-// shadow by its bare name in detest but not in Postgres.
-var postgresBuiltinTypes = func() map[string]bool {
-	m := map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
-	// The types of pg_catalog in Postgres 18, other than arrays and the
-	// catalogs' row types, which an unqualified name finds first.
+// postgresTypeAliases are the SQL names of pg_catalog's types a column is
+// commonly declared with, as db/postgres's typeName gives them, which name no
+// type of the catalog and so no array of one.
+var postgresTypeAliases = map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
+
+// postgresCatalogTypes are the types of pg_catalog in Postgres 18, other than
+// arrays and the catalogs' row types, which an unqualified name finds first.
+var postgresCatalogTypes = func() map[string]bool {
+	m := map[string]bool{}
 	for t := range map[string]bool{
 		"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
 		"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
@@ -28,14 +30,19 @@ var postgresBuiltinTypes = func() map[string]bool {
 		"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
 		"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
 		"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
+		"pg_brin_bloom_summary": true, "pg_brin_minmax_multi_summary": true, "pg_ddl_command": true,
+		"pg_dependencies": true, "pg_lsn": true, "pg_mcv_list": true, "pg_ndistinct": true, "pg_node_tree": true,
+		"pg_snapshot": true,
 	} {
 		m[t] = true
 	}
 	return m
 }()
 
-// PostgresBuiltinType reports whether name is one of postgresBuiltinTypes,
-// or the catalog name of an array of one, such as _int4.
+// PostgresBuiltinType reports whether name is a built-in type's, which a
+// domain of the name would shadow by its bare name in detest but not in
+// Postgres: one of postgresTypeAliases or postgresCatalogTypes, or the
+// catalog name of an array of one of the latter, such as _int4.
 func PostgresBuiltinType(name string) bool {
-	return postgresBuiltinTypes[name] || strings.HasPrefix(name, "_") && postgresBuiltinTypes[name[1:]]
+	return postgresTypeAliases[name] || postgresCatalogTypes[name] || strings.HasPrefix(name, "_") && postgresCatalogTypes[name[1:]]
 }
