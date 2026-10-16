@@ -1,7 +1,6 @@
 package detest
 
 import (
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"maps"
@@ -3677,6 +3676,12 @@ func (c *columnChecker) inputAs(e sqlir.Expr, typ string) {
 // input as that type, as Postgres does when it binds it.
 func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 	for i, a := range f.Args {
+		if k, ok := a.(*sqlir.Const); ok {
+			if what := rawFunctionArg(f, i, functionParamType(f, i, c.typer(sc)), k.Value, "literal"); what != "" {
+				return c.x.unsupported(what)
+			}
+			continue
+		}
 		p, ok := a.(*sqlir.Param)
 		if !ok {
 			continue
@@ -3688,8 +3693,10 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 			return c.x.unsupported(fmt.Sprintf("parameter $%d as an argument of concat without a cast", p.Index+1))
 		}
 		typ := functionParamType(f, i, c.typer(sc))
-		if what := rawFunctionParam(f, i, typ, c.x.args, p); what != "" {
-			return c.x.unsupported(what)
+		if p.Index >= 0 && p.Index < len(c.x.args) {
+			if what := rawFunctionArg(f, i, typ, c.x.args[p.Index], "parameter"); what != "" {
+				return c.x.unsupported(what)
+			}
 		}
 		switch typ {
 		case "":
@@ -3722,20 +3729,18 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 	return nil
 }
 
-// rawFunctionParam names a value bound to p, the i-th argument of f typed
-// typ, that callFunc would take as it is bound, where Postgres converts it
-// to typ, so that a string such as "true" for setval's is_called or "7" for
-// an advisory lock's key would give another sequence state or lock.
-func rawFunctionParam(f *sqlir.FuncCall, i int, typ string, args []driver.Value, p *sqlir.Param) string {
+// rawFunctionArg names a value v, bound to a parameter or written as a
+// literal as the i-th argument of f typed typ, that callFunc would take as it
+// is, where Postgres converts it to typ, so that a string such as "true" for
+// setval's is_called or "7" for an advisory lock's key would give another
+// sequence state or lock. kind says what v is.
+func rawFunctionArg(f *sqlir.FuncCall, i int, typ string, v any, kind string) string {
 	switch {
 	case f.Name == "setval" && i > 0, f.Name == "pg_advisory_xact_lock", f.Name == "pg_try_advisory_xact_lock":
 	default:
 		return ""
 	}
-	if p.Index < 0 || p.Index >= len(args) {
-		return ""
-	}
-	v := derefValue(args[p.Index])
+	v = derefValue(v)
 	if v == nil {
 		return ""
 	}
@@ -3748,7 +3753,7 @@ func rawFunctionParam(f *sqlir.FuncCall, i int, typ string, args []driver.Value,
 	if ok {
 		return ""
 	}
-	return fmt.Sprintf("%s with a %T parameter as its %s argument", f.Name, v, typ)
+	return fmt.Sprintf("%s with a %T %s as its %s argument", f.Name, v, kind, typ)
 }
 
 // typer types expressions in sc as Postgres resolves them, with a domain
