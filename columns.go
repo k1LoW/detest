@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"maps"
@@ -3686,7 +3687,11 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 			// detest does not follow.
 			return c.x.unsupported(fmt.Sprintf("parameter $%d as an argument of concat without a cast", p.Index+1))
 		}
-		switch typ := functionParamType(f, i, c.typer(sc)); typ {
+		typ := functionParamType(f, i, c.typer(sc))
+		if what := rawFunctionParam(f, i, typ, c.x.args, p); what != "" {
+			return c.x.unsupported(what)
+		}
+		switch typ {
 		case "":
 		case "regclass":
 			// The name is read where the sequence is looked up, which is
@@ -3701,14 +3706,47 @@ func (c *columnChecker) functionParams(f *sqlir.FuncCall, sc *colScope) error {
 			// power takes the numeric form only for a parameter no use
 			// Postgres meets earlier has typed a float8, and would take the
 			// float8 one after floor($1), an order detest does not follow,
-			// so the parameter is not read as either. Both are of one family.
+			// so the type is not recorded as a number type for the order
+			// checks. Its input is read as numeric, which takes the text
+			// float8 does but at the edges of the range.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.typedParam(p)
+			c.readParam(p)
+			c.castInput(&sqlir.Cast{X: p, Type: typ})
 		default:
 			c.inputAs(p, typ)
 		}
 	}
 	return nil
+}
+
+// rawFunctionParam names a value bound to p, the i-th argument of f typed
+// typ, that callFunc would take as it is bound, where Postgres converts it
+// to typ, so that a string such as "true" for setval's is_called or "7" for
+// an advisory lock's key would give another sequence state or lock.
+func rawFunctionParam(f *sqlir.FuncCall, i int, typ string, args []driver.Value, p *sqlir.Param) string {
+	switch {
+	case f.Name == "setval" && i > 0, f.Name == "pg_advisory_xact_lock", f.Name == "pg_try_advisory_xact_lock":
+	default:
+		return ""
+	}
+	if p.Index < 0 || p.Index >= len(args) {
+		return ""
+	}
+	v := derefValue(args[p.Index])
+	if v == nil {
+		return ""
+	}
+	ok := false
+	if typ == "bool" {
+		_, ok = v.(bool)
+	} else {
+		_, ok = integer(v)
+	}
+	if ok {
+		return ""
+	}
+	return fmt.Sprintf("%s with a %T parameter as its %s argument", f.Name, v, typ)
 }
 
 // typer types expressions in sc as Postgres resolves them, with a domain

@@ -551,7 +551,7 @@ func functionParamType(f *sqlir.FuncCall, i int, t typer) string {
 			return ""
 		}
 		other := f.Args[1-i]
-		if untypedExpr(other) {
+		if untypedExpr(other) || isNullConst(other) {
 			return "float8"
 		}
 		switch t.reduce(t.of(other)) {

@@ -784,6 +784,7 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE TABLE t (n int, b bigint, f float8, s text)`)
+	mustExec(t, db, `CREATE SEQUENCE seq`)
 	for _, c := range []struct {
 		q    string
 		args []any
@@ -792,10 +793,15 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT abs($1), $1 = s FROM t WHERE false`, []any{"1"}},
 		{`SELECT abs($1), $1 LIKE '1' WHERE false`, []any{"1"}},
 		{`SELECT lower($1) FROM t WHERE n = $1`, []any{int64(1)}},
+		{`SELECT power($1, NULL), $1 = s FROM t WHERE false`, []any{"1"}},
 		{`SELECT round(f, $1) FROM t`, []any{int64(1)}},
 		{`SELECT round(f, 2) FROM t`, nil},
 		{`SELECT pg_advisory_xact_lock(b, 1) FROM t`, nil},
 		{`SELECT pg_try_advisory_xact_lock($1, b) FROM t`, []any{int64(1)}},
+		// callFunc takes the value as bound, where Postgres converts it.
+		{`SELECT setval('seq', 10, $1)`, []any{"true"}},
+		{`SELECT setval('seq', 10, $1), $1::bool`, []any{"true"}},
+		{`SELECT pg_advisory_xact_lock($1), $1::bigint`, []any{"7"}},
 		// Postgres fails it with 42P18, as concat gives the parameter no type.
 		{`SELECT concat($1, s) FROM t`, []any{"a"}},
 		// Postgres takes $1 as an integer here, met first in WHERE, but
@@ -807,8 +813,10 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		}
 	}
 	// Postgres fails the bind of input the argument's type does not take.
-	if _, err := db.Query(`SELECT abs($1) FROM t WHERE false`, "abc"); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
-		t.Errorf("abs($1) of abc: got %v, want 22P02", err)
+	for _, q := range []string{`SELECT abs($1) FROM t WHERE false`, `SELECT power($1, 1::numeric) FROM t WHERE false`} {
+		if _, err := db.Query(q, "abc"); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s of abc: got %v, want 22P02", q, err)
+		}
 	}
 	for _, c := range []struct {
 		q    string
@@ -818,6 +826,8 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT abs($1), abs($1) + f FROM t`, []any{float64(1)}},
 		{`SELECT left($1, $2), length($1) FROM t`, []any{"abc", int64(2)}},
 		{`SELECT pg_try_advisory_xact_lock($1)`, []any{int64(1)}},
+		{`SELECT setval('seq', $1, $2)`, []any{int64(10), true}},
+		{`SELECT floor($1), power($1, 1::numeric)`, []any{int64(2)}},
 	} {
 		if _, err := db.Query(c.q, c.args...); err != nil {
 			t.Errorf("%s: %v", c.q, err)
