@@ -140,6 +140,7 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", postgres.New())
 	mustExec(t, db, `CREATE DOMAIN word AS text`)
+	mustExec(t, db, `CREATE DOMAIN dint AS int`)
 	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, s text, b boolean, d date, at timestamptz, u uuid, j jsonb, a int[], v varchar(10), w word, k int)`)
 	for _, q := range []string{
 		`SELECT sum(s) FROM t`,
@@ -163,6 +164,8 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 		`SELECT avg(NULL) FROM t`,
 		`SELECT sum(coalesce(NULL, NULL)) FROM t`,
 		`SELECT avg(CASE WHEN b THEN '1' END) FROM t`,
+		`SELECT sum(ROW(1, 2)) FROM t`,
+		`SELECT avg(ROW(k, k)) FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v, want unsupported", q, err)
@@ -172,6 +175,7 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 		`SELECT sum(k), avg(k), sum(b::int), sum(at - at) FROM t`,
 		`SELECT sum(x.k) FROM (SELECT k FROM t) x`,
 		`SELECT sum(CASE WHEN b THEN 1 END), sum(coalesce(k, NULL)) FROM t`,
+		`SELECT sum(k::dint), avg(k::dint) FROM t`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Errorf("%s: %v, want nil", q, err)
