@@ -163,6 +163,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	// A script runs its statements on one executor, so the types of an
 	// earlier statement's output must not reach a later one's.
 	x.selectTypes, x.selectNamed, x.returningTypes, x.returningStar = nil, nil, nil, nil
+	if what := nestedCall(stmt); what != "" {
+		return x.unsupported(what)
+	}
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
@@ -2576,6 +2579,76 @@ func (c *columnChecker) resolve(r *sqlir.ColumnRef, sc *colScope) error {
 		}
 	}
 	return c.undefined(r.Column)
+}
+
+// nestedCall describes the first aggregate or window function in the
+// arguments of an aggregate or of a window function under n, and is empty
+// when there is none. Both servers fail one in an aggregate whatever rows the
+// statement reads (42803 in Postgres, 1111 in MySQL), while the evaluators
+// meet it only where a row reaches it. One in a window function's arguments
+// runs on the servers, but detest does not evaluate it.
+func nestedCall(n any) string {
+	var what string
+	var walk func(v reflect.Value, enclosing *sqlir.FuncCall, windowed bool)
+	nested := func(call string, windowed bool) {
+		if windowed {
+			what = call + " in the arguments of a window function"
+		} else {
+			what = call + " in the arguments of an aggregate, which the server refuses"
+		}
+	}
+	walk = func(v reflect.Value, enclosing *sqlir.FuncCall, windowed bool) {
+		if what != "" {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem(), enclosing, windowed)
+			}
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			switch e := v.Interface().(type) {
+			case *sqlir.SelectStmt:
+				// A subquery's aggregates are its own.
+				enclosing = nil
+			case *sqlir.WindowFunc:
+				if enclosing != nil {
+					nested("a window function", windowed)
+					return
+				}
+				if e.Func != nil {
+					walk(reflect.ValueOf(e.Func).Elem(), e.Func, true)
+				}
+				walk(reflect.ValueOf(e.Partition), nil, false)
+				walk(reflect.ValueOf(e.Order), nil, false)
+				return
+			case *sqlir.FuncCall:
+				if isAggregateCall(e) {
+					if enclosing != nil {
+						nested("an aggregate", windowed)
+						return
+					}
+					enclosing, windowed = e, false
+				}
+			}
+			walk(v.Elem(), enclosing, windowed)
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i), enclosing, windowed)
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range v.Len() {
+				walk(v.Index(i), enclosing, windowed)
+			}
+		}
+	}
+	walk(reflect.ValueOf(n), nil, false)
+	return what
 }
 
 // exprs checks the column references under n, and the subqueries in it
