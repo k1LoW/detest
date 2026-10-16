@@ -165,6 +165,8 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		// DISTINCT ON computes an item outside its keys for the first row
 		// of each key only.
 		`SELECT DISTINCT ON (n) n, nextval('sq') FROM u ORDER BY n`,
+		`SELECT DISTINCT ON (n) n, (SELECT x.id FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY n, id`,
+		`SELECT row_number() OVER () FROM u WHERE nextval('sq') > 0 LIMIT 1`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

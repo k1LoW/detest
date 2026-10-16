@@ -308,8 +308,9 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 	return x.aliasWidths(sel, true)
 }
 
-// aliasWidths fails on a column alias list of a derived table under q
-// longer than the table's columns, without running anything. The columns
+// aliasWidths fails on a column alias list of a derived table or a
+// function under q longer than its columns, and refuses a function detest
+// does not run, without running anything. The columns
 // are taken in the scope of the CTEs each query sees, q's own declared
 // already when declared is set.
 func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
@@ -344,6 +345,11 @@ func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
 		return x.aliasWidths(q.Rarg, false)
 	}
 	for _, t := range fromRefs(q) {
+		if t.Func != nil {
+			if err := x.checkFunctionItem(t); err != nil {
+				return err
+			}
+		}
 		if t.Sub == nil {
 			continue
 		}

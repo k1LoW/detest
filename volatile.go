@@ -448,9 +448,13 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 		}
 	}
 	if len(sel.DistinctOn) > 0 {
-		// Postgres computes a select list item no DISTINCT ON key reads
-		// for the first row of each key only, where detest computes it
-		// for every row before it keeps the first.
+		// Postgres may compute a select list item no DISTINCT ON key
+		// reads for the first row of each key only, where detest computes
+		// it for every row before it keeps the first.
+		ctes := map[string]*sqlir.SelectStmt{}
+		for _, c := range sel.With {
+			ctes[c.Name] = c.Select
+		}
 		for _, t := range sel.Targets {
 			if slices.ContainsFunc(sel.DistinctOn, func(e sqlir.Expr) bool { return reflect.DeepEqual(e, t.Expr) }) {
 				continue
@@ -458,6 +462,11 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			for _, f := range sqlir.FuncCalls(t.Expr) {
 				if effectFuncs[f.Name] {
 					return x.unsupported(f.Name + " in the select list of a query with DISTINCT ON, outside its keys")
+				}
+			}
+			for _, q := range sqlir.Selects(t.Expr) {
+				if x.effectfulQuery(q, ctes, map[string]bool{}) {
+					return x.unsupported("a subquery that locks rows in the select list of a query with DISTINCT ON, outside its keys")
 				}
 			}
 		}
@@ -471,6 +480,20 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 		for _, q := range sqlir.Selects(sel.Values) {
 			if x.effectfulQuery(q, nil, map[string]bool{}) {
 				return x.unsupported("a subquery that locks rows in VALUES under LIMIT or OFFSET")
+			}
+		}
+	}
+	if len(windowsOf(sel)) > 0 && (sel.Limit != nil || sel.Offset != nil) {
+		// Postgres may stop reading the rows under the window functions
+		// once LIMIT has its rows, where detest tests the WHERE of each.
+		for _, f := range sqlir.FuncCalls(sel.Where) {
+			if effectFuncs[f.Name] {
+				return x.unsupported(f.Name + " in the WHERE of a query with window functions and LIMIT or OFFSET")
+			}
+		}
+		for _, q := range sqlir.Selects(sel.Where) {
+			if x.effectfulQuery(q, nil, map[string]bool{}) {
+				return x.unsupported("a subquery that locks rows in the WHERE of a query with window functions and LIMIT or OFFSET")
 			}
 		}
 	}
