@@ -1795,9 +1795,18 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		var b strings.Builder
 		for i := range args {
 			if v := d(i); v != nil {
+				// A numeric's text keeps its scale (1.0, 1.000000) and a
+				// float's follows Postgres's own rules, as for a cast to
+				// text.
+				if _, ok := v.(float64); ok {
+					return nil, x.unsupported("concat of a numeric or a float")
+				}
 				v, err := x.rowAsText(v)
 				if err != nil {
 					return nil, err
+				}
+				if t, ok := v.(bool); ok {
+					v = boolOutputText(t, x.tx.db.kind.InnoDB())
 				}
 				fmt.Fprint(&b, v)
 			}
@@ -2007,11 +2016,15 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		if name == "date_part" {
 			return f, nil // double precision
 		}
-		// extract gives a numeric, which detest keeps as a float.
+		// extract gives a numeric, which detest keeps as a float like any
+		// other, so that its text, which keeps the scale it was computed
+		// with (1.000000), is refused where a float's is. An integral one
+		// held as an integer would be written as 1, and would divide as
+		// an integer.
 		if !exactAsFloat(dec) {
 			return nil, x.unsupported("an extract result with more digits than a float keeps")
 		}
-		return numeric(f), nil
+		return numericValue(f), nil
 	case "make_interval":
 		// make_interval(secs => x) is the form that appears in backoff SQL; a
 		// single argument is taken as seconds.
