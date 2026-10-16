@@ -190,7 +190,9 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 		w.exprs(t.Expr, sc, ctes)
 	}
 	w.exprs(sel.Where, sc, ctes)
-	w.exprs(sel.GroupBy, sc, ctes)
+	for _, e := range sel.GroupBy {
+		w.groupKey(e, names, sc, ctes)
+	}
 	w.exprs(sel.Having, sc, ctes)
 	// A bare name in ORDER BY or DISTINCT ON is an output column first.
 	for _, e := range sel.DistinctOn {
@@ -218,6 +220,28 @@ func (w *viewWalk) key(e sqlir.Expr, names []string, sc *viewScope, ctes []map[s
 		return
 	}
 	w.exprs(e, sc, ctes)
+}
+
+// groupKey walks a GROUP BY key. Postgres takes a bare name for a column
+// of the query's own items first, then for an output column, and only
+// then for a column of a query around it.
+func (w *viewWalk) groupKey(e sqlir.Expr, names []string, sc *viewScope, ctes []map[string][]string) {
+	r, ok := e.(*sqlir.ColumnRef)
+	if !ok || r.Table != "" || !w.bind {
+		w.exprs(e, sc, ctes)
+		return
+	}
+	local := false
+	for _, it := range sc.items {
+		if it.cols == nil || slices.Contains(it.cols, r.Column) {
+			local = true
+		}
+	}
+	if !local && (names == nil || slices.Contains(names, r.Column)) {
+		w.loose[r.Column] = true
+		return
+	}
+	w.qualify(r, sc)
 }
 
 // item adds a FROM item to sc.

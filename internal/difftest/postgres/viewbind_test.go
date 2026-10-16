@@ -66,6 +66,19 @@ var viewBindCases = []difftest.Case{
 			difftest.Q(0, `SELECT * FROM xv`),
 		},
 	},
+	{
+		Name: "a view's GROUP BY name that is an output column, beside a column of a query around it",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE u (k int)`,
+			`CREATE VIEW gv AS SELECT u.k FROM u WHERE EXISTS (SELECT n AS k FROM t GROUP BY k HAVING count(*) > 1)`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 1), (2, 2)`, `INSERT INTO u VALUES (7)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT k FROM gv`),
+		},
+	},
 }
 
 func TestDiffViewBind(t *testing.T) {
