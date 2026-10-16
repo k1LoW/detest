@@ -1,5 +1,34 @@
 # Changelog
 
+## [v0.6.1](https://github.com/k1LoW/detest/compare/v0.6.0...v0.6.1) - 2026-10-15
+
+### Fix bug 🐛
+- fix: order goroutines adopted at Current by where Current was called by @k1LoW in https://github.com/k1LoW/detest/pull/91
+- fix: read input typed by an assignment, a cast or a branch before any row by @k1LoW in https://github.com/k1LoW/detest/pull/83
+- fix: read a parameter beside a number in arithmetic as that number's type before any row by @k1LoW in https://github.com/k1LoW/detest/pull/94
+- fix: divide by the sum of a bigint as a numeric by @k1LoW in https://github.com/k1LoW/detest/pull/99
+- fix: reduce a domain to its base type where an operator or a function resolves it by @k1LoW in https://github.com/k1LoW/detest/pull/101
+- fix: stop COALESCE at the first argument that is not NULL by @k1LoW in https://github.com/k1LoW/detest/pull/95
+- fix: refuse an aggregate of only outer columns in a subquery by @k1LoW in https://github.com/k1LoW/detest/pull/108
+- fix: refuse a scalar subquery of several columns and a locking aggregate query before any row by @k1LoW in https://github.com/k1LoW/detest/pull/110
+- fix: read a numeric back as its text by @k1LoW in https://github.com/k1LoW/detest/pull/103
+- fix: name the columns of a derived table over a * that a column alias list renames by @k1LoW in https://github.com/k1LoW/detest/pull/115
+- fix: run an uncorrelated subquery once for the statement by @k1LoW in https://github.com/k1LoW/detest/pull/111
+- fix: refuse arithmetic over a boolean, a uuid or text before the statement runs by @k1LoW in https://github.com/k1LoW/detest/pull/109
+- fix: lock the snapshot's version of a row a non-key update changed under FOR KEY SHARE by @k1LoW in https://github.com/k1LoW/detest/pull/119
+- fix: test every field of a row under IS NULL and IS NOT NULL by @k1LoW in https://github.com/k1LoW/detest/pull/123
+- fix: read a string literal or parameter in a boolean position as boolean input by @k1LoW in https://github.com/k1LoW/detest/pull/128
+- fix: type a column default by the column check before evaluating it by @k1LoW in https://github.com/k1LoW/detest/pull/127
+- fix: run a query's CTE when a row first reads it by @k1LoW in https://github.com/k1LoW/detest/pull/126
+- fix: type a scalar subquery's target in its own scope in every check before a statement by @k1LoW in https://github.com/k1LoW/detest/pull/124
+- fix: raise the errors Postgres raises folding expressions of constants by @k1LoW in https://github.com/k1LoW/detest/pull/107
+### Other Changes
+- feat: type the columns of a *, a set operation and generate_series in FROM by @k1LoW in https://github.com/k1LoW/detest/pull/89
+- fix: refuse a statement reading a view whose query the column check refuses by @k1LoW in https://github.com/k1LoW/detest/pull/131
+- fix: raise the server's error for a power with no real result by @k1LoW in https://github.com/k1LoW/detest/pull/136
+- fix: type a query output of string literals or NULLs as text to the query around it by @k1LoW in https://github.com/k1LoW/detest/pull/132
+- fix: type a CHECK constraint and a generated column by the column check before evaluating them by @k1LoW in https://github.com/k1LoW/detest/pull/135
+
 ## [v0.6.0](https://github.com/k1LoW/detest/compare/v0.5.1...v0.6.0) - 2026-10-14
 
 ### Fix bug 🐛
