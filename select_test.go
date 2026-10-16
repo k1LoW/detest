@@ -2135,6 +2135,7 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 		`SELECT 1.5::numeric(2, 3)`,
 		`SELECT (0.1::float8 + 0.2::float8)::numeric(20, 17)`,
 		`SELECT extract(epoch FROM coalesce(date '2024-01-02', date '2024-01-03'))`,
+		`INSERT INTO t (id, x) VALUES (9, 0.1::float8 + 0.2::float8)`,
 	} {
 		var str string
 		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {
@@ -2159,4 +2160,44 @@ func mustRat(t *testing.T, s string) *big.Rat {
 		t.Fatalf("not a decimal: %q", s)
 	}
 	return r
+}
+
+// The transaction API and State read a numeric as the number it holds, and
+// a number the API writes reads back through SQL with the scale of its text.
+func TestNumericThroughTheTransactionAPI(t *testing.T) {
+	Explore(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE acct (id text PRIMARY KEY, bal numeric, fee numeric(10, 2))`)
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO acct VALUES ('a', 1.00, 2)`)
+		})
+		s.Manual("api", 1, func(p *Proc) error {
+			err := store.Tx(p, func(tx *Tx) error {
+				r, ok := tx.Get("acct", "a")
+				if !ok || r["bal"] != float64(1) || r["fee"] != float64(2) {
+					t.Errorf("Get: got %#v", r)
+				}
+				if ok, err := tx.CAS("acct", "a", "bal", float64(1), 2.5); !ok || err != nil {
+					t.Errorf("CAS of a numeric written with places: %v, %v", ok, err)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			var bal string
+			if err := db.QueryRowContext(p.Context(), `SELECT bal FROM acct`).Scan(&bal); err != nil || bal != "2.5" {
+				t.Errorf("a number the API wrote, read through SQL: got %q, %v", bal, err)
+			}
+			return nil
+		})
+		s.AtQuiescence(func(st *State) error {
+			for _, r := range st.Rows(store, "acct") {
+				if v, _ := r.Get("fee"); v != float64(2) {
+					t.Errorf("RowView.Get: got %#v", v)
+				}
+			}
+			return nil
+		})
+	})
 }

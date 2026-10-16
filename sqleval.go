@@ -94,6 +94,13 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 			// timestamp takes the time's own clock above.
 			return newInstant(t), nil
 		}
+		if f, ok := x.args[v.Index].(float64); ok && !x.tx.db.kind.InnoDB() && floatScale(f) < 0 && !math.IsInf(f, 0) && !math.IsNaN(f) {
+			// The driver sends the shortest text of the float, all of
+			// whose digits a numeric keeps, where a float8 of as many
+			// digits converts with 15; marked as a numeric, a write tells
+			// the two apart.
+			return scaledNum{f, textScale(strconv.FormatFloat(f, 'f', -1, 64))}, nil
+		}
 		return x.args[v.Index], nil
 	case *sqlir.Const:
 		if _, ok := v.Value.(float64); ok {

@@ -131,6 +131,13 @@ func (db *DB) typedValue(table, col string, v any) (any, bool) {
 	if def == nil {
 		return v, false
 	}
+	if def.types[col] == "numeric" && isNumber(v) {
+		if _, ok := v.(scaledNum); !ok {
+			// A number keeps the scale of its text, as a parameter does,
+			// so that SQL reads it back.
+			return storedScaled(def, col, v, v), true
+		}
+	}
 	switch v := v.(type) {
 	case time.Time:
 		if def.types[col] == "timestamptz" {

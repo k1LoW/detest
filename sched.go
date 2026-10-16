@@ -2063,7 +2063,7 @@ func (v RowView) Get(col string) (any, bool) {
 	if e, isEnum := x.(enumValue); isEnum {
 		x = e.String() // and an enum is its label
 	}
-	return x, ok
+	return unscaled(x), ok
 }
 
 // Str returns a column formatted as a string ("" when absent or NULL).

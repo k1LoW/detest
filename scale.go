@@ -242,9 +242,16 @@ func (x *sqlExec) funcScaled(f *sqlir.FuncCall, args []any, out any) any {
 		return out
 	}
 	numericArg := false
-	for _, a := range args {
-		if _, ok := a.(scaledNum); ok {
+	for i, a := range args {
+		if !isNumber(a) || i >= len(f.Args) {
+			continue
+		}
+		switch k, _ := operandScale(f.Args[i], a); k {
+		case opNumeric:
 			numericArg = true
+		case opFloat:
+			// A float8 argument picks the function's float8 form.
+			return out
 		}
 	}
 	switch f.Name {
@@ -467,4 +474,24 @@ func (x *sqlExec) extractScale(f *sqlir.FuncCall, unit string, src any) int {
 		return -1
 	}
 	return 0
+}
+
+// float8Apart reports a float of more than 15 significant digits written
+// to the numeric column col, which stores another value from a float8,
+// converted with 15 digits, than from a parameter, read as the shortest
+// text the drivers send, where the column's scale does not round the two
+// alike. The value does not tell which it came from.
+func float8Apart(written any, nums map[string]numLimit, col string) bool {
+	f, ok := written.(float64)
+	if !ok || floatScale(f) >= 0 || math.IsInf(f, 0) || math.IsNaN(f) {
+		return false
+	}
+	short, _ := new(big.Rat).SetString(strconv.FormatFloat(f, 'f', -1, 64))
+	g15, _ := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', 15, 64))
+	if l, ok := nums[col]; ok {
+		a, errA := scaledRat(short, l)
+		b, errB := scaledRat(g15, l)
+		return errA != nil || errB != nil || a.Cmp(b) != 0
+	}
+	return short.Cmp(g15) != 0
 }
