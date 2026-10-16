@@ -57,6 +57,8 @@ func TestMySQLViewRefusedAfterColumnRename(t *testing.T) {
 		`CREATE VIEW tv AS SELECT * FROM t`,
 		`CREATE VIEW nv AS SELECT id, n FROM t`,
 		`CREATE VIEW wv AS SELECT s FROM tv`,
+		`CREATE TABLE u (id INT PRIMARY KEY, s TEXT)`,
+		`CREATE VIEW jv AS SELECT u.s FROM t JOIN u ON t.id = u.id`,
 		`ALTER TABLE t RENAME COLUMN s TO s2`,
 	} {
 		mustExec(t, db, q)
@@ -66,8 +68,10 @@ func TestMySQLViewRefusedAfterColumnRename(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
-	if _, err := db.Exec(`SELECT n FROM nv`); err != nil {
-		t.Errorf("SELECT n FROM nv: %v", err)
+	for _, q := range []string{`SELECT n FROM nv`, `SELECT s FROM jv`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
 	}
 }
 

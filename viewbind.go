@@ -43,6 +43,7 @@ type viewWalk struct {
 	db        *DB
 	bind      bool
 	renameCol [3]string // table, old name, new name
+	renamed   bool      // a reference was renamed
 	renameRel [2]string // relation, new name
 	loose     map[string]bool
 }
@@ -82,8 +83,11 @@ func (db *DB) viewColumnsChanged(table string, names []string, old, nw string) {
 			// MySQL keeps a view's query by the names it reads, so the view
 			// fails once a column it reads is renamed, which detest, having
 			// no check of MySQL's column names, would read as NULL.
-			refs := sqlir.ColumnRefs(&sqlir.SubQuery{Select: v.View})
-			if slices.ContainsFunc(refs, func(r *sqlir.ColumnRef) bool { return r.Column == old }) {
+			// The rename walk tells which references read the column, on a
+			// copy the view does not keep.
+			sub, _ := sqlir.CloneExpr(&sqlir.SubQuery{Select: v.View}).(*sqlir.SubQuery)
+			w := &viewWalk{db: db, renameCol: [3]string{table, old, nw}}
+			if w.query(sub.Select, nil, nil); w.renamed {
 				b.stale = fmt.Sprintf("view %q after a rename of column %q of %q it reads", relname(name), old, relname(table))
 			}
 		default:
@@ -412,6 +416,7 @@ func (w *viewWalk) ref(r *sqlir.ColumnRef, sc *viewScope) {
 		// A column the item's alias list renames is read by that name.
 		if def := w.db.defs[col[0]]; def != nil && slices.Index(def.columns, col[2]) >= len(it.ref.Columns) {
 			r.Column = col[2]
+			w.renamed = true
 		}
 	}
 }
