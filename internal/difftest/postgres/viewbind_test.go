@@ -22,6 +22,8 @@ var viewBindCases = []difftest.Case{
 			`CREATE VIEW sv AS SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE m = n)`,
 			`CREATE VIEW lv(a) AS SELECT * FROM t JOIN (SELECT 1 AS k) z ON true`,
 			`CREATE VIEW rv AS SELECT * FROM tv`,
+			`CREATE VIEW lsv AS SELECT 1 AS k UNION ALL SELECT 2 ORDER BY k LIMIT (SELECT count(*) FROM t)`,
+			`CREATE VIEW vsv AS VALUES (1), (2), (3) LIMIT (SELECT count(*) FROM t)`,
 			`ALTER TABLE t ADD COLUMN x int`,
 			`ALTER TABLE t ADD COLUMN m int`,
 			`ALTER TABLE u ADD COLUMN n int`,
@@ -44,6 +46,8 @@ var viewBindCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM sv ORDER BY 1`),
 			difftest.Q(0, `SELECT a, s, n, k FROM lv ORDER BY a`),
 			difftest.Q(0, `SELECT * FROM rv ORDER BY id`),
+			difftest.Q(0, `SELECT k FROM lsv ORDER BY 1`),
+			difftest.Q(0, `SELECT column1 FROM vsv ORDER BY 1`),
 		},
 	},
 	{

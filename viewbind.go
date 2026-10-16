@@ -149,14 +149,17 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 		// The keys of ORDER BY can only name the output columns.
 		names := w.query(sel.Larg, outer, ctes)
 		w.query(sel.Rarg, outer, ctes)
+		w.trailing(sel, names, &viewScope{outer: outer}, ctes)
 		return names
 	}
 	if len(sel.Values) > 0 {
-		w.exprs(sel.Values, &viewScope{outer: outer}, ctes)
+		sc := &viewScope{outer: outer}
+		w.exprs(sel.Values, sc, ctes)
 		var names []string
 		for i := range sel.Values[0] {
 			names = append(names, fmt.Sprintf("column%d", i+1))
 		}
+		w.trailing(sel, names, sc, ctes)
 		return names
 	}
 	sc := &viewScope{outer: outer}
@@ -193,12 +196,18 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 	for _, e := range sel.DistinctOn {
 		w.key(e, names, sc, ctes)
 	}
+	w.trailing(sel, names, sc, ctes)
+	return names
+}
+
+// trailing walks the ORDER BY, LIMIT and OFFSET of sel, which a set
+// operation and VALUES have too.
+func (w *viewWalk) trailing(sel *sqlir.SelectStmt, names []string, sc *viewScope, ctes []map[string][]string) {
 	for _, k := range sel.OrderBy {
 		w.key(k.Expr, names, sc, ctes)
 	}
 	w.exprs(sel.Limit, sc, ctes)
 	w.exprs(sel.Offset, sc, ctes)
-	return names
 }
 
 func (w *viewWalk) key(e sqlir.Expr, names []string, sc *viewScope, ctes []map[string][]string) {
