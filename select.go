@@ -905,12 +905,33 @@ func ordersByAlias(sel *sqlir.SelectStmt) bool {
 			continue
 		}
 		for _, t := range sel.Targets {
+			// An alias that only repeats the name of a column of the
+			// query's own items, as a bound view gives each bare column,
+			// orders by that column. One of a query around it is a
+			// constant here.
+			if r, ok := t.Expr.(*sqlir.ColumnRef); ok && strings.EqualFold(r.Column, t.Alias) && readsOwnItem(sel, r) {
+				continue
+			}
 			if t.Alias != "" && strings.EqualFold(t.Alias, c.Column) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// readsOwnItem reports whether r is qualified with an item of sel's FROM.
+func readsOwnItem(sel *sqlir.SelectStmt, r *sqlir.ColumnRef) bool {
+	if r.Table == "" {
+		return false
+	}
+	items := []*sqlir.TableRef{sel.From}
+	for i := range sel.Joins {
+		items = append(items, &sel.Joins[i].Table)
+	}
+	return slices.ContainsFunc(items, func(t *sqlir.TableRef) bool {
+		return t != nil && (t.Alias == r.Table || (t.Alias == "" && t.Name != "" && relname(t.Name) == r.Table))
+	})
 }
 
 // stopAt is where a scan with LIMIT stops: after the rows LIMIT and OFFSET
@@ -2032,8 +2053,22 @@ func outputKeys(targets []sqlir.Target) []string {
 // alias(a, b) renames them.
 func renamedCols(cols, names []string) []string {
 	out := slices.Clone(cols)
+	used := map[string]bool{}
 	for i := range min(len(out), len(names)) {
 		out[i] = names[i]
+		used[names[i]] = true
+	}
+	// A column the list leaves unnamed keeps the name its query gives it,
+	// which outputKeys suffixed only to tell it from a column the list
+	// has renamed away.
+	for _, c := range out[min(len(out), len(names)):] {
+		used[c] = true
+	}
+	for i := len(names); i < len(out); i++ {
+		if j := strings.IndexByte(out[i], 0); j > 0 && !used[out[i][:j]] {
+			out[i] = out[i][:j]
+			used[out[i]] = true
+		}
 	}
 	return out
 }
