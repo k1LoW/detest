@@ -179,6 +179,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	if x.tx.db.kind.InnoDB() {
 		return nil
 	}
+	if what := setOpOrderExpr(stmt); what != "" {
+		return x.unsupported(what)
+	}
 	if err := x.checkSequenceCalls(stmt); err != nil {
 		return err
 	}
@@ -2871,6 +2874,35 @@ func misplacedCall(n any) string {
 		none("OFFSET", sel.Offset)
 	}
 	return what
+}
+
+// setOpOrderExpr describes the first ORDER BY key of a UNION, INTERSECT or
+// EXCEPT under n that is neither a name nor a position, and is empty when
+// there is none. Postgres sorts the combined rows only by an output column
+// and fails any other key with 0A000 whatever rows the statement reads, where
+// MySQL sorts by an expression over the outputs. A cast of an output to its
+// own type and typmod is the one expression Postgres takes as the column, and
+// it is refused with the rest rather than told apart by its typmod. A
+// qualified name fails in Postgres too (42P01), so it is left to the name
+// resolution, which fails it with another code.
+func setOpOrderExpr(n any) string {
+	for _, sel := range sqlir.Selects(n) {
+		if sel.SetOp == "" {
+			continue
+		}
+		for _, k := range sel.OrderBy {
+			switch e := k.Expr.(type) {
+			case *sqlir.ColumnRef:
+				continue
+			case *sqlir.Const:
+				if _, ok := e.Value.(int64); ok {
+					continue
+				}
+			}
+			return "an ORDER BY key of a set operation other than an output column"
+		}
+	}
+	return ""
 }
 
 // blockCall describes the first aggregate, unless aggregates are allowed,
