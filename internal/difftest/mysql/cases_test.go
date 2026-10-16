@@ -1226,6 +1226,25 @@ var cases = []difftest.Case{
 			difftest.S(0, `UPDATE p SET y = POW(x, y) WHERE id = 1`),
 		},
 	},
+	{
+		Name: "aggregates and windows in the clauses that allow them, beside those that allow none",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, m INT)` + binary,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 3)`, `INSERT INTO u VALUES (1, 10)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT count(*) FROM t HAVING max(n) > 0`),
+			difftest.Q(0, `SELECT n FROM t GROUP BY n ORDER BY max(id), n`),
+			difftest.Q(0, `SELECT id, row_number() OVER (ORDER BY id) FROM t ORDER BY row_number() OVER (ORDER BY id)`),
+			difftest.Q(0, `SELECT id FROM t WHERE n < (SELECT max(m) FROM u) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM t WHERE false AND (SELECT max(m) FROM u) > 0`),
+			difftest.S(0, `UPDATE t SET n = (SELECT max(m) FROM u) WHERE id = 1`),
+			difftest.S(0, `INSERT INTO t SELECT 3, max(m) FROM u`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
