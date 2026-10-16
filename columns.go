@@ -1043,6 +1043,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if err := c.exprs(j.On, sc); err != nil {
 			return nil, err
 		}
+		if err := c.condition(j.On, sc, "JOIN/ON"); err != nil {
+			return nil, err
+		}
 	}
 	for _, t := range sel.Targets {
 		if t.Star && t.Table == "" && sel.From == nil {
@@ -1068,7 +1071,13 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if err := c.exprs(sel.Where, sc); err != nil {
 		return nil, err
 	}
+	if err := c.condition(sel.Where, sc, "WHERE"); err != nil {
+		return nil, err
+	}
 	if err := c.exprs(sel.Having, sc); err != nil {
+		return nil, err
+	}
+	if err := c.condition(sel.Having, sc, "HAVING"); err != nil {
 		return nil, err
 	}
 	// The names the select list gives itself; those a * gives are the
@@ -2683,6 +2692,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.x.numericDivs[e] = true
 				}
 				switch e.Op {
+				case "AND", "OR":
+					for _, x := range []sqlir.Expr{e.L, e.R} {
+						if err = c.condition(x, sc, e.Op); err != nil {
+							return
+						}
+					}
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
 						return
@@ -2699,6 +2714,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			case *sqlir.UnaryExpr:
 				if e.Op == "-" {
 					if err = c.arithmeticTypes(sc, "-", e.X); err != nil {
+						return
+					}
+				}
+				if e.Op == "NOT" {
+					if err = c.condition(e.X, sc, "NOT"); err != nil {
 						return
 					}
 				}
@@ -2727,6 +2747,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 							return
 						}
 						c.untypedOperands(sc, e.Arg, w.When)
+					}
+				} else {
+					for _, w := range e.Whens {
+						if err = c.condition(w.When, sc, "CASE/WHEN"); err != nil {
+							return
+						}
 					}
 				}
 			case *sqlir.WindowFunc:
@@ -3362,6 +3388,27 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
 }
 
+// condition refuses e standing where Postgres wants a boolean, as the
+// clause of, when e is of a type the check knows and that type is not
+// boolean. Postgres converts only an untyped literal or parameter there,
+// which the parser has already made a cast to boolean, and fails any other
+// type when it plans the statement (42804), while the run reads the value
+// at each row and returns nothing over no rows. An expression of string
+// literals and NULLs alone, such as COALESCE('t', NULL), is text there.
+func (c *columnChecker) condition(e sqlir.Expr, sc *colScope, clause string) error {
+	if e == nil || c.x.tx.db.kind.InnoDB() {
+		return nil // MySQL reads any value as a truth value
+	}
+	t := c.typer(sc)
+	t.untypedText = true
+	switch typ := t.reduce(t.of(e)); typ {
+	case "", "bool", "boolean", "unresolved column type", ambiguousDomain, constrainedDomain:
+		return nil
+	default:
+		return c.x.unsupported(fmt.Sprintf("a %s as the argument of %s, which Postgres wants a boolean for", typ, clause))
+	}
+}
+
 // arithmeticTypes refuses arithmetic over a boolean, a uuid or a
 // character type that Postgres has no operator for and fails when it plans
 // the statement (42883), while the evaluators check the operands only where
@@ -3641,6 +3688,9 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(oc.InferWhere, sc); err != nil {
 			return err
 		}
+		if err := c.condition(oc.InferWhere, sc, "WHERE"); err != nil {
+			return err
+		}
 		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set), false); err != nil {
 			return err
 		}
@@ -3653,6 +3703,9 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 			return err
 		}
 		if err := c.exprs(oc.Where, up); err != nil {
+			return err
+		}
+		if err := c.condition(oc.Where, up, "WHERE"); err != nil {
 			return err
 		}
 	}
@@ -3727,6 +3780,9 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if err := c.exprs(up.Where, sc); err != nil {
 		return err
 	}
+	if err := c.condition(up.Where, sc, "WHERE"); err != nil {
+		return err
+	}
 	return c.returning(up.Returning, sc, targetAlias(up.Table, up.Alias))
 }
 
@@ -3772,6 +3828,9 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 		return err
 	}
 	if err := c.exprs(del.Where, sc); err != nil {
+		return err
+	}
+	if err := c.condition(del.Where, sc, "WHERE"); err != nil {
 		return err
 	}
 	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
