@@ -87,7 +87,16 @@ func (x *sqlExec) checkSequenceCalls(stmt sqlir.Statement) error {
 		if err := x.rowSequenceCalls(assignedValues(st.Set)); err != nil {
 			return err
 		}
-		if err := x.writeItems(st.With, st.From, st.Table, st.Alias, st.Where, []any{st.Set, st.Where, st.Returning}); err != nil {
+		rest := []any{st.Set, st.Where, st.Returning}
+		if def := x.tx.db.defs[x.tx.db.resolve(st.Table)]; def != nil {
+			// SET col = DEFAULT computes the column's default per row.
+			for _, a := range st.Set {
+				if _, ok := a.Value.(*sqlir.Default); ok {
+					rest = append(rest, def.defaults[a.Column])
+				}
+			}
+		}
+		if err := x.writeItems(st.With, st.From, st.Table, st.Alias, st.Where, rest); err != nil {
 			return err
 		}
 		if err := x.rowSequenceCalls([]any{st.From, st.OrderBy, st.Limit}); err != nil {
@@ -435,6 +444,21 @@ func (x *sqlExec) topSequenceCalls(sel *sqlir.SelectStmt) error {
 			}
 			if x.effectfulQuery(sel.Larg, ctes, map[string]bool{}) || x.effectfulQuery(sel.Rarg, ctes, map[string]bool{}) {
 				return x.unsupported("a set operation under LIMIT or OFFSET over a query that locks rows or has effects, which Postgres runs only as far as LIMIT reads")
+			}
+		}
+	}
+	if len(sel.DistinctOn) > 0 {
+		// Postgres computes a select list item no DISTINCT ON key reads
+		// for the first row of each key only, where detest computes it
+		// for every row before it keeps the first.
+		for _, t := range sel.Targets {
+			if slices.ContainsFunc(sel.DistinctOn, func(e sqlir.Expr) bool { return reflect.DeepEqual(e, t.Expr) }) {
+				continue
+			}
+			for _, f := range sqlir.FuncCalls(t.Expr) {
+				if effectFuncs[f.Name] {
+					return x.unsupported(f.Name + " in the select list of a query with DISTINCT ON, outside its keys")
+				}
 			}
 		}
 	}

@@ -112,6 +112,7 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
 	mustExec(t, db, `INSERT INTO u VALUES (1, 10), (2, 20)`)
 	mustExec(t, db, `CREATE VIEW sv AS SELECT nextval('sq') AS v FROM u`)
+	mustExec(t, db, `CREATE TABLE ud (id int PRIMARY KEY, m bigint DEFAULT nextval('sq'))`)
 	for _, q := range []string{
 		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1`,
 		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s OFFSET 1`,
@@ -160,6 +161,10 @@ func TestPartlyReadItemWithEffects(t *testing.T) {
 		// A write computes SET for a row between the rows of its FROM.
 		`UPDATE u SET n = s.v + nextval('sq') FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id`,
 		`WITH c AS (SELECT id, nextval('sq') AS v FROM u) UPDATE u SET n = c.v + nextval('sq') FROM c WHERE u.id = c.id`,
+		`UPDATE ud SET m = DEFAULT FROM (SELECT id, nextval('sq') AS v FROM ud) s WHERE ud.id = s.id`,
+		// DISTINCT ON computes an item outside its keys for the first row
+		// of each key only.
+		`SELECT DISTINCT ON (n) n, nextval('sq') FROM u ORDER BY n`,
 	} {
 		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
