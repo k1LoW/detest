@@ -911,6 +911,28 @@ var cases = []difftest.Case{
 			difftest.S(0, `COMMIT`),
 		},
 	},
+	{
+		// Postgres resolves every relation when it analyzes the statement,
+		// so a missing one fails it even where no row reaches it.
+		Name: "a relation that does not exist fails the statement where no row reaches it",
+		Schema: []string{
+			`CREATE TABLE e (id int PRIMARY KEY)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (SELECT 1 FROM missing) FROM e`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE EXISTS (SELECT 1 FROM missing WHERE missing.id = e.id)`),
+			difftest.Q(0, `SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`),
+			difftest.Q(0, `WITH c AS (SELECT * FROM missing) SELECT 1`),
+			difftest.Q(0, `WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT 1`),
+			difftest.S(0, `UPDATE e SET id = (SELECT 1 FROM missing) WHERE false`),
+			difftest.S(0, `DELETE FROM e WHERE id IN (SELECT id FROM missing)`),
+			difftest.S(0, `INSERT INTO e SELECT 1 FROM missing WHERE false`),
+			difftest.S(0, `INSERT INTO e VALUES (1) ON CONFLICT (id) DO UPDATE SET id = (SELECT 1 FROM missing)`),
+			// A CTE of the name stands for the relation.
+			difftest.Q(0, `WITH missing AS (SELECT 1 AS id) SELECT (SELECT id FROM missing) FROM e`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
