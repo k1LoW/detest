@@ -185,9 +185,6 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 	// even where the branch it drops reads a column. The others it tests
 	// in their written order.
 	constant := func(e sqlir.Expr) (any, bool) {
-		if len(sqlir.Selects(e)) > 0 {
-			return nil, false
-		}
 		defer func(v map[sqlir.Expr]any) { x.foldValues = v }(x.foldValues)
 		x.foldValues = map[sqlir.Expr]any{}
 		r, err := (&folder{x: x, views: map[string]bool{}}).expr(e)
@@ -273,7 +270,7 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 			continue
 		}
 		if c := x.ctes[name]; c != nil {
-			if !slices.ContainsFunc(sel.With, func(cte sqlir.CTE) bool { return cte.Name == name }) || c.scope[name] != nil {
+			if !slices.ContainsFunc(sel.With, func(cte sqlir.CTE) bool { return cte.Name == name && cte.Select == c.def }) || c.scope[name] != nil {
 				continue
 			}
 		} else if x.isCTE(name) {
@@ -370,6 +367,9 @@ func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
 	rest := *q
 	rest.With, rest.From, rest.Joins = nil, nil, nil
 	subs := sqlir.Selects(&rest)[1:]
+	for _, j := range q.Joins {
+		subs = append(subs, sqlir.Selects(j.On)...)
+	}
 	inner := map[*sqlir.SelectStmt]bool{}
 	for _, s := range subs {
 		for _, in := range sqlir.Selects(s)[1:] {
