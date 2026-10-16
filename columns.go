@@ -1055,6 +1055,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 		if err := c.exprs(j.On, sc); err != nil {
 			return nil, err
 		}
+		if err := c.condition(j.On, sc, "JOIN/ON"); err != nil {
+			return nil, err
+		}
 	}
 	for _, t := range sel.Targets {
 		if t.Star && t.Table == "" && sel.From == nil {
@@ -1080,7 +1083,13 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 	if err := c.exprs(sel.Where, sc); err != nil {
 		return nil, err
 	}
+	if err := c.condition(sel.Where, sc, "WHERE"); err != nil {
+		return nil, err
+	}
 	if err := c.exprs(sel.Having, sc); err != nil {
+		return nil, err
+	}
+	if err := c.condition(sel.Having, sc, "HAVING"); err != nil {
 		return nil, err
 	}
 	// The names the select list gives itself; those a * gives are the
@@ -2765,6 +2774,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.x.numericDivs[e] = true
 				}
 				switch e.Op {
+				case "AND", "OR":
+					for _, x := range []sqlir.Expr{e.L, e.R} {
+						if err = c.condition(x, sc, e.Op); err != nil {
+							return
+						}
+					}
 				case "=", "<>", "!=", "<", "<=", ">", ">=":
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
 						return
@@ -2781,6 +2796,11 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 			case *sqlir.UnaryExpr:
 				if e.Op == "-" {
 					if err = c.arithmeticTypes(sc, "-", e.X); err != nil {
+						return
+					}
+				}
+				if e.Op == "NOT" {
+					if err = c.condition(e.X, sc, "NOT"); err != nil {
 						return
 					}
 				}
@@ -2809,6 +2829,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 							return
 						}
 						c.untypedOperands(sc, e.Arg, w.When)
+					}
+				} else {
+					for _, w := range e.Whens {
+						if err = c.condition(w.When, sc, "CASE/WHEN"); err != nil {
+							return
+						}
 					}
 				}
 			case *sqlir.WindowFunc:
@@ -3444,6 +3470,32 @@ func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
 }
 
+// condition refuses e standing where Postgres wants a boolean, as the
+// clause of, when e is of a type the check knows and that type is not
+// boolean. Postgres converts only an untyped literal or parameter there,
+// which the parser has already made a cast to boolean, and fails any other
+// type when it plans the statement (42804), while the run reads the value
+// at each row and returns nothing over no rows. An expression of string
+// literals and NULLs alone, such as COALESCE('t', NULL), is text there.
+func (c *columnChecker) condition(e sqlir.Expr, sc *colScope, clause string) error {
+	if e == nil || c.x.tx.db.kind.InnoDB() {
+		return nil // MySQL reads any value as a truth value
+	}
+	t := c.typer(sc)
+	t.untypedText = true
+	switch typ := t.reduce(t.of(e)); typ {
+	case "", "bool", "boolean", "unresolved column type", ambiguousDomain, constrainedDomain:
+		return nil
+	default:
+		if c.x.tx.checking && valueFamily(typ) == "" && !collatableType(typ) {
+			// CheckSQL has no schema, so a type it does not know may be a
+			// domain over boolean, which the run reduces.
+			return nil
+		}
+		return c.x.unsupported(fmt.Sprintf("a %s as the argument of %s, which Postgres wants a boolean for", typ, clause))
+	}
+}
+
 // arithmeticTypes refuses arithmetic over a boolean, a uuid or a
 // character type that Postgres has no operator for and fails when it plans
 // the statement (42883), while the evaluators check the operands only where
@@ -3682,6 +3734,9 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(row, values); err != nil {
 			return err
 		}
+		if err := c.textAssigned(ins.Table, ins.Columns, row, values); err != nil {
+			return err
+		}
 		c.assignedParams(ins.Table, ins.Columns, row)
 	}
 	if err := c.insertRows(ins); err != nil {
@@ -3734,7 +3789,13 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(assignedValues(oc.Set), up); err != nil {
 			return err
 		}
+		if err := c.textAssigned(ins.Table, assignedColumns(oc.Set), assignedValues(oc.Set), up); err != nil {
+			return err
+		}
 		if err := c.exprs(oc.Where, up); err != nil {
+			return err
+		}
+		if err := c.condition(oc.Where, up, "WHERE"); err != nil {
 			return err
 		}
 	}
@@ -3785,6 +3846,63 @@ func (c *columnChecker) textInsert(ins *sqlir.InsertStmt) error {
 	return nil
 }
 
+// textAssigned refuses an UPDATE's SET, an INSERT's VALUES row or an ON
+// CONFLICT DO UPDATE's SET that writes an expression of a text type, or of
+// name, to cols, a column of a type neither has an assignment cast to,
+// which Postgres fails when it plans the statement (42804), as textInsert
+// does for INSERT ... SELECT. The run would read the text as the column's
+// input at each row, and write nothing over no rows. A string literal, a
+// parameter or a NULL is not text here, as Postgres reads it as the
+// column's input, while a CASE or COALESCE of those alone, or a scalar
+// subquery returning one, is, as Postgres resolves those to text first.
+func (c *columnChecker) textAssigned(table string, cols []string, exprs []sqlir.Expr, sc *colScope) error {
+	db := c.x.tx.db
+	def := db.defs[db.resolve(table)]
+	if def == nil || db.kind.InnoDB() {
+		return nil
+	}
+	if len(cols) == 0 {
+		cols = def.columns
+	}
+	t := c.typer(sc)
+	t.untypedText = true
+	for i, e := range exprs {
+		if i >= len(cols) {
+			break
+		}
+		if col, ok := e.(*sqlir.Collate); ok && (untypedExpr(col.X) || isNullConst(col.X)) {
+			// The typer takes a literal under COLLATE as text, as Postgres
+			// does in a comparison, but an assignment leaves it for the
+			// column's input to read.
+			continue
+		}
+		typ := t.reduce(t.of(e))
+		if c.paramTypeFamily(typ) != "text" && typ != "name" {
+			continue
+		}
+		if target := def.types[cols[i]]; noTextAssignment(db, target) {
+			return c.x.unsupported(fmt.Sprintf("an assignment of a %s expression to the %s column %q", typ, target, cols[i]))
+		}
+	}
+	return nil
+}
+
+// noTextAssignment reports whether typ is a type text has no assignment
+// cast to. It lists the types detest checks rather than taking every type
+// but text, as Postgres casts text to some others on assignment, such as
+// name and a domain over text.
+func noTextAssignment(db *DB, typ string) bool {
+	base := db.baseType(typ)
+	if db.enumOf(base) != nil || timeRank[base] > 0 {
+		return true
+	}
+	switch paramFamily(base) {
+	case "integer", "float", "bool", "boolean", "uuid", "interval":
+		return true
+	}
+	return base == "json" || base == "jsonb"
+}
+
 func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if c.x.tx.db.checkTable(c.x.tx.db.resolve(up.Table)) != nil {
 		return nil // the missing table is the error, which the UPDATE reports first
@@ -3804,9 +3922,15 @@ func (c *columnChecker) update(up *sqlir.UpdateStmt) error {
 	if err := c.exprs(assignedValues(up.Set), sc); err != nil {
 		return err
 	}
+	if err := c.textAssigned(up.Table, assignedColumns(up.Set), assignedValues(up.Set), sc); err != nil {
+		return err
+	}
 	c.assignedParams(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
 	c.assignedInput(up.Table, assignedColumns(up.Set), assignedValues(up.Set))
 	if err := c.exprs(up.Where, sc); err != nil {
+		return err
+	}
+	if err := c.condition(up.Where, sc, "WHERE"); err != nil {
 		return err
 	}
 	return c.returning(up.Returning, sc, targetAlias(up.Table, up.Alias))
@@ -3854,6 +3978,9 @@ func (c *columnChecker) delete(del *sqlir.DeleteStmt) error {
 		return err
 	}
 	if err := c.exprs(del.Where, sc); err != nil {
+		return err
+	}
+	if err := c.condition(del.Where, sc, "WHERE"); err != nil {
 		return err
 	}
 	return c.returning(del.Returning, sc, targetAlias(del.Table, del.Alias))
