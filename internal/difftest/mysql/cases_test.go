@@ -1277,6 +1277,23 @@ var cases = []difftest.Case{
 			difftest.Q(0, `WITH missing AS (SELECT 1 AS id) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`),
 		},
 	},
+	{
+		// A CTE's name matches as case-sensitively as a table's, so a
+		// reference spelled in another case reads the table.
+		Name: "a CTE stands only for a reference spelled in its case",
+		Schema: []string{
+			`CREATE TABLE e (id INT PRIMARY KEY)` + binary,
+			`CREATE TABLE c (id INT PRIMARY KEY)` + binary,
+		},
+		Seed:  []string{`INSERT INTO c VALUES (1)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `WITH C AS (SELECT 5 AS id) SELECT id FROM c`),
+			difftest.Q(0, `WITH C AS (SELECT 5 AS id) SELECT id FROM C`),
+			difftest.Q(0, `WITH C AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM c)`),
+			difftest.Q(0, `WITH c AS (SELECT 5 AS id) SELECT id FROM C`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

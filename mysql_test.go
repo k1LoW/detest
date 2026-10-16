@@ -3276,8 +3276,13 @@ func TestMySQLFortyFifthReviewFindings(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())
 	var n int
-	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM foo").Scan(&n); err != nil || n != 1 {
+	// A CTE's name matches as case-sensitively as a table's, so foo is the
+	// table, empty in a database without a declared schema.
+	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM foo").Scan(&n); err != nil || n != 0 {
 		t.Errorf("CTE named in another case: %d, %v", n, err)
+	}
+	if err := db.QueryRow("WITH Foo AS (SELECT 1 AS x) SELECT COUNT(*) FROM Foo").Scan(&n); err != nil || n != 1 {
+		t.Errorf("CTE named in its case: %d, %v", n, err)
 	}
 	if _, err := db.Exec("CREATE TABLE two (a INT AUTO_INCREMENT, b INT AUTO_INCREMENT, PRIMARY KEY (a), UNIQUE KEY (b))"); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("two AUTO_INCREMENT columns: %v", err)
@@ -5111,6 +5116,8 @@ func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
 		`WITH c AS (SELECT * FROM missing) SELECT 1`,
 		`WITH c AS (SELECT * FROM missing) SELECT 1 FROM (WITH d AS (SELECT * FROM c) SELECT 1) x`,
 		`WITH missing AS (SELECT 1 AS id) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM missing)`,
+		// A CTE stands only for a name spelled in its case.
+		`WITH E AS (SELECT * FROM missing) SELECT 1 FROM e WHERE false AND EXISTS (SELECT 1 FROM e)`,
 	} {
 		mustExec(t, db, q)
 	}
