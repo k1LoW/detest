@@ -1087,6 +1087,9 @@ func (c *columnChecker) query(sel *sqlir.SelectStmt, outer *colScope) (colSet, e
 			for _, e := range col {
 				c.inputAs(e, types[i])
 			}
+			if err := c.valuesColumn(sel, i, types[i], col, sc); err != nil {
+				return nil, err
+			}
 		}
 		if c.valuesTypes == nil {
 			c.valuesTypes = map[*sqlir.SelectStmt][]string{}
@@ -1553,6 +1556,72 @@ func (c *columnChecker) readOutputs(sel *sqlir.SelectStmt) {
 			c.textParams([]*sqlir.Param{p}, []*sqlir.Param{p})
 		}
 	}
+}
+
+// valuesColumn records the kind of type typ the i-th column of the VALUES
+// query sel resolves to, whose rows col the run converts to it as it does
+// the branches of a CASE, and refuses a column of a type it does not
+// convert them to. Postgres reads a string literal or a parameter there as
+// typ, so '1' beside 2 is the integer 1 and '01' compares equal to it.
+func (c *columnChecker) valuesColumn(sel *sqlir.SelectStmt, i int, typ string, col []sqlir.Expr, sc *colScope) error {
+	x := c.x
+	if x.tx.db.kind.InnoDB() || typ == "" || !slices.ContainsFunc(col, untypedExpr) {
+		// Typed rows alone keep their own values, as before, rather than
+		// being refused where one of them is of a type the check does
+		// not know.
+		return nil
+	}
+	t := c.typer(sc)
+	const among = "the rows of a column of VALUES"
+	err, afterInput := x.unconvertedBranches(col, t, among)
+	if err != nil {
+		return err
+	}
+	if afterInput != nil {
+		c.untyped = append(c.untyped, func() error { return afterInput })
+	}
+	if err := x.branchParamsSent(typ, col); err != nil {
+		return err
+	}
+	kind := x.tx.db.branchKind(typ)
+	if base := x.tx.db.baseType(typ); timeRank[base] > 0 {
+		kind = base
+		// toTimeType converts each row, and refuses text in a format it
+		// does not parse, which inputAs leaves to the run.
+		for _, e := range col {
+			if text, ok := x.untypedText(e); ok {
+				c.untyped = append(c.untyped, func() error {
+					_, err := x.toTimeType(text, base)
+					return err
+				})
+			}
+		}
+	}
+	if kind == "" {
+		k, mismatch := numberBranchKind(col, t)
+		if mismatch {
+			return x.unsupported("text and a number among " + among)
+		}
+		if k != "" {
+			if err := x.numberBranchInput(k, col); err != nil {
+				return err
+			}
+		}
+		kind = k
+	}
+	if kind == "" {
+		return nil
+	}
+	if x.valuesKinds == nil {
+		x.valuesKinds = map[*sqlir.SelectStmt][]string{}
+	}
+	kinds := x.valuesKinds[sel]
+	if kinds == nil {
+		kinds = make([]string, len(sel.Values[0]))
+		x.valuesKinds[sel] = kinds
+	}
+	kinds[i] = kind
+	return nil
 }
 
 // readValues types as text the parameters in the columns of the VALUES
@@ -3527,7 +3596,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 // their own scope.
 func (c *columnChecker) branches(e sqlir.Expr, exprs []sqlir.Expr, sc *colScope) error {
 	subquery := func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }
-	err, afterInput := c.x.unconvertedBranches(exprs, c.typerWith(sc, subquery))
+	err, afterInput := c.x.unconvertedBranches(exprs, c.typerWith(sc, subquery), "the branches of CASE, COALESCE, GREATEST, LEAST, NULLIF, LAG or LEAD")
 	if err != nil {
 		return err
 	}

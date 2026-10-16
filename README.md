@@ -249,6 +249,7 @@ Statements of these forms fail with `detest.ErrUnsupportedSQL` rather than being
 *Writes*
 
 - A write to the columns of a `DEFERRABLE` primary key or unique constraint, a value other than `DEFAULT` for a `GENERATED ALWAYS` identity column without `OVERRIDING SYSTEM VALUE`, `OVERRIDING USER VALUE`, `nextval` of a sequence with `CACHE` above 1, and `ON CONFLICT ... WHERE` with a predicate other than the partial index's own
+- An `INSERT`, `UPDATE` or `DELETE` whose target is a view, which the servers write through to the table under it
 - `TRUNCATE` (MySQL runs it outside a transaction) and `COPY`
 
 *Schema*
