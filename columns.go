@@ -143,9 +143,12 @@ type columnChecker struct {
 	// uncertain are the queries that read around themselves only if a
 	// column whose owner is not known belongs to a query around them.
 	uncertain map[*sqlir.SelectStmt]bool
-	// rowSubqueries are the subqueries a row is compared with, by the
-	// number of columns they must have, which is the row's rather than one.
-	rowSubqueries map[*sqlir.SubQuery]int
+	// rowSubqueries are the subqueries a row is compared with, by that
+	// row, whose width they must have rather than one.
+	rowSubqueries map[*sqlir.SubQuery]*sqlir.RowExpr
+	// inSubqueries are the subqueries of IN (SELECT ...), by the value or
+	// the row compared with their columns.
+	inSubqueries map[*sqlir.SelectStmt]sqlir.Expr
 	// outCertain are the certain types of a query's output columns by
 	// position, and outCertainNamed by name (noteCertain).
 	outCertain      map[*sqlir.SelectStmt][]string
@@ -2742,9 +2745,9 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					if row, ok := e.L.(*sqlir.RowExpr); ok {
 						if q, ok := e.R.(*sqlir.SubQuery); ok {
 							if c.rowSubqueries == nil {
-								c.rowSubqueries = map[*sqlir.SubQuery]int{}
+								c.rowSubqueries = map[*sqlir.SubQuery]*sqlir.RowExpr{}
 							}
-							c.rowSubqueries[q] = len(row.Items)
+							c.rowSubqueries[q] = row
 						}
 					}
 				}
@@ -2809,6 +2812,12 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					}
 				}
 			case *sqlir.InExpr:
+				if e.Sub != nil {
+					if c.inSubqueries == nil {
+						c.inSubqueries = map[*sqlir.SelectStmt]sqlir.Expr{}
+					}
+					c.inSubqueries[e.Sub] = e.X
+				}
 				for _, item := range e.List {
 					if err = c.operandTypes(sc, e.X, item); err != nil {
 						return
@@ -2828,11 +2837,16 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					return
 				}
 				if e.Arg != nil {
-					for _, w := range e.Whens {
-						if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
-							return
+					// Postgres compares a row argument with each WHEN as
+					// records, whose operator it resolves only at a row, and
+					// the run refuses the row there.
+					if _, row := e.Arg.(*sqlir.RowExpr); !row {
+						for _, w := range e.Whens {
+							if err = c.operandTypes(sc, e.Arg, w.When); err != nil {
+								return
+							}
+							c.untypedOperands(sc, e.Arg, w.When)
 						}
-						c.untypedOperands(sc, e.Arg, w.When)
 					}
 				} else {
 					for _, w := range e.Whens {
@@ -2868,8 +2882,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				// Postgres compares two rows under NULLIF as records, whose
+				// operator it resolves only at a row, rather than field by
+				// field as a row comparison does.
 				if e.Name == "nullif" && len(e.Args) == 2 {
-					c.untypedOperands(sc, e.Args[0], e.Args[1])
+					if _, row := e.Args[0].(*sqlir.RowExpr); !row {
+						c.untypedOperands(sc, e.Args[0], e.Args[1])
+					}
 				}
 				if what := intervalBranchMismatch(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
@@ -3000,11 +3019,32 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				}
 				return
 			case *sqlir.SelectStmt:
-				_, err = c.query(e, sc)
+				if _, err = c.query(e, sc); err != nil {
+					return
+				}
+				if x, ok := c.inSubqueries[e]; ok {
+					want := 1
+					if row, ok := x.(*sqlir.RowExpr); ok {
+						want = len(row.Items)
+					}
+					// Postgres fails IN (SELECT ...) of other than the
+					// width of what it compares when it analyzes the
+					// statement.
+					if w, ok := c.knownWidth(e); ok && w != want {
+						err = c.x.unsupported("IN (subquery) whose columns do not match the left side")
+						return
+					}
+					err = c.subqueryOperandTypes(sc, x, e)
+				}
 				return
 			case *sqlir.SubQuery:
 				if _, err = c.query(e.Select, sc); err != nil {
 					return
+				}
+				if row, ok := c.rowSubqueries[e]; ok {
+					if err = c.subqueryOperandTypes(sc, row, e.Select); err != nil {
+						return
+					}
 				}
 				// Postgres fails a subquery of other than the width its place
 				// takes when it analyzes the statement, which the run refuses
@@ -3013,8 +3053,8 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 				if !ok {
 					return
 				}
-				if want, row := c.rowSubqueries[e]; row {
-					if w != want {
+				if row, ok := c.rowSubqueries[e]; ok {
+					if w != len(row.Items) {
 						err = c.x.unsupported("a row compared with a subquery of another number of columns")
 					}
 				} else if w != 1 {
@@ -3111,13 +3151,24 @@ func (c *columnChecker) branchParams(exprs []sqlir.Expr, typ string) {
 // statement that reaches no row, over an empty table or behind a
 // short-circuited OR, must still fail with the input's error.
 func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
+	if ra, rb, ok := rowPair(a, b); ok {
+		for i := range ra {
+			c.untypedOperands(sc, ra[i], rb[i])
+		}
+		return
+	}
 	if untypedExpr(a) == untypedExpr(b) {
 		return
 	}
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
+	c.untypedAs(a, c.x.tx.db.baseType(c.typer(sc).of(b)))
+}
+
+// untypedAs reads a, a string literal or a parameter, as the type typ of
+// what it is compared with, as untypedOperands does.
+func (c *columnChecker) untypedAs(a sqlir.Expr, typ string) {
 	if p, ok := a.(*sqlir.Param); ok {
 		c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 		c.timeParams(typ, a)
@@ -3467,15 +3518,143 @@ func typeSample(typ string) any {
 // operandTypes refuses a comparison of two typed operands Postgres has no
 // operator for, which untypedPair refuses only when it reaches a row.
 func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
+	_, aRow := a.(*sqlir.RowExpr)
+	_, bRow := b.(*sqlir.RowExpr)
+	if aRow != bRow {
+		other := b
+		if bRow {
+			other = a
+		}
+		if q, sub := other.(*sqlir.SubQuery); sub && c.rowSubqueries[q] != nil {
+			return nil // subqueryOperandTypes types a row against its subquery
+		}
+		return c.rowWithValue(c.typer(sc), other)
+	}
+	if ra, rb, ok := rowPair(a, b); ok {
+		// Postgres resolves the operator of each pair of fields.
+		for i := range ra {
+			if err := c.operandTypes(sc, ra[i], rb[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if untypedExpr(a) || untypedExpr(b) {
 		return nil
 	}
 	t := c.typer(sc)
-	fa, fb := valueFamily(t.reduce(t.of(a))), valueFamily(t.reduce(t.of(b)))
+	return c.familyTypes(t.reduce(t.of(a)), t.reduce(t.of(b)))
+}
+
+// familyTypes refuses a comparison of a value of type ta with one of type
+// tb, where Postgres has no operator between their families.
+func (c *columnChecker) familyTypes(ta, tb string) error {
+	fa, fb := valueFamily(ta), valueFamily(tb)
 	if fa == "" || fb == "" || fa == fb {
 		return nil
 	}
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
+}
+
+// rowWithValue refuses a comparison of a row with other, which is not one,
+// where Postgres has no operator between a record and other's type. A NULL
+// takes the record type, and a value of a type the check does not know may
+// be a record. Postgres reads a string literal there as a record's input,
+// which it does not implement (0A000), and a parameter as a record, which
+// detest does not model.
+func (c *columnChecker) rowWithValue(t typer, other sqlir.Expr) error {
+	if isNullConst(other) {
+		return nil
+	}
+	if untypedExpr(other) {
+		return c.x.unsupported("a string literal or a parameter compared with a row")
+	}
+	if f := valueFamily(t.reduce(t.of(other))); f != "" {
+		return c.x.unsupported(fmt.Sprintf("a comparison of a row with a %s", f))
+	}
+	return nil
+}
+
+// rowPair is the fields of a and b when both are rows of one width, which
+// Postgres compares pair by pair. A pair of fields that are both rows is
+// left out, as Postgres compares them as records, whose operator it
+// resolves only at a row.
+func rowPair(a, b sqlir.Expr) ([]sqlir.Expr, []sqlir.Expr, bool) {
+	ra, aok := a.(*sqlir.RowExpr)
+	rb, bok := b.(*sqlir.RowExpr)
+	if !aok || !bok || len(ra.Items) != len(rb.Items) {
+		return nil, nil, false
+	}
+	var fa, fb []sqlir.Expr
+	for i := range ra.Items {
+		_, ia := ra.Items[i].(*sqlir.RowExpr)
+		_, ib := rb.Items[i].(*sqlir.RowExpr)
+		if !ia || !ib {
+			fa, fb = append(fa, ra.Items[i]), append(fb, rb.Items[i])
+		}
+	}
+	return fa, fb, true
+}
+
+// subqueryOperandTypes refuses a comparison of x, a value or a row, with
+// the columns of sel, the subquery of IN (SELECT ...) or of a row
+// comparison, once the walk has checked sel, where Postgres has no operator
+// for a pair, and reads a string literal or a parameter among x's fields as
+// the type of its column.
+func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sqlir.SelectStmt) error {
+	fields := []sqlir.Expr{x}
+	if row, ok := x.(*sqlir.RowExpr); ok {
+		fields = row.Items
+	}
+	var types []string
+	if sel.SetOp != "" || len(sel.Values) > 0 {
+		// unsentOutputParam is not asked, as Postgres resolves a column
+		// whatever a parameter in it is bound to, and typing the column can
+		// only refuse the comparison.
+		types = c.itemTypes(sel)
+	} else {
+		var ok bool
+		if types, ok = c.readTypes(sel); !ok {
+			return nil
+		}
+		// Postgres resolves a parameter among the columns to text, as it
+		// does a string literal or a NULL there.
+		c.readOutputs(sel)
+	}
+	if len(types) != len(fields) {
+		return nil
+	}
+	t := c.typer(sc)
+	for i, f := range fields {
+		_, nested := f.(*sqlir.RowExpr)
+		if sel.SetOp == "" && len(sel.Values) == 0 && len(sel.Targets) == len(fields) && !sel.Targets[i].Star {
+			if _, row := sel.Targets[i].Expr.(*sqlir.RowExpr); row && !nested {
+				if err := c.rowWithValue(t, f); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if nested {
+			// A row's type is a record, which Postgres has no operator
+			// with any type the check knows.
+			if f := valueFamily(t.reduce(types[i])); f != "" {
+				return c.x.unsupported(fmt.Sprintf("a comparison of a row with a %s", f))
+			}
+			continue
+		}
+		if types[i] == "" {
+			continue
+		}
+		if untypedExpr(f) {
+			c.untypedAs(f, c.x.tx.db.baseType(types[i]))
+			continue
+		}
+		if err := c.familyTypes(t.reduce(t.of(f)), t.reduce(types[i])); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // condition refuses e standing where Postgres wants a boolean, as the
