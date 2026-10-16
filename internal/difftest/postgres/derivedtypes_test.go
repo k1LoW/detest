@@ -185,6 +185,23 @@ var derivedTypeCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a string literal in a column of VALUES that Postgres resolves to another type",
+		Schema: []string{`CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT (column1 = '01')::text FROM (VALUES ('1'), (2)) v ORDER BY 1`),
+			difftest.Q(0, `SELECT 1 FROM (VALUES ('1'), (2)) v WHERE column1 = '01'`),
+			difftest.Q(0, `SELECT column1 + 1 FROM (VALUES ('1'), (2)) v ORDER BY 1`),
+			difftest.Q(0, `SELECT (column1 = '01')::text FROM (VALUES ('1'), (2.5)) v ORDER BY 1`),
+			difftest.Q(0, `SELECT (column1 = '1')::text FROM (VALUES ('01'), (2), (NULL)) v ORDER BY 1`),
+			difftest.Q(0, `SELECT count(*) FROM (VALUES ('1', 'a'), (2, 'b')) v WHERE column1 IN ('01', '02')`),
+			difftest.Q(0, `WITH v AS (VALUES ('1'), (2)) SELECT count(*) FROM v WHERE column1 = '01'`),
+			difftest.Q(0, `SELECT (column1 < date '2024-01-02')::text FROM (VALUES ('2024-01-01'), (date '2024-01-03')) v ORDER BY 1`),
+			difftest.Q(0, `SELECT (column1 < 'ok')::text FROM (VALUES ('sad'), ('happy'::mood)) v ORDER BY 1`),
+			difftest.Q(0, `SELECT column1 FROM (VALUES ('x'), (2)) v`),
+		},
+	},
+	{
 		Name: "the columns of a view whose query has a *",
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
