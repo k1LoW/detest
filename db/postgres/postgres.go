@@ -542,7 +542,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			if len(parts) == 0 {
 				return nil, true, nil
 			}
-			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && builtinTypes[r.Newname] {
+			if r.RenameType == pg.ObjectType_OBJECT_DOMAIN && sqlir.PostgresBuiltinType(r.Newname) {
 				return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", r.Newname))
 			}
 			// Columns[0].Name is the bare name, which a dot in a quoted
@@ -577,7 +577,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := names[len(names)-1].GetString_().GetSval()
-		if builtinTypes[name] {
+		if sqlir.PostgresBuiltinType(name) {
 			// Postgres finds the built-in type first by its bare name,
 			// which is all a column of the domain keeps in detest.
 			return nil, true, c.unsupported(fmt.Sprintf("a domain named %q, as a built-in type is", name))
@@ -600,7 +600,7 @@ func (c *pgConv) schema(n *pg.Node) (changes []sqlir.SchemaChange, ok bool, err 
 			return nil, true, nil
 		}
 		name := parts[len(parts)-1]
-		if builtinTypes[name] || strings.HasPrefix(name, "pg_") {
+		if sqlir.PostgresBuiltinType(name) || strings.HasPrefix(name, "pg_") {
 			return nil, true, c.unsupported(fmt.Sprintf("an enum named %q, as a built-in type is", name))
 		}
 		if name != strings.ToLower(name) {
@@ -2590,38 +2590,6 @@ func constrainedDomain(d *pg.CreateDomainStmt) bool {
 	}
 	return len(d.GetTypeName().GetTypmods()) > 0
 }
-
-// builtinTypes are the names of pg_catalog's types a column is commonly
-// declared with, as typeName gives them, which a domain of the name would
-// shadow by its bare name in detest but not in Postgres.
-var builtinTypes = func() map[string]bool {
-	m := map[string]bool{"boolean": true, "smallint": true, "integer": true, "int": true, "bigint": true, "real": true, "decimal": true}
-	// The types of pg_catalog in Postgres 18, other than arrays and the
-	// catalogs' row types, which an unqualified name finds first.
-	for t := range map[string]bool{
-		"aclitem": true, "any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true,
-		"anycompatiblemultirange": true, "anycompatiblenonarray": true, "anycompatiblerange": true,
-		"anyelement": true, "anyenum": true, "anymultirange": true, "anynonarray": true, "anyrange": true,
-		"bit": true, "bool": true, "box": true, "bpchar": true, "bytea": true, "char": true, "cid": true,
-		"cidr": true, "circle": true, "cstring": true, "date": true, "datemultirange": true, "daterange": true,
-		"event_trigger": true, "fdw_handler": true, "float4": true, "float8": true, "gtsvector": true,
-		"index_am_handler": true, "inet": true, "int2": true, "int2vector": true, "int4": true,
-		"int4multirange": true, "int4range": true, "int8": true, "int8multirange": true, "int8range": true,
-		"internal": true, "interval": true, "json": true, "jsonb": true, "jsonpath": true, "language_handler": true,
-		"line": true, "lseg": true, "macaddr": true, "macaddr8": true, "money": true, "name": true, "numeric": true,
-		"nummultirange": true, "numrange": true, "oid": true, "oidvector": true, "path": true, "point": true,
-		"polygon": true, "record": true, "refcursor": true, "regclass": true, "regcollation": true,
-		"regconfig": true, "regdictionary": true, "regnamespace": true, "regoper": true, "regoperator": true,
-		"regproc": true, "regprocedure": true, "regrole": true, "regtype": true, "table_am_handler": true,
-		"text": true, "tid": true, "time": true, "timestamp": true, "timestamptz": true, "timetz": true,
-		"trigger": true, "tsm_handler": true, "tsmultirange": true, "tsquery": true, "tsrange": true,
-		"tstzmultirange": true, "tstzrange": true, "tsvector": true, "txid_snapshot": true, "unknown": true,
-		"uuid": true, "varbit": true, "varchar": true, "void": true, "xid": true, "xid8": true, "xml": true,
-	} {
-		m[t] = true
-	}
-	return m
-}()
 
 // nodeNames are the strings of nodes, such as the parts of a qualified name.
 func nodeNames(nodes []*pg.Node) []string {

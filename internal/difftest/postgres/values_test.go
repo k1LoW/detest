@@ -1152,6 +1152,22 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name: "LIKE and ILIKE take the character types and a domain over one",
+		Schema: []string{
+			`CREATE DOMAIN word AS text`,
+			`CREATE TABLE l (id int PRIMARY KEY, s text, v varchar(3), c char(2), nm name, w word)`,
+		},
+		Seed:  []string{`INSERT INTO l VALUES (1, 'ab', 'Ab', 'ab', 'ab', 'ab'), (2, 'xy', 'XY', 'xy', 'xy', 'xy')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE 'a%' AND v ILIKE 'a%' AND c LIKE 'a%' AND nm LIKE 'a%' AND w LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE v NOT ILIKE 'a%' AND w NOT LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE v OR c ILIKE nm ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE id::text LIKE '2' ORDER BY id`),
+			difftest.Q(0, `SELECT (NULL LIKE NULL) IS NULL, ('a' LIKE NULL) IS NULL`),
+		},
+	},
+	{
 		Name: "arithmetic over a scalar subquery types its target in its own scope",
 		Schema: []string{
 			`CREATE TABLE flags (id int PRIMARY KEY, n boolean)`,

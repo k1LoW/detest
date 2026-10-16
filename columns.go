@@ -3058,6 +3058,22 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if !c.x.tx.db.kind.InnoDB() {
+					if what := likeTypeMismatch(e, c.typerWith(sc, subquery), c.x.tx.checking); what != "" {
+						err = c.x.unsupported(what)
+						return
+					}
+					if strings.HasSuffix(e.Op, "LIKE") {
+						for _, x := range []sqlir.Expr{e.L, e.R} {
+							if p, ok := x.(*sqlir.Param); ok {
+								// Every operator likeTypeMismatch takes
+								// types a parameter as text.
+								c.params.comparedWith(p.Index, c.paramTypeFamily("text"))
+								c.typedParam(p)
+							}
+						}
+					}
+				}
 				if e.Op == "/" && slices.ContainsFunc([]sqlir.Expr{e, e.L, e.R}, func(x sqlir.Expr) bool {
 					// A numeric or a float operand divides as one whatever the
 					// other is, even where the result's type is unresolved.

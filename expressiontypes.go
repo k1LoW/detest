@@ -703,3 +703,33 @@ func concatTypeMismatch(b *sqlir.BinaryExpr, t typer) string {
 	}
 	return ""
 }
+
+// likeTypeMismatch refuses LIKE, ILIKE and their negations over an operand
+// Postgres has no ~~ or ~~* operator for, which it fails when it plans the
+// statement (42883), while the evaluator would match the printed value. Only
+// the character types are taken: bytea has an operator of its own too, but
+// only beside another bytea, and likeMatch reads a value as text, so it is
+// refused rather than modeled. A domain whose base type detest hides is
+// refused too, as a table with a column of one takes no write and so holds
+// no row a refusal could cost. Without a schema a type that is not built in
+// may be a domain over text and is left to run.
+func likeTypeMismatch(b *sqlir.BinaryExpr, t typer, schemaless bool) string {
+	switch b.Op {
+	case "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
+	default:
+		return ""
+	}
+	for _, e := range []sqlir.Expr{b.L, b.R} {
+		typ := t.reduce(t.of(e))
+		if typ == "" && rowValued(e) {
+			typ = "record"
+		}
+		switch {
+		case typ == "" || collatableType(typ):
+		case schemaless && !sqlir.PostgresBuiltinType(typ):
+		default:
+			return b.Op + " with a " + typ + " operand"
+		}
+	}
+	return ""
+}
