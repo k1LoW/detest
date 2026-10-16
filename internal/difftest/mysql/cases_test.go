@@ -1314,14 +1314,17 @@ var cases = []difftest.Case{
 			`CREATE TABLE u (id INT PRIMARY KEY, m INT)` + binary,
 			`CREATE VIEW tv AS SELECT * FROM t`,
 			`CREATE VIEW jv AS SELECT m FROM t JOIN u ON t.id = u.id`,
+			`CREATE TABLE w (a INT)` + binary,
+			`CREATE VIEW ov AS SELECT (SELECT 2 AS a UNION ALL SELECT 1 ORDER BY a+0 LIMIT 1) AS k FROM w`,
 			`ALTER TABLE t ADD COLUMN x INT`,
 			`ALTER TABLE t ADD COLUMN m INT`,
 		},
-		Seed:  []string{`INSERT INTO t (id, n, m) VALUES (1, 2, 7)`, `INSERT INTO u VALUES (1, 5)`},
+		Seed:  []string{`INSERT INTO t (id, n, m) VALUES (1, 2, 7)`, `INSERT INTO u VALUES (1, 5)`, `INSERT INTO w VALUES (5)`},
 		Conns: 1,
 		Steps: []difftest.Step{
 			difftest.Q(0, `SELECT * FROM tv`),
 			difftest.Q(0, `SELECT m FROM jv`),
+			difftest.Q(0, `SELECT k FROM ov`),
 		},
 	},
 	{

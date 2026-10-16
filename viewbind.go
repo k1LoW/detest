@@ -44,6 +44,10 @@ type viewWalk struct {
 	bind      bool
 	renameCol [3]string // table, old name, new name
 	renamed   bool      // a reference was renamed
+	// outputsOnly is set while walking the ORDER BY of a set operation,
+	// whose names are its output columns; MySQL reads them inside an
+	// expression too.
+	outputsOnly bool
 	renameRel [2]string // relation, new name
 	loose     map[string]bool
 }
@@ -143,6 +147,8 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 	if sel == nil {
 		return nil
 	}
+	defer func(saved bool) { w.outputsOnly = saved }(w.outputsOnly)
+	w.outputsOnly = false
 	if len(sel.With) > 0 {
 		m := map[string][]string{}
 		ctes = append(slices.Clip(ctes), m)
@@ -154,7 +160,7 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 		// The keys of ORDER BY can only name the output columns.
 		names := w.query(sel.Larg, outer, ctes)
 		w.query(sel.Rarg, outer, ctes)
-		w.trailing(sel, names, &viewScope{outer: outer}, ctes)
+		w.trailing(sel, names, &viewScope{outer: outer}, ctes, true)
 		return names
 	}
 	if len(sel.Values) > 0 {
@@ -164,7 +170,7 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 		for i := range sel.Values[0] {
 			names = append(names, fmt.Sprintf("column%d", i+1))
 		}
-		w.trailing(sel, names, sc, ctes)
+		w.trailing(sel, names, sc, ctes, false)
 		return names
 	}
 	sc := &viewScope{outer: outer}
@@ -203,16 +209,18 @@ func (w *viewWalk) query(sel *sqlir.SelectStmt, outer *viewScope, ctes []map[str
 	for _, e := range sel.DistinctOn {
 		w.key(e, names, sc, ctes)
 	}
-	w.trailing(sel, names, sc, ctes)
+	w.trailing(sel, names, sc, ctes, false)
 	return names
 }
 
 // trailing walks the ORDER BY, LIMIT and OFFSET of sel, which a set
 // operation and VALUES have too.
-func (w *viewWalk) trailing(sel *sqlir.SelectStmt, names []string, sc *viewScope, ctes []map[string][]string) {
+func (w *viewWalk) trailing(sel *sqlir.SelectStmt, names []string, sc *viewScope, ctes []map[string][]string, outputsOnly bool) {
+	w.outputsOnly = outputsOnly
 	for _, k := range sel.OrderBy {
 		w.key(k.Expr, names, sc, ctes)
 	}
+	w.outputsOnly = false
 	w.exprs(sel.Limit, sc, ctes)
 	w.exprs(sel.Offset, sc, ctes)
 }
@@ -404,7 +412,7 @@ func (w *viewWalk) exprs(n any, sc *viewScope, ctes []map[string][]string) {
 
 func (w *viewWalk) ref(r *sqlir.ColumnRef, sc *viewScope) {
 	if w.bind {
-		if r.Table == "" {
+		if r.Table == "" && !w.outputsOnly {
 			w.qualify(r, sc)
 		}
 		return
