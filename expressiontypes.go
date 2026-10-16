@@ -454,20 +454,36 @@ func textArgumentMismatch(f *sqlir.FuncCall, t typer) string {
 	case "round":
 		// round(x, n) is round(numeric, int4) only, and Postgres casts no
 		// float to numeric, nor a bigint to an integer, implicitly.
-		if len(f.Args) == 2 {
-			switch typ := operandType(t, f.Args[0]); typ {
-			case "float4", "float8", "real", "double precision":
+		if len(f.Args) > 0 {
+			switch typ := operandType(t, f.Args[0]); {
+			case typ == "" || typ == "unresolved column type":
+			case len(f.Args) == 2 && numberCategory(typ) == numberCategory("float8"):
 				return "round of a " + typ + " to a number of places"
+			case numberRank[typ] == 0:
+				return "round of a " + typ
 			}
+		}
+		if len(f.Args) == 2 {
 			switch typ := operandType(t, f.Args[1]); typ {
 			case "", "unresolved column type", "int", "int2", "int4", "integer", "smallint":
 			default:
 				return "round to a " + typ + " number of places"
 			}
 		}
-	case "setval":
-		// setval(regclass, bigint) and setval(regclass, bigint, boolean)
-		// are the only signatures.
+	case "nextval", "setval":
+		// The sequence is a regclass, which Postgres casts implicitly from
+		// these types only. setval(regclass, bigint) and setval(regclass,
+		// bigint, boolean) are setval's only signatures.
+		if len(f.Args) > 0 {
+			switch typ := operandType(t, f.Args[0]); typ {
+			case "", "unresolved column type", "regclass", "oid", "text", "varchar", "int", "int2", "int4", "int8", "integer", "smallint", "bigint":
+			default:
+				return f.Name + " of a " + typ + " sequence"
+			}
+		}
+		if f.Name == "nextval" {
+			break
+		}
 		for i, a := range f.Args[min(1, len(f.Args)):] {
 			typ := operandType(t, a)
 			switch {

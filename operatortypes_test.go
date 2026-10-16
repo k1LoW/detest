@@ -797,6 +797,10 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		{`SELECT power($1, abs(NULL)), $1 = s FROM t WHERE false`, []any{"1"}},
 		{`SELECT round($1, b), $1::numeric FROM t WHERE false`, []any{float64(2.46)}},
 		{`SELECT round(1.5, b) FROM t`, nil},
+		{`SELECT round(s, $1), $1::int FROM t WHERE false`, []any{int64(1)}},
+		{`SELECT round(s) FROM t WHERE false`, nil},
+		{`SELECT setval(false, $1), $1::bigint WHERE false`, []any{int64(10)}},
+		{`SELECT nextval(true) WHERE false`, nil},
 		{`SELECT setval('seq', $1, 0), $1::bigint`, []any{int64(10)}},
 		{`SELECT setval('seq', 10::numeric)`, nil},
 		// Postgres fails a name of no relation when it binds it (42P01).
@@ -820,6 +824,11 @@ func TestFunctionArgumentTypesParameter(t *testing.T) {
 		if _, err := db.Query(c.q, c.args...); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", c.q, err)
 		}
+	}
+	// abs of a parameter of no other type is abs(float8).
+	var v any
+	if err := db.QueryRow(`SELECT abs($1)`, int64(2000000)).Scan(&v); err != nil || v != float64(2000000) {
+		t.Errorf("abs($1): got %#v, %v, want a float64", v, err)
 	}
 	// Postgres fails the bind of input the argument's type does not take.
 	for _, q := range []string{`SELECT abs($1) FROM t WHERE false`, `SELECT power($1, 1::numeric) FROM t WHERE false`} {
