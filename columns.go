@@ -2764,8 +2764,13 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				// Postgres compares two rows under NULLIF as records, whose
+				// operator it resolves only at a row, rather than field by
+				// field as a row comparison does.
 				if e.Name == "nullif" && len(e.Args) == 2 {
-					c.untypedOperands(sc, e.Args[0], e.Args[1])
+					if _, row := e.Args[0].(*sqlir.RowExpr); !row {
+						c.untypedOperands(sc, e.Args[0], e.Args[1])
+					}
 				}
 				if what := intervalBranchMismatch(branchArgs(e), sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }); what != "" {
 					err = c.x.unsupported(what)
@@ -3454,9 +3459,9 @@ func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sq
 	}
 	var types []string
 	if sel.SetOp != "" || len(sel.Values) > 0 {
-		if c.unsentOutputParam(sel) {
-			return nil
-		}
+		// unsentOutputParam is not asked, as Postgres resolves a column
+		// whatever a parameter in it is bound to, and typing the column can
+		// only refuse the comparison.
 		types = c.itemTypes(sel)
 	} else {
 		var ok bool

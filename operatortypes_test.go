@@ -308,6 +308,16 @@ func TestRowComparisonFieldTypesBeforeAnyRow(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
 		}
 	}
+	// Postgres resolves a set operation's or VALUES' column whatever a
+	// parameter in it is bound to.
+	for _, q := range []string{
+		`SELECT (1, 2) IN (VALUES (1, $1)) WHERE false`,
+		`SELECT (1, 2) IN (VALUES ('x', $1), ('y', 2)) WHERE false`,
+	} {
+		if _, err := db.Query(q, int64(2)); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
 	// A string literal among a row's fields is read as the type of its
 	// pair's before any row (22P02).
 	for _, q := range []string{
