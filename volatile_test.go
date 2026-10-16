@@ -99,3 +99,101 @@ func TestPartlyReadCTEWithEffects(t *testing.T) {
 		}
 	}
 }
+
+// Postgres pulls the rows of a derived table, a view or a set operation's
+// query on demand, and computes the select list of the query reading them
+// between two of their rows, where detest runs them in full first. One
+// that locks rows or has effects is accepted only where every row of it is
+// read and the query reading it has no effects of its own.
+func TestPartlyReadItemWithEffects(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE SEQUENCE sq`)
+	mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 10), (2, 20)`)
+	mustExec(t, db, `CREATE VIEW sv AS SELECT nextval('sq') AS v FROM u`)
+	mustExec(t, db, `CREATE TABLE ud (id int PRIMARY KEY, m bigint DEFAULT nextval('sq'))`)
+	for _, q := range []string{
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s OFFSET 1`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s WHERE false`,
+		`SELECT s.v FROM u JOIN (SELECT nextval('sq') AS v) s ON true`,
+		`SELECT EXISTS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s)`,
+		`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a LIMIT 1) b`,
+		`SELECT v FROM sv LIMIT 1`,
+		`SELECT n FROM (SELECT n FROM u FOR UPDATE) s LIMIT 1`,
+		// The select list of the query reading it is computed between its
+		// rows.
+		`SELECT v, nextval('sq') AS w FROM (SELECT nextval('sq') AS v FROM u) s`,
+		`WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v, nextval('sq') AS w FROM c`,
+		`SELECT v, nextval('sq') AS w FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b`,
+		`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s WHERE v > random()`,
+		`SELECT v, nextval('sq') AS w FROM sv`,
+		// A set operation reads its queries as far as LIMIT asks.
+		`SELECT nextval('sq') FROM u UNION ALL SELECT 1 LIMIT 1`,
+		// Postgres computes the select list after the window functions,
+		// and below the row locks, for a row SKIP LOCKED skips too.
+		`SELECT nextval('sq'), row_number() OVER () FROM u LIMIT 1`,
+		`SELECT nextval('sq'), row_number() OVER () FROM u ORDER BY 1`,
+		`SELECT row_number() OVER (), (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u LIMIT 1`,
+		// So are the rows of VALUES.
+		`VALUES (nextval('sq')), (nextval('sq')) LIMIT 1`,
+		`SELECT id, nextval('sq') FROM u LIMIT 1 FOR UPDATE SKIP LOCKED`,
+		`SELECT id FROM u WHERE nextval('sq') > 0 LIMIT 1 FOR UPDATE`,
+		`SELECT u.id, (SELECT x.n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u OFFSET 1 FOR UPDATE`,
+		`SELECT u.id FROM u WHERE (SELECT x.n FROM u x WHERE x.id = u.id FOR UPDATE) > 0 LIMIT 1 FOR UPDATE`,
+		// Whether it computes a subquery for a row past LIMIT depends on
+		// its plan.
+		`SELECT id, (SELECT n FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY id LIMIT 1`,
+		// A write reads a derived table or a view of its FROM or USING as
+		// far as its join asks, which only the shape of a CTE there
+		// leaves to no plan.
+		`DELETE FROM u USING (SELECT nextval('sq') AS v) s WHERE u.id = s.v`,
+		`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id < s.id`,
+		`UPDATE u SET n = 1 FROM (SELECT id FROM u FOR UPDATE) s, sv WHERE u.id = s.id`,
+		`UPDATE u SET n = 1 FROM sv WHERE u.id > 0`,
+		// A LATERAL subquery runs again for each row, as far as the query
+		// reading it asks.
+		`SELECT s.id FROM LATERAL (SELECT id FROM u FOR UPDATE) s LIMIT 1`,
+		`DELETE FROM u USING LATERAL (SELECT id FROM u FOR UPDATE) s WHERE u.id = s.id`,
+		// A view read in full by one reference is not by another.
+		`SELECT v FROM sv UNION ALL (SELECT v FROM sv LIMIT 1)`,
+		// A write computes SET for a row between the rows of its FROM.
+		`UPDATE u SET n = s.v + nextval('sq') FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id`,
+		`WITH c AS (SELECT id, nextval('sq') AS v FROM u) UPDATE u SET n = c.v + nextval('sq') FROM c WHERE u.id = c.id`,
+		`UPDATE ud SET m = DEFAULT FROM (SELECT id, nextval('sq') AS v FROM ud) s WHERE ud.id = s.id`,
+		// DISTINCT ON computes an item outside its keys for the first row
+		// of each key only.
+		`SELECT DISTINCT ON (n) n, nextval('sq') FROM u ORDER BY n`,
+		`SELECT DISTINCT ON (n) n, (SELECT x.id FROM u x WHERE x.id = u.id FOR UPDATE) FROM u ORDER BY n, id`,
+		`SELECT row_number() OVER () FROM u WHERE nextval('sq') > 0 LIMIT 1`,
+		// A query no row is pulled from is still refused for a form
+		// detest does not run.
+		`SELECT * FROM (SELECT id FROM u ORDER BY count(*)) s LIMIT 0`,
+		// How often a join condition is tested is up to the plan.
+		`SELECT a.id FROM u a JOIN u b ON nextval('sq') + a.id + b.id > 0 LIMIT 1`,
+		`SELECT a.id FROM u a JOIN u b ON a.id = (SELECT x.id FROM u x WHERE x.id = b.id FOR UPDATE)`,
+	} {
+		if _, err := db.Query(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	for _, tt := range []struct {
+		q    string
+		want []string
+	}{
+		{`SELECT v FROM (SELECT nextval('sq') AS v FROM u) s ORDER BY v`, []string{"1", "2"}},
+		{`SELECT count(*) FROM (SELECT nextval('sq') AS v FROM u) s WHERE v > 0`, []string{"2"}},
+		{`SELECT v FROM sv ORDER BY v`, []string{"5", "6"}},
+		{`SELECT v FROM (SELECT v FROM (SELECT nextval('sq') AS v FROM u) a) b ORDER BY v`, []string{"7", "8"}},
+		{`SELECT nextval('sq') FROM u UNION ALL SELECT 1`, []string{"9", "10", "1"}},
+		// A CTE of a view's name reads the CTE.
+		{`WITH sv AS (SELECT 1 AS v) SELECT v FROM sv`, []string{"1"}},
+		{`SELECT nextval('sq')`, []string{"11"}},
+		{`UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id RETURNING u.n`, []string{"12", "13"}},
+	} {
+		if got := rowsOf(t, db, tt.q); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.q, got, tt.want)
+		}
+	}
+}

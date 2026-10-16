@@ -455,6 +455,17 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a row of columns where Postgres takes a record, beside arithmetic and functions of its fields",
+		Schema: []string{`CREATE TABLE r (id int PRIMARY KEY, a int)`},
+		Seed:   []string{`INSERT INTO r VALUES (1, 1), (2, NULL)`},
+		Conns:  1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id, ROW(id, a) IS NULL, ROW(id, a) = ROW(1, 1), -abs(id) + 1, lower(coalesce(a::text, 'x')) FROM r ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM r WHERE ROW(id, a) IS NOT NULL AND -a + 1 = 0`),
+			difftest.Q(0, `SELECT count(*) FROM r WHERE ROW(id, 1) IN (ROW(1, 1), ROW(2, 1))`),
+		},
+	},
+	{
 		Name:   "integer arithmetic and rounding",
 		Schema: valueSchema, Seed: valueSeed, Conns: 1,
 		Steps: []difftest.Step{
@@ -1164,6 +1175,22 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT count(*) FROM generate_series(1::big, 3)`),
 			difftest.Q(0, `SELECT count(*) FROM generate_series(1::tiny, 3)`),
 			difftest.Q(0, `SELECT count(*) FROM generate_series(NULL::big + 0, 3000000000)`),
+		},
+	},
+	{
+		Name: "LIKE and ILIKE take the character types and a domain over one",
+		Schema: []string{
+			`CREATE DOMAIN word AS text`,
+			`CREATE TABLE l (id int PRIMARY KEY, s text, v varchar(3), c char(2), nm name, w word)`,
+		},
+		Seed:  []string{`INSERT INTO l VALUES (1, 'ab', 'Ab', 'ab', 'ab', 'ab'), (2, 'xy', 'XY', 'xy', 'xy', 'xy')`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE 'a%' AND v ILIKE 'a%' AND c LIKE 'a%' AND nm LIKE 'a%' AND w LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE v NOT ILIKE 'a%' AND w NOT LIKE 'a%' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE s LIKE v OR c ILIKE nm ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM l WHERE id::text LIKE '2' ORDER BY id`),
+			difftest.Q(0, `SELECT (NULL LIKE NULL) IS NULL, ('a' LIKE NULL) IS NULL`),
 		},
 	},
 	{

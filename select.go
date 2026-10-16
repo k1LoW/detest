@@ -76,6 +76,26 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 		x.bounds = map[*sqlir.SelectStmt][2]int{}
 	}
 	x.bounds[sel] = [2]int{offset, limit}
+	if !x.tx.db.kind.InnoDB() {
+		// Postgres's LIMIT 0 never pulls a row from the plan under it, and
+		// a WHERE condition of no column of the block is a filter it tests
+		// once before the FROM items, so neither runs what is under it.
+		if limit == 0 {
+			return x.unpulled(sel)
+		}
+		scan, out, err := x.gated(sel, outer)
+		switch {
+		case err != nil:
+			return nil, nil, err
+		case !scan && out && isAggregate(sel):
+			if err := x.checkRelations(sel); err != nil {
+				return nil, nil, err
+			}
+			return x.compute(sel, nil, outer)
+		case !scan:
+			return x.unpulled(sel)
+		}
+	}
 	switch {
 	case sel.SetOp != "":
 		return x.evalSetOp(sel, outer)
@@ -98,10 +118,458 @@ func (x *sqlExec) evalSelect(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 	if err != nil {
 		return nil, nil, err
 	}
+	if !x.tx.db.kind.InnoDB() && !isAggregate(sel) && len(windowsOf(sel)) == 0 {
+		return x.pull(sel, rows, outer)
+	}
 	if rows, err = x.where(sel, rows, outer); err != nil {
 		return nil, nil, err
 	}
 	return x.compute(sel, rows, outer)
+}
+
+// gated tests the WHERE and HAVING conditions of sel that Postgres tests
+// once, before it reads any row. scan is false when one is not true, and
+// out is false when one of HAVING is, so that not even the single row of
+// an aggregate without GROUP BY comes out. Postgres takes a
+// condition of no column of the block and no volatile function out of the
+// scan as a one-time filter, and moves one of HAVING with no aggregate or
+// subquery to WHERE, so when it is false the FROM items never run, and
+// when it fails it fails over no rows too. A condition counts only when
+// each subquery in it reads no column around it, as a column of a query
+// around the block is not told apart from one of the block's here.
+func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err error) {
+	if sel.SetOp != "" || sel.Values != nil {
+		return true, true, nil
+	}
+	// A column qualified by a name no FROM item of the block has is one of
+	// a query around it, which is a constant while the block runs. An
+	// unqualified one may be either, and counts as the block's.
+	own := map[string]bool{}
+	for _, t := range fromRefs(sel) {
+		own[t.Alias] = true
+		if t.Alias == "" {
+			own[relname(t.Name)] = true
+			if t.Func != nil {
+				own[t.Func.Name] = true
+			}
+		}
+	}
+	local := func(c *sqlir.ColumnRef) bool { return c.Table == "" || own[c.Table] }
+	once := func(e sqlir.Expr, having bool) bool {
+		if e == nil || slices.ContainsFunc(sqlir.BlockColumnRefs(e), local) || hasAggregate(e) {
+			return false
+		}
+		if slices.ContainsFunc(sqlir.FuncCalls(e), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) {
+			return false
+		}
+		subs := sqlir.Selects(e)
+		if having && len(subs) > 0 {
+			return false
+		}
+		covered := map[*sqlir.SelectStmt]bool{}
+		for _, q := range subs {
+			if x.uncorrelated[q] {
+				for _, in := range sqlir.Selects(q) {
+					covered[in] = true
+				}
+			}
+		}
+		return !slices.ContainsFunc(subs, func(q *sqlir.SelectStmt) bool { return !covered[q] })
+	}
+	type cond struct {
+		e      sqlir.Expr
+		having bool
+	}
+	// Postgres folds a condition of constants when it plans the statement,
+	// so a false one empties the filter before a subquery beside it runs,
+	// even where the branch it drops reads a column. The others it tests
+	// in their written order.
+	constant := func(e sqlir.Expr) (any, bool) {
+		defer func(v map[sqlir.Expr]any) { x.foldValues = v }(x.foldValues)
+		x.foldValues = map[sqlir.Expr]any{}
+		r, err := (&folder{x: x, views: map[string]bool{}}).expr(e)
+		if err != nil || r.c != fixed || !r.hasVal {
+			return nil, false
+		}
+		return r.val, true
+	}
+	var conds []cond
+	for _, e := range splitAnd(sel.Where) {
+		conds = append(conds, cond{e, false})
+	}
+	for _, e := range splitAnd(sel.Having) {
+		conds = append(conds, cond{e, true})
+	}
+	var rest []cond
+	scan, out = true, true
+	for _, c := range conds {
+		if c.e == nil {
+			continue
+		}
+		v, ok := constant(c.e)
+		switch {
+		case !ok:
+			if once(c.e, c.having) {
+				rest = append(rest, c)
+			}
+		case derefValue(v) != true:
+			scan = false
+			out = out && !c.having
+		}
+	}
+	if !scan {
+		return false, out, nil
+	}
+	if len(rest) > 0 {
+		// Postgres resolves every relation when it parses the statement,
+		// before a subquery of the filter may lock rows.
+		if err := x.checkRelations(sel); err != nil {
+			return false, false, err
+		}
+	}
+	for _, c := range rest {
+		if ok, err := x.evalBool(c.e, &env{outer: outer}); err != nil || !ok {
+			return false, !c.having, err
+		}
+	}
+	return true, true, nil
+}
+
+// unpulled is the result of sel when Postgres pulls no row from it, its
+// columns and no rows. A relation that does not exist still fails it, as
+// Postgres fails it when it parses the statement.
+func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
+	if err := x.checkRelations(sel); err != nil {
+		return nil, nil, err
+	}
+	// evalSelect declared sel's own CTEs already.
+	return x.columnsIn(sel), nil, nil
+}
+
+// checkRelations fails on a table sel or a query inside it reads that does
+// not exist, without running anything. A name is a CTE where a WITH
+// declares it in scope, as freeNames finds, or where one around sel does.
+// sel's own CTEs are declared already, and a name of one read inside its
+// own definition, where it is not in scope, reads what the name meant
+// around sel.
+func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
+	// freeNames gives the name of a function item too.
+	plain := map[string]bool{}
+	for _, q := range sqlir.Selects(sel) {
+		for _, t := range fromRefs(q) {
+			if t.Func == nil && t.Sub == nil {
+				plain[t.Name] = true
+			}
+		}
+	}
+	for _, name := range freeNames(sel) {
+		if !plain[name] {
+			continue
+		}
+		if c := x.ctes[name]; c != nil {
+			if !slices.ContainsFunc(sel.With, func(cte sqlir.CTE) bool { return cte.Name == name && cte.Select == c.def }) || c.scope[name] != nil {
+				continue
+			}
+		} else if x.isCTE(name) {
+			continue
+		}
+		if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
+			return err
+		}
+	}
+	// So does a sequence named by a literal, which Postgres reads as a
+	// regclass when it parses the call.
+	for _, f := range sqlir.FuncCallsIn(sel) {
+		if f.Name != "nextval" && f.Name != "setval" && f.Name != "currval" || len(f.Args) == 0 {
+			continue
+		}
+		arg := f.Args[0]
+		if cast, ok := arg.(*sqlir.Cast); ok && strings.EqualFold(cast.Type, "regclass") {
+			arg = cast.X
+		}
+		c, ok := arg.(*sqlir.Const)
+		if !ok {
+			continue
+		}
+		name, ok := c.Value.(string)
+		if !ok {
+			continue
+		}
+		if seq := x.tx.db.seqName(name); !x.tx.db.isRelation(seq) {
+			if err := x.tx.db.missingSequence(seq); err != nil {
+				return err
+			}
+		}
+	}
+	// So does a column alias list longer than its query's columns, which
+	// tableRows checks before it runs the query.
+	return x.aliasWidths(sel, true)
+}
+
+// aliasWidths fails on a column alias list of a derived table or a
+// function under q longer than its columns, and refuses a function detest
+// does not run, without running anything. The columns
+// are taken in the scope of the CTEs each query sees, q's own declared
+// already when declared is set.
+func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
+	if q == nil {
+		return nil
+	}
+	if len(q.With) > 0 && !declared {
+		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(x.ctes)
+		x.ctes = maps.Clone(x.ctes)
+		if x.ctes == nil {
+			x.ctes = map[string]*cteCell{}
+		}
+		x.withCTEs(q, nil)
+	}
+	for _, cte := range q.With {
+		c := x.ctes[cte.Name]
+		if c == nil || c.def != cte.Select {
+			continue // not read, so never run
+		}
+		saved := x.ctes
+		x.ctes = maps.Clone(c.scope)
+		err := x.aliasWidths(cte.Select, false)
+		x.ctes = saved
+		if err != nil {
+			return err
+		}
+	}
+	if len(q.GroupBy) == 0 && q.Having == nil && orderOnlyAggregate(q) && !slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return hasAggregate(t.Expr) }) {
+		return x.unsupported("an aggregate only in ORDER BY") // as evalSelect refuses it
+	}
+	if q.Lock != nil {
+		// planLocking resolves the tables of FOR UPDATE OF, which Postgres
+		// fails on when it parses the statement.
+		if _, err := x.planLocking(q); err != nil {
+			return err
+		}
+	}
+	if q.SetOp != "" {
+		if err := x.aliasWidths(q.Larg, false); err != nil {
+			return err
+		}
+		return x.aliasWidths(q.Rarg, false)
+	}
+	for _, t := range fromRefs(q) {
+		if t.Func != nil {
+			if err := x.checkFunctionItem(t); err != nil {
+				return err
+			}
+		}
+		if t.Sub == nil {
+			continue
+		}
+		if len(t.Columns) > 0 {
+			names := outputNames(t.Sub)
+			if names == nil {
+				names = x.columnsOf(t.Sub) // a * whose width only its items give
+			}
+			if len(t.Columns) > len(names) {
+				return x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", t.Alias, len(names), len(t.Columns)), t.Alias, "", "")
+			}
+		}
+		if err := x.aliasWidths(t.Sub, false); err != nil {
+			return err
+		}
+	}
+	// The queries of its expressions, each in this scope.
+	rest := *q
+	rest.With, rest.From, rest.Joins = nil, nil, nil
+	subs := sqlir.Selects(&rest)[1:]
+	for _, j := range q.Joins {
+		subs = append(subs, sqlir.Selects(j.On)...)
+	}
+	inner := map[*sqlir.SelectStmt]bool{}
+	for _, s := range subs {
+		for _, in := range sqlir.Selects(s)[1:] {
+			inner[in] = true
+		}
+	}
+	for _, s := range subs {
+		if inner[s] {
+			continue
+		}
+		if err := x.aliasWidths(s, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// columnsOf are the output columns of sel without running it, for a query
+// Postgres pulls no row from. The CTEs sel declares are declared for its
+// own items, unrun, and taken back after.
+func (x *sqlExec) columnsOf(sel *sqlir.SelectStmt) []string {
+	if len(sel.With) > 0 {
+		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(x.ctes)
+		x.ctes = maps.Clone(x.ctes)
+		if x.ctes == nil {
+			x.ctes = map[string]*cteCell{}
+		}
+		x.withCTEs(sel, nil)
+	}
+	return x.columnsIn(sel)
+}
+
+// columnsIn is columnsOf for a query whose CTEs are declared already.
+func (x *sqlExec) columnsIn(sel *sqlir.SelectStmt) []string {
+	if sel.SetOp != "" && sel.Larg != nil {
+		return x.columnsOf(sel.Larg)
+	}
+	if len(sel.Values) > 0 {
+		return outputNames(sel)
+	}
+	return outKeys(x.outputCols(sel, nil))
+}
+
+// pull runs the WHERE and the select list of a query that neither
+// aggregates nor has window functions row by row, as Postgres pulls the
+// rows on demand. The select list of a row is computed right after its
+// WHERE, before the next row's, and without ORDER BY or DISTINCT no row
+// past OFFSET and LIMIT is read. Under ORDER BY, Postgres computes a
+// select list item with a volatile function after the sort, for the rows
+// LIMIT lets through and those OFFSET skips, unless ORDER BY or DISTINCT
+// reads it.
+//
+// Under ORDER BY with LIMIT, Postgres may skip the other items for the
+// rows past LIMIT too, by an index scan in place of the sort or by an
+// item's cost, and it pulls the rows of a FROM item only as far as LIMIT
+// asks, where detest runs the item in full. Neither is modeled, as which
+// rows Postgres reaches first there depends on its plan, so that a failure
+// in a row past them, such as a division by zero, cannot be relied on
+// either way. The forms whose effects would differ are refused by
+// topSequenceCalls and partlyRead.
+func (x *sqlExec) pull(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string, []Row, error) {
+	offset, limit, err := x.offsetLimit(sel, outer)
+	if err != nil {
+		return nil, nil, err
+	}
+	sorted := len(sel.OrderBy) > 0 || sel.Distinct || len(sel.DistinctOn) > 0
+	ocols := x.outputCols(sel, rows)
+	cols := outKeys(ocols)
+	later := x.postponed(sel, ocols)
+	value := func(it *selItem, i int) (any, error) {
+		v, err := x.value(it, sel.Targets[i].Expr)
+		if err != nil {
+			return nil, x.unsupportedExpr(err, "in the select list")
+		}
+		return v, nil
+	}
+	var items []*selItem
+	for _, r := range rows {
+		if !sorted && limit >= 0 && len(items) >= offset+limit {
+			break
+		}
+		ctx := r.env(outer)
+		if sel.Where != nil {
+			ok, err := x.evalBool(sel.Where, ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		it := &selItem{ctx: ctx, jr: r}
+		o, err := outputRow(ocols, r, func(i int) (any, error) {
+			if later[i] {
+				return nil, nil
+			}
+			return value(it, i)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		it.out = o
+		items = append(items, it)
+	}
+	// Postgres sorts by the select list item an ORDER BY key matches, so
+	// a volatile key is computed once with it, where outputValue would
+	// compute it again.
+	keys := slices.Clone(sel.OrderBy)
+	for i, k := range keys {
+		if !slices.ContainsFunc(sqlir.FuncCalls(k.Expr), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) {
+			continue
+		}
+		for p, c := range ocols {
+			if c.alias == "" && c.col == "" && reflect.DeepEqual(sel.Targets[c.target].Expr, k.Expr) {
+				pos := &sqlir.Const{Value: int64(p + 1)}
+				x.noteOutput(pos, k.Expr) // so the key keeps its collation
+				keys[i].Expr = pos
+				break
+			}
+		}
+	}
+	if err := x.sortItems(keys, items, cols); err != nil {
+		return nil, nil, err
+	}
+	if items, err = x.distinct(sel, items, cols); err != nil {
+		return nil, nil, err
+	}
+	if limit >= 0 && offset+limit < len(items) {
+		items = items[:offset+limit]
+	}
+	if len(later) > 0 {
+		for _, it := range items {
+			for _, c := range ocols {
+				if !later[c.target] || c.alias != "" || c.col != "" {
+					continue
+				}
+				v, err := value(it, c.target)
+				if err != nil {
+					return nil, nil, err
+				}
+				it.out[c.key] = v
+			}
+		}
+	}
+	items = items[min(offset, len(items)):]
+	out := make([]Row, len(items))
+	for i, it := range items {
+		out[i] = it.out
+	}
+	return cols, out, nil
+}
+
+// postponed are the select list items Postgres computes after ORDER BY:
+// those with a volatile function that no ORDER BY key reads, by the item's
+// name, its position or the same expression. DISTINCT reads every item.
+func (x *sqlExec) postponed(sel *sqlir.SelectStmt, ocols []outCol) map[int]bool {
+	if len(sel.OrderBy) == 0 || sel.Distinct || len(sel.DistinctOn) > 0 {
+		return nil
+	}
+	out := map[int]bool{}
+	for p, c := range ocols {
+		if c.alias != "" || c.col != "" {
+			continue
+		}
+		t := sel.Targets[c.target]
+		if !slices.ContainsFunc(sqlir.FuncCalls(t.Expr), func(f *sqlir.FuncCall) bool { return effectFuncs[f.Name] }) {
+			continue
+		}
+		key := slices.ContainsFunc(sel.OrderBy, func(k sqlir.OrderKey) bool {
+			switch v := k.Expr.(type) {
+			case *sqlir.ColumnRef:
+				if v.Table == "" && v.Column == c.key {
+					return true
+				}
+			case *sqlir.Const:
+				if n, ok := v.Value.(int64); ok && int(n) == p+1 {
+					return true
+				}
+			}
+			return reflect.DeepEqual(k.Expr, t.Expr)
+		})
+		if !key {
+			out[c.target] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // compute is the rest of a query over the rows its FROM and WHERE found:
@@ -121,6 +589,17 @@ func (x *sqlExec) compute(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]str
 	if wins := windowsOf(sel); len(wins) > 0 {
 		if err := x.computeWindows(wins, items); err != nil {
 			return nil, nil, err
+		}
+	}
+	if !x.tx.db.kind.InnoDB() && len(sel.OrderBy) == 0 && !sel.Distinct && len(sel.DistinctOn) == 0 {
+		// Postgres projects a group or a row of the window functions as
+		// LIMIT pulls it, so one past LIMIT is never computed.
+		offset, limit, err := x.offsetLimit(sel, outer)
+		if err != nil {
+			return nil, nil, err
+		}
+		if limit >= 0 && offset+limit < len(items) {
+			items = items[:offset+limit]
 		}
 	}
 	cols, err := x.projectItems(sel, items, rows)
@@ -675,6 +1154,24 @@ func (x *sqlExec) evalLocking(sel *sqlir.SelectStmt, plan lockPlan, outer *env) 
 		x.consistent = false
 		if stop, err = x.rangeLocks(sel, plan); err != nil {
 			return nil, nil, err
+		}
+	}
+	if !x.tx.db.kind.InnoDB() && (sel.Limit != nil || sel.Offset != nil) {
+		// Its WHERE runs for the rows it pulls, which LIMIT stops, where
+		// detest tests every row before it locks any. A subquery that
+		// reads no column around it runs once in both.
+		once := map[*sqlir.SelectStmt]bool{}
+		for _, q := range sqlir.Selects(sel.Where) {
+			if x.uncorrelated[q] {
+				for _, in := range sqlir.Selects(q) {
+					once[in] = true
+				}
+			}
+		}
+		for _, q := range sqlir.Selects(sel.Where) {
+			if !once[q] && x.effectfulQuery(q, nil, map[string]bool{}) {
+				return nil, nil, x.unsupported("a correlated subquery that locks rows in the WHERE of a locking read with LIMIT or OFFSET")
+			}
 		}
 	}
 	rows, err := x.scan(sel, outer)
@@ -1561,6 +2058,10 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 		if cols, ok := x.queryCols[t.Sub]; ok {
 			return cols
 		}
+		if rows == nil {
+			// A query Postgres pulled no row from, which did not run.
+			return renamedCols(x.columnsOf(t.Sub), t.Columns)
+		}
 	case t.Func != nil:
 		// The value column, then the ordinality one, as functionRows names
 		// them, with no rows too.
@@ -1584,12 +2085,37 @@ func (x *sqlExec) itemColumns(t sqlir.TableRef, alias string, rows []jrow) []str
 			if cols, ok := x.cteColumns(t.Name); ok {
 				return cols
 			}
+			if c := x.ctes[t.Name]; c != nil && rows == nil {
+				// In the scope it was declared in, which does not hold
+				// itself, as runCTE runs it.
+				saved := x.ctes
+				x.ctes = maps.Clone(c.scope)
+				cols := x.columnsOf(c.def)
+				x.ctes = saved
+				return cols
+			}
+			if cte, ok := x.pendingCTEs[t.Name]; ok && rows == nil {
+				// Without the reader's CTEs, as runPendingCTE runs it.
+				saved := x.ctes
+				x.ctes = map[string]*cteCell{}
+				cols := x.columnsOf(cte.Select)
+				x.ctes = saved
+				return cols
+			}
 			break
 		}
 		table := x.tx.db.resolve(t.Name)
 		if v := x.tx.db.views[table]; v != nil {
 			if cols, ok := x.queryCols[v.View]; ok {
 				return cols
+			}
+			if rows == nil {
+				// Without the statement's CTEs, as viewRows runs it.
+				ctes, pending, wrows, wcols := x.ctes, x.pendingCTEs, x.writeRows, x.writeCols
+				x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = map[string]*cteCell{}, nil, nil, nil
+				cols := x.columnsOf(v.View)
+				x.ctes, x.pendingCTEs, x.writeRows, x.writeCols = ctes, pending, wrows, wcols
+				return renamedCols(cols, v.ViewColumns)
 			}
 			break
 		}

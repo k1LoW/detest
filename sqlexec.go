@@ -796,15 +796,16 @@ func (x *sqlExec) fill(table string, st *sqlir.CreateTableAsStmt, selCols []stri
 
 func (x *sqlExec) unsupported(what string) error { return unsupported(what, x.query) }
 
-// functionRows evaluates a set-returning function in FROM.
-func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
+// checkFunctionItem refuses a function in FROM detest does not run, and
+// fails on a column alias list wider than its columns, before any row.
+func (x *sqlExec) checkFunctionItem(t sqlir.TableRef) error {
 	// PostgreSQL resolves the function signature before evaluating arguments,
 	// so a refused call must not advance sequences or acquire advisory locks.
 	if t.Func.Name != "generate_series" {
-		return nil, x.unsupported("set-returning function " + t.Func.Name + " in FROM")
+		return x.unsupported("set-returning function " + t.Func.Name + " in FROM")
 	}
 	if len(t.Func.Args) != 2 && len(t.Func.Args) != 3 {
-		return nil, x.unsupported("generate_series with other than two or three arguments")
+		return x.unsupported("generate_series with other than two or three arguments")
 	}
 	// The functions detest runs in FROM give one column, and the ordinality
 	// one more.
@@ -813,7 +814,15 @@ func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
 		width++
 	}
 	if len(t.Columns) > width {
-		return nil, x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("too many column aliases specified for function %s", t.Func.Name), "", "", "")
+		return x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("too many column aliases specified for function %s", t.Func.Name), "", "", "")
+	}
+	return nil
+}
+
+// functionRows evaluates a set-returning function in FROM.
+func (x *sqlExec) functionRows(t sqlir.TableRef, outer *env) ([]Row, error) {
+	if err := x.checkFunctionItem(t); err != nil {
+		return nil, err
 	}
 	en := outer
 	if en == nil {

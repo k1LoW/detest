@@ -912,6 +912,97 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name: "a query computes only the rows it pulls",
+		Schema: []string{
+			`CREATE TABLE u (id int PRIMARY KEY, n int)`,
+			`CREATE TABLE e (id int PRIMARY KEY)`,
+			`CREATE TABLE w (v bigint PRIMARY KEY, id int)`,
+			`CREATE SEQUENCE sq`,
+			`CREATE VIEW uv AS SELECT * FROM u`,
+		},
+		Seed:  []string{`INSERT INTO u VALUES (1, 1), (2, 0), (3, 0)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			// Past LIMIT, no row is read or computed.
+			difftest.Q(0, `SELECT nextval('sq') FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u WHERE id > 1 LIMIT 1`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u OFFSET 1 LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT 1 / n FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT id FROM u WHERE 1 / n = 1 LIMIT 1`),
+			// A row's select list is computed right after its WHERE.
+			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE nextval('sq') > 0`),
+			// LIMIT 0 pulls no row, whatever is under it.
+			difftest.Q(0, `SELECT 1 / n FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT id, 1 / n FROM u ORDER BY id LIMIT 0`),
+			difftest.Q(0, `SELECT sum(1 / n) FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u LIMIT 0`),
+			// A condition of no column is tested before the FROM items.
+			difftest.Q(0, `SELECT * FROM (SELECT 1 / n FROM u) s WHERE false`),
+			difftest.Q(0, `SELECT count(*) FROM (SELECT 1 / n AS v FROM u) s WHERE 1 = 0`),
+			difftest.Q(0, `SELECT sum(1 / n) FROM u HAVING false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE u.id = e.id + 2) > 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE EXISTS (SELECT 1 / n FROM u WHERE u.id = e.id + 2)`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u WHERE id > 0 AND false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND 1 IN (2)`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND abs(1) = 0`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND CASE WHEN true THEN false ELSE e.id > 0 END`),
+			// A condition of a query around the block only is tested once
+			// for each time the block runs.
+			difftest.Q(0, `SELECT (SELECT v FROM (SELECT 1 / n AS v FROM u) s WHERE o.id = 0) FROM u o WHERE o.id = 1`),
+			difftest.Q(0, `SELECT 1 FROM missing WHERE EXISTS (SELECT id FROM u)`),
+			difftest.Q(0, `SELECT * FROM (SELECT * FROM u) s(a, b, c) LIMIT 0`),
+			difftest.Q(0, `SELECT a FROM generate_series(1, 2) AS s(a, b) LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM u a JOIN u b ON (SELECT x FROM (SELECT 1) s(x, y)) = 1 LIMIT 0`),
+			difftest.Q(0, `SELECT (SELECT id FROM u FOR UPDATE OF missing) LIMIT 0`),
+			difftest.Q(0, `SELECT count(*) FROM u WHERE 1 / n > 0 HAVING CASE WHEN true THEN false ELSE count(*) > 0 END`),
+			difftest.Q(0, `WITH nt AS (SELECT 1 AS id) SELECT (WITH nt AS (SELECT * FROM nt) SELECT 1 LIMIT 0)`),
+			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND CASE WHEN true THEN false ELSE (SELECT true) END`),
+			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS a, 2 AS b) SELECT * FROM (SELECT * FROM c) s(x, y)) t LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM generate_series(1, 1) AS g, generate_series AS t LIMIT 0`),
+			difftest.Q(0, `SELECT count(*) FROM u WHERE false HAVING (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
+			// A group or a row of window functions past LIMIT is never
+			// projected.
+			difftest.Q(0, `SELECT 1 / (row_number() OVER () - 2) FROM u LIMIT 1`),
+			difftest.Q(0, `SELECT 1 / (count(*) - 1) + 1 FROM u GROUP BY id LIMIT 0 OFFSET 1`),
+			difftest.Q(0, `SELECT nextval('missing') LIMIT 0`),
+			difftest.Q(0, `SELECT nextval('missing'::regclass) LIMIT 0`),
+			difftest.Q(0, `WITH unused AS (SELECT v FROM (SELECT nextval('sq') AS v FROM u) s LIMIT 1) SELECT 1`),
+			difftest.Q(0, `WITH c AS (SELECT nextval('sq') AS v FROM u) SELECT v FROM c UNION ALL SELECT 1`),
+			// What is not run still gives its columns, and still fails on a
+			// relation that does not exist.
+			difftest.Q(0, `WITH u AS (SELECT * FROM u) SELECT * FROM u LIMIT 0`),
+			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS v) SELECT * FROM c) s UNION ALL SELECT 2 LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM missing LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM e, (SELECT * FROM missing) s WHERE false`),
+			difftest.Q(0, `WITH missing AS (SELECT 1 FROM missing) SELECT 1 FROM missing LIMIT 0`),
+			difftest.Q(0, `WITH u AS (SELECT 1 AS x) SELECT uv.* FROM uv, u LIMIT 0`),
+			difftest.Q(0, `WITH a AS (SELECT * FROM u), u AS (SELECT 1 AS z) SELECT a.* FROM a, u LIMIT 0`),
+			difftest.Q(0, `SELECT * FROM (SELECT 1) AS s(a, b) LIMIT 0`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			// Under ORDER BY, a volatile item no key reads is computed
+			// after the sort, for the rows OFFSET and LIMIT let through.
+			difftest.Q(0, `SELECT setval('sq', 1, false)`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY id DESC`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY id OFFSET 1 LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq')`),
+			difftest.Q(0, `SELECT id, nextval('sq') AS v FROM u ORDER BY v DESC`),
+			difftest.Q(0, `SELECT id, nextval('sq') FROM u ORDER BY 2 DESC LIMIT 1`),
+			difftest.Q(0, `SELECT nextval('sq') FROM u ORDER BY nextval('sq') DESC`),
+			difftest.S(0, `INSERT INTO w SELECT nextval('sq'), id FROM u ORDER BY id DESC`),
+			difftest.Q(0, `SELECT v, id FROM w ORDER BY v`),
+			// A derived table of a write's FROM that reads the target alone,
+			// joined to it by equalities, runs in full under any plan.
+			difftest.S(0, `UPDATE u SET n = s.v FROM (SELECT id, nextval('sq') AS v FROM u) s WHERE u.id = s.id`),
+			difftest.Q(0, `SELECT id, n FROM u ORDER BY id`),
+			// A write's CTE that did not run still gives its columns.
+			difftest.Q(0, `WITH c AS (SELECT id FROM u) UPDATE u SET n = (SELECT count(*) FROM ((SELECT * FROM c LIMIT 0) UNION ALL SELECT 1) s) WHERE id = 1 RETURNING n`),
+		},
+	},
+	{
 		// Postgres resolves every relation when it analyzes the statement,
 		// so a missing one fails it even where no row reaches it.
 		Name: "a relation that does not exist fails the statement where no row reaches it",

@@ -375,6 +375,9 @@ func (c *staticCheck) expr(e sqlir.Expr) error {
 			if what := dateDifferenceMismatch(v, typer{}); what != "" {
 				return c.refuse(what)
 			}
+			if what := likeTypeMismatch(v, typer{}, true); what != "" {
+				return c.refuse(what)
+			}
 		}
 		if !knownBinaryOps[v.Op] {
 			return c.refuse("operator " + v.Op)
