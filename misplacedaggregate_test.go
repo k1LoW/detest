@@ -32,6 +32,9 @@ func TestMisplacedAggregateRefused(t *testing.T) {
 		`SELECT n FROM t GROUP BY n HAVING row_number() OVER () > 0`,
 		`SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM u WHERE max(u.n) > 0)`,
 		`SELECT (SELECT 1 FROM u WHERE max(u.n) > 0) FROM t`,
+		`SELECT n FROM t UNION SELECT n FROM u ORDER BY row_number() OVER ()`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT 1 UNION SELECT 2 ORDER BY row_number() OVER ())`,
+		`SELECT 1 FROM t WHERE EXISTS (SELECT 1 UNION SELECT 2 ORDER BY max(1))`,
 	}
 	byKind := map[string][]string{
 		"postgres": {

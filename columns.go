@@ -2740,7 +2740,11 @@ func misplacedCall(n any) string {
 		}
 		in("HAVING", true, false, sel.Having)
 		in("DISTINCT ON", true, true, sel.DistinctOn)
-		in("ORDER BY", true, true, sel.OrderBy)
+		if sel.SetOp != "" {
+			none("the ORDER BY of a set operation", sel.OrderBy)
+		} else {
+			in("ORDER BY", true, true, sel.OrderBy)
+		}
 		none("LIMIT", sel.Limit)
 		none("OFFSET", sel.Offset)
 	}
