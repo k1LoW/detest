@@ -39,10 +39,27 @@ var postgresCatalogTypes = func() map[string]bool {
 	return m
 }()
 
+// postgresTypesWithoutArray are the postgresCatalogTypes Postgres 18 declares
+// no array type of: the pseudo-types and the pg_ types of the planner's
+// statistics.
+var postgresTypesWithoutArray = map[string]bool{
+	"any": true, "anyarray": true, "anycompatible": true, "anycompatiblearray": true, "anycompatiblemultirange": true,
+	"anycompatiblenonarray": true, "anycompatiblerange": true, "anyelement": true, "anyenum": true,
+	"anymultirange": true, "anynonarray": true, "anyrange": true, "event_trigger": true, "fdw_handler": true,
+	"index_am_handler": true, "internal": true, "language_handler": true, "pg_brin_bloom_summary": true,
+	"pg_brin_minmax_multi_summary": true, "pg_ddl_command": true, "pg_dependencies": true, "pg_mcv_list": true,
+	"pg_ndistinct": true, "pg_node_tree": true, "table_am_handler": true, "trigger": true, "tsm_handler": true,
+	"unknown": true, "void": true,
+}
+
 // PostgresBuiltinType reports whether name is a built-in type's, which a
 // domain of the name would shadow by its bare name in detest but not in
 // Postgres: one of postgresTypeAliases or postgresCatalogTypes, or the
 // catalog name of an array of one of the latter, such as _int4.
 func PostgresBuiltinType(name string) bool {
-	return postgresTypeAliases[name] || postgresCatalogTypes[name] || strings.HasPrefix(name, "_") && postgresCatalogTypes[name[1:]]
+	if postgresTypeAliases[name] || postgresCatalogTypes[name] {
+		return true
+	}
+	elem, ok := strings.CutPrefix(name, "_")
+	return ok && postgresCatalogTypes[elem] && !postgresTypesWithoutArray[elem]
 }

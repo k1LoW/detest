@@ -659,18 +659,22 @@ func TestLikeOperandTypesBeforeAnyRow(t *testing.T) {
 	}
 	// Without a schema a type CheckSQL does not know may be a domain over
 	// text.
+	if err := CheckSQL(postgres.New(), `SELECT 'a'::word LIKE 'a'`); err != nil {
+		t.Errorf("CheckSQL 'a'::word LIKE 'a': %v", err)
+	}
+	// An alias such as integer names no array, so _integer may be a domain.
+	// Nor does a pseudo-type such as trigger have one.
+	mustExec(t, db, `CREATE DOMAIN _integer AS text`)
+	mustExec(t, db, `CREATE DOMAIN _trigger AS text`)
 	for _, q := range []string{
-		`SELECT 'a'::word LIKE 'a'`,
-		// An alias such as integer names no array, so _integer may be a
-		// domain.
 		`SELECT NULL::_integer LIKE 'a'`,
+		`SELECT NULL::_trigger LIKE 'a'`,
 	} {
+		if _, err := db.Query(q); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
 		if err := CheckSQL(postgres.New(), q); err != nil {
 			t.Errorf("CheckSQL %s: %v", q, err)
 		}
-	}
-	mustExec(t, db, `CREATE DOMAIN _integer AS text`)
-	if _, err := db.Query(`SELECT NULL::_integer LIKE 'a'`); err != nil {
-		t.Errorf("_integer LIKE 'a': %v", err)
 	}
 }
