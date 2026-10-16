@@ -647,6 +647,14 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 		if alias == "" {
 			alias = relname(t.Name)
 		}
+		if _, isCTE := c.cteTypesOf(t.Name); !isCTE {
+			// Postgres resolves every relation when it analyzes the
+			// statement, so a missing one fails it even in a subquery no
+			// row reaches, which tableRows alone would never open.
+			if err := c.x.tx.db.checkTable(c.x.tx.db.resolve(t.Name)); err != nil {
+				return err
+			}
+		}
 		cols = c.tableColumns(t.Name)
 	}
 	if len(t.Columns) > 0 && t.Func == nil {
