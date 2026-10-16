@@ -2860,6 +2860,10 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					err = c.x.unsupported(what)
 					return
 				}
+				if what := aggregateArgumentMismatch(e, c.typer(sc), !c.x.tx.checking); what != "" {
+					err = c.x.unsupported(what)
+					return
+				}
 				if e.Name == "nullif" && len(e.Args) == 2 {
 					c.untypedOperands(sc, e.Args[0], e.Args[1])
 				}
