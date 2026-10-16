@@ -52,3 +52,29 @@ func TestViewColumnCheckRefused(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// A view whose query has a * gives its columns the names and the types the
+// * expands to, so a check over them refuses what it refuses over a table.
+func TestViewStarColumnsChecked(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
+		`CREATE VIEW tv AS SELECT * FROM t`,
+		`CREATE VIEW pv AS SELECT * FROM (SELECT 'a'::text AS v) y`,
+		`CREATE VIEW uv AS SELECT * FROM (SELECT 'a'::text AS v) y UNION ALL SELECT 'b'::text`,
+		`CREATE VIEW vv AS SELECT * FROM tv`,
+	} {
+		mustExec(t, db, q)
+	}
+	for _, q := range []string{
+		`SELECT abs(s) FROM tv WHERE false`,
+		`SELECT abs(v) FROM pv WHERE false`,
+		`SELECT abs(v) FROM uv WHERE false`,
+		`SELECT abs(s) FROM vv WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+}
