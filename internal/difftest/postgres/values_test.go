@@ -165,6 +165,7 @@ var valueCases = []difftest.Case{
 			difftest.S(0, `UPDATE c SET s = 'z' WHERE f`),
 			difftest.S(0, `DELETE FROM c WHERE NOT f`),
 			difftest.Q(0, `SELECT id, s FROM c ORDER BY id`),
+			difftest.S(0, `INSERT INTO c VALUES (2, true, true, 'w') ON CONFLICT (id) WHERE s DO NOTHING`),
 		},
 	},
 	{

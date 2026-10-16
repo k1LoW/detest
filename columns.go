@@ -3688,9 +3688,6 @@ func (c *columnChecker) insert(ins *sqlir.InsertStmt) error {
 		if err := c.exprs(oc.InferWhere, sc); err != nil {
 			return err
 		}
-		if err := c.condition(oc.InferWhere, sc, "WHERE"); err != nil {
-			return err
-		}
 		if err := c.assigned(ins.Table, cols, assignedColumns(oc.Set), false); err != nil {
 			return err
 		}
