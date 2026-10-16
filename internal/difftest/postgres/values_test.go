@@ -1205,6 +1205,7 @@ var valueCases = []difftest.Case{
 			difftest.QA(0, `SELECT id FROM fp WHERE s = $1 OR upper(s) = upper($1) ORDER BY id`, "xy"),
 			difftest.QA(0, `SELECT id FROM fp WHERE length(s) = length($1) AND left(s, $2) = left($1, $2) ORDER BY id`, "abc", int64(1)),
 			difftest.QA(0, `SELECT abs($1) = 2, floor($1) = ceil($1)`, int64(-2)),
+			difftest.QA(0, `SELECT abs($1), floor($1)`, int64(-2000000)),
 			difftest.QA(0, `SELECT abs($1) = abs($1), abs($1) > 1`, float64(-2.5)),
 			difftest.QA(0, `SELECT id FROM fp WHERE abs(n) = abs($1) ORDER BY id`, int64(2)),
 			difftest.QA(0, `SELECT id FROM fp WHERE m = round($1, $2) ORDER BY id`, float64(2.46), int64(1)),
