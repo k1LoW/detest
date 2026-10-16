@@ -289,6 +289,16 @@ func TestRowComparisonFieldTypesBeforeAnyRow(t *testing.T) {
 		`SELECT 1 IN (SELECT NULL) WHERE false`,
 		`SELECT (1, 2) IN (VALUES ('1', 2)) WHERE false`,
 		`SELECT 1 IN (VALUES ('1')) WHERE false`,
+		// A field that is a row is a record, which Postgres has no
+		// operator with a number or text for, and reads a string literal
+		// beside it as a record's input, which it does not implement.
+		`SELECT ((n, 2), 3) = (1, 3) FROM t WHERE false`,
+		`SELECT (1, 3) = ((n, 2), 3) FROM t WHERE false`,
+		`SELECT ((n, 2), 3) = (s, 3) FROM t WHERE false`,
+		`SELECT ((n, 2), 3) = ('(1,2)', 3) FROM t WHERE false`,
+		`SELECT ((n, 2), 3) IN (SELECT 1, 3) FROM t WHERE false`,
+		`SELECT ((n, 2), 3) = (SELECT s, 3 FROM t) FROM t WHERE false`,
+		`SELECT (1, 3) IN (SELECT (n, 2), 3 FROM t) WHERE false`,
 		// Postgres fails IN (SELECT ...) of another width (42601).
 		`SELECT (1, 2) IN (SELECT s FROM t) WHERE false`,
 		`SELECT 1 IN (SELECT n, 2 FROM t) WHERE false`,

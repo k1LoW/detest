@@ -3501,6 +3501,18 @@ func typeSample(typ string) any {
 // operandTypes refuses a comparison of two typed operands Postgres has no
 // operator for, which untypedPair refuses only when it reaches a row.
 func (c *columnChecker) operandTypes(sc *colScope, a, b sqlir.Expr) error {
+	_, aRow := a.(*sqlir.RowExpr)
+	_, bRow := b.(*sqlir.RowExpr)
+	if aRow != bRow {
+		other := b
+		if bRow {
+			other = a
+		}
+		if _, sub := other.(*sqlir.SubQuery); sub {
+			return nil // subqueryOperandTypes types a row against a subquery
+		}
+		return c.rowWithValue(c.typer(sc), other)
+	}
 	if ra, rb, ok := rowPair(a, b); ok {
 		// Postgres resolves the operator of each pair of fields.
 		for i := range ra {
@@ -3527,9 +3539,28 @@ func (c *columnChecker) familyTypes(ta, tb string) error {
 	return c.x.unsupported(fmt.Sprintf("a comparison of a %s with a %s", fa, fb))
 }
 
+// rowWithValue refuses a comparison of a row with other, which is not one,
+// where Postgres has no operator between a record and other's type. A NULL
+// takes the record type, and a value of a type the check does not know may
+// be a record. Postgres reads a string literal there as a record's input,
+// which it does not implement (0A000), and a parameter as a record, which
+// detest does not model.
+func (c *columnChecker) rowWithValue(t typer, other sqlir.Expr) error {
+	if isNullConst(other) {
+		return nil
+	}
+	if untypedExpr(other) {
+		return c.x.unsupported("a string literal or a parameter compared with a row")
+	}
+	if f := valueFamily(t.reduce(t.of(other))); f != "" {
+		return c.x.unsupported(fmt.Sprintf("a comparison of a row with a %s", f))
+	}
+	return nil
+}
+
 // rowPair is the fields of a and b when both are rows of one width, which
-// Postgres compares pair by pair. A field that is itself a row is left out,
-// as Postgres compares two such fields as records, whose operator it
+// Postgres compares pair by pair. A pair of fields that are both rows is
+// left out, as Postgres compares them as records, whose operator it
 // resolves only at a row.
 func rowPair(a, b sqlir.Expr) ([]sqlir.Expr, []sqlir.Expr, bool) {
 	ra, aok := a.(*sqlir.RowExpr)
@@ -3541,7 +3572,7 @@ func rowPair(a, b sqlir.Expr) ([]sqlir.Expr, []sqlir.Expr, bool) {
 	for i := range ra.Items {
 		_, ia := ra.Items[i].(*sqlir.RowExpr)
 		_, ib := rb.Items[i].(*sqlir.RowExpr)
-		if !ia && !ib {
+		if !ia || !ib {
 			fa, fb = append(fa, ra.Items[i]), append(fb, rb.Items[i])
 		}
 	}
@@ -3578,7 +3609,24 @@ func (c *columnChecker) subqueryOperandTypes(sc *colScope, x sqlir.Expr, sel *sq
 	}
 	t := c.typer(sc)
 	for i, f := range fields {
-		if _, nested := f.(*sqlir.RowExpr); nested || types[i] == "" {
+		_, nested := f.(*sqlir.RowExpr)
+		if sel.SetOp == "" && len(sel.Values) == 0 && len(sel.Targets) == len(fields) && !sel.Targets[i].Star {
+			if _, row := sel.Targets[i].Expr.(*sqlir.RowExpr); row && !nested {
+				if err := c.rowWithValue(t, f); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if nested {
+			// A row's type is a record, which Postgres has no operator
+			// with any type the check knows.
+			if f := valueFamily(t.reduce(types[i])); f != "" {
+				return c.x.unsupported(fmt.Sprintf("a comparison of a row with a %s", f))
+			}
+			continue
+		}
+		if types[i] == "" {
 			continue
 		}
 		if untypedExpr(f) {
