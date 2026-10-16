@@ -33,6 +33,8 @@ type Step struct {
 	Conn  int
 	SQL   string
 	Query bool
+	// Args are bound to the statement's parameters, on both sides alike.
+	Args []any
 	// CancelTx ends the context the open transaction of connection Conn
 	// began with, as a request's deadline does while the transaction is
 	// idle, so that database/sql rolls it back from a goroutine of its own.
@@ -44,6 +46,11 @@ func S(conn int, sql string) Step { return Step{Conn: conn, SQL: sql} }
 
 // Q is a step run with Query.
 func Q(conn int, sql string) Step { return Step{Conn: conn, SQL: sql, Query: true} }
+
+// QA is a step run with Query, binding args to its parameters.
+func QA(conn int, sql string, args ...any) Step {
+	return Step{Conn: conn, SQL: sql, Query: true, Args: args}
+}
 
 // CT is a step that ends the context of connection conn's open transaction.
 func CT(conn int) Step { return Step{Conn: conn, SQL: "CANCEL TRANSACTION CONTEXT", CancelTx: true} }
