@@ -102,3 +102,26 @@ func TestViewKeepsRelationOnSearchPath(t *testing.T) {
 		t.Errorf("uv: got %v, want %v", got, want)
 	}
 }
+
+// Replacing a view may add columns at its end, which a * left unbound in a
+// view reading it would take up, so such a view is refused from then on.
+func TestViewLeftUnboundRefusedAfterReplace(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE VIEW v(a, b) AS SELECT * FROM (SELECT 1 AS x, 2 AS x) d`,
+		`CREATE VIEW w AS SELECT * FROM v`,
+		`CREATE VIEW nv AS SELECT 1 AS a`,
+		`CREATE VIEW cv AS SELECT * FROM nv`,
+		`CREATE OR REPLACE VIEW v AS SELECT 1 AS a, 2 AS b, 3 AS c`,
+		`CREATE OR REPLACE VIEW nv AS SELECT 1 AS a, 2 AS c`,
+	} {
+		mustExec(t, db, q)
+	}
+	if _, err := db.Exec(`SELECT * FROM w`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("SELECT * FROM w: got %v, want ErrUnsupportedSQL", err)
+	}
+	if _, err := db.Exec(`SELECT c FROM cv`); err == nil || errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("SELECT c FROM cv: got %v, want an undefined column", err)
+	}
+}

@@ -1400,8 +1400,14 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			// columns of one name a join gives.
 			v.ViewColumns = append(slices.Clone(v.ViewColumns), names[len(v.ViewColumns):]...)
 		}
+		_, replaced := db.views[table]
 		db.views[table] = &v
 		db.viewBinds[&v] = b
+		if replaced {
+			// A replacement may add columns, which a * left unbound in a
+			// view reading this one would take up.
+			db.viewColumnsChanged(table, []string{"*"}, "", "")
+		}
 		return nil
 	case ch.Drop:
 		_, isView := db.views[table]

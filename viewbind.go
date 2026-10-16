@@ -65,15 +65,16 @@ func (db *DB) bindView(sel *sqlir.SelectStmt) (*sqlir.SelectStmt, *viewBinding) 
 
 // viewColumnsChanged follows a change to the columns of table, the
 // columns named added or renamed from old to nw, into the views that read
-// it. A view that left a reference of one of the names unbound is marked
-// stale instead, as whether the change reaches it is not known.
+// it, "*" among names standing for any name. A view that left a reference
+// of one of the names unbound is marked stale instead, as whether the
+// change reaches it is not known.
 func (db *DB) viewColumnsChanged(table string, names []string, old, nw string) {
 	for name, v := range db.views {
 		b := db.viewBinds[v]
 		if v.View == nil || b == nil || b.stale != "" || !db.viewReads(v.View, table) {
 			continue
 		}
-		if b.loose["*"] || slices.ContainsFunc(slices.Concat(names, []string{old, nw}), func(n string) bool { return n != "" && b.loose[n] }) {
+		if b.loose["*"] || (slices.Contains(names, "*") && len(b.loose) > 0) || slices.ContainsFunc(slices.Concat(names, []string{old, nw}), func(n string) bool { return n != "" && b.loose[n] }) {
 			b.stale = fmt.Sprintf("view %q, which leaves a column unbound, after a change to the columns of %q", relname(name), relname(table))
 			continue
 		}
