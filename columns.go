@@ -189,6 +189,9 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 				if err := x.tx.db.checkTable(x.tx.db.resolve(name)); err != nil {
 					return err
 				}
+				if why := x.tx.db.staleView(x.tx.db.resolve(name), map[string]bool{}); why != "" {
+					return x.unsupported(why)
+				}
 			}
 		}
 		return nil
@@ -2323,6 +2326,9 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 // shorter column list leaves unnamed included, nil where the walk does not
 // know them.
 func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, colSet, error) {
+	if b := c.x.tx.db.viewBinds[v]; b != nil && b.stale != "" {
+		return nil, itemOrder{}, nil, c.x.unsupported(b.stale)
+	}
 	vc := &columnChecker{x: c.x}
 	cols, err := vc.query(v.View, nil)
 	switch {

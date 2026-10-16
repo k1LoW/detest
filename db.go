@@ -189,6 +189,7 @@ type DB struct {
 	keptBranchCache map[sqlir.Expr]string
 	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views           map[string]*sqlir.SchemaChange      // the query of each view
+	viewBinds       map[*sqlir.SchemaChange]*viewBinding // what binding each view's query left undone
 	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs            map[string]int64                    // sequence values of the run, for nextval
 	uuids           int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
@@ -1215,6 +1216,7 @@ func (db *DB) applySchema(st *sqlir.SchemaStmt, tx *Tx) error {
 		db.defs = map[string]*tableDef{}
 		db.matviews = map[string]*sqlir.CreateTableAsStmt{}
 		db.views = map[string]*sqlir.SchemaChange{}
+		db.viewBinds = map[*sqlir.SchemaChange]*viewBinding{}
 	}
 	for _, ch := range st.Changes {
 		if err := db.applyChange(ch, tx); err != nil {
@@ -1390,7 +1392,10 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 			return db.kind.Error(sqlir.DuplicateTable, fmt.Sprintf("relation %q already exists", relname(table)), relname(table), "", "")
 		}
 		v := ch
+		var b *viewBinding
+		v.View, b = db.bindView(ch.View)
 		db.views[table] = &v
+		db.viewBinds[&v] = b
 		return nil
 	case ch.Drop:
 		_, isView := db.views[table]
@@ -1430,6 +1435,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	}
 	var added []sqlir.ColumnDef
 	redefined := false // a MySQL MODIFY or CHANGE of an existing column
+	var newColumns []string
 	if ch.Collation != "" {
 		def.collation = ch.Collation
 	}
@@ -1446,6 +1452,7 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 				return unsupported("adding an AUTO_INCREMENT column to a table that holds rows", "")
 			}
 			def.columns = append(def.columns, col.Name)
+			newColumns = append(newColumns, col.Name)
 			switch {
 			case !ch.Create && col.Default != nil:
 				added = append(added, col)
@@ -1712,6 +1719,9 @@ func (db *DB) applyChange(ch sqlir.SchemaChange, tx *Tx) error {
 	}
 	if old, nw := ch.RenameIndex[0], ch.RenameIndex[1]; old != "" {
 		def.renameIndex(old, nw)
+	}
+	if len(newColumns) > 0 || ch.RenameColumn[0] != "" {
+		db.viewColumnsChanged(table, newColumns, ch.RenameColumn[0], ch.RenameColumn[1])
 	}
 	return nil
 }
@@ -2240,6 +2250,9 @@ func (db *DB) renameTable(table string, ch sqlir.SchemaChange, tx *Tx) error {
 	}
 	if !moved && !ch.IfExists {
 		return db.kind.Error(sqlir.UndefinedTable, fmt.Sprintf("relation %q does not exist", relname(table)), relname(table), "", "")
+	}
+	if moved {
+		db.viewRelationRenamed(table, to)
 	}
 	return nil
 }

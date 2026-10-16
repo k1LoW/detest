@@ -1,0 +1,71 @@
+package detest
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/k1LoW/detest/db/mysql"
+	"github.com/k1LoW/detest/db/postgres"
+)
+
+// A view whose query left a name unbound when it was created, as an
+// output name in GROUP BY or a * over a function with ORDINALITY, may read
+// another column once a table it reads gains or renames a column of that
+// name, so a statement reading it is refused from then on. The DDL itself
+// runs, so that migrations load.
+func TestViewLeftUnboundRefusedAfterColumnChange(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE TABLE t (id int PRIMARY KEY, s text, n int)`,
+		`CREATE VIEW gv AS SELECT n AS k, count(*) AS c FROM t GROUP BY k`,
+		`CREATE VIEW ov AS SELECT * FROM t JOIN generate_series(1, 2) WITH ORDINALITY g ON true`,
+		`CREATE VIEW wv AS SELECT k FROM gv`,
+		`ALTER TABLE t ADD COLUMN x int`,
+	} {
+		mustExec(t, db, q)
+	}
+	if _, err := db.Exec(`SELECT * FROM gv`); err != nil {
+		t.Errorf("SELECT * FROM gv: %v", err)
+	}
+	mustExec(t, db, `ALTER TABLE t ADD COLUMN k int`)
+	for _, q := range []string{
+		`SELECT * FROM gv`,
+		`SELECT k FROM wv`,
+		`SELECT id FROM ov`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	// Creating the view again binds it again.
+	mustExec(t, db, `CREATE OR REPLACE VIEW gv AS SELECT n AS k, count(*) AS c FROM t GROUP BY 1`)
+	if _, err := db.Exec(`SELECT k FROM wv`); err != nil {
+		t.Errorf("SELECT k FROM wv: %v", err)
+	}
+}
+
+// MySQL keeps a view's query by the names it reads, so a view fails once
+// a column it reads is renamed. detest has no check of MySQL's column
+// names, so it refuses such a view rather than read the column as NULL.
+func TestMySQLViewRefusedAfterColumnRename(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	for _, q := range []string{
+		`CREATE TABLE t (id INT PRIMARY KEY, s TEXT, n INT)`,
+		`CREATE VIEW tv AS SELECT * FROM t`,
+		`CREATE VIEW nv AS SELECT id, n FROM t`,
+		`CREATE VIEW wv AS SELECT s FROM tv`,
+		`ALTER TABLE t RENAME COLUMN s TO s2`,
+	} {
+		mustExec(t, db, q)
+	}
+	for _, q := range []string{`SELECT id FROM tv`, `SELECT s FROM wv`} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT n FROM nv`); err != nil {
+		t.Errorf("SELECT n FROM nv: %v", err)
+	}
+}

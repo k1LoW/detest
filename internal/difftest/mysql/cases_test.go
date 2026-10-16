@@ -1305,6 +1305,25 @@ var cases = []difftest.Case{
 			difftest.Q(0, `WITH c AS (SELECT 5 AS id) SELECT id FROM C`),
 		},
 	},
+	{
+		// MySQL keeps the columns a view's * covers when it creates the
+		// view, as Postgres does.
+		Name: "a view's * covers the columns its table had when it was created",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, m INT)` + binary,
+			`CREATE VIEW tv AS SELECT * FROM t`,
+			`CREATE VIEW jv AS SELECT m FROM t JOIN u ON t.id = u.id`,
+			`ALTER TABLE t ADD COLUMN x INT`,
+			`ALTER TABLE t ADD COLUMN m INT`,
+		},
+		Seed:  []string{`INSERT INTO t (id, n, m) VALUES (1, 2, 7)`, `INSERT INTO u VALUES (1, 5)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT * FROM tv`),
+			difftest.Q(0, `SELECT m FROM jv`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {
