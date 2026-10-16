@@ -495,7 +495,9 @@ func (x *sqlExec) pull(sel *sqlir.SelectStmt, rows []jrow, outer *env) ([]string
 		}
 		for p, c := range ocols {
 			if c.alias == "" && c.col == "" && reflect.DeepEqual(sel.Targets[c.target].Expr, k.Expr) {
-				keys[i].Expr = &sqlir.Const{Value: int64(p + 1)}
+				pos := &sqlir.Const{Value: int64(p + 1)}
+				x.noteOutput(pos, k.Expr) // so the key keeps its collation
+				keys[i].Expr = pos
 				break
 			}
 		}
