@@ -48,6 +48,8 @@ func TestMisplacedAggregateRefused(t *testing.T) {
 			`INSERT INTO t VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = max(excluded.n)`,
 			`INSERT INTO t VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = 1 WHERE max(t.n) > 0`,
 			`SELECT * FROM t, generate_series(1, max(1))`,
+			`SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM max(1))`,
+			`SELECT count(*) AS m FROM v GROUP BY m`,
 			`SELECT row_number() OVER (PARTITION BY row_number() OVER ()) FROM t`,
 		},
 		"mysql": {
@@ -78,6 +80,7 @@ func TestMisplacedAggregateRefused(t *testing.T) {
 			db, _ := s.DB("app", tt.srv)
 			mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, n int)`)
 			mustExec(t, db, `CREATE TABLE u (id int PRIMARY KEY, n int)`)
+			mustExec(t, db, `CREATE VIEW v AS SELECT * FROM t`)
 			for _, q := range append(both, byKind[tt.name]...) {
 				if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 					t.Errorf("%s: got %v, want ErrUnsupportedSQL", q, err)

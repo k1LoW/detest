@@ -2402,16 +2402,26 @@ func (c *columnChecker) groupExpr(e sqlir.Expr, sc *colScope) error {
 	if !ok || r.Table != "" {
 		return c.exprs(e, sc)
 	}
+	input, unknown := false, false
 	for _, cols := range sc.items {
-		if found, _ := cols.has(r.Column); cols == nil || found {
-			return c.resolve(r, sc)
+		if cols == nil {
+			unknown = true
+		} else if found, _ := cols.has(r.Column); found {
+			input = true
 		}
 	}
-	if found, once := sc.outputs.has(r.Column); found && once && !sc.anyOutput {
+	if found, once := sc.outputs.has(r.Column); !input && found && once && !sc.anyOutput {
 		if call := blockCall(sc.outputExprs[r.Column], false, false); call != "" {
-			// misplacedCall cannot tell this name from an input column.
+			// misplacedCall cannot tell this name from an input column,
+			// and an item of unknown columns may lack it, as a view's *.
+			if unknown {
+				return c.x.unsupported(fmt.Sprintf("GROUP BY %q, an output name holding %s or a column of an item whose columns detest does not know", r.Column, call))
+			}
 			return c.x.unsupported(call + " in GROUP BY")
 		}
+	}
+	if input || unknown {
+		return c.resolve(r, sc)
 	}
 	return c.orderExpr(e, sc)
 }
@@ -2700,7 +2710,7 @@ func misplacedCall(n any) string {
 	fromFuncs := func(items ...sqlir.TableRef) {
 		for _, t := range items {
 			if t.Func != nil {
-				none("a function in FROM", t.Func.Args)
+				none("a function in FROM", t.Func)
 			}
 		}
 	}
