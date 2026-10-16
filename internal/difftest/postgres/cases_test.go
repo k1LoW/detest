@@ -928,6 +928,9 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM e WHERE (SELECT 1 / n FROM u WHERE id = 2) > 0 AND abs(1) = 0`),
 			difftest.Q(0, `SELECT 1 FROM missing WHERE EXISTS (SELECT id FROM u)`),
 			difftest.Q(0, `SELECT * FROM (SELECT * FROM u) s(a, b, c) LIMIT 0`),
+			difftest.Q(0, `SELECT * FROM (WITH c AS (SELECT 1 AS a, 2 AS b) SELECT * FROM (SELECT * FROM c) s(x, y)) t LIMIT 0`),
+			difftest.Q(0, `SELECT 1 FROM generate_series(1, 1) AS g, generate_series AS t LIMIT 0`),
+			difftest.Q(0, `SELECT count(*) FROM u WHERE false HAVING (SELECT 1 / n FROM u WHERE id = 2) > 0 AND false`),
 			// A group or a row of window functions past LIMIT is never
 			// projected.
 			difftest.Q(0, `SELECT 1 / (row_number() OVER () - 2) FROM u LIMIT 1`),

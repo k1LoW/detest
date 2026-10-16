@@ -193,14 +193,19 @@ func (x *sqlExec) gated(sel *sqlir.SelectStmt, outer *env) (scan, out bool, err 
 		return r.val, true
 	}
 	var rest []cond
+	scan, out = true, true
 	for _, c := range conds {
 		v, ok := constant(c.e)
 		switch {
 		case !ok:
 			rest = append(rest, c)
 		case derefValue(v) != true:
-			return false, !c.having, nil
+			scan = false
+			out = out && !c.having
 		}
+	}
+	if !scan {
+		return false, out, nil
 	}
 	if len(rest) > 0 {
 		// Postgres resolves every relation when it parses the statement,
@@ -235,16 +240,17 @@ func (x *sqlExec) unpulled(sel *sqlir.SelectStmt) ([]string, []Row, error) {
 // own definition, where it is not in scope, reads what the name meant
 // around sel.
 func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
-	funcs := map[string]bool{}
+	// freeNames gives the name of a function item too.
+	plain := map[string]bool{}
 	for _, q := range sqlir.Selects(sel) {
 		for _, t := range fromRefs(q) {
-			if t.Func != nil {
-				funcs[t.Name] = true
+			if t.Func == nil && t.Sub == nil {
+				plain[t.Name] = true
 			}
 		}
 	}
 	for _, name := range freeNames(sel) {
-		if funcs[name] {
+		if !plain[name] {
 			continue
 		}
 		if c := x.ctes[name]; c != nil {
@@ -280,14 +286,49 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 	}
 	// So does a column alias list longer than its query's columns, which
 	// tableRows checks before it runs the query.
-	for _, q := range sqlir.Selects(sel) {
-		for _, t := range fromRefs(q) {
-			if t.Sub == nil {
-				continue
-			}
-			if len(t.Columns) == 0 {
-				continue
-			}
+	return x.aliasWidths(sel, true)
+}
+
+// aliasWidths fails on a column alias list of a derived table under q
+// longer than the table's columns, without running anything. The columns
+// are taken in the scope of the CTEs each query sees, q's own declared
+// already when declared is set.
+func (x *sqlExec) aliasWidths(q *sqlir.SelectStmt, declared bool) error {
+	if q == nil {
+		return nil
+	}
+	if len(q.With) > 0 && !declared {
+		defer func(ctes map[string]*cteCell) { x.ctes = ctes }(x.ctes)
+		x.ctes = maps.Clone(x.ctes)
+		if x.ctes == nil {
+			x.ctes = map[string]*cteCell{}
+		}
+		x.withCTEs(q, nil)
+	}
+	for _, cte := range q.With {
+		c := x.ctes[cte.Name]
+		if c == nil || c.def != cte.Select {
+			continue // not read, so never run
+		}
+		saved := x.ctes
+		x.ctes = maps.Clone(c.scope)
+		err := x.aliasWidths(cte.Select, false)
+		x.ctes = saved
+		if err != nil {
+			return err
+		}
+	}
+	if q.SetOp != "" {
+		if err := x.aliasWidths(q.Larg, false); err != nil {
+			return err
+		}
+		return x.aliasWidths(q.Rarg, false)
+	}
+	for _, t := range fromRefs(q) {
+		if t.Sub == nil {
+			continue
+		}
+		if len(t.Columns) > 0 {
 			names := outputNames(t.Sub)
 			if names == nil {
 				names = x.columnsOf(t.Sub) // a * whose width only its items give
@@ -295,6 +336,27 @@ func (x *sqlExec) checkRelations(sel *sqlir.SelectStmt) error {
 			if len(t.Columns) > len(names) {
 				return x.tx.db.kind.Error(sqlir.InvalidColumnReference, fmt.Sprintf("table %q has %d columns available but %d columns specified", t.Alias, len(names), len(t.Columns)), t.Alias, "", "")
 			}
+		}
+		if err := x.aliasWidths(t.Sub, false); err != nil {
+			return err
+		}
+	}
+	// The queries of its expressions, each in this scope.
+	rest := *q
+	rest.With, rest.From, rest.Joins = nil, nil, nil
+	subs := sqlir.Selects(&rest)[1:]
+	inner := map[*sqlir.SelectStmt]bool{}
+	for _, s := range subs {
+		for _, in := range sqlir.Selects(s)[1:] {
+			inner[in] = true
+		}
+	}
+	for _, s := range subs {
+		if inner[s] {
+			continue
+		}
+		if err := x.aliasWidths(s, false); err != nil {
+			return err
 		}
 	}
 	return nil
