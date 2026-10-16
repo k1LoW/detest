@@ -292,6 +292,7 @@ A `numeric(p, s)` column rounds what it stores to `s` places, half away from zer
 - A string compared with a number is compared as the number it converts to
 - Strings compare exactly, as a `_bin` collation compares them. A text column of a case-insensitive (`_ci`) collation, which MySQL 8 gives a column that declares none (`utf8mb4_0900_ai_ci`), loads with the schema, but a statement whose outcome depends on how it compares fails with `detest.ErrUnsupportedSQL`: a comparison, `LIKE`, `IN` or a join on it, `ORDER BY`, `GROUP BY`, `DISTINCT`, `UNION` or a window over it, `MIN` and `MAX` of it, a write that a unique index or a foreign key over it checks, and a `LIMIT` scan along a primary key that holds it. Reading and writing its values as they are runs. Declare `COLLATE utf8mb4_bin` on the column or the table, or pass `mysql.Collation("utf8mb4_bin")` when the server's default collation is a `_bin` one
 - Migrations, `mysqldump` output and `SHOW CREATE TABLE` output, which `ddl.From` writes for MySQL, run as they are. `mysql.Database` sets the current database
+- An `UPDATE`, a `DELETE` or an `INSERT ... VALUES` whose subquery reads the table it writes fails with 1093, as MySQL fails it. A read of the table through a derived table or a CTE in that subquery runs, as does `INSERT ... SELECT` from the table
 - Errors carry MySQL's error number and SQLSTATE, and `mysqlerr.Convert` turns them into go-sql-driver's `*mysql.MySQLError`, which GORM's `TranslateError` reads
 
 ``` go
@@ -301,6 +302,7 @@ s.DB("app", mysql.New(mysql.Errors(mysqlerr.Convert))) // *mysql.MySQLError
 For MySQL, these fail with `detest.ErrUnsupportedSQL` besides the forms above.
 
 - `REPLACE`, an `UPDATE` that sets columns of a joined table, multi-table `DELETE`, and `RETURNING`
+- A write whose subquery reads the table it writes through a view (1443 or a run in MySQL, by whether it merges the view), and an `UPDATE` joined to a view or a derived table that holds a subquery reading the table it writes
 - A locking read, `UPDATE` or `DELETE` whose index locks depend on MySQL's optimizer or on an index detest does not model. This applies where the search takes gap locks, at Repeatable Read and Serializable, or takes the record locks of a secondary index, at Read Committed, and covers a search
   - by a prefix index (`KEY (name(3))`) or a descending index
   - that more than one index serves without a unique point lookup among them, since MySQL's optimizer picks one by its statistics

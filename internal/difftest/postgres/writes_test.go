@@ -1034,6 +1034,26 @@ var writeCases = []difftest.Case{
 			difftest.S(0, `INSERT INTO MV SELECT 1, 1 WHERE false`),
 		},
 	},
+	{
+		// MySQL fails a write whose subquery reads its own table (1093, or
+		// 1443 through a view), and Postgres runs it.
+		Name: "a write whose subquery reads its own table",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, n int)`,
+			`CREATE VIEW tv AS SELECT * FROM t`,
+		},
+		Seed:  []string{`INSERT INTO t VALUES (1, 2), (2, 1), (3, 3)`},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `DELETE FROM t WHERE id IN (SELECT id FROM t WHERE id = 3) RETURNING id`),
+			difftest.Q(0, `UPDATE t SET n = (SELECT max(n) FROM t) WHERE id = 2 RETURNING id, n`),
+			difftest.Q(0, `UPDATE t SET n = (SELECT max(n) FROM tv) + 1 WHERE id = 1 RETURNING id, n`),
+			difftest.Q(0, `DELETE FROM t WHERE id IN (SELECT id FROM tv WHERE id = 2) RETURNING id`),
+			difftest.Q(0, `INSERT INTO t VALUES ((SELECT max(id) FROM t) + 1, 0) RETURNING id, n`),
+			difftest.Q(0, `INSERT INTO t VALUES ((SELECT max(id) FROM tv), 0) ON CONFLICT (id) DO UPDATE SET n = (SELECT max(n) FROM t) RETURNING id, n`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
 }
 
 func TestDiffWrites(t *testing.T) {
