@@ -1984,8 +1984,19 @@ func outputKeys(targets []sqlir.Target) []string {
 // alias(a, b) renames them.
 func renamedCols(cols, names []string) []string {
 	out := slices.Clone(cols)
+	used := map[string]bool{}
 	for i := range min(len(out), len(names)) {
 		out[i] = names[i]
+		used[names[i]] = true
+	}
+	// A column the list leaves unnamed keeps the name its query gives it,
+	// which outputKeys suffixed only to tell it from a column the list
+	// has renamed away.
+	for i := len(names); i < len(out); i++ {
+		if j := strings.IndexByte(out[i], 0); j > 0 && !used[out[i][:j]] {
+			out[i] = out[i][:j]
+		}
+		used[out[i]] = true
 	}
 	return out
 }

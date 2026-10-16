@@ -2919,14 +2919,11 @@ func toInt64(v any) (int64, bool) {
 // renameColumns renames rows' columns by position, as a column alias list
 // does.
 func renameColumns(rows []Row, cols, names []string) []Row {
+	keys := renamedCols(cols, names)
 	for i, r := range rows {
 		m := Row{}
 		for j, c := range cols {
-			if j < len(names) {
-				m[names[j]] = r[c]
-			} else {
-				m[c] = r[c]
-			}
+			m[keys[j]] = r[c]
 		}
 		rows[i] = m
 	}
