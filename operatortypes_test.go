@@ -166,6 +166,9 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 		`SELECT avg(CASE WHEN b THEN '1' END) FROM t`,
 		`SELECT sum(ROW(1, 2)) FROM t`,
 		`SELECT avg(ROW(k, k)) FROM t`,
+		`SELECT sum(coalesce(ROW(1, 2), NULL)) FROM t`,
+		`SELECT avg(CASE WHEN true THEN ROW(1, 2) END) FROM t`,
+		`SELECT sum(nullif(ROW(k, k), ROW(1, 1))) FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v, want unsupported", q, err)
@@ -176,6 +179,7 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 		`SELECT sum(x.k) FROM (SELECT k FROM t) x`,
 		`SELECT sum(CASE WHEN b THEN 1 END), sum(coalesce(k, NULL)) FROM t`,
 		`SELECT sum(k::dint), avg(k::dint) FROM t`,
+		`SELECT sum(CASE WHEN ROW(k, k) = ROW(1, 1) THEN 1 END) FROM t`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Errorf("%s: %v, want nil", q, err)

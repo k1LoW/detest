@@ -522,7 +522,7 @@ func aggregateArgumentMismatch(f *sqlir.FuncCall, t typer, typed bool) string {
 		// A string literal, a parameter or a NULL matches several forms
 		// (42725), and a CASE or COALESCE of them is text (42883).
 		return f.Name + " of a string literal, a parameter or NULL, or a CASE or COALESCE of them"
-	case isRowExpr(a):
+	case rowValued(a):
 		return f.Name + " of a row"
 	case !typed:
 		return ""
@@ -537,9 +537,18 @@ func aggregateArgumentMismatch(f *sqlir.FuncCall, t typer, typed bool) string {
 	}
 }
 
-func isRowExpr(e sqlir.Expr) bool {
-	_, ok := e.(*sqlir.RowExpr)
-	return ok
+// rowValued reports a row, or a CASE, COALESCE, GREATEST, LEAST or NULLIF
+// one of whose branches is a row, which the typer gives no type.
+func rowValued(e sqlir.Expr) bool {
+	switch e := e.(type) {
+	case *sqlir.RowExpr:
+		return true
+	case *sqlir.CaseExpr:
+		return slices.ContainsFunc(caseBranches(e), rowValued)
+	case *sqlir.FuncCall:
+		return slices.ContainsFunc(branchArgs(e), rowValued)
+	}
+	return false
 }
 
 // dateDifferenceMismatch refuses date - date, which Postgres gives as an
