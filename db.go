@@ -189,7 +189,6 @@ type DB struct {
 	keptBranchCache map[sqlir.Expr]string
 	matviews        map[string]*sqlir.CreateTableAsStmt // the query each materialized view refreshes from
 	views           map[string]*sqlir.SchemaChange      // the query of each view
-	viewBinds       map[*sqlir.SchemaChange]*viewBinding // what binding each view's query left undone
 	seqDefs         map[string]*seqDef                  // the sequences CREATE SEQUENCE and identity columns declared
 	seqs            map[string]int64                    // sequence values of the run, for nextval
 	uuids           int64                               // uuids gen_random_uuid, uuid_generate_v4 and UUID() handed out in the run
@@ -198,6 +197,8 @@ type DB struct {
 	// later change in the same start undoes (see startEffects).
 	effects uint64
 	ignored map[string]bool // tables Ignore took out of the simulation
+	// viewBinds is what binding each view's query left undone.
+	viewBinds map[*sqlir.SchemaChange]*viewBinding
 
 	// InnoDB's state of a run: the commit sequence number, the versions
 	// commits left for snapshots to read, and the gap locks held.
