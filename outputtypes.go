@@ -294,21 +294,18 @@ func (c *columnChecker) certainOutput(sel *sqlir.SelectStmt) []string {
 // row may read a column of an outer query.
 func (c *columnChecker) noteValuesCertain(sel *sqlir.SelectStmt, sc *colScope) {
 	out := make([]string, len(sel.Values[0]))
-	float := false
 	for i := range out {
 		out[i] = c.certainBranches(setOpColumnExprs(sel, i), sc)
 		for _, e := range setOpColumnExprs(sel, i) {
 			if numberCategory(c.certainType(e, sc)) == numberCategory("float8") {
-				out[i], float = "float8", true
+				out[i] = "float8"
 			}
 		}
 	}
-	if float {
-		if c.x.setOpCertain == nil {
-			c.x.setOpCertain = map[*sqlir.SelectStmt][]string{}
-		}
-		c.x.setOpCertain[sel] = out
+	if c.x.setOpCertain == nil {
+		c.x.setOpCertain = map[*sqlir.SelectStmt][]string{}
 	}
+	c.x.setOpCertain[sel] = out
 	if c.outCertain == nil {
 		c.outCertain = map[*sqlir.SelectStmt][]string{}
 		c.outCertainNamed = map[*sqlir.SelectStmt]map[string]string{}

@@ -2136,6 +2136,9 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 		`SELECT (0.1::float8 + 0.2::float8)::numeric(20, 17)`,
 		`SELECT extract(epoch FROM coalesce(date '2024-01-02', date '2024-01-03'))`,
 		`INSERT INTO t (id, x) VALUES (9, 0.1::float8 + 0.2::float8)`,
+		// A column whose type the check cannot tell may be a float8.
+		`SELECT v::numeric FROM (VALUES (1.50), (abs(NULL))) AS s(v)`,
+		`SELECT v::numeric FROM (SELECT 1.50 AS v UNION ALL SELECT abs(NULL)) AS s`,
 	} {
 		var str string
 		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {

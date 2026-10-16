@@ -1007,6 +1007,10 @@ func (x *sqlExec) evalValues(sel *sqlir.SelectStmt, outer *env) ([]string, []Row
 			}
 			if t := x.setOpCertain[sel]; i < len(t) && numberCategory(t[i]) == numberCategory("float8") {
 				v = unscaled(v) // converted to the column's float8
+			} else if n, ok := v.(scaledNum); ok && len(sel.Values) > 1 && (i >= len(t) || t[i] == "") {
+				// The column may be a float8 the check cannot tell, which
+				// drops the scale.
+				v = scaledNum{n.v, -1}
 			}
 			if i < len(cols) {
 				r[cols[i]] = v
@@ -1108,11 +1112,17 @@ func (x *sqlExec) evalSetOp(sel *sqlir.SelectStmt, outer *env) ([]string, []Row,
 		if t := x.setOpCertain[sel]; i < len(t) {
 			certain = t[i]
 		}
-		if numberCategory(certain) == numberCategory("float8") {
-			// A numeric under a float8 is converted to one, without its
-			// scale.
-			for _, r := range rows {
-				r[c] = unscaled(r[c])
+		for _, r := range rows {
+			n, ok := r[c].(scaledNum)
+			switch {
+			case !ok:
+			case numberCategory(certain) == numberCategory("float8"):
+				// A numeric under a float8 is converted to one, without
+				// its scale.
+				r[c] = n.v
+			case certain == "":
+				// The column may be a float8 the check cannot tell.
+				r[c] = scaledNum{n.v, -1}
 			}
 		}
 		if kinds["number"] && (setColumnFloat(sel, i) || slices.ContainsFunc(rows, func(r Row) bool { return isFloat(r[c]) })) {
