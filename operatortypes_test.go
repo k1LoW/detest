@@ -187,6 +187,52 @@ func TestSumAndAvgArgumentTypesBeforeAnyRow(t *testing.T) {
 	}
 }
 
+// A query output that is a row is a record to the query around it, which
+// has no arithmetic, no function of a number or of text and no sum or avg,
+// so Postgres fails a statement using one so with 42883 whatever rows it
+// reads, and one testing it as a condition with 42804.
+func TestRowValuedOutputBeforeAnyRow(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, k int)`)
+	for _, q := range []string{
+		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT lower(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT sum(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT avg(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT -x.v FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT length(x.v) FROM (SELECT ROW(1, 2) AS v) x WHERE false`,
+		`SELECT 1 FROM (SELECT ROW(1, 2) AS v) x WHERE x.v`,
+		`SELECT x.v + 1 FROM (SELECT (1, 2) AS v) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT ROW(k, k) AS v FROM t) x`,
+		`SELECT x.v + 1 FROM (SELECT CASE WHEN true THEN ROW(1, 2) END AS v) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT coalesce(ROW(1, 2), NULL) AS v) x WHERE false`,
+		`WITH c AS (SELECT ROW(1, 2) AS v) SELECT c.v + 1 FROM c WHERE false`,
+		`SELECT (SELECT ROW(1, 2)) + 1 WHERE false`,
+		`SELECT y.w + 1 FROM (SELECT x.v AS w FROM (SELECT ROW(1, 2) AS v) x) y WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT * FROM (SELECT ROW(1, 2) AS v) y) x WHERE false`,
+		`SELECT x.v + 1 FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT ROW(3, 4)) x WHERE false`,
+		`SELECT abs(x.v) FROM (SELECT ROW(1, 2) AS v UNION ALL SELECT NULL) x WHERE false`,
+		`SELECT abs(x.v) FROM (VALUES (ROW(1, 2))) x(v) WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v, want unsupported", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT x.v IS NULL, count(x.v) FROM (SELECT ROW(1, 2) AS v) x GROUP BY x.v`,
+		`SELECT coalesce(x.v, ROW(3, 4)) IS NULL FROM (SELECT ROW(1, 2) AS v) x`,
+		`SELECT CASE WHEN x.v IS NULL THEN 0 ELSE 1 END FROM (SELECT ROW(1, 2) AS v) x`,
+		`SELECT x.v IS NULL FROM (VALUES (ROW(1, 2))) x(v)`,
+		`SELECT abs(x.a) FROM (SELECT ROW(1, 2) AS v, 1 AS a) x`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Errorf("%s: %v, want nil", q, err)
+		}
+	}
+}
+
 // The type checks a statement gets before it runs read a scalar subquery's
 // target in the subquery's own scope, not as the outer column of that name.
 func TestSubqueryTargetTypedInItsOwnScope(t *testing.T) {

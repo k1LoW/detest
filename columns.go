@@ -82,7 +82,8 @@ type columnChecker struct {
 	cteTypes []map[string]map[string]string
 	// outTypes are the types of a query's output columns by position, ""
 	// where expressionType does not know one, for a FROM item, a CTE, a
-	// view or a scalar subquery made of it.
+	// view or a scalar subquery made of it. A row is "record", which
+	// expressionType never gives.
 	outTypes map[*sqlir.SelectStmt][]string
 	// outNamed are the types of a query's output columns by name, which a
 	// select list with a * has where outTypes has none; "" for a name two
@@ -1230,6 +1231,14 @@ func (c *columnChecker) noteOutputTypes(sel *sqlir.SelectStmt, sc *colScope) {
 			}
 			c.outUnresolved[sel][len(types)] = true
 		}
+		if typ == "" && rowValued(t.Expr) {
+			// Only here and not in typer, which leaves a row untyped for
+			// the row comparisons and the run's branch checks to handle
+			// as they do. A query around reads the column as the record
+			// Postgres gives it, which no operator or function the checks
+			// know takes.
+			typ = "record"
+		}
 		if typ == "" && !untypedExpr(t.Expr) && !isNullConst(t.Expr) {
 			// Postgres resolves a CASE, a COALESCE or an aggregate of
 			// untyped values alone, such as max('1'), to text.
@@ -1975,7 +1984,11 @@ func (c *columnChecker) itemTypes(sel *sqlir.SelectStmt) []string {
 	}
 	types := slices.Clone(c.setOpTypes(sel))
 	for i := range types {
-		types[i] = resolvedType(types[i], setOpColumnExprs(sel, i))
+		exprs := setOpColumnExprs(sel, i)
+		types[i] = resolvedType(types[i], exprs)
+		if types[i] == "" && slices.ContainsFunc(exprs, rowValued) {
+			types[i] = "record"
+		}
 	}
 	return types
 }
@@ -3491,14 +3504,14 @@ func (c *columnChecker) condition(e sqlir.Expr, sc *colScope, clause string) err
 	}
 }
 
-// arithmeticTypes refuses arithmetic over a boolean, a uuid or a
+// arithmeticTypes refuses arithmetic over a boolean, a uuid, a record or a
 // character type that Postgres has no operator for and fails when it plans
 // the statement (42883), while the evaluators check the operands only where
 // a row reaches them. operands are the left and the right operand of op, or
 // the one operand of unary minus. A domain counts as its base type, and an
 // expression of string literals and NULLs, such as COALESCE('1', NULL) or
 // min('1'), as text, which Postgres resolves it to. No operator takes a
-// boolean or a uuid. The only one that takes a character type is
+// boolean, a uuid or a record. The only one that takes a character type is
 // jsonb - text, so a character type is refused anywhere but on the right of
 // a binary minus, and there only beside a type detest classifies, which
 // cannot be jsonb, rather than beside a string literal, a parameter, a bare
@@ -3525,7 +3538,7 @@ func (c *columnChecker) arithmeticTypes(sc *colScope, op string, operands ...sql
 		}
 		typ := typeOf(o)
 		switch {
-		case typ == "bool" || typ == "boolean" || typ == "uuid":
+		case typ == "bool" || typ == "boolean" || typ == "uuid" || typ == "record":
 		case collatableType(typ):
 			if len(operands) == 2 && i == 1 && op == "-" {
 				l := operands[0]
