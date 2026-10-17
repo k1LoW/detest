@@ -5260,6 +5260,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		"SELECT 1 FROM (SELECT CURRENT_DATE, 2 AS `CURRENT_DATE`) d",
 		`SELECT t.n AS m, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.m HAVING m > 0`,
 		`SELECT VALUES(n) FROM t`,
+		`WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5317,6 +5318,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT n AS k FROM t GROUP BY n HAVING max(k) > 0`,
 		`SELECT 1 FROM (SELECT n+1, n+2 FROM t) d`,
 		`SELECT 1 FROM (SELECT UserName, count(*) FROM t GROUP BY UserName) d`,
+		`WITH c AS (SELECT 1 AS id) SELECT (WITH c AS (SELECT 2 AS id) SELECT id FROM c) FROM c`,
 		`SELECT t.n AS n, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, t.n HAVING n > 0`,
 		`SELECT 1 FROM t a JOIN t b ON b.id = a.id`,
 		`UPDATE t JOIN u ON m = n JOIN u AS u2 ON u2.id = u.id SET t.n = 3 WHERE false`,
@@ -5328,6 +5330,17 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`INSERT INTO t (id, ID) VALUES (5, 6)`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrDuplicateColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// A view keeps the parser's substitution of a GROUP BY alias, which
+	// its direct query refuses too.
+	mustExec(t, db, `CREATE VIEW grouped AS SELECT n % 2 AS id, count(*) AS c FROM t GROUP BY id`)
+	for _, q := range []string{
+		`SELECT n % 2 AS id, count(*) AS c FROM t GROUP BY id`,
+		`SELECT c FROM grouped`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
 		}
 	}

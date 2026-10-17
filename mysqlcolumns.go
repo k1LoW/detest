@@ -276,7 +276,11 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope, error) {
 	if len(sel.With) > 0 {
 		var level []*myCTE
-		for _, cte := range sel.With {
+		for i, cte := range sel.With {
+			if slices.ContainsFunc(sel.With[:i], func(o sqlir.CTE) bool { return strings.EqualFold(o.Name, cte.Name) }) {
+				// MySQL fails it with 1066, and detest reads the last.
+				return myCols{}, nil, w.x.unsupported(fmt.Sprintf("two CTEs named %s in one WITH", cte.Name))
+			}
 			level = append(level, &myCTE{name: cte.Name, sel: cte.Select, outer: outer})
 		}
 		w.ctes = append(w.ctes, level)
