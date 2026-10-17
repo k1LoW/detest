@@ -2228,6 +2228,11 @@ func TestNumericUnderUncertainOutputType(t *testing.T) {
 	if err := db.QueryRow(`SELECT * FROM t JOIN u ON true`).Scan(new(any), &nm, &x, &f, &uf, &unm); err != nil || nm != "2.00" || x != "7" || f != 1.5 || uf != 3.5 || unm != "4.00" {
 		t.Errorf("a * over a join: got %#v %#v %#v %#v %#v, %v", nm, x, f, uf, unm, err)
 	}
+	// A function in FROM gives a column too.
+	var gx any
+	if err := db.QueryRow(`SELECT * FROM t, generate_series(1, 1)`).Scan(new(any), new(any), &gx, new(any), new(any)); err != nil || gx != "7" {
+		t.Errorf("a * over a table and a function: got %#v, %v, want the text 7", gx, err)
+	}
 	// A whole numeric still scans into an int64.
 	for _, q := range []string{`SELECT x, 0 FROM v`, `SELECT * FROM (SELECT x, x FROM t) s`} {
 		var n, m int64

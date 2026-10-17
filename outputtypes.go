@@ -300,10 +300,13 @@ func (c *columnChecker) starCertain(sel *sqlir.SelectStmt, t sqlir.Target, sc *c
 	found := false
 	for _, it := range items {
 		alias := it.Alias
-		if alias == "" && it.Func == nil {
+		if alias == "" && it.Sub == nil && it.Func == nil {
 			alias = relname(it.Name)
 		}
-		if alias == "" || t.Table != "" && alias != t.Table {
+		if alias == "" {
+			return nil
+		}
+		if t.Table != "" && alias != t.Table {
 			continue
 		}
 		found = true
