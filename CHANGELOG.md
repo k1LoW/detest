@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.6.3](https://github.com/k1LoW/detest/compare/v0.6.2...v0.6.3) - 2026-10-16
+
+### Fix bug 🐛
+- fix: give a view whose query has a * the columns its query has by @k1LoW in https://github.com/k1LoW/detest/pull/185
+- fix: refuse an aggregate only in DISTINCT ON or a window by @k1LoW in https://github.com/k1LoW/detest/pull/179
+- fix: write a boolean argument of concat as the server's output function does by @k1LoW in https://github.com/k1LoW/detest/pull/180
+- fix: write extract's numeric with its scale and refuse a time of day by @k1LoW in https://github.com/k1LoW/detest/pull/182
+- fix: read a string literal in a column of VALUES as the type of its rows by @k1LoW in https://github.com/k1LoW/detest/pull/181
+- fix: refuse a write whose target is a view by @k1LoW in https://github.com/k1LoW/detest/pull/190
+- fix: type a parameter by the function argument it stands in by @k1LoW in https://github.com/k1LoW/detest/pull/184
+- fix: fail a MySQL write whose subquery reads its own table by @k1LoW in https://github.com/k1LoW/detest/pull/192
+- fix: bind a view's query when the view is created by @k1LoW in https://github.com/k1LoW/detest/pull/191
+- fix: read a numeric back with the scale Postgres gives it by @k1LoW in https://github.com/k1LoW/detest/pull/193
+
 ## [v0.6.2](https://github.com/k1LoW/detest/compare/v0.6.1...v0.6.2) - 2026-10-16
 
 ### Fix bug 🐛
