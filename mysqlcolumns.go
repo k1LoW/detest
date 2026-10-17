@@ -51,6 +51,10 @@ func identLike(name string) bool {
 	return name != ""
 }
 
+// niladic are the functions MySQL calls without parentheses, which name a
+// select list item by an identifier.
+var niladic = []string{"current_timestamp", "current_date", "current_time", "current_user", "localtime", "localtimestamp", "utc_date", "utc_time", "utc_timestamp"}
+
 // literalName is the name MySQL gives a literal in a select list.
 func literalName(e sqlir.Expr) (string, bool) {
 	c, ok := e.(*sqlir.Const)
@@ -558,6 +562,18 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 				// detest names the column by targetName, which MySQL
 				// does not, so neither name reads it the same on both.
 				out.unread = append(out.unread, targetName(t))
+				if f, ok := t.Expr.(*sqlir.FuncCall); ok && len(f.Args) == 0 {
+					// MySQL names CURRENT_TIMESTAMP and the like as
+					// written, which the parser folds into another call.
+					out.unread = append(out.unread, niladic...)
+				}
+				if c, ok := t.Expr.(*sqlir.Const); ok {
+					if v, ok := c.Value.(int64); ok {
+						// Only for the duplicate check: an integer's
+						// spelling is never a plain identifier.
+						out.literals = append(out.literals, fmt.Sprint(v))
+					}
+				}
 				if name, ok := literalName(t.Expr); ok {
 					out.unread = append(out.unread, name)
 					out.literals = append(out.literals, name)
@@ -599,7 +615,8 @@ func (w *myWalk) expr(e sqlir.Expr, ctx myCtx) error {
 			}
 			if x, ok := reflect.TypeAssert[sqlir.Expr](v); ok && ctx.substituted != nil {
 				if alias, ok := ctx.substituted[x]; ok {
-					err = w.aliasColumn(ctx.block, x, alias)
+					// Inside an aggregate the lookup scope is the block's.
+					err = w.aliasColumn(cmp.Or(ctx.block, ctx.sc), x, alias)
 					return
 				}
 			}

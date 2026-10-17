@@ -5228,6 +5228,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT 1 FROM (SELECT 1 AS k, 2 AS k) d`,
 		`WITH c AS (SELECT 1 AS k, 2 AS K) SELECT 1 FROM c`,
 		`SELECT 1 FROM (SELECT 'a', 2 AS a) d`,
+		`SELECT 1 FROM (SELECT 1, 1) d`,
+		`SELECT d.current_timestamp FROM (SELECT CURRENT_TIMESTAMP) d`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = (SELECT new.m FROM u AS new)`,
 		`SELECT DEFAULT(nope) FROM t`,
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
 	} {
@@ -5283,6 +5286,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE t.n = 3`,
 		`SELECT 1 AS k, 2 AS k`,
 		`WITH c AS (SELECT 1 AS k, 2 AS k) SELECT 1`,
+		`SELECT n AS n FROM t GROUP BY n HAVING max(n) > 0`,
+		`SELECT n AS k FROM t GROUP BY n HAVING max(k) > 0`,
 	} {
 		mustExec(t, db, q)
 	}

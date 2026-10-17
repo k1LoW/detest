@@ -830,6 +830,14 @@ func (c *conv) from(j *ast.Join) (*sqlir.TableRef, []sqlir.Join, error) {
 	return base, append(joins, out), nil
 }
 
+// tableNameOf is the name of a table source, empty for a subquery.
+func tableNameOf(n ast.ResultSetNode) string {
+	if t, ok := n.(*ast.TableName); ok {
+		return t.Name.L
+	}
+	return ""
+}
+
 func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	ts, ok := n.(*ast.TableSource)
 	if !ok {
@@ -838,6 +846,11 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	// Column references name their table in lower case (ColumnName.Table.L),
 	// so the alias a FROM item is known by is lower case too.
 	out := sqlir.TableRef{Alias: ts.AsName.L, Lateral: ts.Lateral}
+	if c.rowAlias != "" && (ts.AsName.L == c.rowAlias || ts.AsName.L == "" && strings.EqualFold(tableNameOf(ts.Source), c.rowAlias)) {
+		// The conversion reads the row alias as the proposed row without
+		// regard to the scopes of subqueries, where this item shadows it.
+		return out, c.unsupported("a FROM item of the row alias's name in ON DUPLICATE KEY UPDATE")
+	}
 	for _, cn := range ts.ColumnNames {
 		out.Columns = append(out.Columns, cn.L)
 	}
