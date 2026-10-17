@@ -169,11 +169,15 @@ type columnChecker struct {
 	// paramCount is the number of uses of each parameter in the statement.
 	paramCount map[int]int
 	// paramShown are the uses of parameters typed by a type the statement
-	// shows without a guess (certainType), and paramBeside the parameters
-	// used again whose output type certainType took from an operand beside
-	// them, which holds only where every use is in paramShown.
-	paramShown  map[*sqlir.Param]bool
-	paramBeside map[int]bool
+	// shows without a guess (certainType), paramGuessed those typed by one
+	// the check guesses, and paramBeside the parameters used again whose
+	// output type certainType took from an operand beside them, which
+	// holds only where every use is shown and none guessed. A use is
+	// guessed even where another context of the same node shows its type,
+	// as BETWEEN compares one node twice.
+	paramShown   map[*sqlir.Param]bool
+	paramGuessed map[*sqlir.Param]bool
+	paramBeside  map[int]bool
 	// outExpanded are the names of a query's columns with its * expanded
 	// (noteExpanded).
 	outExpanded map[*sqlir.SelectStmt][]string
@@ -284,7 +288,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 		return x.unsupported(c.numberConflict)
 	}
 	for _, p := range sqlir.Params(stmt) {
-		if c.paramBeside[p.Index] && !c.paramShown[p] {
+		if c.paramBeside[p.Index] && (!c.paramShown[p] || c.paramGuessed[p]) {
 			// Postgres types the parameter at the use it meets first, and
 			// this use's type is one the check guesses or does not record,
 			// so the type the output took may not be the server's.
@@ -3758,7 +3762,12 @@ func (c *columnChecker) shownBeside(a sqlir.Expr, typ string, b sqlir.Expr, sc *
 	}
 	if ct := c.x.tx.db.baseType(c.certainType(b, sc)); numberRank[ct] > 0 && numberRank[ct] == numberRank[typ] {
 		c.shownParam(p)
+		return
 	}
+	if c.paramGuessed == nil {
+		c.paramGuessed = map[*sqlir.Param]bool{}
+	}
+	c.paramGuessed[p] = true
 }
 
 func (c *columnChecker) shownParam(p *sqlir.Param) {

@@ -2252,6 +2252,9 @@ func TestNumericUnderUncertainOutputType(t *testing.T) {
 		// Postgres takes abs(NULL)'s float8 at the first.
 		{`SELECT (1.00 + abs(NULL)) + $1, 2.00 + $1`, []any{int64(1)}},
 		{`SELECT s.v + $1, 2.00 + $1 FROM (VALUES (1.00), (abs(NULL))) s(v)`, []any{int64(1)}},
+		// BETWEEN and IN compare one node of the parameter more than once.
+		{`DELETE FROM t USING (VALUES (1.00), (abs(NULL))) s(v) WHERE $1 BETWEEN s.v AND 3.00 RETURNING 2.00 + $1`, []any{int64(2)}},
+		{`SELECT 2.00 + $1 FROM (VALUES (1.00), (abs(NULL))) s(v) WHERE $1 IN (3.00, s.v)`, []any{int64(2)}},
 		// The check tells a CTE's columns apart by name only.
 		{`WITH w AS (SELECT nm, nm FROM t) SELECT * FROM w`, nil},
 		// A column of a function in FROM has no certain type, so the
