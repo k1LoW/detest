@@ -5227,6 +5227,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		"SELECT d.`1.0` FROM (SELECT 1.0) d",
 		`SELECT 1 FROM (SELECT 1 AS k, 2 AS k) d`,
 		`WITH c AS (SELECT 1 AS k, 2 AS K) SELECT 1 FROM c`,
+		`SELECT 1 FROM (SELECT 'a', 2 AS a) d`,
 		`SELECT DEFAULT(nope) FROM t`,
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
 	} {
@@ -5284,6 +5285,14 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`WITH c AS (SELECT 1 AS k, 2 AS k) SELECT 1`,
 	} {
 		mustExec(t, db, q)
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id, id) VALUES (5, 6)`,
+		`INSERT INTO t (id, ID) VALUES (5, 6)`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrDuplicateColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
 	}
 	// A set operation's ORDER BY names its first query's alias in any case.
 	var n int

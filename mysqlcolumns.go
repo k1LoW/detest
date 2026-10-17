@@ -20,6 +20,9 @@ type myCols struct {
 	// unread are the names MySQL gives columns detest names otherwise, such
 	// as a string literal's, named by its value.
 	unread []string
+	// literals are the names MySQL gives literals without an alias, by
+	// their value, which are among unread too.
+	literals []string
 	// unknown is set for an item whose columns detest does not know, such
 	// as an ignored table, which resolves any name.
 	unknown bool
@@ -225,8 +228,9 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 	if len(t.Columns) > 0 {
 		it.cols = myCols{names: t.Columns}
 	}
-	for i, n := range it.cols.names {
-		if slices.ContainsFunc(it.cols.names[i+1:], func(m string) bool { return strings.EqualFold(m, n) }) {
+	named := append(slices.Clone(it.cols.names), it.cols.literals...)
+	for i, n := range named {
+		if slices.ContainsFunc(named[i+1:], func(m string) bool { return strings.EqualFold(m, n) }) {
 			// MySQL fails it with 1060 before it runs the statement.
 			return it, w.x.unsupported(fmt.Sprintf("FROM item %s with two columns named %q", it.alias, n))
 		}
@@ -541,6 +545,7 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 				}
 				out.names = append(out.names, it.cols.names...)
 				out.unread = append(out.unread, it.cols.unread...)
+				out.literals = append(out.literals, it.cols.literals...)
 				out.unnamed = out.unnamed || it.cols.unnamed
 				out.unknown = out.unknown || it.cols.unknown
 			}
@@ -555,6 +560,7 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 				out.unread = append(out.unread, targetName(t))
 				if name, ok := literalName(t.Expr); ok {
 					out.unread = append(out.unread, name)
+					out.literals = append(out.literals, name)
 				} else {
 					out.unnamed = true
 				}
@@ -762,9 +768,12 @@ func (w *myWalk) setColumn(col string, target myItem, others []myItem) error {
 
 func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 	t := w.target(ins.Table, ins.Alias)
-	for _, c := range ins.Columns {
+	for i, c := range ins.Columns {
 		if err := w.setColumn(c, t, nil); err != nil {
 			return err
+		}
+		if slices.Contains(ins.Columns[:i], c) {
+			return w.x.tx.db.kind.Error(sqlir.DuplicateColumn, fmt.Sprintf("Column '%s' specified twice", c), relname(ins.Table), c, "")
 		}
 	}
 	// MySQL reads the row being built, detest nothing.
