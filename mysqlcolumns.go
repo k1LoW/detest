@@ -58,7 +58,7 @@ type myHaving struct {
 // names only, unlike columnChecker, whose types are Postgres's.
 type myWalk struct {
 	x    *sqlExec
-	ctes []map[string]myCols
+	ctes [][]*myCTE
 	// views are the views being named, against a view that reads itself.
 	views map[string]bool
 }
@@ -92,21 +92,48 @@ func (w *myWalk) ambiguous(name, clause string) error {
 	return w.x.tx.db.kind.Error(sqlir.AmbiguousColumn, fmt.Sprintf("Column '%s' in %s is ambiguous", name, clause), "", name, "")
 }
 
+// myCTE is a CTE of a WITH, whose query is checked the first time the
+// statement refers to it: MySQL leaves a CTE nothing refers to unresolved.
+type myCTE struct {
+	name  string
+	sel   *sqlir.SelectStmt
+	outer *myScope
+	done  bool
+	cols  myCols
+	err   error
+}
+
+// cteCols are the columns of the i-th CTE of the level-th WITH in scope,
+// whose query sees the CTEs before it only.
+func (w *myWalk) cteCols(level, i int) (myCols, error) {
+	e := w.ctes[level][i]
+	if !e.done {
+		e.done = true
+		saved := w.ctes
+		w.ctes = append(slices.Clone(saved[:level]), saved[level][:i])
+		e.cols, _, e.err = w.query(e.sel, e.outer)
+		w.ctes = saved
+	}
+	return e.cols, e.err
+}
+
 // tableCols are the columns of the table, view or CTE name refers to.
-func (w *myWalk) tableCols(name string) myCols {
-	for _, m := range slices.Backward(w.ctes) {
-		if c, ok := m[name]; ok {
-			return c
+func (w *myWalk) tableCols(name string) (myCols, error) {
+	for level, ctes := range slices.Backward(w.ctes) {
+		for i, e := range slices.Backward(ctes) {
+			if e.name == name {
+				return w.cteCols(level, i)
+			}
 		}
 	}
 	db := w.x.tx.db
 	table := db.resolve(name)
 	if def := db.defs[table]; def != nil {
-		return myCols{names: def.columns}
+		return myCols{names: def.columns}, nil
 	}
 	if v := db.views[table]; v != nil && !w.views[table] {
 		if len(v.ViewColumns) > 0 {
-			return myCols{names: v.ViewColumns}
+			return myCols{names: v.ViewColumns}, nil
 		}
 		w.views[table] = true
 		defer delete(w.views, table)
@@ -117,10 +144,10 @@ func (w *myWalk) tableCols(name string) myCols {
 		cols, _, err := w.query(v.View, nil)
 		w.ctes = saved
 		if err == nil {
-			return cols
+			return cols, nil
 		}
 	}
-	return myCols{unknown: true}
+	return myCols{unknown: true}, nil
 }
 
 // itemAlias is the name a FROM item is referred to by, lower case as the
@@ -146,7 +173,11 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 	case t.Func != nil:
 		it.cols = myCols{unknown: true}
 	default:
-		it.cols = w.tableCols(t.Name)
+		cols, err := w.tableCols(t.Name)
+		if err != nil {
+			return it, err
+		}
+		it.cols = cols
 	}
 	if len(t.Columns) > 0 {
 		it.cols = myCols{names: t.Columns}
@@ -159,16 +190,12 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 // operation.
 func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope, error) {
 	if len(sel.With) > 0 {
-		m := map[string]myCols{}
-		w.ctes = append(w.ctes, m)
-		defer func() { w.ctes = w.ctes[:len(w.ctes)-1] }()
+		var level []*myCTE
 		for _, cte := range sel.With {
-			cols, _, err := w.query(cte.Select, outer)
-			if err != nil {
-				return myCols{}, nil, err
-			}
-			m[cte.Name] = cols
+			level = append(level, &myCTE{name: cte.Name, sel: cte.Select, outer: outer})
 		}
+		w.ctes = append(w.ctes, level)
+		defer func() { w.ctes = w.ctes[:len(w.ctes)-1] }()
 	}
 	if sel.SetOp != "" {
 		return w.setOp(sel, outer)
@@ -209,6 +236,12 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			}
 		}
 	}
+	for _, t := range sel.Targets {
+		if t.Star && t.Table != "" && !slices.ContainsFunc(sc.items, func(it myItem) bool { return it.alias == t.Table }) {
+			// MySQL fails it with 1051, and detest gives no columns.
+			return myCols{}, nil, w.x.unsupported(fmt.Sprintf("%s.* of a table not in FROM", t.Table))
+		}
+	}
 	substituted := map[sqlir.Expr]string{}
 	for _, t := range sel.Targets {
 		if t.Alias != "" && t.Expr != nil {
@@ -247,8 +280,19 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 	}
 	if sel.Having != nil {
 		for _, t := range sel.Targets {
-			if t.Star {
+			if t.Star && t.Table == "" {
 				having.star = true
+			}
+			if t.Star && t.Table != "" {
+				for _, it := range sc.items {
+					if it.alias != t.Table {
+						continue
+					}
+					having.star = having.star || it.cols.unknown || it.cols.unnamed
+					for _, c := range it.cols.names {
+						having.cols[[2]string{it.alias, c}] = true
+					}
+				}
 			}
 			if r, ok := t.Expr.(*sqlir.ColumnRef); ok {
 				if alias, ok := w.owner(r, sc); ok {
@@ -295,9 +339,11 @@ func (w *myWalk) setOp(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			case r.Table != "":
 				// MySQL fails it with 1250 rather than 1054.
 				return myCols{}, nil, w.x.unsupported("a qualified column in the ORDER BY of a set operation")
-			case cols.unknown || slices.ContainsFunc(cols.names, func(n string) bool { return strings.EqualFold(n, r.Column) }):
-			case cols.unnamed:
-				return myCols{}, nil, w.x.unsupported("an ORDER BY name of a set operation whose columns detest cannot name")
+			case cols.unknown || slices.Contains(cols.names, r.Column):
+			case cols.unnamed || slices.ContainsFunc(cols.names, func(n string) bool { return strings.EqualFold(n, r.Column) }):
+				// The executor keys the column by the name the first
+				// query gives it.
+				return myCols{}, nil, w.x.unsupported("an ORDER BY name of a set operation detest cannot match to its columns")
 			default:
 				return myCols{}, nil, w.unknownColumn(r.Column, "order clause")
 			}
@@ -326,6 +372,7 @@ func (w *myWalk) aliasColumn(sc *myScope, e sqlir.Expr, alias string) error {
 func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) error {
 	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" {
 		unnamed := false
+		var matched []any
 		for _, t := range sel.Targets {
 			name := t.Alias
 			if c, ok := t.Expr.(*sqlir.ColumnRef); ok && name == "" {
@@ -334,9 +381,24 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 			if t.Expr != nil && name == "" {
 				unnamed = true
 			}
-			if name != "" && strings.EqualFold(name, r.Column) {
-				return nil
+			if name == "" || !strings.EqualFold(name, r.Column) {
+				continue
 			}
+			// Items of one column name it once; any other two are
+			// ambiguous.
+			var what any = t.Expr
+			if c, ok := t.Expr.(*sqlir.ColumnRef); ok {
+				if alias, ok := w.owner(c, sc); ok {
+					what = [2]string{alias, c.Column}
+				}
+			}
+			if len(matched) > 0 && matched[0] != what {
+				return w.ambiguous(r.Column, "order clause")
+			}
+			matched = append(matched, what)
+		}
+		if len(matched) > 0 {
+			return nil
 		}
 		err := w.expr(e, myCtx{sc: sc, clause: "order clause"})
 		if unnamed && errors.Is(err, sqlir.ErrUndefinedColumn) {
@@ -507,6 +569,10 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 		switch {
 		case len(hits) > 1:
 			return w.ambiguous(name, clause)
+		case len(hits) == 1 && folded:
+			// MySQL takes the two names for one and fails with 1052,
+			// where detest reads the one of the exact case.
+			return w.x.unsupported(fmt.Sprintf("column %s beside a column of the name in another case", name))
 		case len(hits) == 1:
 			it := hits[0]
 			if missed && r.Table != "" && s != sc {
@@ -528,7 +594,7 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			return w.x.unsupported(fmt.Sprintf("column %s beside a column detest cannot name", name))
 		}
 	}
-	if r.Table == "" {
+	if r.Table == "" && sc != nil {
 		for s := sc.outer; s != nil; s = s.outer {
 			if slices.ContainsFunc(s.aliases, func(a string) bool { return strings.EqualFold(a, r.Column) }) {
 				// MySQL reads an outer select list alias in some clauses

@@ -538,6 +538,25 @@ func (c *conv) setOpr(s *ast.SetOprStmt) (*sqlir.SelectStmt, error) {
 	if out.OrderBy, err = c.orderBy(s.OrderBy); err != nil {
 		return nil, err
 	}
+	// The rows of a set operation take the first query's names, which
+	// MySQL's ORDER BY matches case-insensitively and the executor exactly.
+	first := out
+	for first.SetOp != "" && first.Larg != nil {
+		first = first.Larg
+	}
+	for _, k := range out.OrderBy {
+		for _, ref := range sqlir.BlockColumnRefs(k.Expr) {
+			if ref.Table != "" {
+				continue
+			}
+			for _, t := range first.Targets {
+				if t.Alias != "" && strings.EqualFold(t.Alias, ref.Column) {
+					ref.Column = t.Alias
+					break
+				}
+			}
+		}
+	}
 	if out.Limit, out.Offset, err = c.limit(s.Limit); err != nil {
 		return nil, err
 	}

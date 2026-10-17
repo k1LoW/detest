@@ -5158,6 +5158,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`UPDATE t SET nope = 1`,
 		`UPDATE t SET n = 1 ORDER BY nope`,
 		`DELETE FROM t WHERE nope = 1`,
+		`VALUES ROW(nope)`,
+		`WITH a AS (SELECT nope FROM t) SELECT 1 FROM t WHERE false AND EXISTS (SELECT 1 FROM a)`,
+		`SELECT t.*, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id HAVING u.m > 0`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5168,6 +5171,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
 		`UPDATE t, u SET n = 1 WHERE id = 1`,
 		`UPDATE t JOIN u ON u.t_id = t.id SET id = 1 WHERE false`,
+		`SELECT t.id, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT t.n AS k, u.m AS k FROM t JOIN u ON u.t_id = t.id ORDER BY k`,
+		`SELECT n AS id, id FROM t ORDER BY id`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrAmbiguousColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5192,6 +5198,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`INSERT INTO t (id, n) SELECT id + 10, m FROM u ON DUPLICATE KEY UPDATE n = m`,
 		`INSERT INTO t (id, n) SELECT id + 20, m FROM u ON DUPLICATE KEY UPDATE n = id`,
 		`UPDATE t JOIN u ON u.t_id = t.id SET m = 1 WHERE false`,
+		`SELECT id FROM t CROSS JOIN (SELECT 2 AS ID) d`,
+		`SELECT missing.* FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5231,8 +5239,18 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`UPDATE t JOIN u ON u.t_id = t.id SET t.n = u.m WHERE u.m > 0`,
 		`UPDATE t SET n = n + 1 WHERE id = 1 ORDER BY n LIMIT 1`,
 		`DELETE FROM t WHERE id = 99`,
+		`SELECT t.id, t.id FROM t ORDER BY id`,
+		`SELECT n AS k, n AS k FROM t ORDER BY k`,
+		`WITH unused AS (SELECT nope FROM t) SELECT 1`,
+		`WITH a AS (SELECT nope FROM t), b AS (SELECT * FROM a) SELECT 1`,
+		`SELECT *, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.id HAVING u.m > 0`,
 	} {
 		mustExec(t, db, q)
+	}
+	// A set operation's ORDER BY names its first query's alias in any case.
+	var n int
+	if err := db.QueryRow(`SELECT 1 AS X UNION ALL SELECT 2 ORDER BY X DESC LIMIT 1`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("set operation ordered by an upper case alias: %d, %v", n, err)
 	}
 }
 
