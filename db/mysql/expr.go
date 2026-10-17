@@ -64,6 +64,10 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 		}
 		return &sqlir.ColumnRef{Table: table, Column: e.Name.Name.L}, nil
 	case *ast.ValuesExpr:
+		if !c.onDuplicate {
+			// MySQL reads it as NULL outside ON DUPLICATE KEY UPDATE.
+			return nil, c.unsupported("VALUES(col) outside ON DUPLICATE KEY UPDATE")
+		}
 		// VALUES(col) in ON DUPLICATE KEY UPDATE is the proposed row's column.
 		return &sqlir.ColumnRef{Table: "excluded", Column: e.Column.Name.Name.L}, nil
 	case *ast.DefaultExpr:

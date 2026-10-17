@@ -250,6 +250,13 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 				return it, w.x.unsupported(fmt.Sprintf("FROM item %s with an expression twice without an alias", it.alias))
 			}
 		}
+		for _, n := range it.cols.names {
+			if slices.ContainsFunc(it.cols.unread, func(m string) bool { return strings.EqualFold(m, n) }) {
+				// Another column may have the name on MySQL, which fails
+				// it with 1060.
+				return it, w.x.unsupported(fmt.Sprintf("FROM item %s with the column name %q, which an expression's column may have", it.alias, n))
+			}
+		}
 		if len(it.cols.exprs) > 0 {
 			for _, n := range it.cols.names {
 				if !identLike(strings.ToLower(n)) {
@@ -346,6 +353,7 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 		}
 	}
 	having := &myHaving{cols: map[[2]string]bool{}}
+	var grouped [][2]string
 	for _, g := range sel.GroupBy {
 		if alias, ok := substituted[g]; ok {
 			// The parser put the select list's expression for its alias,
@@ -369,6 +377,7 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 		if r, ok := g.(*sqlir.ColumnRef); ok {
 			if alias, ok := w.owner(r, sc); ok {
 				having.cols[[2]string{alias, r.Column}] = true
+				grouped = append(grouped, [2]string{alias, r.Column})
 			}
 		}
 	}
@@ -394,7 +403,7 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			}
 		}
 		hs := &myScope{items: sc.items, outer: sc.outer, aliases: sc.aliases, having: having}
-		if err := w.expr(sel.Having, myCtx{sc: hs, block: sc, clause: "having clause", substituted: substituted}); err != nil {
+		if err := w.expr(sel.Having, myCtx{sc: hs, block: sc, clause: "having clause", substituted: substituted, grouped: grouped}); err != nil {
 			return myCols{}, nil, err
 		}
 	}
@@ -631,6 +640,9 @@ type myCtx struct {
 	// parser put for an alias.
 	block       *myScope
 	substituted map[sqlir.Expr]string
+	// grouped are the GROUP BY columns of the block, by item alias and
+	// column, which a HAVING name reads before the select list's alias.
+	grouped [][2]string
 	// skip are the expressions checked already.
 	skip map[sqlir.Expr]bool
 }
@@ -654,7 +666,17 @@ func (w *myWalk) expr(e sqlir.Expr, ctx myCtx) error {
 			if x, ok := reflect.TypeAssert[sqlir.Expr](v); ok && ctx.substituted != nil {
 				if alias, ok := ctx.substituted[x]; ok {
 					// Inside an aggregate the lookup scope is the block's.
-					err = w.aliasColumn(cmp.Or(ctx.block, ctx.sc), x, alias)
+					block := cmp.Or(ctx.block, ctx.sc)
+					if r, ok := x.(*sqlir.ColumnRef); ok && strings.EqualFold(r.Column, alias) {
+						own, _ := w.owner(r, block)
+						if slices.ContainsFunc(ctx.grouped, func(g [2]string) bool { return strings.EqualFold(g[1], alias) && g != [2]string{own, r.Column} }) {
+							// MySQL reads the grouped column, where the
+							// parser put the select list's.
+							err = w.x.unsupported(fmt.Sprintf("HAVING name %q, which both a select list alias and another item's GROUP BY column give", alias))
+							return
+						}
+					}
+					err = w.aliasColumn(block, x, alias)
 					return
 				}
 			}
