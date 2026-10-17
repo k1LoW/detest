@@ -42,6 +42,8 @@ type conv struct {
 	// rowAlias is the alias INSERT ... AS alias gives the proposed row, which
 	// ON DUPLICATE KEY UPDATE refers to as the excluded row.
 	rowAlias string
+	// onDuplicate is set while ON DUPLICATE KEY UPDATE converts.
+	onDuplicate bool
 	// inLimit is set while LIMIT and OFFSET convert.
 	inLimit bool
 	// params numbers the ? placeholders in the order they appear.
@@ -538,6 +540,25 @@ func (c *conv) setOpr(s *ast.SetOprStmt) (*sqlir.SelectStmt, error) {
 	if out.OrderBy, err = c.orderBy(s.OrderBy); err != nil {
 		return nil, err
 	}
+	// The rows of a set operation take the first query's names, which
+	// MySQL's ORDER BY matches case-insensitively and the executor exactly.
+	first := out
+	for first.SetOp != "" && first.Larg != nil {
+		first = first.Larg
+	}
+	for _, k := range out.OrderBy {
+		for _, ref := range sqlir.BlockColumnRefs(k.Expr) {
+			if ref.Table != "" {
+				continue
+			}
+			for _, t := range first.Targets {
+				if t.Alias != "" && strings.EqualFold(t.Alias, ref.Column) {
+					ref.Column = t.Alias
+					break
+				}
+			}
+		}
+	}
 	if out.Limit, out.Offset, err = c.limit(s.Limit); err != nil {
 		return nil, err
 	}
@@ -597,6 +618,9 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 	if s.Fields != nil {
 		for _, f := range s.Fields.Fields {
 			if f.WildCard != nil {
+				if f.WildCard.Schema.L != "" {
+					return nil, c.unsupported("a * qualified by its database")
+				}
 				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.L}) // aliases are lower case
 				continue
 			}
@@ -809,6 +833,14 @@ func (c *conv) from(j *ast.Join) (*sqlir.TableRef, []sqlir.Join, error) {
 	return base, append(joins, out), nil
 }
 
+// tableNameOf is the name of a table source, empty for a subquery.
+func tableNameOf(n ast.ResultSetNode) string {
+	if t, ok := n.(*ast.TableName); ok {
+		return t.Name.L
+	}
+	return ""
+}
+
 func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	ts, ok := n.(*ast.TableSource)
 	if !ok {
@@ -817,6 +849,16 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	// Column references name their table in lower case (ColumnName.Table.L),
 	// so the alias a FROM item is known by is lower case too.
 	out := sqlir.TableRef{Alias: ts.AsName.L, Lateral: ts.Lateral}
+	if c.rowAlias != "" && (ts.AsName.L == c.rowAlias || ts.AsName.L == "" && strings.EqualFold(tableNameOf(ts.Source), c.rowAlias)) {
+		// The conversion reads the row alias as the proposed row without
+		// regard to the scopes of subqueries, where this item shadows it.
+		return out, c.unsupported("a FROM item of the row alias's name in ON DUPLICATE KEY UPDATE")
+	}
+	if c.onDuplicate && (ts.AsName.L == "excluded" || ts.AsName.L == "" && tableNameOf(ts.Source) == "excluded") {
+		// VALUES() and the row alias convert to the qualifier excluded,
+		// which this item would then shadow.
+		return out, c.unsupported("a FROM item named excluded in ON DUPLICATE KEY UPDATE")
+	}
 	for _, cn := range ts.ColumnNames {
 		out.Columns = append(out.Columns, cn.L)
 	}
@@ -844,8 +886,8 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 }
 
 // target returns the single table an INSERT, UPDATE or DELETE writes, with
-// the tables a multi-table UPDATE joins to it.
-func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableRef, sqlir.Expr, error) {
+// the tables a multi-table UPDATE joins to it and the ON of each.
+func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableRef, []sqlir.Expr, error) {
 	if refs == nil || refs.TableRefs == nil {
 		return sqlir.TableRef{}, nil, nil, c.unsupported("statement without a table")
 	}
@@ -857,17 +899,15 @@ func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableR
 		return sqlir.TableRef{}, nil, nil, c.unsupported("writing to a derived table")
 	}
 	var extra []sqlir.TableRef
-	var on sqlir.Expr
+	var ons []sqlir.Expr
 	for _, j := range joins {
 		if j.Kind != sqlir.InnerJoin && j.Kind != sqlir.CrossJoin {
 			return sqlir.TableRef{}, nil, nil, c.unsupported("outer join in UPDATE or DELETE")
 		}
 		extra = append(extra, j.Table)
-		if j.On != nil {
-			on = and(on, j.On)
-		}
+		ons = append(ons, j.On)
 	}
-	return *base, extra, on, nil
+	return *base, extra, ons, nil
 }
 
 func and(a, b sqlir.Expr) sqlir.Expr {
@@ -891,7 +931,9 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	if len(extra) > 0 {
 		return nil, c.unsupported("INSERT into a join")
 	}
-	out := &sqlir.InsertStmt{Table: t.Name}
+	// The alias is the lower case name a mixed case table's qualifiers
+	// convert to.
+	out := &sqlir.InsertStmt{Table: t.Name, Alias: t.Alias}
 	for _, col := range s.Columns {
 		out.Columns = append(out.Columns, col.Name.L)
 	}
@@ -918,8 +960,13 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	case len(s.OnDuplicate) > 0:
 		// The row alias names the proposed row only in these expressions; a
 		// later statement of a script may use the name for a table.
-		c.rowAlias = s.RowAlias.L
-		defer func() { c.rowAlias = "" }()
+		if s.RowAlias.L != "" && strings.EqualFold(s.RowAlias.O, relname(t.Name)) {
+			// MySQL fails it with 1066, and the alias would read as the
+			// proposed row where the table's name is meant.
+			return nil, c.unsupported("a row alias of the INSERT target's name")
+		}
+		c.rowAlias, c.onDuplicate = s.RowAlias.L, true
+		defer func() { c.rowAlias, c.onDuplicate = "", false }()
 		oc := &sqlir.OnConflict{}
 		for _, a := range s.OnDuplicate {
 			if _, ok := a.Expr.(*ast.DefaultExpr); ok {
@@ -929,7 +976,10 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e})
+			if a.Column.Schema.L != "" {
+				return nil, c.unsupported("an assignment target qualified by its database")
+			}
+			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
 		}
 		out.OnConflict = oc
 	case s.IgnoreErr:
@@ -949,12 +999,15 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 	if s.IgnoreErr {
 		return nil, c.unsupported("UPDATE IGNORE")
 	}
-	t, extra, on, err := c.target(s.TableRefs)
+	t, extra, ons, err := c.target(s.TableRefs)
 	if err != nil {
 		return nil, err
 	}
-	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra}
+	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra, JoinOn: ons}
 	for _, a := range s.List {
+		if a.Column.Schema.L != "" {
+			return nil, c.unsupported("an assignment target qualified by its database")
+		}
 		if q := a.Column.Table.L; q != "" && q != strings.ToLower(relname(t.Name)) && q != strings.ToLower(t.Name) && q != strings.ToLower(t.Alias) {
 			return nil, c.unsupported("UPDATE of more than one table")
 		}
@@ -966,12 +1019,16 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {
 			return nil, err
 		}
+	}
+	var on sqlir.Expr
+	for _, o := range ons {
+		on = and(on, o)
 	}
 	out.Where = and(on, out.Where)
 	if len(extra) > 0 && (s.Order != nil || s.Limit != nil) {
@@ -993,7 +1050,7 @@ func (c *conv) delete(s *ast.DeleteStmt) (sqlir.Statement, error) {
 	if s.With != nil {
 		return nil, c.unsupported("CTE on DELETE")
 	}
-	t, extra, on, err := c.target(s.TableRefs)
+	t, extra, ons, err := c.target(s.TableRefs)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,6 +1059,10 @@ func (c *conv) delete(s *ast.DeleteStmt) (sqlir.Statement, error) {
 		if out.Where, err = c.cond(s.Where); err != nil {
 			return nil, err
 		}
+	}
+	var on sqlir.Expr
+	for _, o := range ons {
+		on = and(on, o)
 	}
 	out.Where = and(on, out.Where)
 	if out.OrderBy, err = c.orderBy(s.Order); err != nil {

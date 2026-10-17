@@ -5124,3 +5124,298 @@ func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
 	// A script checks each statement after the DDL before it.
 	mustExec(t, db, `CREATE TABLE t (id int); INSERT INTO e SELECT id FROM t`)
 }
+
+func TestColumnNamesMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT, UserName VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE u (id INT PRIMARY KEY, t_id INT, m INT)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2, 'a')`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 1, 5)`)
+	for _, q := range []string{
+		`SELECT nope FROM t`,
+		`UPDATE t SET n = 3 WHERE nope = 1`,
+		`SELECT id FROM t WHERE false AND nope = 1`,
+		`SELECT n AS a FROM t WHERE a = 2`,
+		`SELECT id FROM t GROUP BY id HAVING n > 1`,
+		`SELECT n + 1 FROM t GROUP BY id HAVING n > 1`,
+		`SELECT count(*) FROM t HAVING n > 0`,
+		`SELECT id FROM t GROUP BY id HAVING (SELECT max(m) FROM u WHERE u.t_id = n) > 0`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY n`,
+		`SELECT * FROM t JOIN u ON u.t_id = u2.id JOIN u u2 ON u2.id = t.id`,
+		`SELECT x.id FROM t AS x WHERE t.id = 1`,
+		`SELECT d.x FROM (SELECT id AS x FROM t) d WHERE d.id = 1`,
+		`SELECT id FROM t WHERE id = (SELECT id FROM u WHERE nope = 1)`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.nope = t.id)`,
+		`SELECT id FROM t ORDER BY (SELECT a)`,
+		`SELECT n AS a FROM t ORDER BY t.a`,
+		`INSERT INTO t (id, nope) VALUES (3, 1)`,
+		`INSERT INTO t (id, n) VALUES (4, 1) ON DUPLICATE KEY UPDATE n = VALUES(nope)`,
+		`INSERT INTO t (id, n) VALUES (4, 1) ON DUPLICATE KEY UPDATE nope = 1`,
+		`INSERT INTO t (id, n) VALUES (4, 1) AS new ON DUPLICATE KEY UPDATE n = new.nope`,
+		`INSERT INTO t (id, n) VALUES (4, nope)`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET t.n = u.m WHERE u.nope = 1`,
+		`UPDATE t SET nope = 1`,
+		`UPDATE t SET n = 1 ORDER BY nope`,
+		`DELETE FROM t WHERE nope = 1`,
+		`VALUES ROW(nope)`,
+		`WITH a AS (SELECT nope FROM t) SELECT 1 FROM t WHERE false AND EXISTS (SELECT 1 FROM a)`,
+		`SELECT t.*, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id HAVING u.m > 0`,
+		`UPDATE t JOIN u ON u.t_id = u2.id JOIN u AS u2 ON u2.id = t.id SET t.n = 3 WHERE false`,
+		`UPDATE t AS x SET t.n = 3 WHERE false`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE ghost.n = 3`,
+		`SELECT d.*, count(*) FROM t CROSS JOIN (SELECT 1) d GROUP BY t.id HAVING t.n > 0`,
+		`INSERT INTO t (id, n) SELECT id + 30, m AS incoming FROM u ON DUPLICATE KEY UPDATE n = incoming`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT id FROM t JOIN u ON u.t_id = t.id`,
+		`SELECT id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`UPDATE t, u SET n = 1 WHERE id = 1`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET id = 1 WHERE false`,
+		`SELECT t.id, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT t.n AS k, u.m AS k FROM t JOIN u ON u.t_id = t.id ORDER BY k`,
+		`SELECT n AS id, id FROM t ORDER BY id`,
+		`SELECT 1 AS k, 2 AS k UNION ALL SELECT 3, 4 ORDER BY k`,
+		`SELECT id, id FROM t UNION ALL SELECT 1, 2 ORDER BY id`,
+		`SELECT count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT t.*, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT * FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`UPDATE t JOIN (SELECT 1 AS N) d ON TRUE SET n = 3 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrAmbiguousColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// MySQL runs these, and detest would read another value than it does.
+	for _, q := range []string{
+		`SELECT n AS a, (SELECT a) FROM t`,
+		`SELECT n AS a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.m > a)`,
+		`SELECT n AS a FROM t ORDER BY (SELECT a)`,
+		`SELECT n AS a FROM t ORDER BY a + 1`,
+		`SELECT n AS a FROM t GROUP BY id ORDER BY max(a)`,
+		`SELECT n % 2 AS a, count(*) FROM t GROUP BY a + 0`,
+		`SELECT n % 2 AS id, count(*) FROM t GROUP BY id`,
+		`SELECT n % 2 AS id, count(*) FROM t GROUP BY n HAVING id > 0`,
+		`SELECT d.a FROM (SELECT n AS A FROM t) d`,
+		"SELECT d.`n+1` FROM (SELECT n+1 FROM t) d",
+		`WITH c AS (SELECT id AS K FROM t) SELECT k FROM c`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u t WHERE t.n = 1)`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY t.id`,
+		`INSERT INTO t (id, n) VALUES (2, id)`,
+		`INSERT INTO t (id, n) SELECT id + 10, m FROM u ON DUPLICATE KEY UPDATE n = m`,
+		`INSERT INTO t (id, n) SELECT id + 20, m FROM u ON DUPLICATE KEY UPDATE n = id`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET m = 1 WHERE false`,
+		`SELECT id FROM t CROSS JOIN (SELECT 2 AS ID) d`,
+		`SELECT missing.* FROM t`,
+		`SELECT n + 1 AS k, n + 1 AS k FROM t ORDER BY k`,
+		`SELECT n AS k, n + 1 AS k FROM t ORDER BY k`,
+		`SELECT u.id, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT n AS k, id AS k FROM t GROUP BY n, id HAVING k > 0`,
+		`SELECT n AS k, id AS k FROM t GROUP BY k`,
+		`SELECT 'n', id FROM t ORDER BY n, id DESC LIMIT 1`,
+		`SELECT n FROM t CROSS JOIN (SELECT 'n') d`,
+		`SELECT d.n FROM (SELECT 'n') d`,
+		`SELECT a FROM (SELECT 'a' UNION SELECT 'b') d`,
+		`SELECT count FROM (SELECT count(*) FROM t) d CROSS JOIN u`,
+		`SELECT abs(n) FROM t ORDER BY abs`,
+		`SELECT abs(n), n AS abs FROM t ORDER BY abs LIMIT 1`,
+		"UPDATE t JOIN (SELECT count(*) FROM u) d ON TRUE SET `count` = 3",
+		"SELECT d.`1.0` FROM (SELECT 1.0) d",
+		`SELECT 1 FROM (SELECT 1 AS k, 2 AS k) d`,
+		`WITH c AS (SELECT 1 AS k, 2 AS K) SELECT 1 FROM c`,
+		`SELECT 1 FROM (SELECT 'a', 2 AS a) d`,
+		`SELECT 1 FROM (SELECT 1, 1) d`,
+		`SELECT d.current_timestamp FROM (SELECT CURRENT_TIMESTAMP) d`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = (SELECT new.m FROM u AS new)`,
+		`SELECT DEFAULT(nope) FROM t`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = (SELECT new.n FROM u AS excluded LIMIT 1)`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(n) FROM excluded LIMIT 1)`,
+		`SELECT 1 FROM (SELECT n+1, n+1 FROM t) d`,
+		`WITH c AS (SELECT n+1, N + 1 FROM t) SELECT 1 FROM c`,
+		`SELECT 1 FROM (SELECT * FROM (SELECT n+1 FROM t) a CROSS JOIN (SELECT n+1 FROM t) b) d`,
+		`SELECT a.id FROM t a CROSS JOIN u a`,
+		`SELECT 1 FROM t JOIN t`,
+		`UPDATE t AS a JOIN u AS a ON TRUE SET a.n = 3`,
+		`UPDATE t JOIN t ON TRUE SET n = 3`,
+		`SELECT t.n, (SELECT u.m AS n FROM u ORDER BY (SELECT n) LIMIT 1) FROM t`,
+		`SELECT t.n, (SELECT u.m AS n FROM u HAVING (SELECT n) > 0 LIMIT 1) FROM t`,
+		"SELECT 1 FROM (SELECT n+1, 2 AS `n+1` FROM t) d",
+		`SELECT 1 FROM (SELECT 1.0, 1.0) d`,
+		`SELECT wrong.t.id FROM t`,
+		`SELECT app.t.id FROM t`,
+		`SELECT wrong.t.* FROM t`,
+		`UPDATE t SET wrong.t.n = 3`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 3`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS t ON DUPLICATE KEY UPDATE n = t.n`,
+		`SELECT t.n AS a, count(*) FROM t CROSS JOIN (SELECT 'a' UNION ALL SELECT 'b') d GROUP BY a, t.n`,
+		"SELECT d.`TRUE` FROM (SELECT TRUE) d",
+		`SELECT d.false FROM (SELECT FALSE) d`,
+		"SELECT 1 FROM (SELECT TRUE, 2 AS `TRUE`) d",
+		"SELECT 1 FROM (SELECT FALSE, 2 AS `false`) d",
+		"SELECT 1 FROM (SELECT CURRENT_DATE, 2 AS `CURRENT_DATE`) d",
+		`SELECT t.n AS m, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.m HAVING m > 0`,
+		`SELECT VALUES(n) FROM t`,
+		`WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`,
+		`SELECT 'bucket', count(*) FROM t GROUP BY bucket`,
+		`SELECT 'bucket', count(*) FROM t GROUP BY 1 HAVING bucket = 'bucket'`,
+		`SELECT 'bucket', id FROM t ORDER BY concat(bucket, id) DESC`,
+		`SELECT t.id FROM t JOIN u ON u.id = t.id GROUP BY t.id HAVING id > 0`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT USERNAME, username, ID FROM t`,
+		`SELECT n AS a FROM t GROUP BY a HAVING a > 0 ORDER BY a`,
+		`SELECT n AS a FROM t ORDER BY A`,
+		`SELECT n AS a FROM t GROUP BY id HAVING a > 0`,
+		`SELECT n AS a FROM t GROUP BY a HAVING n > 0`,
+		`SELECT n AS a, count(*) FROM t GROUP BY n HAVING a > 0`,
+		`SELECT id, n FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id, n FROM t GROUP BY id HAVING t.n > 1`,
+		`SELECT t.n FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id FROM t GROUP BY id, n HAVING n > 1`,
+		`SELECT * FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id FROM t GROUP BY id HAVING max(n) > 1 AND id > 0`,
+		`SELECT id FROM t GROUP BY id HAVING (SELECT max(m) FROM u WHERE u.t_id = t.id) > 0`,
+		`SELECT id FROM t ORDER BY n`,
+		`SELECT n AS id FROM t ORDER BY id`,
+		`SELECT t.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT t.n FROM t ORDER BY N`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY id`,
+		`SELECT id AS x FROM t UNION SELECT t_id FROM u ORDER BY X`,
+		`SELECT n FROM t UNION SELECT m FROM u ORDER BY -n`,
+		`SELECT id FROM t WHERE id IN (SELECT t_id FROM u WHERE m > n)`,
+		`SELECT id FROM t WHERE id IN (SELECT id FROM u WHERE t.n = 2)`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE id = 1)`,
+		`SELECT (SELECT max(m) FROM u WHERE u.t_id = t.id) FROM t`,
+		`SELECT d.id FROM (SELECT * FROM t) d`,
+		`SELECT * FROM t JOIN (SELECT t_id FROM u) d ON d.t_id = t.id WHERE d.t_id = 1`,
+		`WITH c AS (SELECT id AS k FROM t) SELECT k FROM c`,
+		`INSERT INTO t (id, n) VALUES (1, 1) ON DUPLICATE KEY UPDATE n = VALUES(n) + n`,
+		`INSERT INTO t (id, n) VALUES (1, 1) AS new ON DUPLICATE KEY UPDATE n = new.n + t.n`,
+		`INSERT INTO t (id, n) SELECT id, m FROM u ON DUPLICATE KEY UPDATE n = t.n + 1`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET t.n = u.m WHERE u.m > 0`,
+		`UPDATE t SET n = n + 1 WHERE id = 1 ORDER BY n LIMIT 1`,
+		`DELETE FROM t WHERE id = 99`,
+		`SELECT t.id, t.id FROM t ORDER BY id`,
+		`SELECT n AS k, n AS k FROM t ORDER BY k`,
+		`WITH unused AS (SELECT nope FROM t) SELECT 1`,
+		`WITH a AS (SELECT nope FROM t), b AS (SELECT * FROM a) SELECT 1`,
+		`SELECT *, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.id HAVING u.m > 0`,
+		`SELECT t.id AS id, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT t.*, t.id FROM t ORDER BY id`,
+		`SELECT t.n AS k, t.n AS k FROM t ORDER BY k`,
+		`UPDATE t AS x JOIN u ON u.t_id = x.id SET x.n = u.m WHERE false`,
+		`SELECT n FROM t CROSS JOIN (SELECT count(*) FROM t) d`,
+		`SELECT id, coalesce(n, 0) FROM t ORDER BY n`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE t.n = 3`,
+		`SELECT 1 AS k, 2 AS k`,
+		`WITH c AS (SELECT 1 AS k, 2 AS k) SELECT 1`,
+		`SELECT n AS n FROM t GROUP BY n HAVING max(n) > 0`,
+		`SELECT n AS k FROM t GROUP BY n HAVING max(k) > 0`,
+		`SELECT 1 FROM (SELECT n+1, n+2 FROM t) d`,
+		`SELECT 1 FROM (SELECT UserName, count(*) FROM t GROUP BY UserName) d`,
+		`WITH c AS (SELECT 1 AS id) SELECT (WITH c AS (SELECT 2 AS id) SELECT id FROM c) FROM c`,
+		`SELECT t.n AS n, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, t.n HAVING n > 0`,
+		`SELECT 1 FROM t a JOIN t b ON b.id = a.id`,
+		`UPDATE t JOIN u ON m = n JOIN u AS u2 ON u2.id = u.id SET t.n = 3 WHERE false`,
+	} {
+		mustExec(t, db, q)
+	}
+	for _, q := range []string{
+		`INSERT INTO t (id, id) VALUES (5, 6)`,
+		`INSERT INTO t (id, ID) VALUES (5, 6)`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrDuplicateColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// A view keeps the parser's substitution of a GROUP BY alias, which
+	// its direct query refuses too.
+	mustExec(t, db, `CREATE VIEW grouped AS SELECT n % 2 AS id, count(*) AS c FROM t GROUP BY id`)
+	for _, q := range []string{
+		`SELECT n % 2 AS id, count(*) AS c FROM t GROUP BY id`,
+		`SELECT c FROM grouped`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// A mixed case table's own name reads the existing row.
+	mustExec(t, db, `CREATE TABLE T2 (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `INSERT INTO T2 VALUES (1, 2)`)
+	mustExec(t, db, `INSERT INTO T2 VALUES (1, 9) ON DUPLICATE KEY UPDATE n = T2.n + 1`)
+	var stored int
+	if err := db.QueryRow(`SELECT n FROM T2 WHERE id = 1`).Scan(&stored); err != nil || stored != 3 {
+		t.Errorf("upsert reading a mixed case table: %d, %v", stored, err)
+	}
+	// A set operation's ORDER BY names its first query's alias in any case.
+	var n int
+	if err := db.QueryRow(`SELECT 1 AS X UNION ALL SELECT 2 ORDER BY X DESC LIMIT 1`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("set operation ordered by an upper case alias: %d, %v", n, err)
+	}
+}
+
+func TestColumnNamesOfViewsMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT id, n AS total FROM t`)
+	mustExec(t, db, `CREATE VIEW vc (k, x) AS SELECT id, n FROM t`)
+	mustExec(t, db, `CREATE VIEW vs AS SELECT * FROM t`)
+	mustExec(t, db, `CREATE VIEW vo AS SELECT n AS a FROM t ORDER BY a + 1`)
+	mustExec(t, db, `CREATE VIEW voc (x) AS SELECT n AS a FROM t ORDER BY a + 1`)
+	mustExec(t, db, `CREATE TABLE excluded (id INT PRIMARY KEY, n INT)`)
+	// A read of a view runs its query, so a form detest refuses there is
+	// refused under the view too, and so is ON DUPLICATE KEY UPDATE of a
+	// table the parser cannot tell from its proposed row.
+	for _, q := range []string{
+		`SELECT nope FROM vo`,
+		`SELECT x FROM voc`,
+		`INSERT INTO excluded (id, n) VALUES (1, 2) ON DUPLICATE KEY UPDATE n = VALUES(n)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT n FROM v`,
+		`SELECT id FROM vc`,
+		`SELECT v.nope FROM v`,
+		`SELECT nope FROM vs`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT id, total FROM v`,
+		`SELECT k, x FROM vc`,
+		`SELECT id, n FROM vs`,
+		`SELECT v.total FROM v JOIN t ON t.id = v.id`,
+	} {
+		mustExec(t, db, q)
+	}
+
+	// Without a declared schema, a table takes any column, while a view,
+	// a CTE and a derived table still have the columns their queries give.
+	db2, _ := s.DB("bare", mysqlBin())
+	mustExec(t, db2, `SELECT anything FROM whatever`)
+	mustExec(t, db2, `CREATE VIEW bv AS SELECT 1 AS id`)
+	for _, q := range []string{
+		`SELECT nope FROM bv`,
+		`WITH c AS (SELECT 1 AS id) SELECT nope FROM c`,
+		`SELECT nope FROM (SELECT 1 AS id) d`,
+	} {
+		if _, err := db2.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}

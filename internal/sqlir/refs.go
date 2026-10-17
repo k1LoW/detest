@@ -188,36 +188,55 @@ func Exprs(e Expr) []Expr {
 // database that runs the same query, so an expression kept in one
 // database's schema is copied before that database changes it. Like
 // ColumnRefs it walks by reflection, and it copies the exported fields;
-// unexported ones are shallow-copied with their struct.
+// unexported ones are shallow-copied with their struct. A node e reaches
+// twice is copied once, as MySQL's parser puts the select list's
+// expression for an alias in GROUP BY and HAVING, and the column walk
+// tells the two apart by that sharing.
 func CloneExpr(e Expr) Expr {
 	if e == nil {
 		return nil
 	}
-	out, _ := reflect.TypeAssert[Expr](deepCopy(reflect.ValueOf(&e).Elem()))
+	c := copier{}
+	out, _ := reflect.TypeAssert[Expr](c.copy(reflect.ValueOf(&e).Elem()))
 	return out
 }
 
-func deepCopy(v reflect.Value) reflect.Value {
+// copier deep-copies by reflection, keeping the copies of the pointers it
+// has met.
+type copier map[struct {
+	t reflect.Type
+	p uintptr
+}]reflect.Value
+
+func (c copier) copy(v reflect.Value) reflect.Value {
 	switch v.Kind() {
 	case reflect.Interface:
 		out := reflect.New(v.Type()).Elem()
 		if !v.IsNil() {
-			out.Set(deepCopy(v.Elem()))
+			out.Set(c.copy(v.Elem()))
 		}
 		return out
 	case reflect.Pointer:
 		if v.IsNil() {
 			return v
 		}
+		key := struct {
+			t reflect.Type
+			p uintptr
+		}{v.Type(), v.Pointer()}
+		if out, ok := c[key]; ok {
+			return out
+		}
 		out := reflect.New(v.Type().Elem())
-		out.Elem().Set(deepCopy(v.Elem()))
+		c[key] = out
+		out.Elem().Set(c.copy(v.Elem()))
 		return out
 	case reflect.Struct:
 		out := reflect.New(v.Type()).Elem()
 		out.Set(v)
 		for i := range v.NumField() {
 			if v.Type().Field(i).IsExported() {
-				out.Field(i).Set(deepCopy(v.Field(i)))
+				out.Field(i).Set(c.copy(v.Field(i)))
 			}
 		}
 		return out
@@ -227,7 +246,7 @@ func deepCopy(v reflect.Value) reflect.Value {
 		}
 		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		for i := range v.Len() {
-			out.Index(i).Set(deepCopy(v.Index(i)))
+			out.Index(i).Set(c.copy(v.Index(i)))
 		}
 		return out
 	}

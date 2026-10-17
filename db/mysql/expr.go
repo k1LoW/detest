@@ -48,15 +48,34 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 	case *ast.ParenthesesExpr:
 		return c.expr(e.Expr)
 	case *ast.ColumnNameExpr:
+		if e.Name.Schema.L != "" {
+			// The reference keeps the table's name only, and the database
+			// would go unchecked.
+			return nil, c.unsupported("a column qualified by its database")
+		}
 		table := e.Name.Table.L
-		if table != "" && table == c.rowAlias {
+		switch {
+		case table != "" && table == c.rowAlias:
 			table = "excluded"
+		case table == "excluded" && c.onDuplicate:
+			// It would read as the proposed row, which MySQL names
+			// only by VALUES() or the row alias.
+			return nil, c.unsupported("a column qualified excluded in ON DUPLICATE KEY UPDATE")
 		}
 		return &sqlir.ColumnRef{Table: table, Column: e.Name.Name.L}, nil
 	case *ast.ValuesExpr:
+		if !c.onDuplicate {
+			// MySQL reads it as NULL outside ON DUPLICATE KEY UPDATE.
+			return nil, c.unsupported("VALUES(col) outside ON DUPLICATE KEY UPDATE")
+		}
 		// VALUES(col) in ON DUPLICATE KEY UPDATE is the proposed row's column.
 		return &sqlir.ColumnRef{Table: "excluded", Column: e.Column.Name.Name.L}, nil
 	case *ast.DefaultExpr:
+		if e.Name != nil {
+			// The executor reads DEFAULT as NULL, not the column's
+			// default.
+			return nil, c.unsupported("DEFAULT(col)")
+		}
 		return &sqlir.Default{}, nil
 	case *ast.BinaryOperationExpr:
 		l, err := c.expr(e.L)
