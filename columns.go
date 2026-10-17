@@ -168,6 +168,16 @@ type columnChecker struct {
 	outCertainNamed map[*sqlir.SelectStmt]map[string]string
 	// paramCount is the number of uses of each parameter in the statement.
 	paramCount map[int]int
+	// paramShown are the uses of parameters typed by a type the statement
+	// shows without a guess (certainType), paramGuessed those typed by one
+	// the check guesses, and paramBeside the parameters used again whose
+	// output type certainType took from an operand beside them, which
+	// holds only where every use is shown and none guessed. A use is
+	// guessed even where another context of the same node shows its type,
+	// as BETWEEN compares one node twice.
+	paramShown   map[*sqlir.Param]bool
+	paramGuessed map[*sqlir.Param]bool
+	paramBeside  map[int]bool
 	// outExpanded are the names of a query's columns with its * expanded
 	// (noteExpanded).
 	outExpanded map[*sqlir.SelectStmt][]string
@@ -276,6 +286,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.numberConflict != "" {
 		return x.unsupported(c.numberConflict)
+	}
+	for _, p := range sqlir.Params(stmt) {
+		if c.paramBeside[p.Index] && (!c.paramShown[p] || c.paramGuessed[p]) {
+			// Postgres types the parameter at the use it meets first, and
+			// this use's type is one the check guesses or does not record,
+			// so the type the output took may not be the server's.
+			return x.unsupported(fmt.Sprintf("parameter $%d used again beside a number, and typed where detest cannot tell its type", p.Index+1))
+		}
 	}
 	if what := c.untrackedParam(); what != "" {
 		return x.unsupported(what)
@@ -746,7 +764,7 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 				sc.noteCertain(alias, c.cteCertainOf(t.Name))
 			}
 		} else if v := db.views[db.resolve(t.Name)]; v != nil {
-			types, ordered, cols, err := c.viewTypes(v)
+			types, ordered, cols, certain, err := c.viewTypes(v)
 			if err != nil {
 				return err
 			}
@@ -758,6 +776,9 @@ func (c *columnChecker) item(t sqlir.TableRef, sc *colScope) error {
 			}
 			sc.types[alias] = types
 			sc.noteOrdered(alias, ordered)
+			if len(t.Columns) == 0 {
+				sc.noteCertain(alias, certain)
+			}
 		} else if def := db.defs[db.resolve(t.Name)]; def != nil && len(t.Columns) == 0 {
 			sc.types[alias] = def.types
 			sc.noteCertain(alias, def.types)
@@ -2416,10 +2437,10 @@ func (c *columnChecker) setOpSubqueryType(q *sqlir.SubQuery, sc *colScope) strin
 // from those of parameters, which a view's query cannot hold. It also gives
 // the view's column set as the walk finds it, a *'s columns and those a
 // shorter column list leaves unnamed included, nil where the walk does not
-// know them.
-func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, colSet, error) {
+// know them, and the certain types of its columns, as a derived table's.
+func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, itemOrder, colSet, map[string]string, error) {
 	if b := c.x.tx.db.viewBinds[v]; b != nil && b.stale != "" {
-		return nil, itemOrder{}, nil, c.x.unsupported(b.stale)
+		return nil, itemOrder{}, nil, nil, c.x.unsupported(b.stale)
 	}
 	vc := &columnChecker{x: c.x}
 	cols, err := vc.query(v.View, nil)
@@ -2438,11 +2459,11 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, ite
 	}
 	if err != nil {
 		if _, ok := errors.AsType[*ErrUnsupportedSQL](err); ok {
-			return nil, itemOrder{}, nil, err
+			return nil, itemOrder{}, nil, nil, err
 		}
 		// Any other failure is one Postgres makes when the view is created,
 		// so it cannot be the answer to a statement reading the view.
-		return map[string]string{}, itemOrder{}, nil, nil
+		return map[string]string{}, itemOrder{}, nil, map[string]string{}, nil
 	}
 	ordered := vc.itemOrderOf(v.View, v.ViewColumns)
 	if len(v.ViewColumns) > 0 {
@@ -2455,12 +2476,12 @@ func (c *columnChecker) viewTypes(v *sqlir.SchemaChange) (map[string]string, ite
 			// The set counts a name two items give once, so the width
 			// says whether the list names every column.
 			if w, ok := vc.knownWidth(v.View); !ok || w != len(v.ViewColumns) {
-				return nil, itemOrder{}, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
+				return nil, itemOrder{}, nil, nil, c.x.unsupported(fmt.Sprintf("view %q, whose column list renames columns of a * detest does not know the order of", relname(v.Table)))
 			}
 		}
 		cols = namesSet(ordered.names)
 	}
-	return vc.derivedTypes(v.View, v.ViewColumns), ordered, cols, nil
+	return vc.derivedTypes(v.View, v.ViewColumns), ordered, cols, vc.certainItem(v.View, v.ViewColumns), nil
 }
 
 // cteTypesOf are the column types of the CTE name, the innermost of that
@@ -3564,6 +3585,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.numberParam(p, e.Type)
 					c.typedParam(p)
 					c.readParam(p)
+					c.shownParam(p)
 				}
 				if typeCollation(e.Type) != "" {
 					// A cast to name brings name's C collation in, as a
@@ -3725,7 +3747,34 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	c.untypedAs(a, c.x.tx.db.baseType(c.typer(sc).of(b)))
+	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
+	c.shownBeside(a, typ, b, sc)
+	c.untypedAs(a, typ)
+}
+
+// shownBeside records the use a, where it is a parameter, as typed by a
+// type the statement shows, where typ, the type it takes from b, is b's
+// certain type.
+func (c *columnChecker) shownBeside(a sqlir.Expr, typ string, b sqlir.Expr, sc *colScope) {
+	p, ok := a.(*sqlir.Param)
+	if !ok {
+		return
+	}
+	if ct := c.x.tx.db.baseType(c.certainType(b, sc)); numberRank[ct] > 0 && numberRank[ct] == numberRank[typ] {
+		c.shownParam(p)
+		return
+	}
+	if c.paramGuessed == nil {
+		c.paramGuessed = map[*sqlir.Param]bool{}
+	}
+	c.paramGuessed[p] = true
+}
+
+func (c *columnChecker) shownParam(p *sqlir.Param) {
+	if c.paramShown == nil {
+		c.paramShown = map[*sqlir.Param]bool{}
+	}
+	c.paramShown[p] = true
 }
 
 // untypedAs reads a, a string literal or a parameter, as the type typ of
@@ -3783,6 +3832,7 @@ func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) err
 		// is 2, while the run computes with the float as bound.
 		return c.x.unsupported(fmt.Sprintf("a float bound to parameter $%d taken as %s in arithmetic", p.Index+1, typ))
 	}
+	c.shownBeside(a, typ, b, sc)
 	c.inputAs(a, typ)
 	return nil
 }
@@ -4115,6 +4165,7 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 			// statement, in VALUES too, whose input checkTypes reads.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.numberParam(p, typ)
+			c.shownParam(p)
 			if c.paramTypeFamily(typ) != "" {
 				c.typedParam(p)
 			}

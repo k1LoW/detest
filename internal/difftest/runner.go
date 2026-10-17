@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,6 +95,9 @@ func transcript(c Case, res []stepResult) string {
 		args := ""
 		if len(st.Args) > 0 {
 			args = fmt.Sprintf(" %v", st.Args)
+		}
+		if st.Scan != "" {
+			args += " into " + st.Scan
 		}
 		fmt.Fprintf(&sb, "%2d conn%d %s%s\n     => %s%s\n", k, st.Conn, st.SQL, args, waited, res[k].text)
 	}
@@ -200,7 +205,7 @@ func (s *session) exec(ctx context.Context, st Step) (string, error) {
 			return "", err
 		}
 		defer rows.Close()
-		return renderRows(rows)
+		return renderRows(rows, st.Scan)
 	}
 	var res sql.Result
 	var err error
@@ -232,24 +237,49 @@ func txOptions(q string) (*sql.TxOptions, error) {
 	return nil, fmt.Errorf("difftest: unknown %q", q)
 }
 
-func renderRows(rows *sql.Rows) (string, error) {
+func renderRows(rows *sql.Rows, scan string) (string, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return "", err
 	}
 	var out []string
 	for rows.Next() {
-		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
+		for i := range ptrs {
+			switch scan {
+			case "":
+				ptrs[i] = new(any)
+			case "string":
+				ptrs[i] = new(string)
+			case "float64":
+				ptrs[i] = new(float64)
+			case "int64":
+				ptrs[i] = new(int64)
+			case "decimal":
+				ptrs[i] = new(decimal)
+			default:
+				return "", fmt.Errorf("difftest: unknown scan type %q", scan)
+			}
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return "", err
+			if scan == "" {
+				return "", err
+			}
+			// The message names the column, whose name is not compared
+			// elsewhere, so only the failure is.
+			out = append(out, "(SCAN FAILED)")
+			continue
 		}
-		fields := make([]string, len(vals))
-		for i, v := range vals {
-			fields[i] = renderValue(v)
+		fields := make([]string, len(ptrs))
+		for i, p := range ptrs {
+			switch p := p.(type) {
+			case *any:
+				fields[i] = renderValue(*p)
+			case *decimal:
+				fields[i] = p.RatString()
+			default:
+				fields[i] = renderValue(reflect.ValueOf(p).Elem().Interface())
+			}
 		}
 		out = append(out, "("+strings.Join(fields, ", ")+")")
 	}
@@ -257,6 +287,32 @@ func renderRows(rows *sql.Rows) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("ROWS %d [%s]", len(out), strings.Join(out, " ")), nil
+}
+
+// decimal scans a number as a decimal type of an application does, from
+// the text or the number the driver returns.
+type decimal struct{ big.Rat }
+
+func (d *decimal) Scan(v any) error {
+	switch v := v.(type) {
+	case string:
+		if _, ok := d.SetString(v); !ok {
+			return fmt.Errorf("difftest: %q is no decimal", v)
+		}
+	case []byte:
+		if _, ok := d.SetString(string(v)); !ok {
+			return fmt.Errorf("difftest: %q is no decimal", v)
+		}
+	case int64:
+		d.SetInt64(v)
+	case float64:
+		if d.SetFloat64(v) == nil {
+			return fmt.Errorf("difftest: %v is no decimal", v)
+		}
+	default:
+		return fmt.Errorf("difftest: %T is no decimal", v)
+	}
+	return nil
 }
 
 func renderValue(v any) string {

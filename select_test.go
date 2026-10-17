@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2137,12 +2138,23 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 		`SELECT extract(epoch FROM coalesce(date '2024-01-02', date '2024-01-03'))`,
 		`INSERT INTO t (id, x) VALUES (9, 0.1::float8 + 0.2::float8)`,
 		// A column whose type the check cannot tell may be a float8.
-		`SELECT v::numeric FROM (VALUES (1.50), (abs(NULL))) AS s(v)`,
-		`SELECT v::numeric FROM (SELECT 1.50 AS v UNION ALL SELECT abs(NULL)) AS s`,
+		`SELECT v::numeric FROM (SELECT g AS v FROM generate_series(1, 1) g UNION ALL SELECT 1.50) AS s`,
+		`SELECT v::numeric FROM (VALUES ((SELECT g FROM generate_series(1, 1) g)), (1.50)) AS s(v)`,
 	} {
 		var str string
 		if err := db.QueryRow(q).Scan(&str); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %q, %v, want unsupported", q, str, err)
+		}
+	}
+	// abs(NULL) is abs(float8), which converts the column's numeric to a
+	// float8 and drops its scale.
+	for _, q := range []string{
+		`SELECT v::numeric FROM (VALUES (1.50), (abs(NULL))) AS s(v) WHERE v IS NOT NULL`,
+		`SELECT v::numeric FROM (SELECT 1.50 AS v UNION ALL SELECT abs(NULL)) AS s WHERE v IS NOT NULL`,
+	} {
+		var str string
+		if err := db.QueryRow(q).Scan(&str); err != nil || str != "1.5" {
+			t.Errorf("%s: got %q, %v, want 1.5", q, str, err)
 		}
 	}
 	// abs of a parameter is abs(float8), whose many digits the cast to
@@ -2165,6 +2177,100 @@ func TestNumericReadsBackWithScale(t *testing.T) {
 	var ok bool
 	if err := db.QueryRow(`SELECT x = 5.0625 FROM t WHERE id = 2`).Scan(&ok); err != nil || !ok {
 		t.Errorf("a numeric of unknown scale compared: got %v, %v", ok, err)
+	}
+}
+
+// A numeric reads back as its text where the output's type is a repeated
+// parameter's, a view's column or a * over several items, and is refused
+// where detest cannot tell it from a float8.
+func TestNumericUnderUncertainOutputType(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", postgres.New())
+	mustExec(t, db, `CREATE TABLE t (id int PRIMARY KEY, nm numeric(10, 2), x numeric, f float8)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2, 7, 1.5)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT nm, x, f FROM t`)
+	mustExec(t, db, `CREATE TABLE u (f float8, nm numeric)`)
+	mustExec(t, db, `INSERT INTO u VALUES (3.5, 4.00)`)
+	for _, tc := range []struct {
+		q    string
+		args []any
+		want []string
+	}{
+		{`SELECT 1.00 + $1, 2.00 + $1`, []any{int64(1)}, []string{"2.00", "3.00"}},
+		{`SELECT nm + $1 FROM t WHERE nm > $1 AND x = 7`, []any{int64(1)}, []string{"3.00"}},
+		{`SELECT nm FROM v`, nil, []string{"2.00"}},
+		{`SELECT v.nm + 1 FROM v`, nil, []string{"3.00"}},
+		{`SELECT * FROM v`, nil, []string{"2.00", "7", "1.5"}},
+	} {
+		strs := make([]string, len(tc.want))
+		ptrs := make([]any, len(tc.want))
+		for i := range strs {
+			ptrs[i] = &strs[i]
+		}
+		if err := db.QueryRow(tc.q, tc.args...).Scan(ptrs...); err != nil || !slices.Equal(strs, tc.want) {
+			t.Errorf("%s into strings: got %q, %v, want %q", tc.q, strs, err, tc.want)
+		}
+		var f float64
+		if err := db.QueryRow(tc.q, tc.args...).Scan(append([]any{&f}, ptrs[1:]...)...); err != nil || strconv.FormatFloat(f, 'f', 2, 64) != tc.want[0] {
+			t.Errorf("%s into a float64: got %v, %v", tc.q, f, err)
+		}
+		var d decimalScanner
+		if err := db.QueryRow(tc.q, tc.args...).Scan(append([]any{&d}, ptrs[1:]...)...); err != nil || d.r.Cmp(mustRat(t, tc.want[0])) != 0 {
+			t.Errorf("%s into a decimal: got %v, %v", tc.q, d.r, err)
+		}
+		var i int64
+		if err := db.QueryRow(tc.q, tc.args...).Scan(append([]any{&i}, ptrs[1:]...)...); err == nil || !strings.Contains(err.Error(), "invalid syntax") {
+			t.Errorf("%s into an int64: got %d, %v, want database/sql's invalid syntax", tc.q, i, err)
+		}
+	}
+	// A * over a join gives each item's columns in turn, so a name two
+	// items give has the type of its own.
+	var nm, x, f, uf, unm any
+	if err := db.QueryRow(`SELECT * FROM t JOIN u ON true`).Scan(new(any), &nm, &x, &f, &uf, &unm); err != nil || nm != "2.00" || x != "7" || f != 1.5 || uf != 3.5 || unm != "4.00" {
+		t.Errorf("a * over a join: got %#v %#v %#v %#v %#v, %v", nm, x, f, uf, unm, err)
+	}
+	// A function in FROM gives a column too.
+	var gx any
+	if err := db.QueryRow(`SELECT * FROM t, generate_series(1, 1)`).Scan(new(any), new(any), &gx, new(any), new(any)); err != nil || gx != "7" {
+		t.Errorf("a * over a table and a function: got %#v, %v, want the text 7", gx, err)
+	}
+	// A whole numeric still scans into an int64.
+	for _, q := range []string{`SELECT x, 0 FROM v`, `SELECT * FROM (SELECT x, x FROM t) s`} {
+		var n, m int64
+		if err := db.QueryRow(q).Scan(&n, &m); err != nil || n != 7 {
+			t.Errorf("%s into an int64: got %d, %v, want 7", q, n, err)
+		}
+	}
+	for _, tc := range []struct {
+		q    string
+		args []any
+	}{
+		// Postgres types the parameter at the use it meets first.
+		{`SELECT abs($1), 1.00 + $1`, []any{1.5}},
+		{`SELECT f + $1, 1.00 + $1 FROM t`, []any{1.5}},
+		// A use typed by a guess agrees with the others in the check, where
+		// Postgres takes abs(NULL)'s float8 at the first.
+		{`SELECT (1.00 + abs(NULL)) + $1, 2.00 + $1`, []any{int64(1)}},
+		{`SELECT s.v + $1, 2.00 + $1 FROM (VALUES (1.00), (abs(NULL))) s(v)`, []any{int64(1)}},
+		// BETWEEN and IN compare one node of the parameter more than once.
+		{`DELETE FROM t USING (VALUES (1.00), (abs(NULL))) s(v) WHERE $1 BETWEEN s.v AND 3.00 RETURNING 2.00 + $1`, []any{int64(2)}},
+		{`SELECT 2.00 + $1 FROM (VALUES (1.00), (abs(NULL))) s(v) WHERE $1 IN (3.00, s.v)`, []any{int64(2)}},
+		// The check tells a CTE's columns apart by name only.
+		{`WITH w AS (SELECT nm, nm FROM t) SELECT * FROM w`, nil},
+		// A column of a function in FROM has no certain type, so the
+		// column beside the numeric may be a float8.
+		{`SELECT g FROM generate_series(1, 1) g UNION ALL SELECT 1.50`, nil},
+	} {
+		rows, err := db.Query(tc.q, tc.args...)
+		if err == nil {
+			for rows.Next() {
+			}
+			err = rows.Err()
+			rows.Close()
+		}
+		if !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", tc.q, err)
+		}
 	}
 }
 

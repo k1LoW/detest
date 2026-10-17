@@ -35,6 +35,11 @@ type Step struct {
 	Query bool
 	// Args are bound to the statement's parameters, on both sides alike.
 	Args []any
+	// Scan is the type a Query step scans every column into, as an
+	// application does: "string", "float64", "int64" or "decimal" (a
+	// sql.Scanner over big.Rat), and any when empty. A row that fails to
+	// scan is rendered as SCAN FAILED.
+	Scan string
 	// CancelTx ends the context the open transaction of connection Conn
 	// began with, as a request's deadline does while the transaction is
 	// idle, so that database/sql rolls it back from a goroutine of its own.
@@ -50,6 +55,12 @@ func Q(conn int, sql string) Step { return Step{Conn: conn, SQL: sql, Query: tru
 // QA is a step run with Query, binding args to its parameters.
 func QA(conn int, sql string, args ...any) Step {
 	return Step{Conn: conn, SQL: sql, Query: true, Args: args}
+}
+
+// QS is a step run with Query that scans every column into the type scan
+// names (Step.Scan), binding args to its parameters.
+func QS(conn int, scan, sql string, args ...any) Step {
+	return Step{Conn: conn, SQL: sql, Query: true, Args: args, Scan: scan}
 }
 
 // CT is a step that ends the context of connection conn's open transaction.
