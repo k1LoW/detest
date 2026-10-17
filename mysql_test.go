@@ -5182,6 +5182,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
 		`SELECT t.*, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
 		`SELECT * FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`UPDATE t JOIN (SELECT 1 AS N) d ON TRUE SET n = 3 WHERE false`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrAmbiguousColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5211,6 +5212,12 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT n + 1 AS k, n + 1 AS k FROM t ORDER BY k`,
 		`SELECT n AS k, n + 1 AS k FROM t ORDER BY k`,
 		`SELECT u.id, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT n AS k, id AS k FROM t GROUP BY n, id HAVING k > 0`,
+		`SELECT n AS k, id AS k FROM t GROUP BY k`,
+		`SELECT 'n', id FROM t ORDER BY n, id DESC LIMIT 1`,
+		`SELECT n FROM t CROSS JOIN (SELECT 'n') d`,
+		`SELECT d.n FROM (SELECT 'n') d`,
+		`SELECT a FROM (SELECT 'a' UNION SELECT 'b') d`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5259,6 +5266,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT t.*, t.id FROM t ORDER BY id`,
 		`SELECT t.n AS k, t.n AS k FROM t ORDER BY k`,
 		`UPDATE t AS x JOIN u ON u.t_id = x.id SET x.n = u.m WHERE false`,
+		`SELECT n FROM t CROSS JOIN (SELECT count(*) FROM t) d`,
+		`SELECT id, coalesce(n, 0) FROM t ORDER BY n`,
 	} {
 		mustExec(t, db, q)
 	}
@@ -5276,6 +5285,21 @@ func TestColumnNamesOfViewsMySQL(t *testing.T) {
 	mustExec(t, db, `CREATE VIEW v AS SELECT id, n AS total FROM t`)
 	mustExec(t, db, `CREATE VIEW vc (k, x) AS SELECT id, n FROM t`)
 	mustExec(t, db, `CREATE VIEW vs AS SELECT * FROM t`)
+	mustExec(t, db, `CREATE VIEW vo AS SELECT n AS a FROM t ORDER BY a + 1`)
+	mustExec(t, db, `CREATE VIEW voc (x) AS SELECT n AS a FROM t ORDER BY a + 1`)
+	mustExec(t, db, `CREATE TABLE excluded (id INT PRIMARY KEY, n INT)`)
+	// A read of a view runs its query, so a form detest refuses there is
+	// refused under the view too, and so is ON DUPLICATE KEY UPDATE of a
+	// table the parser cannot tell from its proposed row.
+	for _, q := range []string{
+		`SELECT nope FROM vo`,
+		`SELECT x FROM voc`,
+		`INSERT INTO excluded (id, n) VALUES (1, 2) ON DUPLICATE KEY UPDATE n = VALUES(n)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
 	for _, q := range []string{
 		`SELECT n FROM v`,
 		`SELECT id FROM vc`,

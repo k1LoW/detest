@@ -1485,6 +1485,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `UPDATE orders o JOIN users u ON u.id = o.user_id SET o.status = 'x' WHERE id = 1`),
 			difftest.S(0, `UPDATE orders o JOIN users u ON u.id = u2.id JOIN users u2 ON u2.id = o.user_id SET o.status = 'x'`),
 			difftest.S(0, `UPDATE orders AS o SET orders.status = 'x'`),
+			difftest.S(0, `UPDATE orders JOIN (SELECT 1 AS STATUS) d ON TRUE SET status = 'x'`),
 			difftest.Q(0, `SELECT id, total, status FROM orders ORDER BY id`),
 		},
 	},

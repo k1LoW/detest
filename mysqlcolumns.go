@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"reflect"
@@ -13,12 +14,55 @@ import (
 // myCols are the names of a MySQL FROM item's columns, in order.
 type myCols struct {
 	names []string
-	// unnamed is set when a column's name is not known, as MySQL names an
-	// expression without an alias by its text.
+	// unnamed is set when a column is an expression without an alias,
+	// which MySQL names by its text and so never by a plain identifier.
 	unnamed bool
+	// unread are the names MySQL gives columns detest names otherwise, such
+	// as a string literal's, named by its value.
+	unread []string
 	// unknown is set for an item whose columns detest does not know, such
 	// as an ignored table, which resolves any name.
 	unknown bool
+}
+
+// mayHave reports whether MySQL may give a column of c the name, which
+// detest would not read.
+func (c myCols) mayHave(name string) bool {
+	if slices.ContainsFunc(c.unread, func(n string) bool { return strings.EqualFold(n, name) }) {
+		return true
+	}
+	return c.unnamed && !identLike(name)
+}
+
+// identLike reports whether name is a plain identifier, which the text of
+// an expression never is.
+func identLike(name string) bool {
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_', r == '$':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return name != ""
+}
+
+// literalName is the name MySQL gives a literal in a select list.
+func literalName(e sqlir.Expr) (string, bool) {
+	c, ok := e.(*sqlir.Const)
+	if !ok {
+		return "", false
+	}
+	switch v := c.Value.(type) {
+	case nil:
+		return "NULL", true
+	case bool:
+		return strings.ToUpper(fmt.Sprint(v)), true
+	case string:
+		return v, true
+	}
+	return fmt.Sprint(c.Value), true
 }
 
 // myItem is a FROM item a MySQL query block sees.
@@ -132,20 +176,21 @@ func (w *myWalk) tableCols(name string) (myCols, error) {
 		return myCols{names: def.columns}, nil
 	}
 	if v := db.views[table]; v != nil && !w.views[table] {
-		if len(v.ViewColumns) > 0 {
-			return myCols{names: v.ViewColumns}, nil
-		}
 		w.views[table] = true
 		defer delete(w.views, table)
-		// The view's own query is checked where it is created; here only
-		// the names of its columns matter.
+		// A read of the view runs its query, which is checked as the
+		// statement's own.
 		saved := w.ctes
 		w.ctes = nil
 		cols, _, err := w.query(v.View, nil)
 		w.ctes = saved
-		if err == nil {
-			return cols, nil
+		if err != nil {
+			return myCols{}, err
 		}
+		if len(v.ViewColumns) > 0 {
+			return myCols{names: v.ViewColumns}, nil
+		}
+		return cols, nil
 	}
 	return myCols{unknown: true}, nil
 }
@@ -209,7 +254,11 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			}
 		}
 		// MySQL names the columns column_0 and on, detest column1.
-		return myCols{unnamed: true}, nil, nil
+		var out myCols
+		for i := range sel.Values[0] {
+			out.unread = append(out.unread, fmt.Sprintf("column_%d", i))
+		}
+		return out, nil, nil
 	}
 	sc := &myScope{outer: outer}
 	if sel.From != nil {
@@ -298,7 +347,7 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 					if it.alias != t.Table {
 						continue
 					}
-					having.star = having.star || it.cols.unknown || it.cols.unnamed
+					having.star = having.star || it.cols.unknown || it.cols.unnamed || len(it.cols.unread) > 0
 					for _, c := range it.cols.names {
 						having.cols[[2]string{it.alias, c}] = true
 					}
@@ -349,10 +398,12 @@ func (w *myWalk) setOp(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			case r.Table != "":
 				// MySQL fails it with 1250 rather than 1054.
 				return myCols{}, nil, w.x.unsupported("a qualified column in the ORDER BY of a set operation")
+			case cols.mayHave(r.Column):
+				return myCols{}, nil, w.x.unsupported("an ORDER BY name of a set operation detest cannot match to its columns")
 			case !cols.unknown && len(slices.DeleteFunc(slices.Clone(cols.names), func(n string) bool { return !strings.EqualFold(n, r.Column) })) > 1:
 				return myCols{}, nil, w.ambiguous(r.Column, "order clause")
 			case cols.unknown || slices.Contains(cols.names, r.Column):
-			case cols.unnamed || slices.ContainsFunc(cols.names, func(n string) bool { return strings.EqualFold(n, r.Column) }):
+			case cols.mayHave(r.Column) || slices.ContainsFunc(cols.names, func(n string) bool { return strings.EqualFold(n, r.Column) }):
 				// The executor keys the column by the name the first
 				// query gives it.
 				return myCols{}, nil, w.x.unsupported("an ORDER BY name of a set operation detest cannot match to its columns")
@@ -368,6 +419,11 @@ func (w *myWalk) setOp(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 // select list's alias while a FROM item has a column of the name, which
 // MySQL reads instead.
 func (w *myWalk) aliasColumn(sc *myScope, e sqlir.Expr, alias string) error {
+	if len(slices.DeleteFunc(slices.Clone(sc.aliases), func(a string) bool { return !strings.EqualFold(a, alias) })) > 1 {
+		// MySQL fails it with 1052 where the items differ, and the parser
+		// puts one of them.
+		return w.x.unsupported(fmt.Sprintf("GROUP BY or HAVING name %q, which two select list aliases give", alias))
+	}
 	if r, ok := e.(*sqlir.ColumnRef); ok && strings.EqualFold(r.Column, alias) {
 		return nil
 	}
@@ -436,12 +492,12 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 		case n > 0:
 			return nil
 		}
-		err := w.expr(e, myCtx{sc: sc, clause: "order clause"})
-		if unnamed && errors.Is(err, sqlir.ErrUndefinedColumn) {
-			// MySQL names the item by its text, which ORDER BY may name.
-			return w.x.unsupported("an ORDER BY name beside a select list item detest cannot name")
+		if unnamed && w.outputs(sel, sc).mayHave(r.Column) {
+			// MySQL reads the select list item it names by its text or
+			// value before a FROM column of the name.
+			return w.x.unsupported("an ORDER BY name a select list item detest names otherwise may give")
 		}
-		return err
+		return w.expr(e, myCtx{sc: sc, clause: "order clause"})
 	}
 	return w.expr(e, myCtx{sc: sc, clause: "order clause", aliases: sc.aliases})
 }
@@ -484,6 +540,7 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 					continue
 				}
 				out.names = append(out.names, it.cols.names...)
+				out.unread = append(out.unread, it.cols.unread...)
 				out.unnamed = out.unnamed || it.cols.unnamed
 				out.unknown = out.unknown || it.cols.unknown
 			}
@@ -492,6 +549,8 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 		default:
 			if r, ok := t.Expr.(*sqlir.ColumnRef); ok {
 				out.names = append(out.names, r.Column)
+			} else if name, ok := literalName(t.Expr); ok {
+				out.unread = append(out.unread, name)
 			} else {
 				out.unnamed = true
 			}
@@ -585,13 +644,19 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 	missed := false // an item of the qualifier lacks the column
 	for s := sc; s != nil; s = s.outer {
 		var hits []myItem
-		folded, unnamed := false, false
+		folded, unknown := false, false
+		refuse := ""
 		for _, it := range s.items {
 			if r.Table != "" && it.alias != r.Table || r.Table == "" && it.qualified {
 				continue
 			}
 			if it.cols.unknown {
-				return nil
+				unknown = true
+				refuse = cmp.Or(refuse, it.refuse)
+				continue
+			}
+			if it.cols.mayHave(r.Column) {
+				return w.x.unsupported(fmt.Sprintf("column %s beside a column detest names otherwise than MySQL", name))
 			}
 			n := 0
 			for _, c := range it.cols.names {
@@ -607,11 +672,15 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			if n == 1 {
 				hits = append(hits, it)
 			} else {
-				unnamed = unnamed || it.cols.unnamed
 				missed = missed || r.Table != ""
 			}
 		}
 		switch {
+		case unknown && refuse != "" && len(hits) <= 1:
+			return w.x.unsupported(refuse)
+		case unknown && len(hits) <= 1:
+			// An item whose columns detest does not know may have it too.
+			return nil
 		case len(hits) > 1:
 			return w.ambiguous(name, clause)
 		case len(hits) == 1 && folded:
@@ -635,8 +704,6 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 		case folded:
 			// The executor keys the column by the name its query gives it.
 			return w.x.unsupported(fmt.Sprintf("column %s named in another case than its query gives it", name))
-		case unnamed:
-			return w.x.unsupported(fmt.Sprintf("column %s beside a column detest cannot name", name))
 		}
 	}
 	if r.Table == "" && sc != nil {
@@ -667,7 +734,10 @@ func (w *myWalk) setColumn(col string, target myItem, others []myItem) error {
 	if target.cols.unknown {
 		return nil
 	}
-	in := func(it myItem) bool { return slices.Contains(it.cols.names, col) }
+	// MySQL matches a joined item's column in any case.
+	in := func(it myItem) bool {
+		return it.cols.mayHave(col) || slices.ContainsFunc(it.cols.names, func(n string) bool { return strings.EqualFold(n, col) })
+	}
 	switch {
 	case in(target):
 		if slices.ContainsFunc(others, in) {
@@ -709,12 +779,17 @@ func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 		if sc == nil {
 			// A set operation, whose columns ON DUPLICATE KEY UPDATE
 			// reads by names this walk does not follow.
-			selected = &myScope{items: []myItem{{cols: myCols{unnamed: true}}}}
+			selected = &myScope{items: []myItem{{cols: myCols{unknown: true}}}}
 		}
 	}
 	oc := ins.OnConflict
 	if oc == nil || oc.DoNothing {
 		return nil
+	}
+	if t.alias == "excluded" {
+		// The parser writes VALUES(col) as excluded.col, which the
+		// table's own name would read too.
+		return w.x.unsupported("ON DUPLICATE KEY UPDATE of a table named excluded")
 	}
 	excluded := t
 	excluded.alias, excluded.qualified = "excluded", true
