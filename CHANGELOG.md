@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.6.4](https://github.com/k1LoW/detest/compare/v0.6.3...v0.6.4) - 2026-10-17
+
+### Fix bug 🐛
+- fix: read a numeric back as text under a repeated parameter, a view or a * over a join by @k1LoW in https://github.com/k1LoW/detest/pull/196
+- fix: resolve MySQL column names before a statement runs by @k1LoW in https://github.com/k1LoW/detest/pull/197
+
 ## [v0.6.3](https://github.com/k1LoW/detest/compare/v0.6.2...v0.6.3) - 2026-10-16
 
 ### Fix bug 🐛
