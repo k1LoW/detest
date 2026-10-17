@@ -109,10 +109,6 @@ type myWalk struct {
 
 // checkMySQLColumns resolves the column names of a MySQL statement.
 func (x *sqlExec) checkMySQLColumns(stmt sqlir.Statement) error {
-	if len(x.tx.db.defs) == 0 {
-		// Without a declared schema, every table takes any column.
-		return nil
-	}
 	w := &myWalk{x: x, views: map[string]bool{}}
 	switch st := stmt.(type) {
 	case *sqlir.SelectStmt:
@@ -256,7 +252,7 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 		// MySQL names the columns column_0 and on, detest column1.
 		var out myCols
 		for i := range sel.Values[0] {
-			out.unread = append(out.unread, fmt.Sprintf("column_%d", i))
+			out.unread = append(out.unread, fmt.Sprintf("column_%d", i), fmt.Sprintf("column%d", i+1))
 		}
 		return out, nil, nil
 	}
@@ -347,7 +343,6 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 					if it.alias != t.Table {
 						continue
 					}
-					having.star = having.star || it.cols.unknown || it.cols.unnamed || len(it.cols.unread) > 0
 					for _, c := range it.cols.names {
 						having.cols[[2]string{it.alias, c}] = true
 					}
@@ -549,10 +544,15 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 		default:
 			if r, ok := t.Expr.(*sqlir.ColumnRef); ok {
 				out.names = append(out.names, r.Column)
-			} else if name, ok := literalName(t.Expr); ok {
-				out.unread = append(out.unread, name)
 			} else {
-				out.unnamed = true
+				// detest names the column by targetName, which MySQL
+				// does not, so neither name reads it the same on both.
+				out.unread = append(out.unread, targetName(t))
+				if name, ok := literalName(t.Expr); ok {
+					out.unread = append(out.unread, name)
+				} else {
+					out.unnamed = true
+				}
 			}
 		}
 	}
@@ -802,6 +802,9 @@ func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 		}
 	}
 	for _, a := range oc.Set {
+		if a.Table != "" && a.Table != t.alias {
+			return w.unknownColumn(a.Table+"."+a.Column, "field list")
+		}
 		if err := w.setColumn(a.Column, t, nil); err != nil {
 			return err
 		}

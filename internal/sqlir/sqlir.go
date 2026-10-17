@@ -409,8 +409,9 @@ type ForeignKey struct {
 type Assignment struct {
 	Column string
 	Value  Expr
-	// Table is the qualifier a MySQL UPDATE writes the column with, which
-	// tells a multi-table UPDATE's tables apart; empty for none.
+	// Table is the qualifier a MySQL UPDATE or ON DUPLICATE KEY UPDATE
+	// writes the column with, which tells a multi-table UPDATE's tables
+	// apart; empty for none.
 	Table string
 }
 

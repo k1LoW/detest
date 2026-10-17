@@ -5163,6 +5163,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT t.*, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id HAVING u.m > 0`,
 		`UPDATE t JOIN u ON u.t_id = u2.id JOIN u AS u2 ON u2.id = t.id SET t.n = 3 WHERE false`,
 		`UPDATE t AS x SET t.n = 3 WHERE false`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE ghost.n = 3`,
+		`SELECT d.*, count(*) FROM t CROSS JOIN (SELECT 1) d GROUP BY t.id HAVING t.n > 0`,
 		`INSERT INTO t (id, n) SELECT id + 30, m AS incoming FROM u ON DUPLICATE KEY UPDATE n = incoming`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
@@ -5218,6 +5220,10 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT n FROM t CROSS JOIN (SELECT 'n') d`,
 		`SELECT d.n FROM (SELECT 'n') d`,
 		`SELECT a FROM (SELECT 'a' UNION SELECT 'b') d`,
+		`SELECT count FROM (SELECT count(*) FROM t) d CROSS JOIN u`,
+		`SELECT abs(n) FROM t ORDER BY abs`,
+		`SELECT DEFAULT(nope) FROM t`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5268,6 +5274,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`UPDATE t AS x JOIN u ON u.t_id = x.id SET x.n = u.m WHERE false`,
 		`SELECT n FROM t CROSS JOIN (SELECT count(*) FROM t) d`,
 		`SELECT id, coalesce(n, 0) FROM t ORDER BY n`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE t.n = 3`,
 	} {
 		mustExec(t, db, q)
 	}
@@ -5319,7 +5326,18 @@ func TestColumnNamesOfViewsMySQL(t *testing.T) {
 		mustExec(t, db, q)
 	}
 
-	// Without a declared schema, a table takes any column.
+	// Without a declared schema, a table takes any column, while a view,
+	// a CTE and a derived table still have the columns their queries give.
 	db2, _ := s.DB("bare", mysqlBin())
 	mustExec(t, db2, `SELECT anything FROM whatever`)
+	mustExec(t, db2, `CREATE VIEW bv AS SELECT 1 AS id`)
+	for _, q := range []string{
+		`SELECT nope FROM bv`,
+		`WITH c AS (SELECT 1 AS id) SELECT nope FROM c`,
+		`SELECT nope FROM (SELECT 1 AS id) d`,
+	} {
+		if _, err := db2.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
 }

@@ -49,14 +49,24 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 		return c.expr(e.Expr)
 	case *ast.ColumnNameExpr:
 		table := e.Name.Table.L
-		if table != "" && table == c.rowAlias {
+		switch {
+		case table != "" && table == c.rowAlias:
 			table = "excluded"
+		case table == "excluded" && c.onDuplicate:
+			// It would read as the proposed row, which MySQL names
+			// only by VALUES() or the row alias.
+			return nil, c.unsupported("a column qualified excluded in ON DUPLICATE KEY UPDATE")
 		}
 		return &sqlir.ColumnRef{Table: table, Column: e.Name.Name.L}, nil
 	case *ast.ValuesExpr:
 		// VALUES(col) in ON DUPLICATE KEY UPDATE is the proposed row's column.
 		return &sqlir.ColumnRef{Table: "excluded", Column: e.Column.Name.Name.L}, nil
 	case *ast.DefaultExpr:
+		if e.Name != nil {
+			// The executor reads DEFAULT as NULL, not the column's
+			// default.
+			return nil, c.unsupported("DEFAULT(col)")
+		}
 		return &sqlir.Default{}, nil
 	case *ast.BinaryOperationExpr:
 		l, err := c.expr(e.L)

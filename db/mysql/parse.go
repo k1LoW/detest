@@ -42,6 +42,8 @@ type conv struct {
 	// rowAlias is the alias INSERT ... AS alias gives the proposed row, which
 	// ON DUPLICATE KEY UPDATE refers to as the excluded row.
 	rowAlias string
+	// onDuplicate is set while ON DUPLICATE KEY UPDATE converts.
+	onDuplicate bool
 	// inLimit is set while LIMIT and OFFSET convert.
 	inLimit bool
 	// params numbers the ? placeholders in the order they appear.
@@ -935,8 +937,8 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	case len(s.OnDuplicate) > 0:
 		// The row alias names the proposed row only in these expressions; a
 		// later statement of a script may use the name for a table.
-		c.rowAlias = s.RowAlias.L
-		defer func() { c.rowAlias = "" }()
+		c.rowAlias, c.onDuplicate = s.RowAlias.L, true
+		defer func() { c.rowAlias, c.onDuplicate = "", false }()
 		oc := &sqlir.OnConflict{}
 		for _, a := range s.OnDuplicate {
 			if _, ok := a.Expr.(*ast.DefaultExpr); ok {
@@ -946,7 +948,7 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e})
+			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
 		}
 		out.OnConflict = oc
 	case s.IgnoreErr:
