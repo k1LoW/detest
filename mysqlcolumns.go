@@ -62,7 +62,9 @@ func literalName(e sqlir.Expr) (string, bool) {
 	case string:
 		return v, true
 	}
-	return fmt.Sprint(c.Value), true
+	// A number is named by its spelling, which the value does not keep,
+	// and which a plain identifier never matches.
+	return "", false
 }
 
 // myItem is a FROM item a MySQL query block sees.
@@ -222,6 +224,12 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 	}
 	if len(t.Columns) > 0 {
 		it.cols = myCols{names: t.Columns}
+	}
+	for i, n := range it.cols.names {
+		if slices.ContainsFunc(it.cols.names[i+1:], func(m string) bool { return strings.EqualFold(m, n) }) {
+			// MySQL fails it with 1060 before it runs the statement.
+			return it, w.x.unsupported(fmt.Sprintf("FROM item %s with two columns named %q", it.alias, n))
+		}
 	}
 	return it, nil
 }
@@ -434,7 +442,12 @@ func (w *myWalk) aliasColumn(sc *myScope, e sqlir.Expr, alias string) error {
 // the select list before the FROM items.
 func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) error {
 	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" {
-		unnamed, exprs := false, 0
+		if w.outputs(sel, sc).mayHave(r.Column) {
+			// detest keys an output by a name MySQL gives it otherwise,
+			// or the reverse, and may sort by another item.
+			return w.x.unsupported("an ORDER BY name a select list item detest names otherwise may give")
+		}
+		exprs := 0
 		var matched [][2]string // the columns the matching items are
 		for _, t := range sel.Targets {
 			if t.Star {
@@ -458,9 +471,6 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 			name := t.Alias
 			if c, ok := t.Expr.(*sqlir.ColumnRef); ok && name == "" {
 				name = c.Column
-			}
-			if t.Expr != nil && name == "" {
-				unnamed = true
 			}
 			if name == "" || !strings.EqualFold(name, r.Column) {
 				continue
@@ -486,11 +496,6 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 			return w.ambiguous(r.Column, "order clause")
 		case n > 0:
 			return nil
-		}
-		if unnamed && w.outputs(sel, sc).mayHave(r.Column) {
-			// MySQL reads the select list item it names by its text or
-			// value before a FROM column of the name.
-			return w.x.unsupported("an ORDER BY name a select list item detest names otherwise may give")
 		}
 		return w.expr(e, myCtx{sc: sc, clause: "order clause"})
 	}
@@ -736,15 +741,19 @@ func (w *myWalk) setColumn(col string, target myItem, others []myItem) error {
 	}
 	// MySQL matches a joined item's column in any case.
 	in := func(it myItem) bool {
-		return it.cols.mayHave(col) || slices.ContainsFunc(it.cols.names, func(n string) bool { return strings.EqualFold(n, col) })
+		return slices.ContainsFunc(it.cols.names, func(n string) bool { return strings.EqualFold(n, col) })
 	}
+	uncertain := func(it myItem) bool { return it.cols.unknown || it.cols.mayHave(col) }
 	switch {
 	case in(target):
 		if slices.ContainsFunc(others, in) {
 			return w.ambiguous(col, "field list")
 		}
+		if slices.ContainsFunc(others, uncertain) {
+			return w.x.unsupported(fmt.Sprintf("SET of column %q beside a joined column detest names otherwise", col))
+		}
 		return nil
-	case slices.ContainsFunc(others, func(it myItem) bool { return in(it) || it.cols.unknown }):
+	case slices.ContainsFunc(others, func(it myItem) bool { return in(it) || uncertain(it) }):
 		// MySQL writes the joined table's column, detest the target's.
 		return w.x.unsupported(fmt.Sprintf("SET of column %q of a joined table", col))
 	}

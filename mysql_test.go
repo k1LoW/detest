@@ -5222,6 +5222,11 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT a FROM (SELECT 'a' UNION SELECT 'b') d`,
 		`SELECT count FROM (SELECT count(*) FROM t) d CROSS JOIN u`,
 		`SELECT abs(n) FROM t ORDER BY abs`,
+		`SELECT abs(n), n AS abs FROM t ORDER BY abs LIMIT 1`,
+		"UPDATE t JOIN (SELECT count(*) FROM u) d ON TRUE SET `count` = 3",
+		"SELECT d.`1.0` FROM (SELECT 1.0) d",
+		`SELECT 1 FROM (SELECT 1 AS k, 2 AS k) d`,
+		`WITH c AS (SELECT 1 AS k, 2 AS K) SELECT 1 FROM c`,
 		`SELECT DEFAULT(nope) FROM t`,
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
 	} {
@@ -5275,6 +5280,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT n FROM t CROSS JOIN (SELECT count(*) FROM t) d`,
 		`SELECT id, coalesce(n, 0) FROM t ORDER BY n`,
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE t.n = 3`,
+		`SELECT 1 AS k, 2 AS k`,
+		`WITH c AS (SELECT 1 AS k, 2 AS k) SELECT 1`,
 	} {
 		mustExec(t, db, q)
 	}
