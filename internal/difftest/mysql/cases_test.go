@@ -1431,6 +1431,55 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
 		},
 	},
+	{
+		// MySQL resolves every column name before it runs a statement, so
+		// a name a migration renamed or dropped fails with 1054, and one
+		// two tables have with 1052, whatever rows the statement reads.
+		Name: "column names resolve as MySQL resolves them",
+		Schema: []string{
+			`CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(10) NOT NULL)` + binary,
+			`CREATE TABLE orders (id INT PRIMARY KEY, user_id INT NOT NULL, total INT NOT NULL, status VARCHAR(10) NOT NULL)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO users VALUES (1, 'alice'), (2, 'bob')`,
+			`INSERT INTO orders VALUES (1, 1, 20, 'new'), (2, 1, 5, 'new'), (3, 2, 30, 'new')`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT o.id, u.name FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id`),
+			difftest.Q(0, `SELECT o.ID, u.NAME FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE o.Total > 10 ORDER BY ID`),
+			difftest.Q(0, `SELECT user_id AS uid, count(*) AS c FROM orders GROUP BY uid HAVING c > 1 ORDER BY uid`),
+			difftest.Q(0, `SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING user_id > 1`),
+			difftest.Q(0, `SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 10) ORDER BY id`),
+			difftest.Q(0, `SELECT u.id, (SELECT count(*) FROM orders WHERE orders.user_id = u.id AND total > 1) AS c FROM users u ORDER BY c DESC`),
+			difftest.Q(0, `SELECT name FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id AND status = 'new') ORDER BY name`),
+			difftest.Q(0, `SELECT d.uid, d.n FROM (SELECT user_id AS uid, count(*) AS n FROM orders GROUP BY user_id) d ORDER BY d.uid`),
+			difftest.Q(0, `SELECT d.id FROM (SELECT * FROM orders) d WHERE d.total > 10 ORDER BY d.id`),
+			difftest.Q(0, `WITH c AS (SELECT user_id, sum(total) AS s FROM orders GROUP BY user_id) SELECT user_id FROM c WHERE s > 25 ORDER BY user_id`),
+			difftest.Q(0, `SELECT id FROM orders UNION SELECT id FROM users ORDER BY id`),
+			difftest.S(0, `INSERT INTO orders (id, user_id, total, status) VALUES (1, 1, 99, 'new') ON DUPLICATE KEY UPDATE total = VALUES(total) + total, status = 'dup'`),
+			difftest.S(0, `INSERT INTO orders (id, user_id, total, status) VALUES (2, 1, 7, 'new') AS new ON DUPLICATE KEY UPDATE total = new.total + orders.total`),
+			difftest.S(0, `UPDATE orders o JOIN users u ON u.id = o.user_id SET o.status = 'vip' WHERE u.name = 'bob'`),
+			difftest.S(0, `UPDATE orders SET total = total + 1 WHERE status = 'new' ORDER BY id LIMIT 1`),
+			difftest.S(0, `DELETE FROM orders WHERE status = 'gone'`),
+			difftest.Q(0, `SELECT id, total, status FROM orders ORDER BY id`),
+			difftest.Q(0, `SELECT amount FROM orders`),
+			difftest.Q(0, `SELECT id FROM orders WHERE false AND amount > 0`),
+			difftest.S(0, `UPDATE orders SET status = 'x' WHERE state = 'new'`),
+			difftest.S(0, `UPDATE orders SET state = 'x' WHERE id = 1`),
+			difftest.S(0, `INSERT INTO orders (id, user_id, amount, status) VALUES (9, 1, 1, 'new')`),
+			difftest.S(0, `INSERT INTO orders (id, user_id, total, status) VALUES (1, 1, 1, 'new') ON DUPLICATE KEY UPDATE total = VALUES(amount)`),
+			difftest.S(0, `DELETE FROM orders WHERE state = 'new'`),
+			difftest.Q(0, `SELECT o.id FROM orders o JOIN users u ON u.id = o.user_id WHERE u.email = ''`),
+			difftest.Q(0, `SELECT o.id FROM orders o JOIN users u ON u.id = x.user_id`),
+			difftest.Q(0, `SELECT user_id AS uid FROM orders WHERE uid = 1`),
+			difftest.Q(0, `SELECT id FROM orders GROUP BY id HAVING total > 1`),
+			difftest.Q(0, `SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 0)`),
+			difftest.Q(0, `SELECT id FROM orders o JOIN users u ON u.id = o.user_id`),
+			difftest.S(0, `UPDATE orders o JOIN users u ON u.id = o.user_id SET o.status = 'x' WHERE id = 1`),
+			difftest.Q(0, `SELECT id, total, status FROM orders ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

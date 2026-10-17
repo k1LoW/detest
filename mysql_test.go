@@ -5124,3 +5124,145 @@ func TestUndefinedTableWhereNoRowReachesMySQL(t *testing.T) {
 	// A script checks each statement after the DDL before it.
 	mustExec(t, db, `CREATE TABLE t (id int); INSERT INTO e SELECT id FROM t`)
 }
+
+func TestColumnNamesMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT, UserName VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE u (id INT PRIMARY KEY, t_id INT, m INT)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2, 'a')`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 1, 5)`)
+	for _, q := range []string{
+		`SELECT nope FROM t`,
+		`UPDATE t SET n = 3 WHERE nope = 1`,
+		`SELECT id FROM t WHERE false AND nope = 1`,
+		`SELECT n AS a FROM t WHERE a = 2`,
+		`SELECT id FROM t GROUP BY id HAVING n > 1`,
+		`SELECT n + 1 FROM t GROUP BY id HAVING n > 1`,
+		`SELECT count(*) FROM t HAVING n > 0`,
+		`SELECT id FROM t GROUP BY id HAVING (SELECT max(m) FROM u WHERE u.t_id = n) > 0`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY n`,
+		`SELECT * FROM t JOIN u ON u.t_id = u2.id JOIN u u2 ON u2.id = t.id`,
+		`SELECT x.id FROM t AS x WHERE t.id = 1`,
+		`SELECT d.x FROM (SELECT id AS x FROM t) d WHERE d.id = 1`,
+		`SELECT id FROM t WHERE id = (SELECT id FROM u WHERE nope = 1)`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.nope = t.id)`,
+		`SELECT id FROM t ORDER BY (SELECT a)`,
+		`SELECT n AS a FROM t ORDER BY t.a`,
+		`INSERT INTO t (id, nope) VALUES (3, 1)`,
+		`INSERT INTO t (id, n) VALUES (4, 1) ON DUPLICATE KEY UPDATE n = VALUES(nope)`,
+		`INSERT INTO t (id, n) VALUES (4, 1) ON DUPLICATE KEY UPDATE nope = 1`,
+		`INSERT INTO t (id, n) VALUES (4, 1) AS new ON DUPLICATE KEY UPDATE n = new.nope`,
+		`INSERT INTO t (id, n) VALUES (4, nope)`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET t.n = u.m WHERE u.nope = 1`,
+		`UPDATE t SET nope = 1`,
+		`UPDATE t SET n = 1 ORDER BY nope`,
+		`DELETE FROM t WHERE nope = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT id FROM t JOIN u ON u.t_id = t.id`,
+		`SELECT id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`UPDATE t, u SET n = 1 WHERE id = 1`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET id = 1 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrAmbiguousColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// MySQL runs these, and detest would read another value than it does.
+	for _, q := range []string{
+		`SELECT n AS a, (SELECT a) FROM t`,
+		`SELECT n AS a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.m > a)`,
+		`SELECT n AS a FROM t ORDER BY (SELECT a)`,
+		`SELECT n AS a FROM t ORDER BY a + 1`,
+		`SELECT n AS a FROM t GROUP BY id ORDER BY max(a)`,
+		`SELECT n % 2 AS a, count(*) FROM t GROUP BY a + 0`,
+		`SELECT n % 2 AS id, count(*) FROM t GROUP BY id`,
+		`SELECT n % 2 AS id, count(*) FROM t GROUP BY n HAVING id > 0`,
+		`SELECT d.a FROM (SELECT n AS A FROM t) d`,
+		"SELECT d.`n+1` FROM (SELECT n+1 FROM t) d",
+		`WITH c AS (SELECT id AS K FROM t) SELECT k FROM c`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u t WHERE t.n = 1)`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY t.id`,
+		`INSERT INTO t (id, n) VALUES (2, id)`,
+		`INSERT INTO t (id, n) SELECT id + 10, m FROM u ON DUPLICATE KEY UPDATE n = m`,
+		`INSERT INTO t (id, n) SELECT id + 20, m FROM u ON DUPLICATE KEY UPDATE n = id`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET m = 1 WHERE false`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT USERNAME, username, ID FROM t`,
+		`SELECT n AS a FROM t GROUP BY a HAVING a > 0 ORDER BY a`,
+		`SELECT n AS a FROM t ORDER BY A`,
+		`SELECT n AS a FROM t GROUP BY id HAVING a > 0`,
+		`SELECT n AS a FROM t GROUP BY a HAVING n > 0`,
+		`SELECT n AS a, count(*) FROM t GROUP BY n HAVING a > 0`,
+		`SELECT id, n FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id, n FROM t GROUP BY id HAVING t.n > 1`,
+		`SELECT t.n FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id FROM t GROUP BY id, n HAVING n > 1`,
+		`SELECT * FROM t GROUP BY id HAVING n > 1`,
+		`SELECT id FROM t GROUP BY id HAVING max(n) > 1 AND id > 0`,
+		`SELECT id FROM t GROUP BY id HAVING (SELECT max(m) FROM u WHERE u.t_id = t.id) > 0`,
+		`SELECT id FROM t ORDER BY n`,
+		`SELECT n AS id FROM t ORDER BY id`,
+		`SELECT t.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT t.n FROM t ORDER BY N`,
+		`SELECT id FROM t UNION SELECT id FROM u ORDER BY id`,
+		`SELECT id AS x FROM t UNION SELECT t_id FROM u ORDER BY X`,
+		`SELECT n FROM t UNION SELECT m FROM u ORDER BY -n`,
+		`SELECT id FROM t WHERE id IN (SELECT t_id FROM u WHERE m > n)`,
+		`SELECT id FROM t WHERE id IN (SELECT id FROM u WHERE t.n = 2)`,
+		`SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE id = 1)`,
+		`SELECT (SELECT max(m) FROM u WHERE u.t_id = t.id) FROM t`,
+		`SELECT d.id FROM (SELECT * FROM t) d`,
+		`SELECT * FROM t JOIN (SELECT t_id FROM u) d ON d.t_id = t.id WHERE d.t_id = 1`,
+		`WITH c AS (SELECT id AS k FROM t) SELECT k FROM c`,
+		`INSERT INTO t (id, n) VALUES (1, 1) ON DUPLICATE KEY UPDATE n = VALUES(n) + n`,
+		`INSERT INTO t (id, n) VALUES (1, 1) AS new ON DUPLICATE KEY UPDATE n = new.n + t.n`,
+		`INSERT INTO t (id, n) SELECT id, m FROM u ON DUPLICATE KEY UPDATE n = t.n + 1`,
+		`UPDATE t JOIN u ON u.t_id = t.id SET t.n = u.m WHERE u.m > 0`,
+		`UPDATE t SET n = n + 1 WHERE id = 1 ORDER BY n LIMIT 1`,
+		`DELETE FROM t WHERE id = 99`,
+	} {
+		mustExec(t, db, q)
+	}
+}
+
+func TestColumnNamesOfViewsMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT id, n AS total FROM t`)
+	mustExec(t, db, `CREATE VIEW vc (k, x) AS SELECT id, n FROM t`)
+	mustExec(t, db, `CREATE VIEW vs AS SELECT * FROM t`)
+	for _, q := range []string{
+		`SELECT n FROM v`,
+		`SELECT id FROM vc`,
+		`SELECT v.nope FROM v`,
+		`SELECT nope FROM vs`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT id, total FROM v`,
+		`SELECT k, x FROM vc`,
+		`SELECT id, n FROM vs`,
+		`SELECT v.total FROM v JOIN t ON t.id = v.id`,
+	} {
+		mustExec(t, db, q)
+	}
+
+	// Without a declared schema, a table takes any column.
+	db2, _ := s.DB("bare", mysqlBin())
+	mustExec(t, db2, `SELECT anything FROM whatever`)
+}

@@ -196,6 +196,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 					return x.unsupported(why)
 				}
 			}
+			return x.checkMySQLColumns(stmt)
 		case *sqlir.CreateTableAsStmt:
 			// IF NOT EXISTS over a table that exists runs no query.
 			if !st.IfNotExists || !x.tx.db.isRelation(x.tx.db.resolve(st.Table)) {

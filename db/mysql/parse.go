@@ -966,7 +966,7 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Qualified: a.Column.Table.L != ""})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {

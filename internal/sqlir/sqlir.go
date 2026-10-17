@@ -405,6 +405,9 @@ type ForeignKey struct {
 type Assignment struct {
 	Column string
 	Value  Expr
+	// Qualified is set where the column is written with its table's name,
+	// which tells MySQL's multi-table UPDATE which table's column it is.
+	Qualified bool
 }
 
 // Script is several statements run in order, as a migration file runs. A
