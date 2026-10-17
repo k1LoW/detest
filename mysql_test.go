@@ -5161,6 +5161,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`VALUES ROW(nope)`,
 		`WITH a AS (SELECT nope FROM t) SELECT 1 FROM t WHERE false AND EXISTS (SELECT 1 FROM a)`,
 		`SELECT t.*, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id HAVING u.m > 0`,
+		`UPDATE t JOIN u ON u.t_id = u2.id JOIN u AS u2 ON u2.id = t.id SET t.n = 3 WHERE false`,
+		`UPDATE t AS x SET t.n = 3 WHERE false`,
+		`INSERT INTO t (id, n) SELECT id + 30, m AS incoming FROM u ON DUPLICATE KEY UPDATE n = incoming`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5174,6 +5177,11 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT t.id, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
 		`SELECT t.n AS k, u.m AS k FROM t JOIN u ON u.t_id = t.id ORDER BY k`,
 		`SELECT n AS id, id FROM t ORDER BY id`,
+		`SELECT 1 AS k, 2 AS k UNION ALL SELECT 3, 4 ORDER BY k`,
+		`SELECT id, id FROM t UNION ALL SELECT 1, 2 ORDER BY id`,
+		`SELECT count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT t.*, u.id FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
+		`SELECT * FROM t JOIN u ON u.t_id = t.id ORDER BY id`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrAmbiguousColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5200,6 +5208,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`UPDATE t JOIN u ON u.t_id = t.id SET m = 1 WHERE false`,
 		`SELECT id FROM t CROSS JOIN (SELECT 2 AS ID) d`,
 		`SELECT missing.* FROM t`,
+		`SELECT n + 1 AS k, n + 1 AS k FROM t ORDER BY k`,
+		`SELECT n AS k, n + 1 AS k FROM t ORDER BY k`,
+		`SELECT u.id, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5244,6 +5255,10 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`WITH unused AS (SELECT nope FROM t) SELECT 1`,
 		`WITH a AS (SELECT nope FROM t), b AS (SELECT * FROM a) SELECT 1`,
 		`SELECT *, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.id HAVING u.m > 0`,
+		`SELECT t.id AS id, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY id`,
+		`SELECT t.*, t.id FROM t ORDER BY id`,
+		`SELECT t.n AS k, t.n AS k FROM t ORDER BY k`,
+		`UPDATE t AS x JOIN u ON u.t_id = x.id SET x.n = u.m WHERE false`,
 	} {
 		mustExec(t, db, q)
 	}

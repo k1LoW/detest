@@ -269,8 +269,18 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			if err := w.aliasColumn(sc, g, alias); err != nil {
 				return myCols{}, nil, err
 			}
-		} else if err := w.expr(g, myCtx{sc: sc, clause: "group statement", aliases: sc.aliases}); err != nil {
-			return myCols{}, nil, err
+		} else {
+			if r, ok := g.(*sqlir.ColumnRef); ok && r.Table == "" && w.selectsColumn(sel, r.Column) {
+				if n := slices.IndexFunc(sc.items, func(it myItem) bool { return slices.Contains(it.cols.names, r.Column) }); n >= 0 &&
+					slices.ContainsFunc(sc.items[n+1:], func(it myItem) bool { return slices.Contains(it.cols.names, r.Column) }) {
+					// MySQL groups by the select list's column, where
+					// detest groups by the first item's.
+					return myCols{}, nil, w.x.unsupported(fmt.Sprintf("GROUP BY name %q, which two FROM items have and the select list names", r.Column))
+				}
+			}
+			if err := w.expr(g, myCtx{sc: sc, clause: "group statement", aliases: sc.aliases}); err != nil {
+				return myCols{}, nil, err
+			}
 		}
 		if r, ok := g.(*sqlir.ColumnRef); ok {
 			if alias, ok := w.owner(r, sc); ok {
@@ -339,6 +349,8 @@ func (w *myWalk) setOp(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			case r.Table != "":
 				// MySQL fails it with 1250 rather than 1054.
 				return myCols{}, nil, w.x.unsupported("a qualified column in the ORDER BY of a set operation")
+			case !cols.unknown && len(slices.DeleteFunc(slices.Clone(cols.names), func(n string) bool { return !strings.EqualFold(n, r.Column) })) > 1:
+				return myCols{}, nil, w.ambiguous(r.Column, "order clause")
 			case cols.unknown || slices.Contains(cols.names, r.Column):
 			case cols.unnamed || slices.ContainsFunc(cols.names, func(n string) bool { return strings.EqualFold(n, r.Column) }):
 				// The executor keys the column by the name the first
@@ -371,9 +383,27 @@ func (w *myWalk) aliasColumn(sc *myScope, e sqlir.Expr, alias string) error {
 // the select list before the FROM items.
 func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) error {
 	if r, ok := e.(*sqlir.ColumnRef); ok && r.Table == "" {
-		unnamed := false
-		var matched []any
+		unnamed, exprs := false, 0
+		var matched [][2]string // the columns the matching items are
 		for _, t := range sel.Targets {
+			if t.Star {
+				for _, it := range sc.items {
+					if t.Table != "" && it.alias != t.Table {
+						continue
+					}
+					for _, c := range it.cols.names {
+						if c != r.Column && strings.EqualFold(c, r.Column) {
+							// The executor keys the column by the name
+							// its query gives it.
+							return w.x.unsupported(fmt.Sprintf("ORDER BY name %q, which a * gives in another case", r.Column))
+						}
+						if c == r.Column {
+							matched = append(matched, [2]string{it.alias, c})
+						}
+					}
+				}
+				continue
+			}
 			name := t.Alias
 			if c, ok := t.Expr.(*sqlir.ColumnRef); ok && name == "" {
 				name = c.Column
@@ -384,20 +414,26 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 			if name == "" || !strings.EqualFold(name, r.Column) {
 				continue
 			}
-			// Items of one column name it once; any other two are
-			// ambiguous.
-			var what any = t.Expr
-			if c, ok := t.Expr.(*sqlir.ColumnRef); ok {
-				if alias, ok := w.owner(c, sc); ok {
-					what = [2]string{alias, c.Column}
-				}
+			c, ok := t.Expr.(*sqlir.ColumnRef)
+			alias := ""
+			if ok {
+				alias, ok = w.owner(c, sc)
 			}
-			if len(matched) > 0 && matched[0] != what {
-				return w.ambiguous(r.Column, "order clause")
+			if !ok {
+				exprs++
+				continue
 			}
-			matched = append(matched, what)
+			matched = append(matched, [2]string{alias, c.Column})
 		}
-		if len(matched) > 0 {
+		n := len(matched) + exprs
+		switch {
+		case n > 1 && exprs > 0:
+			// MySQL takes one of two items of the name when one is an
+			// expression, by rules detest does not follow.
+			return w.x.unsupported(fmt.Sprintf("ORDER BY name %q, which two select list items give", r.Column))
+		case n > 1 && slices.ContainsFunc(matched, func(m [2]string) bool { return m != matched[0] }):
+			return w.ambiguous(r.Column, "order clause")
+		case n > 0:
 			return nil
 		}
 		err := w.expr(e, myCtx{sc: sc, clause: "order clause"})
@@ -408,6 +444,15 @@ func (w *myWalk) orderKey(sel *sqlir.SelectStmt, sc *myScope, e sqlir.Expr) erro
 		return err
 	}
 	return w.expr(e, myCtx{sc: sc, clause: "order clause", aliases: sc.aliases})
+}
+
+// selectsColumn reports whether a select list item of sel is a column of
+// the name.
+func (w *myWalk) selectsColumn(sel *sqlir.SelectStmt, name string) bool {
+	return slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool {
+		c, ok := t.Expr.(*sqlir.ColumnRef)
+		return ok && c.Column == name
+	})
 }
 
 // owner is the alias of the item of the block sc a reference resolves to,
@@ -714,10 +759,23 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 	if err != nil {
 		return err
 	}
+	for i, on := range up.JoinOn {
+		if on == nil {
+			continue
+		}
+		// ON sees the tables joined so far only.
+		if err := w.expr(on, myCtx{sc: &myScope{items: sc.items[:i+2]}, clause: "on clause"}); err != nil {
+			return err
+		}
+	}
 	for _, a := range up.Set {
 		others := sc.items[1:]
-		if a.Qualified {
-			// The parser refuses a qualifier other than the target's.
+		if a.Table != "" {
+			if a.Table != t.alias {
+				// The parser refuses the name of another table, so this
+				// is one an alias hides.
+				return w.unknownColumn(a.Table+"."+a.Column, "field list")
+			}
 			others = nil
 		}
 		if err := w.setColumn(a.Column, t, others); err != nil {

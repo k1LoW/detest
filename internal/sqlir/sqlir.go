@@ -183,6 +183,10 @@ type UpdateStmt struct {
 	// updated are the first Limit of the matching rows in that order.
 	OrderBy []OrderKey
 	Limit   Expr
+	// JoinOn are the ON conditions of MySQL's multi-table UPDATE, one per
+	// From item, nil for none. Where holds them too, for the run; MySQL
+	// resolves each in the scope of the tables joined so far.
+	JoinOn []Expr
 }
 
 // DeleteStmt is DELETE FROM ... [USING ...] WHERE ... [RETURNING ...].
@@ -405,9 +409,9 @@ type ForeignKey struct {
 type Assignment struct {
 	Column string
 	Value  Expr
-	// Qualified is set where the column is written with its table's name,
-	// which tells MySQL's multi-table UPDATE which table's column it is.
-	Qualified bool
+	// Table is the qualifier a MySQL UPDATE writes the column with, which
+	// tells a multi-table UPDATE's tables apart; empty for none.
+	Table string
 }
 
 // Script is several statements run in order, as a migration file runs. A

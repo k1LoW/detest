@@ -863,8 +863,8 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 }
 
 // target returns the single table an INSERT, UPDATE or DELETE writes, with
-// the tables a multi-table UPDATE joins to it.
-func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableRef, sqlir.Expr, error) {
+// the tables a multi-table UPDATE joins to it and the ON of each.
+func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableRef, []sqlir.Expr, error) {
 	if refs == nil || refs.TableRefs == nil {
 		return sqlir.TableRef{}, nil, nil, c.unsupported("statement without a table")
 	}
@@ -876,17 +876,15 @@ func (c *conv) target(refs *ast.TableRefsClause) (sqlir.TableRef, []sqlir.TableR
 		return sqlir.TableRef{}, nil, nil, c.unsupported("writing to a derived table")
 	}
 	var extra []sqlir.TableRef
-	var on sqlir.Expr
+	var ons []sqlir.Expr
 	for _, j := range joins {
 		if j.Kind != sqlir.InnerJoin && j.Kind != sqlir.CrossJoin {
 			return sqlir.TableRef{}, nil, nil, c.unsupported("outer join in UPDATE or DELETE")
 		}
 		extra = append(extra, j.Table)
-		if j.On != nil {
-			on = and(on, j.On)
-		}
+		ons = append(ons, j.On)
 	}
-	return *base, extra, on, nil
+	return *base, extra, ons, nil
 }
 
 func and(a, b sqlir.Expr) sqlir.Expr {
@@ -968,11 +966,11 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 	if s.IgnoreErr {
 		return nil, c.unsupported("UPDATE IGNORE")
 	}
-	t, extra, on, err := c.target(s.TableRefs)
+	t, extra, ons, err := c.target(s.TableRefs)
 	if err != nil {
 		return nil, err
 	}
-	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra}
+	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra, JoinOn: ons}
 	for _, a := range s.List {
 		if q := a.Column.Table.L; q != "" && q != strings.ToLower(relname(t.Name)) && q != strings.ToLower(t.Name) && q != strings.ToLower(t.Alias) {
 			return nil, c.unsupported("UPDATE of more than one table")
@@ -985,12 +983,16 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Qualified: a.Column.Table.L != ""})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {
 			return nil, err
 		}
+	}
+	var on sqlir.Expr
+	for _, o := range ons {
+		on = and(on, o)
 	}
 	out.Where = and(on, out.Where)
 	if len(extra) > 0 && (s.Order != nil || s.Limit != nil) {
@@ -1012,7 +1014,7 @@ func (c *conv) delete(s *ast.DeleteStmt) (sqlir.Statement, error) {
 	if s.With != nil {
 		return nil, c.unsupported("CTE on DELETE")
 	}
-	t, extra, on, err := c.target(s.TableRefs)
+	t, extra, ons, err := c.target(s.TableRefs)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,6 +1023,10 @@ func (c *conv) delete(s *ast.DeleteStmt) (sqlir.Statement, error) {
 		if out.Where, err = c.cond(s.Where); err != nil {
 			return nil, err
 		}
+	}
+	var on sqlir.Expr
+	for _, o := range ons {
+		on = and(on, o)
 	}
 	out.Where = and(on, out.Where)
 	if out.OrderBy, err = c.orderBy(s.Order); err != nil {
