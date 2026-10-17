@@ -5261,6 +5261,10 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT t.n AS m, count(*) FROM t JOIN u ON u.t_id = t.id GROUP BY t.id, u.m HAVING m > 0`,
 		`SELECT VALUES(n) FROM t`,
 		`WITH c AS (SELECT 1 AS id), c AS (SELECT 2 AS id) SELECT id FROM c`,
+		`SELECT 'bucket', count(*) FROM t GROUP BY bucket`,
+		`SELECT 'bucket', count(*) FROM t GROUP BY 1 HAVING bucket = 'bucket'`,
+		`SELECT 'bucket', id FROM t ORDER BY concat(bucket, id) DESC`,
+		`SELECT t.id FROM t JOIN u ON u.id = t.id GROUP BY t.id HAVING id > 0`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)

@@ -1491,6 +1491,7 @@ var cases = []difftest.Case{
 			difftest.S(0, `INSERT INTO orders (id, id, user_id, total, status) VALUES (7, 8, 1, 1, 'new')`),
 			difftest.S(0, `INSERT INTO orders (id, ID, user_id, total, status) VALUES (7, 8, 1, 1, 'new')`),
 			difftest.S(0, `UPDATE orders o JOIN users u ON name <> '' JOIN users u2 ON u2.id = o.user_id SET o.status = 'y' WHERE o.id = 3`),
+			difftest.Q(0, `SELECT count(*) FROM orders o JOIN users u ON u.id = o.user_id GROUP BY o.user_id HAVING id > 0`),
 			difftest.Q(0, `SELECT id, total, status FROM orders ORDER BY id`),
 		},
 	},
