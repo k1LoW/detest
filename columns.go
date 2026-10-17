@@ -168,6 +168,12 @@ type columnChecker struct {
 	outCertainNamed map[*sqlir.SelectStmt]map[string]string
 	// paramCount is the number of uses of each parameter in the statement.
 	paramCount map[int]int
+	// paramShown are the uses of parameters typed by a type the statement
+	// shows without a guess (certainType), and paramBeside the parameters
+	// used again whose output type certainType took from an operand beside
+	// them, which holds only where every use is in paramShown.
+	paramShown  map[*sqlir.Param]bool
+	paramBeside map[int]bool
 	// outExpanded are the names of a query's columns with its * expanded
 	// (noteExpanded).
 	outExpanded map[*sqlir.SelectStmt][]string
@@ -276,6 +282,14 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 	}
 	if c.numberConflict != "" {
 		return x.unsupported(c.numberConflict)
+	}
+	for _, p := range sqlir.Params(stmt) {
+		if c.paramBeside[p.Index] && !c.paramShown[p] {
+			// Postgres types the parameter at the use it meets first, and
+			// this use's type is one the check guesses or does not record,
+			// so the type the output took may not be the server's.
+			return x.unsupported(fmt.Sprintf("parameter $%d used again beside a number, and typed where detest cannot tell its type", p.Index+1))
+		}
 	}
 	if what := c.untrackedParam(); what != "" {
 		return x.unsupported(what)
@@ -3567,6 +3581,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 					c.numberParam(p, e.Type)
 					c.typedParam(p)
 					c.readParam(p)
+					c.shownParam(p)
 				}
 				if typeCollation(e.Type) != "" {
 					// A cast to name brings name's C collation in, as a
@@ -3728,7 +3743,29 @@ func (c *columnChecker) untypedOperands(sc *colScope, a, b sqlir.Expr) {
 	if untypedExpr(b) {
 		a, b = b, a
 	}
-	c.untypedAs(a, c.x.tx.db.baseType(c.typer(sc).of(b)))
+	typ := c.x.tx.db.baseType(c.typer(sc).of(b))
+	c.shownBeside(a, typ, b, sc)
+	c.untypedAs(a, typ)
+}
+
+// shownBeside records the use a, where it is a parameter, as typed by a
+// type the statement shows, where typ, the type it takes from b, is b's
+// certain type.
+func (c *columnChecker) shownBeside(a sqlir.Expr, typ string, b sqlir.Expr, sc *colScope) {
+	p, ok := a.(*sqlir.Param)
+	if !ok {
+		return
+	}
+	if ct := c.x.tx.db.baseType(c.certainType(b, sc)); numberRank[ct] > 0 && numberRank[ct] == numberRank[typ] {
+		c.shownParam(p)
+	}
+}
+
+func (c *columnChecker) shownParam(p *sqlir.Param) {
+	if c.paramShown == nil {
+		c.paramShown = map[*sqlir.Param]bool{}
+	}
+	c.paramShown[p] = true
 }
 
 // untypedAs reads a, a string literal or a parameter, as the type typ of
@@ -3786,6 +3823,7 @@ func (c *columnChecker) arithmeticOperand(sc *colScope, e *sqlir.BinaryExpr) err
 		// is 2, while the run computes with the float as bound.
 		return c.x.unsupported(fmt.Sprintf("a float bound to parameter $%d taken as %s in arithmetic", p.Index+1, typ))
 	}
+	c.shownBeside(a, typ, b, sc)
 	c.inputAs(a, typ)
 	return nil
 }
@@ -4118,6 +4156,7 @@ func (c *columnChecker) assignedParams(table string, cols []string, exprs []sqli
 			// statement, in VALUES too, whose input checkTypes reads.
 			c.params.comparedWith(p.Index, c.paramTypeFamily(typ))
 			c.numberParam(p, typ)
+			c.shownParam(p)
 			if c.paramTypeFamily(typ) != "" {
 				c.typedParam(p)
 			}

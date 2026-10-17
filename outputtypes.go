@@ -42,14 +42,18 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 			l, r := c.certainType(e.L, sc), c.certainType(e.R, sc)
 			// An untyped literal or parameter takes the other operand's
 			// type. A parameter used again is typed at the use Postgres
-			// meets first, which may give it another number type, but
-			// arithmeticOperand records this use's, and one given two is
-			// refused (numberParam), so every use that types it agrees.
+			// meets first, which may give it another number type. One
+			// given two is refused (numberParam), but a use the check types
+			// by a guess agrees with the others alike, so checkColumns
+			// refuses the statement unless every use is typed by a type it
+			// shows (paramShown).
 			if takesOtherType(e.R) {
 				r = l
+				c.besideParam(e.R, l)
 			}
 			if takesOtherType(e.L) {
 				l = r
+				c.besideParam(e.L, r)
 			}
 			if numberRank[l] == 0 || numberRank[r] == 0 {
 				return ""
@@ -161,6 +165,20 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		}
 	}
 	return ""
+}
+
+// besideParam records e, where it is a parameter used again, as one whose
+// output type certainType took from an operand beside it, of the number
+// type typ.
+func (c *columnChecker) besideParam(e sqlir.Expr, typ string) {
+	p, ok := e.(*sqlir.Param)
+	if !ok || c.paramCount[p.Index] < 2 || numberRank[typ] == 0 {
+		return
+	}
+	if c.paramBeside == nil {
+		c.paramBeside = map[int]bool{}
+	}
+	c.paramBeside[p.Index] = true
 }
 
 // certainBranches is the number type branches of CASE, COALESCE and the like

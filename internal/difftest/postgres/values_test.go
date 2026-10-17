@@ -1389,6 +1389,7 @@ var valueCases = []difftest.Case{
 			difftest.QS(0, "decimal", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
 			difftest.QS(0, "int64", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
 			difftest.QA(0, `SELECT nm + $1, x * $1 FROM t ORDER BY id`, int64(2)),
+			difftest.QA(0, `SELECT nm + $1 FROM t WHERE nm > $1 ORDER BY id`, int64(2)),
 			difftest.Q(0, `SELECT nm, x, f, y FROM v ORDER BY id`),
 			difftest.Q(0, `SELECT * FROM v ORDER BY id`),
 			difftest.Q(0, `SELECT v.nm * 2, sum(v.x) OVER () FROM v ORDER BY id`),

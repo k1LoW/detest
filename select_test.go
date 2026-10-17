@@ -2197,6 +2197,7 @@ func TestNumericUnderUncertainOutputType(t *testing.T) {
 		want []string
 	}{
 		{`SELECT 1.00 + $1, 2.00 + $1`, []any{int64(1)}, []string{"2.00", "3.00"}},
+		{`SELECT nm + $1 FROM t WHERE nm > $1 AND x = 7`, []any{int64(1)}, []string{"3.00"}},
 		{`SELECT nm FROM v`, nil, []string{"2.00"}},
 		{`SELECT v.nm + 1 FROM v`, nil, []string{"3.00"}},
 		{`SELECT * FROM v`, nil, []string{"2.00", "7", "1.5"}},
@@ -2247,6 +2248,10 @@ func TestNumericUnderUncertainOutputType(t *testing.T) {
 		// Postgres types the parameter at the use it meets first.
 		{`SELECT abs($1), 1.00 + $1`, []any{1.5}},
 		{`SELECT f + $1, 1.00 + $1 FROM t`, []any{1.5}},
+		// A use typed by a guess agrees with the others in the check, where
+		// Postgres takes abs(NULL)'s float8 at the first.
+		{`SELECT (1.00 + abs(NULL)) + $1, 2.00 + $1`, []any{int64(1)}},
+		{`SELECT s.v + $1, 2.00 + $1 FROM (VALUES (1.00), (abs(NULL))) s(v)`, []any{int64(1)}},
 		// The check tells a CTE's columns apart by name only.
 		{`WITH w AS (SELECT nm, nm FROM t) SELECT * FROM w`, nil},
 		// A column of a function in FROM has no certain type, so the
