@@ -851,6 +851,11 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 		// regard to the scopes of subqueries, where this item shadows it.
 		return out, c.unsupported("a FROM item of the row alias's name in ON DUPLICATE KEY UPDATE")
 	}
+	if c.onDuplicate && (ts.AsName.L == "excluded" || ts.AsName.L == "" && tableNameOf(ts.Source) == "excluded") {
+		// VALUES() and the row alias convert to the qualifier excluded,
+		// which this item would then shadow.
+		return out, c.unsupported("a FROM item named excluded in ON DUPLICATE KEY UPDATE")
+	}
 	for _, cn := range ts.ColumnNames {
 		out.Columns = append(out.Columns, cn.L)
 	}

@@ -5233,6 +5233,17 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = (SELECT new.m FROM u AS new)`,
 		`SELECT DEFAULT(nope) FROM t`,
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = excluded.n`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = (SELECT new.n FROM u AS excluded LIMIT 1)`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(n) FROM excluded LIMIT 1)`,
+		`SELECT 1 FROM (SELECT n+1, n+1 FROM t) d`,
+		`WITH c AS (SELECT n+1, N + 1 FROM t) SELECT 1 FROM c`,
+		`SELECT 1 FROM (SELECT * FROM (SELECT n+1 FROM t) a CROSS JOIN (SELECT n+1 FROM t) b) d`,
+		`SELECT a.id FROM t a CROSS JOIN u a`,
+		`SELECT 1 FROM t JOIN t`,
+		`UPDATE t AS a JOIN u AS a ON TRUE SET a.n = 3`,
+		`UPDATE t JOIN t ON TRUE SET n = 3`,
+		`SELECT t.n, (SELECT u.m AS n FROM u ORDER BY (SELECT n) LIMIT 1) FROM t`,
+		`SELECT t.n, (SELECT u.m AS n FROM u HAVING (SELECT n) > 0 LIMIT 1) FROM t`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5288,6 +5299,9 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`WITH c AS (SELECT 1 AS k, 2 AS k) SELECT 1`,
 		`SELECT n AS n FROM t GROUP BY n HAVING max(n) > 0`,
 		`SELECT n AS k FROM t GROUP BY n HAVING max(k) > 0`,
+		`SELECT 1 FROM (SELECT n+1, n+2 FROM t) d`,
+		`SELECT 1 FROM t a JOIN t b ON b.id = a.id`,
+		`UPDATE t JOIN u ON m = n JOIN u AS u2 ON u2.id = u.id SET t.n = 3 WHERE false`,
 	} {
 		mustExec(t, db, q)
 	}

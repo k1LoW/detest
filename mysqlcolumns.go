@@ -23,6 +23,9 @@ type myCols struct {
 	// literals are the names MySQL gives literals without an alias, by
 	// their value, which are among unread too.
 	literals []string
+	// exprs are the select list's expressions without an alias other than
+	// literals, which MySQL names by their spelling.
+	exprs []sqlir.Expr
 	// unknown is set for an item whose columns detest does not know, such
 	// as an ignored table, which resolves any name.
 	unknown bool
@@ -239,6 +242,15 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 			return it, w.x.unsupported(fmt.Sprintf("FROM item %s with two columns named %q", it.alias, n))
 		}
 	}
+	if len(t.Columns) == 0 {
+		for i, e := range it.cols.exprs {
+			if slices.ContainsFunc(it.cols.exprs[i+1:], func(f sqlir.Expr) bool { return reflect.DeepEqual(e, f) }) {
+				// MySQL fails it with 1060 when the two are spelled alike,
+				// which the parser does not keep.
+				return it, w.x.unsupported(fmt.Sprintf("FROM item %s with an expression twice without an alias", it.alias))
+			}
+		}
+	}
 	return it, nil
 }
 
@@ -287,7 +299,9 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 			if err != nil {
 				return myCols{}, nil, err
 			}
-			sc.items = append(sc.items, it)
+			if err := w.add(sc, it); err != nil {
+				return myCols{}, nil, err
+			}
 			if i > 0 && sel.Joins[i-1].On != nil {
 				// ON sees the items joined so far only.
 				on := &myScope{items: slices.Clone(sc.items), outer: outer}
@@ -550,6 +564,7 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 				out.names = append(out.names, it.cols.names...)
 				out.unread = append(out.unread, it.cols.unread...)
 				out.literals = append(out.literals, it.cols.literals...)
+				out.exprs = append(out.exprs, it.cols.exprs...)
 				out.unnamed = out.unnamed || it.cols.unnamed
 				out.unknown = out.unknown || it.cols.unknown
 			}
@@ -579,6 +594,9 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 					out.literals = append(out.literals, name)
 				} else {
 					out.unnamed = true
+					if _, ok := t.Expr.(*sqlir.Const); !ok {
+						out.exprs = append(out.exprs, t.Expr)
+					}
 				}
 			}
 		}
@@ -598,6 +616,8 @@ type myCtx struct {
 	// parser put for an alias.
 	block       *myScope
 	substituted map[sqlir.Expr]string
+	// skip are the expressions checked already.
+	skip map[sqlir.Expr]bool
 }
 
 // expr checks the names e reads, its subqueries' included.
@@ -611,6 +631,9 @@ func (w *myWalk) expr(e sqlir.Expr, ctx myCtx) error {
 		switch v.Kind() {
 		case reflect.Interface:
 			if v.IsNil() {
+				return
+			}
+			if x, ok := reflect.TypeAssert[sqlir.Expr](v); ok && ctx.skip[x] {
 				return
 			}
 			if x, ok := reflect.TypeAssert[sqlir.Expr](v); ok && ctx.substituted != nil {
@@ -733,14 +756,11 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			// The executor keys the column by the name its query gives it.
 			return w.x.unsupported(fmt.Sprintf("column %s named in another case than its query gives it", name))
 		}
-	}
-	if r.Table == "" && sc != nil {
-		for s := sc.outer; s != nil; s = s.outer {
-			if slices.ContainsFunc(s.aliases, func(a string) bool { return strings.EqualFold(a, r.Column) }) {
-				// MySQL reads an outer select list alias in some clauses
-				// of a subquery and fails it with 1054 in others.
-				return w.x.unsupported(fmt.Sprintf("subquery reading the outer select list alias %q", r.Column))
-			}
+		if r.Table == "" && s != sc && slices.ContainsFunc(s.aliases, func(a string) bool { return strings.EqualFold(a, r.Column) }) {
+			// MySQL reads an outer select list alias in some clauses of a
+			// subquery, before the blocks farther out, and fails it with
+			// 1054 in others.
+			return w.x.unsupported(fmt.Sprintf("subquery reading the outer select list alias %q", r.Column))
 		}
 	}
 	return w.unknownColumn(name, clause)
@@ -861,9 +881,23 @@ func (w *myWalk) joined(target myItem, refs []sqlir.TableRef) (*myScope, error) 
 		if err != nil {
 			return nil, err
 		}
-		sc.items = append(sc.items, it)
+		if err := w.add(sc, it); err != nil {
+			return nil, err
+		}
 	}
 	return sc, nil
+}
+
+// add adds a FROM item to the block sc.
+func (w *myWalk) add(sc *myScope, it myItem) error {
+	if slices.ContainsFunc(sc.items, func(o myItem) bool { return o.alias == it.alias }) {
+		// MySQL fails it with 1066, and detest's row keeps one item of the
+		// name. The parser writes aliases in lower case, so two that
+		// differ in case only are refused too.
+		return w.x.unsupported(fmt.Sprintf("two FROM items named %s", it.alias))
+	}
+	sc.items = append(sc.items, it)
+	return nil
 }
 
 func (w *myWalk) update(up *sqlir.UpdateStmt) error {
@@ -898,20 +932,29 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 			return err
 		}
 	}
-	return w.writeRest(sc, up.Where, up.OrderBy, up.Limit)
+	// The parser joins the ON conditions to WHERE, and they resolve in
+	// their own scopes above.
+	skip := map[sqlir.Expr]bool{}
+	for _, on := range up.JoinOn {
+		if on != nil {
+			skip[on] = true
+		}
+	}
+	return w.writeRest(sc, up.Where, skip, up.OrderBy, up.Limit)
 }
+
 
 func (w *myWalk) delete(del *sqlir.DeleteStmt) error {
 	sc, err := w.joined(w.target(del.Table, del.Alias), del.Using)
 	if err != nil {
 		return err
 	}
-	return w.writeRest(sc, del.Where, del.OrderBy, del.Limit)
+	return w.writeRest(sc, del.Where, nil, del.OrderBy, del.Limit)
 }
 
-func (w *myWalk) writeRest(sc *myScope, where sqlir.Expr, order []sqlir.OrderKey, limit sqlir.Expr) error {
+func (w *myWalk) writeRest(sc *myScope, where sqlir.Expr, skip map[sqlir.Expr]bool, order []sqlir.OrderKey, limit sqlir.Expr) error {
 	if where != nil {
-		if err := w.expr(where, myCtx{sc: sc, clause: "where clause"}); err != nil {
+		if err := w.expr(where, myCtx{sc: sc, clause: "where clause", skip: skip}); err != nil {
 			return err
 		}
 	}
