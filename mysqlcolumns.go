@@ -24,7 +24,7 @@ type myCols struct {
 	// their value, which are among unread too.
 	literals []string
 	// exprs are the select list's expressions without an alias other than
-	// literals, which MySQL names by their spelling.
+	// strings, NULL and booleans, which MySQL names by their spelling.
 	exprs []sqlir.Expr
 	// unknown is set for an item whose columns detest does not know, such
 	// as an ignored table, which resolves any name.
@@ -250,6 +250,15 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 				return it, w.x.unsupported(fmt.Sprintf("FROM item %s with an expression twice without an alias", it.alias))
 			}
 		}
+		if len(it.cols.exprs) > 0 {
+			for _, n := range it.cols.names {
+				if !identLike(strings.ToLower(n)) {
+					// The name may be an expression's spelling, which
+					// MySQL fails with 1060.
+					return it, w.x.unsupported(fmt.Sprintf("FROM item %s with the column name %q beside an expression without an alias", it.alias, n))
+				}
+			}
+		}
 	}
 	return it, nil
 }
@@ -453,7 +462,7 @@ func (w *myWalk) aliasColumn(sc *myScope, e sqlir.Expr, alias string) error {
 		return nil
 	}
 	for _, it := range sc.items {
-		if slices.ContainsFunc(it.cols.names, func(n string) bool { return strings.EqualFold(n, alias) }) {
+		if it.cols.mayHave(alias) || slices.ContainsFunc(it.cols.names, func(n string) bool { return strings.EqualFold(n, alias) }) {
 			return w.x.unsupported(fmt.Sprintf("GROUP BY or HAVING name %q, which is both a select list alias and a column", alias))
 		}
 	}
@@ -594,9 +603,7 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 					out.literals = append(out.literals, name)
 				} else {
 					out.unnamed = true
-					if _, ok := t.Expr.(*sqlir.Const); !ok {
-						out.exprs = append(out.exprs, t.Expr)
-					}
+					out.exprs = append(out.exprs, t.Expr)
 				}
 			}
 		}

@@ -48,6 +48,11 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 	case *ast.ParenthesesExpr:
 		return c.expr(e.Expr)
 	case *ast.ColumnNameExpr:
+		if e.Name.Schema.L != "" {
+			// The reference keeps the table's name only, and the database
+			// would go unchecked.
+			return nil, c.unsupported("a column qualified by its database")
+		}
 		table := e.Name.Table.L
 		switch {
 		case table != "" && table == c.rowAlias:

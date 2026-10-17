@@ -5244,6 +5244,15 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`UPDATE t JOIN t ON TRUE SET n = 3`,
 		`SELECT t.n, (SELECT u.m AS n FROM u ORDER BY (SELECT n) LIMIT 1) FROM t`,
 		`SELECT t.n, (SELECT u.m AS n FROM u HAVING (SELECT n) > 0 LIMIT 1) FROM t`,
+		"SELECT 1 FROM (SELECT n+1, 2 AS `n+1` FROM t) d",
+		`SELECT 1 FROM (SELECT 1.0, 1.0) d`,
+		`SELECT wrong.t.id FROM t`,
+		`SELECT app.t.id FROM t`,
+		`SELECT wrong.t.* FROM t`,
+		`UPDATE t SET wrong.t.n = 3`,
+		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 3`,
+		`INSERT INTO t (id, n) VALUES (1, 9) AS t ON DUPLICATE KEY UPDATE n = t.n`,
+		`SELECT t.n AS a, count(*) FROM t CROSS JOIN (SELECT 'a' UNION ALL SELECT 'b') d GROUP BY a, t.n`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5300,6 +5309,7 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT n AS n FROM t GROUP BY n HAVING max(n) > 0`,
 		`SELECT n AS k FROM t GROUP BY n HAVING max(k) > 0`,
 		`SELECT 1 FROM (SELECT n+1, n+2 FROM t) d`,
+		`SELECT 1 FROM (SELECT UserName, count(*) FROM t GROUP BY UserName) d`,
 		`SELECT 1 FROM t a JOIN t b ON b.id = a.id`,
 		`UPDATE t JOIN u ON m = n JOIN u AS u2 ON u2.id = u.id SET t.n = 3 WHERE false`,
 	} {

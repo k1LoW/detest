@@ -618,6 +618,9 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 	if s.Fields != nil {
 		for _, f := range s.Fields.Fields {
 			if f.WildCard != nil {
+				if f.WildCard.Schema.L != "" {
+					return nil, c.unsupported("a * qualified by its database")
+				}
 				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.L}) // aliases are lower case
 				continue
 			}
@@ -955,6 +958,11 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	case len(s.OnDuplicate) > 0:
 		// The row alias names the proposed row only in these expressions; a
 		// later statement of a script may use the name for a table.
+		if s.RowAlias.L != "" && strings.EqualFold(s.RowAlias.O, relname(t.Name)) {
+			// MySQL fails it with 1066, and the alias would read as the
+			// proposed row where the table's name is meant.
+			return nil, c.unsupported("a row alias of the INSERT target's name")
+		}
 		c.rowAlias, c.onDuplicate = s.RowAlias.L, true
 		defer func() { c.rowAlias, c.onDuplicate = "", false }()
 		oc := &sqlir.OnConflict{}
@@ -965,6 +973,9 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			e, err := c.expr(a.Expr)
 			if err != nil {
 				return nil, err
+			}
+			if a.Column.Schema.L != "" {
+				return nil, c.unsupported("an assignment target qualified by its database")
 			}
 			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
 		}
@@ -992,6 +1003,9 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 	}
 	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra, JoinOn: ons}
 	for _, a := range s.List {
+		if a.Column.Schema.L != "" {
+			return nil, c.unsupported("an assignment target qualified by its database")
+		}
 		if q := a.Column.Table.L; q != "" && q != strings.ToLower(relname(t.Name)) && q != strings.ToLower(t.Name) && q != strings.ToLower(t.Alias) {
 			return nil, c.unsupported("UPDATE of more than one table")
 		}
