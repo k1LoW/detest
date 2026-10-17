@@ -1366,6 +1366,49 @@ var valueCases = []difftest.Case{
 		},
 	},
 	{
+		// The drivers return a numeric as its text wherever the output is
+		// a numeric, such as a parameter used twice beside one, a view's
+		// column or a column of a * over a join, and a float8 as a float64.
+		// An application scans either into a string, a float64 or a
+		// decimal, and a whole numeric into an int64 too.
+		Name: "a numeric reads back as text under a repeated parameter, a view and a * over a join",
+		Schema: []string{
+			`CREATE TABLE t (id int PRIMARY KEY, nm numeric(10, 2), x numeric, f float8)`,
+			`CREATE TABLE u (f float8, nm numeric)`,
+			`CREATE VIEW v AS SELECT id, nm, x, f, nm + 1 AS y FROM t`,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 2, 7, 1.5), (2, 2.5, 2000000, 2000000)`,
+			`INSERT INTO u VALUES (3.5, 4.00)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.QA(0, `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
+			difftest.QS(0, "string", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
+			difftest.QS(0, "float64", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
+			difftest.QS(0, "decimal", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
+			difftest.QS(0, "int64", `SELECT 1.00 + $1, 2.00 + $1`, int64(1)),
+			difftest.QA(0, `SELECT nm + $1, x * $1 FROM t ORDER BY id`, int64(2)),
+			difftest.QA(0, `SELECT nm + $1 FROM t WHERE nm > $1 ORDER BY id`, int64(2)),
+			difftest.Q(0, `SELECT nm, x, f, y FROM v ORDER BY id`),
+			difftest.Q(0, `SELECT * FROM v ORDER BY id`),
+			difftest.Q(0, `SELECT v.nm * 2, sum(v.x) OVER () FROM v ORDER BY id`),
+			difftest.QS(0, "string", `SELECT nm, x, f, y FROM v ORDER BY id`),
+			difftest.QS(0, "float64", `SELECT nm, x, f, y FROM v ORDER BY id`),
+			difftest.QS(0, "decimal", `SELECT nm, x, f, y FROM v ORDER BY id`),
+			difftest.QS(0, "int64", `SELECT nm FROM v ORDER BY id`),
+			difftest.QS(0, "int64", `SELECT x FROM v ORDER BY id`),
+			difftest.QS(0, "int64", `SELECT f FROM v ORDER BY id`),
+			difftest.Q(0, `SELECT * FROM t JOIN u ON true ORDER BY id`),
+			difftest.Q(0, `SELECT u.*, t.* FROM t, u ORDER BY id`),
+			difftest.Q(0, `SELECT * FROM (SELECT nm, nm FROM t) s, u`),
+			difftest.QS(0, "string", `SELECT * FROM t JOIN u ON true ORDER BY id`),
+			difftest.Q(0, `VALUES (2000000::numeric), (abs(NULL))`),
+			difftest.Q(0, `SELECT v::numeric FROM (VALUES (1.50), (abs(NULL))) AS s(v) WHERE v IS NOT NULL`),
+			difftest.Q(0, `VALUES (1.50), (length('ab'))`),
+		},
+	},
+	{
 		Name: "a derived table over a * with a column alias list",
 		Schema: []string{
 			`CREATE TABLE t (id int PRIMARY KEY, a numeric, b text)`,

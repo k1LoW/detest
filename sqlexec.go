@@ -2892,7 +2892,15 @@ func (x *sqlExec) driverValueAs(v any, typ string) (driver.Value, error) {
 		}
 		return s, nil
 	}
-	if typ == "" || numberRank[x.tx.db.baseType(typ)] != numberRank["numeric"] {
+	if typ == "" {
+		if _, ok := v.(scaledNum); ok {
+			// The output may be a float8 that converted the numeric, which
+			// the drivers return as a float64, or the numeric's text.
+			return nil, x.unsupported("a numeric read back under an output type detest cannot tell")
+		}
+		return toDriverValue(v), nil
+	}
+	if numberRank[x.tx.db.baseType(typ)] != numberRank["numeric"] {
 		return toDriverValue(v), nil
 	}
 	if n, ok := v.(scaledNum); ok {

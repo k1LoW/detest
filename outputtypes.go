@@ -41,13 +41,19 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		case "+", "-", "*", "/", "%":
 			l, r := c.certainType(e.L, sc), c.certainType(e.R, sc)
 			// An untyped literal or parameter takes the other operand's
-			// type, a parameter used once only, as one used again is typed
-			// at the use Postgres meets first.
-			if c.untypedOnce(e.R) {
+			// type. A parameter used again is typed at the use Postgres
+			// meets first, which may give it another number type. One
+			// given two is refused (numberParam), but a use the check types
+			// by a guess agrees with the others alike, so checkColumns
+			// refuses the statement unless every use is typed by a type it
+			// shows (paramShown).
+			if takesOtherType(e.R) {
 				r = l
+				c.besideParam(e.R, l)
 			}
-			if c.untypedOnce(e.L) {
+			if takesOtherType(e.L) {
 				l = r
+				c.besideParam(e.L, r)
 			}
 			if numberRank[l] == 0 || numberRank[r] == 0 {
 				return ""
@@ -66,6 +72,10 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		switch e.Name {
 		case "extract":
 			return "numeric"
+		case "date_part", "random":
+			return "float8"
+		case "length", "char_length", "octet_length":
+			return "int4"
 		case "count":
 			return "int8"
 		case "sum", "avg":
@@ -81,7 +91,14 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 			case numberRank[typ] > 0:
 				return "int8"
 			}
-		case "min", "max", "abs", "coalesce", "greatest", "least":
+		case "abs":
+			if len(e.Args) == 1 && takesOtherType(e.Args[0]) {
+				// abs(NULL) and abs($1) are abs(float8), as functionParamType
+				// types the parameter.
+				return "float8"
+			}
+			return c.certainBranches(e.Args, sc)
+		case "min", "max", "coalesce", "greatest", "least":
 			return c.certainBranches(e.Args, sc)
 		case "lag", "lead":
 			// The value and the default, not the offset.
@@ -148,6 +165,20 @@ func (c *columnChecker) certainType(e sqlir.Expr, sc *colScope) string {
 		}
 	}
 	return ""
+}
+
+// besideParam records e, where it is a parameter used again, as one whose
+// output type certainType took from an operand beside it, of the number
+// type typ.
+func (c *columnChecker) besideParam(e sqlir.Expr, typ string) {
+	p, ok := e.(*sqlir.Param)
+	if !ok || c.paramCount[p.Index] < 2 || numberRank[typ] == 0 {
+		return
+	}
+	if c.paramBeside == nil {
+		c.paramBeside = map[int]bool{}
+	}
+	c.paramBeside[p.Index] = true
 }
 
 // certainBranches is the number type branches of CASE, COALESCE and the like
@@ -233,10 +264,8 @@ func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
 			note(targetName(t), typ)
 			continue
 		}
-		if cols := c.starColumns(sel, t); cols != nil {
-			for _, typ := range cols {
-				types = append(types, c.x.tx.db.baseType(typ))
-			}
+		if cols := c.starCertain(sel, t, sc); cols != nil {
+			types = append(types, cols...)
 		} else {
 			positional = false
 		}
@@ -270,6 +299,71 @@ func (c *columnChecker) noteCertain(sel *sqlir.SelectStmt, sc *colScope) {
 		named = map[string]string{}
 	}
 	c.outCertainNamed[sel] = named
+}
+
+// starCertain is the certain types of the columns the * t of sel gives, in
+// the order the run gives them, the FROM items' in turn, where the check
+// knows the order of every item's columns, and nil otherwise. A name two
+// items give is told apart by position here, which outCertainNamed cannot.
+func (c *columnChecker) starCertain(sel *sqlir.SelectStmt, t sqlir.Target, sc *colScope) []string {
+	if sel.From == nil {
+		return nil
+	}
+	db := c.x.tx.db
+	items := []sqlir.TableRef{*sel.From}
+	for _, j := range sel.Joins {
+		items = append(items, j.Table)
+	}
+	var out []string
+	found := false
+	for _, it := range items {
+		alias := it.Alias
+		if alias == "" && it.Sub == nil && it.Func == nil {
+			alias = relname(it.Name)
+		}
+		if alias == "" {
+			return nil
+		}
+		if t.Table != "" && alias != t.Table {
+			continue
+		}
+		found = true
+		names := sc.names[alias]
+		if it.Sub != nil && names != nil {
+			// By position, as a name the query gives twice has no certain
+			// type by name.
+			if types := c.certainOutput(it.Sub); len(types) == len(names) {
+				for _, typ := range types {
+					out = append(out, db.baseType(typ))
+				}
+				continue
+			}
+		}
+		if names == nil {
+			if it.Sub != nil || it.Func != nil || len(it.Columns) > 0 {
+				return nil
+			}
+			if _, cte := c.cteTypesOf(it.Name); cte || db.views[db.resolve(it.Name)] != nil {
+				return nil
+			}
+			def := db.defs[db.resolve(it.Name)]
+			if def == nil {
+				return nil
+			}
+			names = def.columns
+		}
+		for _, n := range names {
+			typ := sc.certain[alias][n]
+			if typ == "unresolved column type" {
+				typ = ""
+			}
+			out = append(out, db.baseType(typ))
+		}
+	}
+	if !found {
+		return nil
+	}
+	return out
 }
 
 // certainOutput is the certain types of the output columns of sel by
@@ -391,13 +485,4 @@ func (sc *colScope) certainSource(e sqlir.Expr) string {
 		return sc.certainColumn(e)
 	}
 	return ""
-}
-
-// untypedOnce reports an untyped literal or NULL, or a parameter used once,
-// which takes the type of what it stands beside.
-func (c *columnChecker) untypedOnce(e sqlir.Expr) bool {
-	if p, ok := e.(*sqlir.Param); ok && c.paramCount[p.Index] > 1 {
-		return false
-	}
-	return takesOtherType(e)
 }
