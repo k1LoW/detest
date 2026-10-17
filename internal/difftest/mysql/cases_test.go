@@ -1494,6 +1494,22 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id, total, status FROM orders ORDER BY id`),
 		},
 	},
+	{
+		// The parser writes a qualifier in lower case, and the upsert reads
+		// the existing row of a mixed case table by its own name.
+		Name: "ON DUPLICATE KEY UPDATE reads a mixed case table by its name",
+		Schema: []string{
+			`CREATE TABLE Counters (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO Counters VALUES (1, 2)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO Counters VALUES (1, 9) ON DUPLICATE KEY UPDATE n = Counters.n + 1`),
+			difftest.Q(0, `SELECT id, n FROM Counters ORDER BY id`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

@@ -5253,6 +5253,8 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 3`,
 		`INSERT INTO t (id, n) VALUES (1, 9) AS t ON DUPLICATE KEY UPDATE n = t.n`,
 		`SELECT t.n AS a, count(*) FROM t CROSS JOIN (SELECT 'a' UNION ALL SELECT 'b') d GROUP BY a, t.n`,
+		"SELECT d.`TRUE` FROM (SELECT TRUE) d",
+		`SELECT d.false FROM (SELECT FALSE) d`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
@@ -5322,6 +5324,14 @@ func TestColumnNamesMySQL(t *testing.T) {
 		if _, err := db.Exec(q); !errors.Is(err, ErrDuplicateColumn) {
 			t.Errorf("%s: %v", q, err)
 		}
+	}
+	// A mixed case table's own name reads the existing row.
+	mustExec(t, db, `CREATE TABLE T2 (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `INSERT INTO T2 VALUES (1, 2)`)
+	mustExec(t, db, `INSERT INTO T2 VALUES (1, 9) ON DUPLICATE KEY UPDATE n = T2.n + 1`)
+	var stored int
+	if err := db.QueryRow(`SELECT n FROM T2 WHERE id = 1`).Scan(&stored); err != nil || stored != 3 {
+		t.Errorf("upsert reading a mixed case table: %d, %v", stored, err)
 	}
 	// A set operation's ORDER BY names its first query's alias in any case.
 	var n int

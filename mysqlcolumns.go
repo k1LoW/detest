@@ -596,6 +596,14 @@ func (w *myWalk) outputs(sel *sqlir.SelectStmt, sc *myScope) myCols {
 						// Only for the duplicate check: an integer's
 						// spelling is never a plain identifier.
 						out.literals = append(out.literals, fmt.Sprint(v))
+						// TRUE and FALSE convert to 1 and 0, and MySQL
+						// names them as written.
+						switch v {
+						case 1:
+							out.unread = append(out.unread, "TRUE")
+						case 0:
+							out.unread = append(out.unread, "FALSE")
+						}
 					}
 				}
 				if name, ok := literalName(t.Expr); ok {

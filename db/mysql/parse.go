@@ -931,7 +931,9 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	if len(extra) > 0 {
 		return nil, c.unsupported("INSERT into a join")
 	}
-	out := &sqlir.InsertStmt{Table: t.Name}
+	// The alias is the lower case name a mixed case table's qualifiers
+	// convert to.
+	out := &sqlir.InsertStmt{Table: t.Name, Alias: t.Alias}
 	for _, col := range s.Columns {
 		out.Columns = append(out.Columns, col.Name.L)
 	}
