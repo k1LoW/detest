@@ -203,13 +203,12 @@ func (w *myWalk) tableCols(name string) (myCols, error) {
 	return myCols{unknown: true}, nil
 }
 
-// itemAlias is the name a FROM item is referred to by, lower case as the
-// parser writes a column's qualifier.
+// itemAlias is the case-sensitive name a FROM item is referred to by.
 func itemAlias(t sqlir.TableRef) string {
 	if t.Alias != "" {
 		return t.Alias
 	}
-	return strings.ToLower(relname(t.Name))
+	return relname(t.Name)
 }
 
 // item returns the FROM item t, checking the query it is made of, which
@@ -947,10 +946,9 @@ func (w *myWalk) joined(target myItem, refs []sqlir.TableRef) (*myScope, error) 
 
 // add adds a FROM item to the block sc.
 func (w *myWalk) add(sc *myScope, it myItem) error {
-	if slices.ContainsFunc(sc.items, func(o myItem) bool { return o.alias == it.alias }) {
+	if slices.ContainsFunc(sc.items, func(o myItem) bool { return strings.EqualFold(o.alias, it.alias) }) {
 		// MySQL fails it with 1066, and detest's row keeps one item of the
-		// name. The parser writes aliases in lower case, so two that
-		// differ in case only are refused too.
+		// name. Aliases differing only in case remain unsupported.
 		return w.x.unsupported(fmt.Sprintf("two FROM items named %s", it.alias))
 	}
 	sc.items = append(sc.items, it)
@@ -999,7 +997,6 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 	}
 	return w.writeRest(sc, up.Where, skip, up.OrderBy, up.Limit)
 }
-
 
 func (w *myWalk) delete(del *sqlir.DeleteStmt) error {
 	sc, err := w.joined(w.target(del.Table, del.Alias), del.Using)
