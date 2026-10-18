@@ -621,7 +621,7 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 				if f.WildCard.Schema.L != "" {
 					return nil, c.unsupported("a * qualified by its database")
 				}
-				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.L}) // aliases are lower case
+				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.O})
 				continue
 			}
 			e, err := c.expr(f.Expr)
@@ -846,10 +846,9 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	if !ok {
 		return sqlir.TableRef{}, c.unsupported(fmt.Sprintf("from item %T", n))
 	}
-	// Column references name their table in lower case (ColumnName.Table.L),
-	// so the alias a FROM item is known by is lower case too.
-	out := sqlir.TableRef{Alias: ts.AsName.L, Lateral: ts.Lateral}
-	if c.rowAlias != "" && (ts.AsName.L == c.rowAlias || ts.AsName.L == "" && strings.EqualFold(tableNameOf(ts.Source), c.rowAlias)) {
+	// Keep the case of an alias, just as column qualifiers do.
+	out := sqlir.TableRef{Alias: ts.AsName.O, Lateral: ts.Lateral}
+	if c.rowAlias != "" && (strings.EqualFold(ts.AsName.O, c.rowAlias) || ts.AsName.L == "" && strings.EqualFold(tableNameOf(ts.Source), c.rowAlias)) {
 		// The conversion reads the row alias as the proposed row without
 		// regard to the scopes of subqueries, where this item shadows it.
 		return out, c.unsupported("a FROM item of the row alias's name in ON DUPLICATE KEY UPDATE")
@@ -870,9 +869,6 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 			return out, c.unsupported("index hints")
 		}
 		out.Name = tableName(src)
-		if out.Alias == "" && src.Name.O != src.Name.L {
-			out.Alias = src.Name.L
-		}
 	case *ast.SelectStmt, *ast.SetOprStmt:
 		sel, err := c.query1(src)
 		if err != nil {
@@ -931,8 +927,6 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	if len(extra) > 0 {
 		return nil, c.unsupported("INSERT into a join")
 	}
-	// The alias is the lower case name a mixed case table's qualifiers
-	// convert to.
 	out := &sqlir.InsertStmt{Table: t.Name, Alias: t.Alias}
 	for _, col := range s.Columns {
 		out.Columns = append(out.Columns, col.Name.L)
@@ -965,7 +959,7 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			// proposed row where the table's name is meant.
 			return nil, c.unsupported("a row alias of the INSERT target's name")
 		}
-		c.rowAlias, c.onDuplicate = s.RowAlias.L, true
+		c.rowAlias, c.onDuplicate = s.RowAlias.O, true
 		defer func() { c.rowAlias, c.onDuplicate = "", false }()
 		oc := &sqlir.OnConflict{}
 		for _, a := range s.OnDuplicate {
@@ -979,7 +973,7 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			if a.Column.Schema.L != "" {
 				return nil, c.unsupported("an assignment target qualified by its database")
 			}
-			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
+			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O})
 		}
 		out.OnConflict = oc
 	case s.IgnoreErr:
@@ -1019,7 +1013,7 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {

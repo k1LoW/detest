@@ -53,7 +53,9 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			// would go unchecked.
 			return nil, c.unsupported("a column qualified by its database")
 		}
-		table := e.Name.Table.L
+		// Table names and aliases are case sensitive under MySQL's default
+		// lower_case_table_names=0, unlike column names.
+		table := e.Name.Table.O
 		switch {
 		case table != "" && table == c.rowAlias:
 			table = "excluded"
