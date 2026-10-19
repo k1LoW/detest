@@ -48,7 +48,8 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 // follow MySQL's quoting and comments, and a list after anything else, as in
 // SELECT (1) d (v), stays the syntax error MySQL gives too.
 func derivedColumnList(query string, err error) bool {
-	const lateral = "LATERAL "
+	// The spaces keep LATERAL a word of its own after FROM( or JOIN(.
+	const lateral = " LATERAL "
 	for {
 		off, ok := syntaxErrorOffset(query, err)
 		if !ok || query[off] != '(' {
@@ -75,18 +76,30 @@ func derivedColumnList(query string, err error) bool {
 }
 
 // syntaxErrorOffset finds where in query TiDB's parser failed, from the text
-// its syntax error quotes from the failing token to the end of the query.
+// its syntax error quotes from the failing token to the end of the query. The
+// parser cuts that text at 2048 bytes and then gives its whole length.
 func syntaxErrorOffset(query string, err error) (int, bool) {
 	msg := err.Error()
 	i := strings.Index(msg, ` near "`)
-	if i < 0 || !strings.HasSuffix(msg, `" `) || i+len(` near "`) > len(msg)-2 {
+	if i < 0 {
 		return 0, false
 	}
-	near := msg[i+len(` near "`) : len(msg)-2]
-	if near == "" || !strings.HasSuffix(query, near) {
+	body := msg[i+len(` near "`):]
+	if near, ok := strings.CutSuffix(body, `" `); ok {
+		if near == "" || !strings.HasSuffix(query, near) {
+			return 0, false
+		}
+		return len(query) - len(near), true
+	}
+	j := strings.LastIndex(body, `" (total length `)
+	if j < 0 || !strings.HasSuffix(body, ")") {
 		return 0, false
 	}
-	return len(query) - len(near), true
+	n, err := strconv.Atoi(body[j+len(`" (total length `) : len(body)-1])
+	if err != nil || n <= 0 || n > len(query) || !strings.HasPrefix(query[len(query)-n:], body[:j]) {
+		return 0, false
+	}
+	return len(query) - n, true
 }
 
 // conv converts one query's AST.

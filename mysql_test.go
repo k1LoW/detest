@@ -5631,6 +5631,10 @@ func TestMySQLDerivedTableColumnListRefused(t *testing.T) {
 		`SELECT v FROM (SELECT 1) AS d /* marker */ (v)`,
 		"SELECT v FROM (SELECT 1) /* ( */ AS d -- (\n (v)",
 		`SELECT v FROM (SELECT '(' AS s) AS d (v)`,
+		`SELECT v FROM(SELECT 1) AS d (v)`,
+		`SELECT v FROM ci JOIN(SELECT 1) AS d (v) ON true`,
+		// The parser's error quotes no more than 2048 bytes of the query.
+		`SELECT v FROM (SELECT 1) AS d (v) WHERE v IN (` + strings.Repeat(`1, `, 1000) + `1)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
