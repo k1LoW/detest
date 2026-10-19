@@ -1043,7 +1043,6 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 	return w.writeRest(sc, up.Where, skip, up.OrderBy, up.Limit)
 }
 
-
 func (w *myWalk) delete(del *sqlir.DeleteStmt) error {
 	sc, err := w.joined(w.target(del.Table, del.Alias), del.Using)
 	if err != nil {
