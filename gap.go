@@ -492,7 +492,7 @@ func (x *sqlExec) lockScanTo(table, alias string, where sqlir.Expr, mode lockMod
 	desc := false
 	if len(stop.order) == 1 {
 		c, ok := stop.order[0].Expr.(*sqlir.ColumnRef)
-		if !ok || sr.eq >= len(sr.cols) || c.Column != sr.cols[sr.eq] || c.Table != "" && c.Table != alias && c.Table != relname(table) {
+		if !ok || sr.eq >= len(sr.cols) || c.Column != sr.cols[sr.eq] || c.Table != "" && !qualifies(c.Table, table, alias) {
 			return false, nil
 		}
 		desc = stop.order[0].Desc
@@ -1214,7 +1214,7 @@ func (x *sqlExec) unequalOnIndex(table, alias string, where sqlir.Expr) bool {
 	}
 	isLeading := func(e sqlir.Expr) bool {
 		c, ok := e.(*sqlir.ColumnRef)
-		return ok && leading[c.Column] && (c.Table == "" || c.Table == alias || c.Table == relname(table))
+		return ok && leading[c.Column] && (c.Table == "" || qualifies(c.Table, table, alias))
 	}
 	for _, e := range splitAnd(where) {
 		switch e := e.(type) {
@@ -1260,7 +1260,7 @@ func (x *sqlExec) orOnIndex(table, alias string, where sqlir.Expr) bool {
 			continue
 		}
 		if slices.ContainsFunc(sqlir.ColumnRefs(b), func(c *sqlir.ColumnRef) bool {
-			return indexed[c.Column] && (c.Table == "" || c.Table == alias || c.Table == relname(table))
+			return indexed[c.Column] && (c.Table == "" || qualifies(c.Table, table, alias))
 		}) {
 			return true
 		}
@@ -1290,7 +1290,7 @@ func splitAnd(e sqlir.Expr) []sqlir.Expr {
 func (x *sqlExec) columnRanges(col, alias, table string, conjuncts []sqlir.Expr) ([]valRange, bool) {
 	isCol := func(e sqlir.Expr) bool {
 		c, ok := e.(*sqlir.ColumnRef)
-		return ok && c.Column == col && (c.Table == "" || c.Table == alias || c.Table == relname(table))
+		return ok && c.Column == col && (c.Table == "" || qualifies(c.Table, table, alias))
 	}
 	// eval evaluates a constant of the search: an expression of no column,
 	// or of the outer row's columns only in a joined table's search.

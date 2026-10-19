@@ -1552,6 +1552,28 @@ var cases = []difftest.Case{
 			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
 		},
 	},
+	{
+		// The alias T hides the table T, so T.n is the outer row's column
+		// and the joined search looks up T(5), clear of the lock on T(1).
+		Name: "an alias hides its table's name in a joined locking search",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
+			`CREATE TABLE T (id INT PRIMARY KEY)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 5)`,
+			`INSERT INTO T VALUES (1), (5)`,
+		},
+		Conns: 2,
+		Steps: []difftest.Step{
+			difftest.S(1, rr),
+			difftest.Q(1, `SELECT id FROM T WHERE id = 1 FOR UPDATE`),
+			difftest.S(0, rr),
+			difftest.Q(0, `SELECT T.id, t.id FROM t AS T JOIN T AS t ON t.id = T.n WHERE T.id = 1 FOR UPDATE NOWAIT`),
+			difftest.S(0, `COMMIT`),
+			difftest.S(1, `COMMIT`),
+		},
+	},
 }
 
 func TestDiff(t *testing.T) {

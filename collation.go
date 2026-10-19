@@ -46,10 +46,9 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		if db.defs[t] == nil {
 			return
 		}
-		tables[relname(name)] = t
-		if alias != "" {
-			tables[alias] = t
-		}
+		// An alias hides the table's name, which may be another item's
+		// alias.
+		tables[cmp.Or(alias, relname(name))] = t
 	}
 	walkNodes(stmt, func(n any) {
 		switch n := n.(type) {

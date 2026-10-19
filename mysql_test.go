@@ -5394,6 +5394,8 @@ func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
 	for _, q := range []string{
 		`SELECT a.id FROM ci a JOIN bin A ON A.id = a.id WHERE a.s = 'x'`,
 		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE A.s = 'x'`,
+		// The alias bin hides the table bin, so bin.s is ci's column.
+		`SELECT bin.id FROM ci AS bin JOIN bin AS BIN ON BIN.id = bin.id WHERE bin.s = 'x'`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
