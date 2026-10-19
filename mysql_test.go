@@ -5436,6 +5436,17 @@ func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 			t.Errorf("%s: %v", q, err)
 		}
 	}
+	// CREATE TABLE ... SELECT resolves its query as a SELECT does.
+	mustExec(t, db, `CREATE TABLE cp AS SELECT app.t.n FROM t`)
+	if err := db.QueryRow(`SELECT n FROM cp`).Scan(&n); err != nil || n != 18 {
+		t.Errorf("CREATE TABLE AS through a database qualified name: %d, %v", n, err)
+	}
+	if _, err := db.Exec(`CREATE TABLE cp2 AS SELECT wrong.t.n FROM t`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Errorf("CREATE TABLE AS of another database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE cp3 AS SELECT (SELECT app.t.n FROM other.t LIMIT 1) AS n FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CREATE TABLE AS of a shadowed name: %v", err)
+	}
 	// The same holds where neither table is declared, so detest does not
 	// know the outer item's columns.
 	undeclared, _ := s.DB("undeclared", mysqlBin())
