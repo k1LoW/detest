@@ -42,46 +42,34 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 // derivedColumnList reports whether query fails to parse only for column
 // lists on derived tables, as in (SELECT id FROM t) AS d (v), which MySQL
 // runs. TiDB's grammar takes such a list only after LATERAL and fails at its
-// '(', so each failing list is cut out and the rest parsed again. The text
-// alone does not tell the form, since a list after a parenthesized
-// expression, as in SELECT (1) d (v), is a syntax error on MySQL too, so the
-// cut query has to parse and each list has to follow the alias of a derived
-// table in it.
+// '('. So LATERAL is put before each '(' ahead of the failure in turn, and
+// the list is one on a derived table when that lets the parser past it. The
+// grammar decides this rather than a scan of the text, which would have to
+// follow MySQL's quoting and comments, and a list after anything else, as in
+// SELECT (1) d (v), stays the syntax error MySQL gives too.
 func derivedColumnList(query string, err error) bool {
-	var aliases []string
+	const lateral = "LATERAL "
 	for {
 		off, ok := syntaxErrorOffset(query, err)
 		if !ok || query[off] != '(' {
 			return false
 		}
-		n := strings.IndexByte(query[off:], ')')
-		if n < 0 {
+		past := false
+		for q := off - 1; q >= 0 && !past; q-- {
+			if query[q] != '(' {
+				continue
+			}
+			try := query[:q] + lateral + query[q:]
+			_, _, terr := tidb.New().ParseSQL(try)
+			if terr == nil {
+				return true
+			}
+			if toff, ok := syntaxErrorOffset(try, terr); ok && toff > off+len(lateral) {
+				query, err, past = try, terr, true
+			}
+		}
+		if !past {
 			return false
-		}
-		list := query[off+1 : off+n]
-		for name := range strings.SplitSeq(list, ",") {
-			if !isIdentifier(strings.TrimSpace(name)) {
-				return false
-			}
-		}
-		alias, ok := aliasAfterParen(query[:off])
-		if !ok {
-			return false
-		}
-		aliases = append(aliases, alias)
-		query = query[:off] + query[off+n+1:]
-		var stmts []ast.StmtNode
-		if stmts, _, err = tidb.New().ParseSQL(query); err == nil {
-			v := &derivedAliases{found: map[string]bool{}}
-			for _, s := range stmts {
-				s.Accept(v)
-			}
-			for _, a := range aliases {
-				if !v.found[a] {
-					return false
-				}
-			}
-			return true
 		}
 	}
 }
@@ -100,74 +88,6 @@ func syntaxErrorOffset(query string, err error) (int, bool) {
 	}
 	return len(query) - len(near), true
 }
-
-// aliasAfterParen returns the alias that ends s when s ends with ") alias"
-// or ") AS alias".
-func aliasAfterParen(s string) (string, bool) {
-	s = strings.TrimRight(s, " \t\r\n")
-	var alias string
-	if strings.HasSuffix(s, "`") {
-		i := strings.LastIndexByte(s[:len(s)-1], '`')
-		if i < 0 {
-			return "", false
-		}
-		alias, s = s[i+1:len(s)-1], s[:i]
-	} else {
-		i := len(s)
-		for i > 0 && isIdentByte(s[i-1]) {
-			i--
-		}
-		alias, s = s[i:], s[:i]
-		if !isIdentifier(alias) {
-			return "", false
-		}
-	}
-	if alias == "" {
-		return "", false
-	}
-	s = strings.TrimRight(s, " \t\r\n")
-	if len(s) >= 2 && strings.EqualFold(s[len(s)-2:], "as") {
-		s = strings.TrimRight(s[:len(s)-2], " \t\r\n")
-	}
-	return alias, strings.HasSuffix(s, ")")
-}
-
-// isIdentifier reports whether s is a quoted identifier or an unquoted one,
-// which may begin with a digit but not consist of digits alone.
-func isIdentifier(s string) bool {
-	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
-		return !strings.Contains(s[1:len(s)-1], "`")
-	}
-	digits := true
-	for i := range len(s) {
-		if !isIdentByte(s[i]) {
-			return false
-		}
-		digits = digits && '0' <= s[i] && s[i] <= '9'
-	}
-	return s != "" && !digits
-}
-
-func isIdentByte(b byte) bool {
-	return b == '_' || b == '$' || b >= 0x80 || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
-}
-
-// derivedAliases gathers the aliases of the derived tables of a statement.
-type derivedAliases struct {
-	found map[string]bool
-}
-
-func (v *derivedAliases) Enter(n ast.Node) (ast.Node, bool) {
-	if ts, ok := n.(*ast.TableSource); ok {
-		switch ts.Source.(type) {
-		case *ast.SelectStmt, *ast.SetOprStmt:
-			v.found[ts.AsName.O] = true
-		}
-	}
-	return n, false
-}
-
-func (v *derivedAliases) Leave(n ast.Node) (ast.Node, bool) { return n, true }
 
 // conv converts one query's AST.
 type conv struct {

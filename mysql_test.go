@@ -5624,6 +5624,13 @@ func TestMySQLDerivedTableColumnListRefused(t *testing.T) {
 		`SELECT ci.id FROM ci JOIN (SELECT id FROM ci) AS d (v) ON d.v = ci.id`,
 		`UPDATE ci JOIN (SELECT id FROM ci) d (v) ON d.v = ci.id SET ci.s = 'y'`,
 		`SELECT d.v FROM ci AS t, LATERAL (SELECT s FROM ci) AS d (v) WHERE d.v = 'x'`,
+		// Quoting and comments are the grammar's to follow.
+		"SELECT * FROM (SELECT 1) AS d (`a,b`)",
+		"SELECT * FROM (SELECT 1) AS d (`a)b`)",
+		"SELECT v FROM (SELECT 1) AS `d``x` (v)",
+		`SELECT v FROM (SELECT 1) AS d /* marker */ (v)`,
+		"SELECT v FROM (SELECT 1) /* ( */ AS d -- (\n (v)",
+		`SELECT v FROM (SELECT '(' AS s) AS d (v)`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: got %v, want unsupported", q, err)
@@ -5637,6 +5644,8 @@ func TestMySQLDerivedTableColumnListRefused(t *testing.T) {
 		`SELECT v FROM (SELECT id FROM ci) AS d (v) WHERE WHERE`,
 		`SELECT v FROM (SELECT id FROM ci) AS d ()`,
 		`SELECT v FROM (SELECT id FROM ci) AS d (1)`,
+		`SELECT v FROM (SELECT 1) AS d (v), (SELECT 2) e (w) WHERE WHERE`,
+		`SELECT '(' d (v) FROM ci`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
 			t.Errorf("%s: got %v, want a syntax error", q, err)
