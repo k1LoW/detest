@@ -113,7 +113,7 @@ func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = p
 // A returned error redelivers the message, bounded by MaxRedeliveries.
 func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
 	s.declare("OnMessage")
-	pt := &procType{name: name, kind: trigMessage, instances: s.pods, queue: q, msgFn: fn}
+	pt := &procType{name: name, kind: trigMessage, instances: 1, queue: q, msgFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
@@ -125,7 +125,7 @@ func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, 
 // point, at most maxRuns times per run.
 func (s *Sim) Loop(name string, maxRuns int, fn func(p *Proc) error, opts ...ProcOption) {
 	s.declare("Loop")
-	pt := &procType{name: name, kind: trigLoop, instances: s.pods, maxRuns: maxRuns, loopFn: fn}
+	pt := &procType{name: name, kind: trigLoop, instances: 1, maxRuns: maxRuns, loopFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
