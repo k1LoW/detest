@@ -36,19 +36,28 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	if !db.kind.InnoDB() {
 		return nil
 	}
-	// The tables the statement names, by alias and by name.
-	tables := map[string]string{}
+	// The tables the statement names, by the name each item is known by.
+	// One name may stand for other tables in other query blocks.
+	// derived holds the names of items that are not tables, such as a
+	// derived table or a WITH query, whose columns' collations detest does
+	// not follow through the query they are made of.
+	tables, derived := map[string][]string{}, map[string]bool{}
 	add := func(name, alias string) {
-		if name == "" {
-			return
+		// An alias hides the table's name, which may be another item's
+		// alias.
+		k := cmp.Or(alias, relname(name))
+		t := ""
+		if name != "" {
+			t = db.resolve(name)
 		}
-		t := db.resolve(name)
 		if db.defs[t] == nil {
+			if k != "" {
+				derived[k] = true
+			}
 			return
 		}
-		tables[strings.ToLower(relname(name))] = t
-		if alias != "" {
-			tables[strings.ToLower(alias)] = t
+		if !slices.Contains(tables[k], t) {
+			tables[k] = append(tables[k], t)
 		}
 	}
 	walkNodes(stmt, func(n any) {
@@ -64,22 +73,30 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		}
 	})
 	anyCI := false
-	for _, t := range tables {
-		if len(db.defs[t].ci) > 0 {
-			anyCI = true
+	for _, ts := range tables {
+		for _, t := range ts {
+			if len(db.defs[t].ci) > 0 {
+				anyCI = true
+			}
 		}
 	}
 	if !anyCI {
 		return nil
 	}
+	// A qualifier is not resolved to its query block, so a name that
+	// stands for several tables refuses a column case-insensitive in any,
+	// and one that may stand for an item other than a table refuses a
+	// column case-insensitive in any table, as an unqualified one does.
 	isCI := func(c *sqlir.ColumnRef) bool {
-		if c.Table != "" {
-			t, ok := tables[strings.ToLower(c.Table)]
-			return ok && db.defs[t].ci[c.Column]
-		}
-		for _, t := range tables {
-			if db.defs[t].ci[c.Column] {
-				return true
+		whole := c.Table == "" || derived[c.Table] || len(tables[c.Table]) == 0
+		for k, ts := range tables {
+			if !whole && k != c.Table {
+				continue
+			}
+			for _, t := range ts {
+				if db.defs[t].ci[c.Column] {
+					return true
+				}
 			}
 		}
 		return false
@@ -148,7 +165,7 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 				err = refuse("DISTINCT over")
 			case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
 				err = refuse(strings.ToUpper(n.SetOp) + " over")
-			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && pkCI(db, tables[strings.ToLower(cmp.Or(n.From.Alias, relname(n.From.Name)))]):
+			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && slices.ContainsFunc(tables[cmp.Or(n.From.Alias, relname(n.From.Name))], func(t string) bool { return pkCI(db, t) }):
 				err = refuse("a locking LIMIT scan along a primary key that holds")
 			}
 		case *sqlir.UpdateStmt:

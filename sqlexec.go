@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"cmp"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -221,10 +222,17 @@ func (x *sqlExec) outerConstant(e sqlir.Expr, table string) (any, bool) {
 // the query, rather than of a table joined to it.
 func (x *sqlExec) searchedColumn(c *sqlir.ColumnRef, table, alias string) bool {
 	if c.Table != "" {
-		return c.Table == alias || c.Table == relname(table)
+		return qualifies(c.Table, table, alias)
 	}
 	def := x.tx.db.defs[table]
 	return def != nil && slices.Contains(def.columns, c.Column)
+}
+
+// qualifies reports whether q, a column's qualifier, names table, called
+// alias in the query. An alias hides the table's own name, which may then
+// be another item's alias.
+func qualifies(q, table, alias string) bool {
+	return q == cmp.Or(alias, relname(table))
 }
 
 // env is the evaluation context of an expression: the rows of the tables in

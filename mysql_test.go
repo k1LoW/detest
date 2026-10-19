@@ -5351,6 +5351,27 @@ func TestColumnNamesMySQL(t *testing.T) {
 	if err := db.QueryRow(`SELECT n FROM T2 WHERE id = 1`).Scan(&stored); err != nil || stored != 3 {
 		t.Errorf("upsert reading a mixed case table: %d, %v", stored, err)
 	}
+	// A * qualified in another case than its table or alias fails with
+	// 1051 on MySQL.
+	for _, q := range []string{
+		`SELECT T.* FROM t`,
+		`SELECT A.* FROM t AS a`,
+		`SELECT t2.* FROM T2`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// MySQL fails a locking clause naming a table in another case with
+	// 3568, and the error number does not depend on the data.
+	for _, q := range []string{
+		`SELECT id FROM t AS a FOR UPDATE OF A`,
+		`SELECT id FROM t FOR UPDATE OF T`,
+	} {
+		if _, err := db.Exec(q); err == nil {
+			t.Errorf("%s: no error", q)
+		}
+	}
 	// A set operation's ORDER BY names its first query's alias in any case.
 	var n int
 	if err := db.QueryRow(`SELECT 1 AS X UNION ALL SELECT 2 ORDER BY X DESC LIMIT 1`).Scan(&n); err != nil || n != 2 {
@@ -5454,6 +5475,40 @@ func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 	mustExec(t, undeclared, `INSERT INTO other.t (id, n) VALUES (5, 6)`)
 	if _, err := undeclared.Exec(`SELECT (SELECT app.t.n FROM other.t LIMIT 1) FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("undeclared tables: %v", err)
+	}
+}
+
+// Two aliases that differ only in case name two tables, and a comparison
+// is refused by the collation of the column its qualifier names.
+func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE bin (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	for _, q := range []string{
+		`SELECT a.id FROM ci a JOIN bin A ON A.id = a.id WHERE a.s = 'x'`,
+		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE A.s = 'x'`,
+		// The alias bin hides the table bin, so bin.s is ci's column.
+		`SELECT bin.id FROM ci AS bin JOIN bin AS BIN ON BIN.id = bin.id WHERE bin.s = 'x'`,
+		// An alias another query block reuses for bin still names ci here.
+		`SELECT id FROM ci AS a WHERE s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
+		`SELECT a.id FROM ci AS a WHERE a.s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
+		`SELECT id FROM ci a WHERE s = 'x' UNION ALL SELECT id FROM bin a`,
+		// A derived table or a WITH query passes ci's column through.
+		`SELECT CI.id FROM (SELECT id, s FROM ci) AS CI WHERE CI.s = 'x'`,
+		`SELECT ci.id FROM (SELECT a.id, a.s FROM ci AS a) AS ci WHERE ci.s = 'x'`,
+		`SELECT d.id FROM (SELECT id, s FROM ci) AS d WHERE d.s = 'x'`,
+		`WITH c AS (SELECT id, s FROM ci) SELECT c.id FROM c WHERE c.s = 'x'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT a.id FROM ci a JOIN bin A ON A.id = a.id WHERE A.s = 'x'`,
+		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE a.s = 'x'`,
+	} {
+		mustExec(t, db, q)
 	}
 }
 

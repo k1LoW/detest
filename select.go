@@ -1420,7 +1420,7 @@ func (x *sqlExec) pushDown(sel *sqlir.SelectStmt, table, alias string, where sql
 		return func() {}
 	}
 	covered := !slices.ContainsFunc(sel.Targets, func(t sqlir.Target) bool {
-		return t.Star && (t.Table == "" || t.Table == alias || t.Table == relname(table))
+		return t.Star && (t.Table == "" || qualifies(t.Table, table, alias))
 	})
 	walkNodes(sel, func(n any) {
 		if c, ok := n.(*sqlir.ColumnRef); ok && x.searchedColumn(c, table, alias) && !slices.Contains(sr.cols, c.Column) && !slices.Contains(def.pk, c.Column) {

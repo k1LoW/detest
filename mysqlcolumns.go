@@ -228,13 +228,9 @@ func qualified(parts ...string) string {
 	return strings.Join(slices.DeleteFunc(parts, func(p string) bool { return p == "" }), ".")
 }
 
-// itemAlias is the name a FROM item is referred to by, lower case as the
-// parser writes a column's qualifier.
+// itemAlias is the name a FROM item is referred to by.
 func itemAlias(t sqlir.TableRef) string {
-	if t.Alias != "" {
-		return t.Alias
-	}
-	return strings.ToLower(relname(t.Name))
+	return cmp.Or(t.Alias, relname(t.Name))
 }
 
 // item returns the FROM item t, checking the query it is made of, which
@@ -984,8 +980,7 @@ func (w *myWalk) joined(target myItem, refs []sqlir.TableRef) (*myScope, error) 
 func (w *myWalk) add(sc *myScope, it myItem) error {
 	if slices.ContainsFunc(sc.items, func(o myItem) bool { return o.alias == it.alias }) {
 		// MySQL fails it with 1066, and detest's row keeps one item of the
-		// name. The parser writes aliases in lower case, so two that
-		// differ in case only are refused too.
+		// name.
 		return w.x.unsupported(fmt.Sprintf("two FROM items named %s", it.alias))
 	}
 	sc.items = append(sc.items, it)
@@ -1011,8 +1006,9 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 		others := sc.items[1:]
 		if a.Table != "" {
 			if a.Table != t.alias || a.Schema != "" && a.Schema != t.db {
-				// The parser refuses the name of another table, so this
-				// is one an alias hides or one of another database.
+				// The parser refuses a joined item's name, so this names
+				// no item, the table an alias hides, or one of another
+				// database.
 				return w.unknownColumn(qualified(a.Schema, a.Table, a.Column), "field list")
 			}
 			others = nil

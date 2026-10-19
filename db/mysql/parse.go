@@ -618,7 +618,7 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 	if s.Fields != nil {
 		for _, f := range s.Fields.Fields {
 			if f.WildCard != nil {
-				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.L, Schema: f.WildCard.Schema.O}) // aliases are lower case
+				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.O, Schema: f.WildCard.Schema.O})
 				continue
 			}
 			e, err := c.expr(f.Expr)
@@ -707,7 +707,7 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 		}
 		if out.Lock != nil {
 			for _, t := range s.LockInfo.Tables {
-				out.Lock.Of = append(out.Lock.Of, t.Name.L)
+				out.Lock.Of = append(out.Lock.Of, t.Name.O)
 			}
 		}
 	}
@@ -833,7 +833,7 @@ func (c *conv) from(j *ast.Join) (*sqlir.TableRef, []sqlir.Join, error) {
 // tableNameOf is the name of a table source, empty for a subquery.
 func tableNameOf(n ast.ResultSetNode) string {
 	if t, ok := n.(*ast.TableName); ok {
-		return t.Name.L
+		return t.Name.O
 	}
 	return ""
 }
@@ -843,15 +843,15 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 	if !ok {
 		return sqlir.TableRef{}, c.unsupported(fmt.Sprintf("from item %T", n))
 	}
-	// Column references name their table in lower case (ColumnName.Table.L),
-	// so the alias a FROM item is known by is lower case too.
-	out := sqlir.TableRef{Alias: ts.AsName.L, Lateral: ts.Lateral}
-	if c.rowAlias != "" && (ts.AsName.L == c.rowAlias || ts.AsName.L == "" && strings.EqualFold(tableNameOf(ts.Source), c.rowAlias)) {
+	// MySQL compares table names and aliases case sensitively (with the
+	// default lower_case_table_names=0), so they keep their spelling.
+	out := sqlir.TableRef{Alias: ts.AsName.O, Lateral: ts.Lateral}
+	if c.rowAlias != "" && (ts.AsName.O == c.rowAlias || ts.AsName.O == "" && tableNameOf(ts.Source) == c.rowAlias) {
 		// The conversion reads the row alias as the proposed row without
 		// regard to the scopes of subqueries, where this item shadows it.
 		return out, c.unsupported("a FROM item of the row alias's name in ON DUPLICATE KEY UPDATE")
 	}
-	if c.onDuplicate && (ts.AsName.L == "excluded" || ts.AsName.L == "" && tableNameOf(ts.Source) == "excluded") {
+	if c.onDuplicate && (ts.AsName.O == "excluded" || ts.AsName.O == "" && tableNameOf(ts.Source) == "excluded") {
 		// VALUES() and the row alias convert to the qualifier excluded,
 		// which this item would then shadow.
 		return out, c.unsupported("a FROM item named excluded in ON DUPLICATE KEY UPDATE")
@@ -867,9 +867,6 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 			return out, c.unsupported("index hints")
 		}
 		out.Name = tableName(src)
-		if out.Alias == "" && src.Name.O != src.Name.L {
-			out.Alias = src.Name.L
-		}
 	case *ast.SelectStmt, *ast.SetOprStmt:
 		sel, err := c.query1(src)
 		if err != nil {
@@ -928,8 +925,6 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	if len(extra) > 0 {
 		return nil, c.unsupported("INSERT into a join")
 	}
-	// The alias is the lower case name a mixed case table's qualifiers
-	// convert to.
 	out := &sqlir.InsertStmt{Table: t.Name, Alias: t.Alias}
 	for _, col := range s.Columns {
 		out.Columns = append(out.Columns, col.Name.L)
@@ -957,12 +952,12 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 	case len(s.OnDuplicate) > 0:
 		// The row alias names the proposed row only in these expressions; a
 		// later statement of a script may use the name for a table.
-		if s.RowAlias.L != "" && strings.EqualFold(s.RowAlias.O, relname(t.Name)) {
+		if s.RowAlias.O != "" && s.RowAlias.O == relname(t.Name) {
 			// MySQL fails it with 1066, and the alias would read as the
 			// proposed row where the table's name is meant.
 			return nil, c.unsupported("a row alias of the INSERT target's name")
 		}
-		c.rowAlias, c.onDuplicate = s.RowAlias.L, true
+		c.rowAlias, c.onDuplicate = s.RowAlias.O, true
 		defer func() { c.rowAlias, c.onDuplicate = "", false }()
 		oc := &sqlir.OnConflict{}
 		for _, a := range s.OnDuplicate {
@@ -973,7 +968,7 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L, Schema: a.Column.Schema.O})
+			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O, Schema: a.Column.Schema.O})
 		}
 		out.OnConflict = oc
 	case s.IgnoreErr:
@@ -999,7 +994,7 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 	}
 	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra, JoinOn: ons}
 	for _, a := range s.List {
-		if q := a.Column.Table.L; q != "" && q != strings.ToLower(relname(t.Name)) && q != strings.ToLower(t.Name) && q != strings.ToLower(t.Alias) {
+		if q := a.Column.Table.O; q != "" && slices.ContainsFunc(extra, func(e sqlir.TableRef) bool { return q == e.Alias || e.Alias == "" && q == relname(e.Name) }) {
 			return nil, c.unsupported("UPDATE of more than one table")
 		}
 		if _, ok := a.Expr.(*ast.DefaultExpr); ok {
@@ -1010,7 +1005,7 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.L, Schema: a.Column.Schema.O})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O, Schema: a.Column.Schema.O})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {

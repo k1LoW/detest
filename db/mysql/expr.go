@@ -48,7 +48,7 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 	case *ast.ParenthesesExpr:
 		return c.expr(e.Expr)
 	case *ast.ColumnNameExpr:
-		table, schema := e.Name.Table.L, e.Name.Schema.O
+		table, schema := e.Name.Table.O, e.Name.Schema.O
 		switch {
 		case table != "" && table == c.rowAlias:
 			// MySQL reads the row alias under any database.

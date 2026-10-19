@@ -671,7 +671,7 @@ func (x *sqlExec) depPinnedKey(def *tableDef, table, name, alias string, where s
 		if ok && b.Op == "=" {
 			for _, side := range [][2]sqlir.Expr{{b.L, b.R}, {b.R, b.L}} {
 				c, isCol := side[0].(*sqlir.ColumnRef)
-				if isCol && (c.Table == "" || c.Table == name || c.Table == alias) && isValue(side[1]) {
+				if isCol && (c.Table == "" || qualifies(c.Table, name, alias)) && isValue(side[1]) {
 					v, err := x.eval(side[1], nil)
 					if err == nil {
 						v, err = x.columnValue(table, c.Column, v)
