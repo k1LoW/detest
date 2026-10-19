@@ -109,6 +109,8 @@ type conv struct {
 	rowAlias string
 	// onDuplicate is set while ON DUPLICATE KEY UPDATE converts.
 	onDuplicate bool
+	// inQuery is set while a query converts.
+	inQuery bool
 	// inLimit is set while LIMIT and OFFSET convert.
 	inLimit bool
 	// params numbers the ? placeholders in the order they appear.
@@ -541,6 +543,9 @@ func tableName(t *ast.TableName) string {
 
 // query1 converts a SELECT, a set operation or VALUES.
 func (c *conv) query1(n ast.Node) (*sqlir.SelectStmt, error) {
+	prev := c.inQuery
+	c.inQuery = true
+	defer func() { c.inQuery = prev }()
 	switch s := n.(type) {
 	case *ast.SelectStmt:
 		return c.selectStmt(s)

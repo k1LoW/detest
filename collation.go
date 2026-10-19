@@ -42,6 +42,10 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	// derived table or a WITH query, whose columns' collations detest does
 	// not follow through the query they are made of.
 	tables, derived := map[string][]string{}, map[string]bool{}
+	// opaque holds the names of the items whose output columns are not
+	// known by position, all of which are taken as case-insensitive.
+	opaque := map[string]bool{}
+	var view func(k, name string, v *sqlir.SchemaChange)
 	add := func(name, alias string) {
 		// An alias hides the table's name, which may be another item's
 		// alias.
@@ -49,6 +53,10 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		t := ""
 		if name != "" {
 			t = db.resolve(name)
+		}
+		if v := db.views[t]; v != nil && v.View != nil {
+			view(k, t, v)
+			return
 		}
 		if db.defs[t] == nil {
 			if k != "" {
@@ -80,40 +88,72 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 			body(c.Name, c.Select)
 		}
 	}
-	walkNodes(stmt, func(n any) {
-		switch n := n.(type) {
-		case *sqlir.SelectStmt:
-			with(n.With)
-		case *sqlir.UpdateStmt:
-			with(n.With)
-		case *sqlir.DeleteStmt:
-			with(n.With)
+	var collect func(root any)
+	// The tables of a view's query join the statement's, as the queries of
+	// derived tables and WITH queries do, so that its qualified references
+	// resolve and a statement over views alone is checked at all. seen
+	// walks each view's query once however often it is read.
+	seen := map[string]bool{}
+	// roots are the statement and the views' queries. A view's query was
+	// checked when the view was created, but a later ALTER may have made a
+	// column it compares case-insensitive, and reading the view runs it.
+	roots := []any{stmt}
+	view = func(k, name string, v *sqlir.SchemaChange) {
+		derived[k] = true
+		q := v.View
+		// A * the binding left unexpanded gives columns at positions the
+		// view's names do not tell.
+		if slices.ContainsFunc(setArms(q), func(a *sqlir.SelectStmt) bool {
+			return slices.ContainsFunc(a.Targets, func(t sqlir.Target) bool { return t.Star })
+		}) {
+			opaque[k] = true
+		} else if len(v.ViewColumns) > 0 {
+			q = viewNamed(q, v.ViewColumns)
 		}
-	})
-	walkNodes(stmt, func(n any) {
-		switch n := n.(type) {
-		case *sqlir.TableRef:
-			add(n.Name, n.Alias)
-			switch {
-			case n.Sub != nil && n.Alias != "":
-				body(n.Alias, n.Sub)
-			case n.Sub == nil && n.Alias != "" && ctes[n.Name] != nil:
-				// The name may read a WITH query rather than the table it
-				// hides; WITH scopes are not followed, so it is taken as
-				// both.
-				derived[n.Alias] = true
-				for _, q := range ctes[n.Name] {
-					body(n.Alias, q)
-				}
+		body(k, q)
+		if !seen[name] {
+			seen[name] = true
+			roots = append(roots, v.View)
+			collect(v.View)
+		}
+	}
+	collect = func(root any) {
+		walkNodes(root, func(n any) {
+			switch n := n.(type) {
+			case *sqlir.SelectStmt:
+				with(n.With)
+			case *sqlir.UpdateStmt:
+				with(n.With)
+			case *sqlir.DeleteStmt:
+				with(n.With)
 			}
-		case *sqlir.InsertStmt:
-			add(n.Table, n.Alias)
-		case *sqlir.UpdateStmt:
-			add(n.Table, n.Alias)
-		case *sqlir.DeleteStmt:
-			add(n.Table, n.Alias)
-		}
-	})
+		})
+		walkNodes(root, func(n any) {
+			switch n := n.(type) {
+			case *sqlir.TableRef:
+				add(n.Name, n.Alias)
+				switch {
+				case n.Sub != nil && n.Alias != "":
+					body(n.Alias, n.Sub)
+				case n.Sub == nil && n.Alias != "" && ctes[n.Name] != nil:
+					// The name may read a WITH query rather than the table it
+					// hides; WITH scopes are not followed, so it is taken as
+					// both.
+					derived[n.Alias] = true
+					for _, q := range ctes[n.Name] {
+						body(n.Alias, q)
+					}
+				}
+			case *sqlir.InsertStmt:
+				add(n.Table, n.Alias)
+			case *sqlir.UpdateStmt:
+				add(n.Table, n.Alias)
+			case *sqlir.DeleteStmt:
+				add(n.Table, n.Alias)
+			}
+		})
+	}
+	collect(stmt)
 	anyCI := false
 	for _, ts := range tables {
 		for _, t := range ts {
@@ -129,9 +169,6 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	// lower cased output names it gives a case-insensitive column under
 	// another name, such as v of SELECT s AS v, which no table has.
 	renamed := map[string]map[string]bool{}
-	// opaque holds the names of the items whose output columns are not
-	// known by position, all of which are taken as case-insensitive.
-	opaque := map[string]bool{}
 	// A qualifier is not resolved to its query block, so a name that
 	// stands for several tables refuses a column case-insensitive in any,
 	// and one that may stand for an item other than a table refuses a
@@ -220,71 +257,73 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		return false
 	}
 	var err error
-	walkNodes(stmt, func(n any) {
-		if err != nil {
-			return
-		}
-		switch n := n.(type) {
-		case *sqlir.BinaryExpr:
-			if compareOps[n.Op] && (exprCI(n.L) || exprCI(n.R)) {
-				err = refuse("a comparison of")
+	for _, root := range roots {
+		walkNodes(root, func(n any) {
+			if err != nil {
+				return
 			}
-		case *sqlir.InExpr:
-			if exprCI(n.X) || slices.ContainsFunc(n.List, exprCI) || n.Sub != nil && starCI(n.Sub.Targets) {
-				err = refuse("IN over")
+			switch n := n.(type) {
+			case *sqlir.BinaryExpr:
+				if compareOps[n.Op] && (exprCI(n.L) || exprCI(n.R)) {
+					err = refuse("a comparison of")
+				}
+			case *sqlir.InExpr:
+				if exprCI(n.X) || slices.ContainsFunc(n.List, exprCI) || n.Sub != nil && starCI(n.Sub.Targets) {
+					err = refuse("IN over")
+				}
+			case *sqlir.CaseExpr:
+				if n.Arg != nil && (exprCI(n.Arg) || slices.ContainsFunc(n.Whens, func(w sqlir.CaseWhen) bool { return exprCI(w.When) })) {
+					err = refuse("CASE comparing")
+				}
+			case *sqlir.FuncCall:
+				if (orderingFuncs[n.Name] || n.Distinct) && slices.ContainsFunc(n.Args, exprCI) {
+					err = refuse(strings.ToUpper(n.Name) + " of")
+				}
+			case *sqlir.WindowFunc:
+				if slices.ContainsFunc(n.Partition, exprCI) || keysCI(n.Order, nil) {
+					err = refuse("a window over")
+				}
+			case *sqlir.SelectStmt:
+				switch {
+				case slices.ContainsFunc(n.GroupBy, exprCI):
+					err = refuse("GROUP BY")
+				case keysCI(n.OrderBy, n.Targets):
+					err = refuse("ORDER BY")
+				case slices.ContainsFunc(n.DistinctOn, exprCI) || n.Distinct && starCI(n.Targets):
+					err = refuse("DISTINCT over")
+				case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
+					err = refuse(strings.ToUpper(n.SetOp) + " over")
+				case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && slices.ContainsFunc(tables[cmp.Or(n.From.Alias, relname(n.From.Name))], func(t string) bool { return pkCI(db, t) }):
+					err = refuse("a locking LIMIT scan along a primary key that holds")
+				}
+			case *sqlir.UpdateStmt:
+				table := db.resolve(n.Table)
+				switch {
+				case keysCI(n.OrderBy, nil):
+					err = refuse("ORDER BY")
+				case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
+					err = refuse("a LIMIT scan along a primary key that holds")
+				case slices.ContainsFunc(n.Set, func(a sqlir.Assignment) bool { return uniqueCI(db, table, a.Column) || fkCI(db, table, a.Column) }):
+					err = refuse("a write a unique index or a foreign key checks, over")
+				}
+			case *sqlir.DeleteStmt:
+				table := db.resolve(n.Table)
+				switch {
+				case keysCI(n.OrderBy, nil):
+					err = refuse("ORDER BY")
+				case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
+					err = refuse("a LIMIT scan along a primary key that holds")
+				case referencedCI(db, table):
+					err = refuse("a delete a foreign key checks, over")
+				}
+			case *sqlir.InsertStmt:
+				table := db.resolve(n.Table)
+				if uniqueCI(db, table, "") || fkCI(db, table, "") {
+					err = refuse("an insert a unique index or a foreign key checks, over")
+				}
 			}
-		case *sqlir.CaseExpr:
-			if n.Arg != nil && (exprCI(n.Arg) || slices.ContainsFunc(n.Whens, func(w sqlir.CaseWhen) bool { return exprCI(w.When) })) {
-				err = refuse("CASE comparing")
-			}
-		case *sqlir.FuncCall:
-			if (orderingFuncs[n.Name] || n.Distinct) && slices.ContainsFunc(n.Args, exprCI) {
-				err = refuse(strings.ToUpper(n.Name) + " of")
-			}
-		case *sqlir.WindowFunc:
-			if slices.ContainsFunc(n.Partition, exprCI) || keysCI(n.Order, nil) {
-				err = refuse("a window over")
-			}
-		case *sqlir.SelectStmt:
-			switch {
-			case slices.ContainsFunc(n.GroupBy, exprCI):
-				err = refuse("GROUP BY")
-			case keysCI(n.OrderBy, n.Targets):
-				err = refuse("ORDER BY")
-			case slices.ContainsFunc(n.DistinctOn, exprCI) || n.Distinct && starCI(n.Targets):
-				err = refuse("DISTINCT over")
-			case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
-				err = refuse(strings.ToUpper(n.SetOp) + " over")
-			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && slices.ContainsFunc(tables[cmp.Or(n.From.Alias, relname(n.From.Name))], func(t string) bool { return pkCI(db, t) }):
-				err = refuse("a locking LIMIT scan along a primary key that holds")
-			}
-		case *sqlir.UpdateStmt:
-			table := db.resolve(n.Table)
-			switch {
-			case keysCI(n.OrderBy, nil):
-				err = refuse("ORDER BY")
-			case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
-				err = refuse("a LIMIT scan along a primary key that holds")
-			case slices.ContainsFunc(n.Set, func(a sqlir.Assignment) bool { return uniqueCI(db, table, a.Column) || fkCI(db, table, a.Column) }):
-				err = refuse("a write a unique index or a foreign key checks, over")
-			}
-		case *sqlir.DeleteStmt:
-			table := db.resolve(n.Table)
-			switch {
-			case keysCI(n.OrderBy, nil):
-				err = refuse("ORDER BY")
-			case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
-				err = refuse("a LIMIT scan along a primary key that holds")
-			case referencedCI(db, table):
-				err = refuse("a delete a foreign key checks, over")
-			}
-		case *sqlir.InsertStmt:
-			table := db.resolve(n.Table)
-			if uniqueCI(db, table, "") || fkCI(db, table, "") {
-				err = refuse("an insert a unique index or a foreign key checks, over")
-			}
-		}
-	})
+		})
+	}
 	return err
 }
 
@@ -335,6 +374,29 @@ func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) (names []strin
 		}
 	}
 	return names, true
+}
+
+// setArms returns the queries a set operation q is made of, left to right,
+// or q itself when it is not one.
+func setArms(q *sqlir.SelectStmt) []*sqlir.SelectStmt {
+	if q.SetOp != "" && q.Larg != nil && q.Rarg != nil {
+		return append(setArms(q.Larg), setArms(q.Rarg)...)
+	}
+	return []*sqlir.SelectStmt{q}
+}
+
+// viewNamed returns a copy of a view's query whose first query names its
+// output columns by the view's column list, which is where ciOutputs reads
+// a set operation's names from.
+func viewNamed(q *sqlir.SelectStmt, cols []string) *sqlir.SelectStmt {
+	sub, _ := sqlir.CloneExpr(&sqlir.SubQuery{Select: q}).(*sqlir.SubQuery)
+	first := setArms(sub.Select)[0]
+	for i := range first.Targets {
+		if i < len(cols) {
+			first.Targets[i].Alias = cols[i]
+		}
+	}
+	return sub.Select
 }
 
 // pkCI reports whether table's primary key holds a case-insensitive column.
