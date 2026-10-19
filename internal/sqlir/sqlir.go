@@ -153,6 +153,10 @@ type InsertStmt struct {
 	// OverridingSystemValue is OVERRIDING SYSTEM VALUE, which lets an
 	// INSERT give a GENERATED ALWAYS identity column a value.
 	OverridingSystemValue bool
+	// ColumnQualifiers are the table and database a MySQL column list
+	// entry is qualified with, as written, by the index of Columns,
+	// which the column name check resolves; nil when no entry has one.
+	ColumnQualifiers []ColumnRef
 }
 
 // OnConflict is ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ... WHERE ...

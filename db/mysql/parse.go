@@ -926,8 +926,14 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 		return nil, c.unsupported("INSERT into a join")
 	}
 	out := &sqlir.InsertStmt{Table: t.Name, Alias: t.Alias}
-	for _, col := range s.Columns {
+	for i, col := range s.Columns {
 		out.Columns = append(out.Columns, col.Name.L)
+		if col.Table.O != "" {
+			if out.ColumnQualifiers == nil {
+				out.ColumnQualifiers = make([]sqlir.ColumnRef, len(s.Columns))
+			}
+			out.ColumnQualifiers[i] = sqlir.ColumnRef{Schema: col.Schema.O, Table: col.Table.O, Column: col.Name.L}
+		}
 	}
 	if len(s.ColumnAliases) > 0 {
 		return nil, c.unsupported("INSERT ... AS alias with column aliases")

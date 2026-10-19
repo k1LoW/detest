@@ -5379,6 +5379,34 @@ func TestColumnNamesMySQL(t *testing.T) {
 	}
 }
 
+func TestQualifiedInsertColumnsMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `CREATE TABLE other.t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `INSERT INTO t (app.t.id, t.n) VALUES (4, 5)`)
+	mustExec(t, db, `INSERT INTO app.t (t.id, n) VALUES (8, 5)`)
+	mustExec(t, db, `INSERT INTO other.t (t.id, n) VALUES (9, 5)`)
+	mustExec(t, db, `INSERT INTO other.t (other.t.id, n) VALUES (11, 5)`)
+	var c int
+	if err := db.QueryRow(`SELECT count(*) FROM t`).Scan(&c); err != nil || c != 2 {
+		t.Errorf("rows of t: %d, %v", c, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM other.t`).Scan(&c); err != nil || c != 2 {
+		t.Errorf("rows of other.t: %d, %v", c, err)
+	}
+	for _, q := range []string{
+		`INSERT INTO t (wrong.t.id, n) VALUES (2, 3)`,
+		`INSERT INTO t (APP.t.id, n) VALUES (12, 5)`,
+		`INSERT INTO other.t (app.t.id, n) VALUES (10, 5)`,
+		`INSERT INTO t SET other.t.id = 13, n = 1`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+}
+
 func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())
