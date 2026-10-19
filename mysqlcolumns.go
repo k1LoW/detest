@@ -92,6 +92,10 @@ type myItem struct {
 	// qualified is set for the row ON DUPLICATE KEY UPDATE reads through
 	// VALUES() or the row alias, which a bare name does not reach.
 	qualified bool
+	// target is the item of the table an INSERT writes, set on the
+	// proposed row, whose name and database a qualified VALUES() argument
+	// must give.
+	target *myItem
 }
 
 // myScope is the FROM items of one MySQL query block, inside those of the
@@ -768,6 +772,9 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			if r.Table != "" && it.alias != r.Table || r.Table == "" && it.qualified {
 				continue
 			}
+			if it.target != nil && r.Values != "" && (r.Values != it.target.alias || r.Schema != "" && r.Schema != it.target.db) {
+				return w.unknownColumn(qualified(r.Schema, r.Values, r.Column), clause)
+			}
 			if r.Schema != "" && it.db != "" && it.db != r.Schema {
 				// MySQL looks past it, where the executor, which keys an
 				// item by its alias only, would read it.
@@ -935,7 +942,7 @@ func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 		return w.x.unsupported("ON DUPLICATE KEY UPDATE of a table named excluded")
 	}
 	excluded := t
-	excluded.alias, excluded.qualified, excluded.db = "excluded", true, ""
+	excluded.alias, excluded.qualified, excluded.db, excluded.target = "excluded", true, "", &t
 	sc := &myScope{items: []myItem{t, excluded}}
 	if selected != nil {
 		// MySQL reads the SELECT's columns too, detest none of them.

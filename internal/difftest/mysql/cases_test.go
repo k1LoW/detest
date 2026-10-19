@@ -1524,6 +1524,37 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// MySQL resolves a qualified VALUES() argument against the target
+		// table only, in its case, and fails any other qualifier, the row
+		// alias's and a table of the SELECT's among them, with 1054. Each
+		// case runs in a database of its own, which the statements cannot
+		// name, so the forms naming it are in mysql_test.go.
+		Name: "a qualified VALUES() argument names the target table",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, n INT)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 2)`,
+			`INSERT INTO u VALUES (1, 5)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(wrong.t.n)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(u.n)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(T.n)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(excluded.n)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) AS r ON DUPLICATE KEY UPDATE n = VALUES(r.n)`),
+			difftest.S(0, `INSERT INTO t SELECT * FROM u ON DUPLICATE KEY UPDATE n = VALUES(u.n)`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 10) ON DUPLICATE KEY UPDATE n = VALUES(t.n)`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 11) ON DUPLICATE KEY UPDATE n = VALUES(t.N) + 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 13) AS r ON DUPLICATE KEY UPDATE n = VALUES(t.n) + r.n`),
+			difftest.S(0, `INSERT INTO t SELECT id, 30 FROM u ON DUPLICATE KEY UPDATE n = VALUES(t.n)`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
+	{
 		// The upsert reads the existing row of a mixed case table by its
 		// own name.
 		Name: "ON DUPLICATE KEY UPDATE reads a mixed case table by its name",

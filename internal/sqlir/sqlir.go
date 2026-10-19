@@ -497,6 +497,10 @@ type ColumnRef struct {
 	// written, which the column name check resolves and the executor
 	// does not read; empty for none.
 	Schema string
+	// Values is the table a MySQL VALUES() argument is qualified with, as
+	// written, which the column name check matches against the INSERT
+	// target and the executor does not read; empty for none.
+	Values string
 }
 
 // Param is a positional parameter, 0-based.

@@ -65,7 +65,9 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			return nil, c.unsupported("VALUES(col) outside ON DUPLICATE KEY UPDATE")
 		}
 		// VALUES(col) in ON DUPLICATE KEY UPDATE is the proposed row's column.
-		return &sqlir.ColumnRef{Table: "excluded", Column: e.Column.Name.Name.L}, nil
+		// Its qualifier names the target table, never the row alias.
+		col := e.Column.Name
+		return &sqlir.ColumnRef{Table: "excluded", Column: col.Name.L, Schema: col.Schema.O, Values: col.Table.O}, nil
 	case *ast.DefaultExpr:
 		if e.Name != nil {
 			// The executor reads DEFAULT as NULL, not the column's

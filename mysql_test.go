@@ -5438,6 +5438,10 @@ func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 		`UPDATE t x SET wrong.x.n = 3`,
 		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 1`,
 		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = wrong.t.n`,
+		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(wrong.t.n)`,
+		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(APP.t.n)`,
+		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = VALUES(other.t.n)`,
+		`INSERT INTO t VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = VALUES(app.new.n)`,
 	} {
 		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
 			t.Errorf("%s: %v", q, err)
@@ -5476,6 +5480,16 @@ func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 	if _, err := undeclared.Exec(`SELECT (SELECT app.t.n FROM other.t LIMIT 1) FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
 		t.Errorf("undeclared tables: %v", err)
 	}
+	// A qualified VALUES() argument takes the target's own database.
+	mustExec(t, db, `INSERT INTO t VALUES (1, 20) ON DUPLICATE KEY UPDATE n = VALUES(app.t.n)`)
+	mustExec(t, db, `INSERT INTO app.t VALUES (1, 21) ON DUPLICATE KEY UPDATE n = VALUES(t.n) + VALUES(app.t.n)`)
+	if err := db.QueryRow(`SELECT n FROM t WHERE id = 1`).Scan(&n); err != nil || n != 42 {
+		t.Errorf("VALUES() qualified by its database: %d, %v", n, err)
+	}
+	if _, err := db.Exec(`INSERT INTO other.t VALUES (5, 9) ON DUPLICATE KEY UPDATE n = VALUES(app.t.n)`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Errorf("VALUES() of another database's target: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO other.t VALUES (5, 9) ON DUPLICATE KEY UPDATE n = VALUES(other.t.n)`)
 }
 
 // Two aliases that differ only in case name two tables, and a comparison
