@@ -5396,6 +5396,10 @@ func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
 		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE A.s = 'x'`,
 		// The alias bin hides the table bin, so bin.s is ci's column.
 		`SELECT bin.id FROM ci AS bin JOIN bin AS BIN ON BIN.id = bin.id WHERE bin.s = 'x'`,
+		// An alias another query block reuses for bin still names ci here.
+		`SELECT id FROM ci AS a WHERE s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
+		`SELECT a.id FROM ci AS a WHERE a.s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
+		`SELECT id FROM ci a WHERE s = 'x' UNION ALL SELECT id FROM bin a`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
