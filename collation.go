@@ -63,11 +63,21 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	// bodies are the queries each derived table or WITH query is made of,
 	// by its name.
 	bodies := map[string][]*sqlir.SelectStmt{}
-	with := func(ctes []sqlir.CTE) {
-		for _, c := range ctes {
+	body := func(k string, q *sqlir.SelectStmt) {
+		if !slices.Contains(bodies[k], q) {
+			bodies[k] = append(bodies[k], q)
+		}
+	}
+	// ctes are the queries of the WITH queries, by name.
+	ctes := map[string][]*sqlir.SelectStmt{}
+	with := func(list []sqlir.CTE) {
+		for _, c := range list {
 			// A WITH query hides a table of its name.
 			derived[c.Name] = true
-			bodies[c.Name] = append(bodies[c.Name], c.Select)
+			if !slices.Contains(ctes[c.Name], c.Select) {
+				ctes[c.Name] = append(ctes[c.Name], c.Select)
+			}
+			body(c.Name, c.Select)
 		}
 	}
 	walkNodes(stmt, func(n any) {
@@ -86,13 +96,15 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 			add(n.Name, n.Alias)
 			switch {
 			case n.Sub != nil && n.Alias != "":
-				bodies[n.Alias] = append(bodies[n.Alias], n.Sub)
-			case n.Sub == nil && n.Alias != "" && bodies[n.Name] != nil:
+				body(n.Alias, n.Sub)
+			case n.Sub == nil && n.Alias != "" && ctes[n.Name] != nil:
 				// The name may read a WITH query rather than the table it
 				// hides; WITH scopes are not followed, so it is taken as
 				// both.
 				derived[n.Alias] = true
-				bodies[n.Alias] = append(bodies[n.Alias], bodies[n.Name]...)
+				for _, q := range ctes[n.Name] {
+					body(n.Alias, q)
+				}
 			}
 		case *sqlir.InsertStmt:
 			add(n.Table, n.Alias)

@@ -5558,6 +5558,9 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 	} {
 		mustExec(t, db, q)
 	}
+	// Each reference of a WITH query under its own name adds its query once.
+	arms := slices.Repeat([]string{`SELECT c.v FROM c AS c WHERE c.v = 1`}, 40)
+	mustExec(t, db, `WITH c AS (SELECT id AS v FROM ci) `+strings.Join(arms, ` UNION ALL `))
 }
 
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
