@@ -27,6 +27,9 @@ func (parser) Name() string { return "mysql" }
 func (parser) Parse(query string) (sqlir.Statement, error) {
 	stmts, _, err := tidb.New().ParseSQL(query)
 	if err != nil {
+		if derivedColumnList(query, err) {
+			return nil, sqlir.Unsupported("derived table column list", query)
+		}
 		return nil, &sqlir.ParseError{Query: query, Err: err}
 	}
 	c := &conv{query: query, params: paramIndexes(stmts)}
@@ -34,6 +37,68 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 		return c.script(stmts)
 	}
 	return c.stmt(stmts[0])
+}
+
+// derivedColumnList reports whether query fails to parse only for column
+// lists on derived tables, as in (SELECT id FROM t) AS d (v), which MySQL
+// runs. TiDB's grammar takes such a list only after LATERAL and fails at its
+// '('. So LATERAL is put before each '(' ahead of the failure in turn, and
+// the list is one on a derived table when that lets the parser past it. The
+// grammar decides this rather than a scan of the text, which would have to
+// follow MySQL's quoting and comments, and a list after anything else, as in
+// SELECT (1) d (v), stays the syntax error MySQL gives too.
+func derivedColumnList(query string, err error) bool {
+	// The spaces keep LATERAL a word of its own after FROM( or JOIN(.
+	const lateral = " LATERAL "
+	for {
+		off, ok := syntaxErrorOffset(query, err)
+		if !ok || query[off] != '(' {
+			return false
+		}
+		past := false
+		for q := off - 1; q >= 0 && !past; q-- {
+			if query[q] != '(' {
+				continue
+			}
+			try := query[:q] + lateral + query[q:]
+			_, _, terr := tidb.New().ParseSQL(try)
+			if terr == nil {
+				return true
+			}
+			if toff, ok := syntaxErrorOffset(try, terr); ok && toff > off+len(lateral) {
+				query, err, past = try, terr, true
+			}
+		}
+		if !past {
+			return false
+		}
+	}
+}
+
+// syntaxErrorOffset finds where in query TiDB's parser failed, from the text
+// its syntax error quotes from the failing token to the end of the query. The
+// parser cuts that text at 2048 bytes and then gives its whole length.
+func syntaxErrorOffset(query string, err error) (int, bool) {
+	msg := err.Error()
+	_, body, ok := strings.Cut(msg, ` near "`)
+	if !ok {
+		return 0, false
+	}
+	if near, ok := strings.CutSuffix(body, `" `); ok {
+		if near == "" || !strings.HasSuffix(query, near) {
+			return 0, false
+		}
+		return len(query) - len(near), true
+	}
+	j := strings.LastIndex(body, `" (total length `)
+	if j < 0 || !strings.HasSuffix(body, ")") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(body[j+len(`" (total length `) : len(body)-1])
+	if err != nil || n <= 0 || n > len(query) || !strings.HasPrefix(query[len(query)-n:], body[:j]) {
+		return 0, false
+	}
+	return len(query) - n, true
 }
 
 // conv converts one query's AST.
@@ -861,8 +926,11 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 		// which this item would then shadow.
 		return out, c.unsupported("a FROM item named excluded in ON DUPLICATE KEY UPDATE")
 	}
-	for _, cn := range ts.ColumnNames {
-		out.Columns = append(out.Columns, cn.L)
+	if len(ts.ColumnNames) > 0 {
+		// The collation check does not follow a column a list renames, and
+		// the form without LATERAL fails before conversion with the same
+		// refusal.
+		return out, c.unsupported("derived table column list")
 	}
 	switch src := ts.Source.(type) {
 	case *ast.TableName:
