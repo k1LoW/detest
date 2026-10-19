@@ -5554,6 +5554,63 @@ func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
 	}
 }
 
+// A derived table or a WITH query that renames a case-insensitive column
+// passes its collation on under the new name, so a comparison, an ORDER BY
+// or a DISTINCT on that name is refused as one on the column is.
+func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE bin (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	mustExec(t, db, `CREATE TABLE one (s VARCHAR(10))`)
+	for _, q := range []string{
+		`SELECT v FROM (SELECT s AS v FROM ci) d WHERE v = 'x'`,
+		`SELECT d.v FROM (SELECT s AS v FROM ci) d WHERE d.v = 'x'`,
+		`SELECT d.v FROM (SELECT s AS V FROM ci) d WHERE d.v = 'x'`,
+		`WITH c AS (SELECT s AS v FROM ci) SELECT v FROM c WHERE v = 'x'`,
+		`SELECT d.id FROM bin CROSS JOIN (SELECT id, s AS v FROM ci) d WHERE d.v = 'x'`,
+		`SELECT v FROM (SELECT s AS v FROM ci) d ORDER BY v`,
+		`SELECT count(DISTINCT v) FROM (SELECT s AS v FROM ci) d`,
+		// The rename passes through another derived table or WITH query.
+		`SELECT w FROM (SELECT v AS w FROM (SELECT s AS v FROM ci) d) e WHERE w = 'x'`,
+		`WITH c AS (SELECT s AS v FROM ci), e AS (SELECT v AS w FROM c) SELECT w FROM e WHERE w = 'x'`,
+		// A WITH query hides the table of its name.
+		`WITH ci AS (SELECT s AS v FROM ci) SELECT ci.v FROM ci WHERE ci.v = 'x'`,
+		// A set operation's column takes its name from the first query and
+		// may take its collation from any.
+		`SELECT v FROM (SELECT 'a' AS v UNION ALL SELECT s FROM ci) d WHERE v = 'x'`,
+		`SELECT id FROM (SELECT id FROM bin UNION ALL SELECT s FROM ci) d WHERE id = 'x'`,
+		// A query of a set operation with a * gives columns whose positions
+		// detest does not follow.
+		`SELECT v FROM (SELECT 0 AS n, 'a' AS v UNION ALL SELECT * FROM ci) d WHERE v = 'x'`,
+		// A VALUES list or a * in a subquery gives a column no name or
+		// ColumnRef ties to the case-insensitive one.
+		`SELECT v FROM (SELECT 'a' AS v UNION ALL VALUES ROW((SELECT s FROM ci WHERE id = 1))) d WHERE v = 'x'`,
+		`SELECT v FROM (SELECT (SELECT * FROM one) AS v) d WHERE v = 'x'`,
+		`SELECT 1 FROM ci WHERE (SELECT * FROM one) = 'x'`,
+		// A WITH query read under an alias, hiding a table of its name.
+		`WITH bin AS (SELECT s AS v FROM ci) SELECT b.v FROM bin AS b WHERE b.v = 'x'`,
+		// An expression over the column keeps its collation.
+		`SELECT v FROM (SELECT concat(s, '') AS v FROM ci) d WHERE v = 'x'`,
+		`UPDATE bin JOIN (SELECT id, s AS v FROM ci) d ON d.id = bin.id SET bin.s = 'y' WHERE d.v = 'x'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT v FROM (SELECT id AS v FROM ci) d WHERE v = 1`,
+		`SELECT v FROM (SELECT s AS v FROM bin) d WHERE v = 'x'`,
+		`SELECT d.id FROM (SELECT id, s AS v FROM ci) d WHERE d.id = 1`,
+		`WITH c AS (SELECT s AS v FROM bin) SELECT v FROM c WHERE v = 'x' ORDER BY v`,
+	} {
+		mustExec(t, db, q)
+	}
+	// Each reference of a WITH query under its own name adds its query once.
+	arms := slices.Repeat([]string{`SELECT c.v FROM c AS c WHERE c.v = 1`}, 40)
+	mustExec(t, db, `WITH c AS (SELECT id AS v FROM ci) `+strings.Join(arms, ` UNION ALL `))
+}
+
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())
