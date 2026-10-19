@@ -901,6 +901,11 @@ func (w *myWalk) setColumn(col string, target myItem, others []myItem) error {
 func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 	t := w.target(ins.Table, ins.Alias)
 	for i, c := range ins.Columns {
+		if i < len(ins.ColumnQualifiers) {
+			if q := ins.ColumnQualifiers[i]; q.Table != "" && q.Table != t.alias || q.Schema != "" && q.Schema != t.db {
+				return w.unknownColumn(qualified(q.Schema, q.Table, q.Column), "field list")
+			}
+		}
 		if err := w.setColumn(c, t, nil); err != nil {
 			return err
 		}

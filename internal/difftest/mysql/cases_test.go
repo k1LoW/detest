@@ -1555,6 +1555,39 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// MySQL resolves a qualified entry of an INSERT's column list
+		// against the target table, in its case, and fails one naming
+		// another table or database with 1054.
+		Name: "a qualified INSERT column names the target table",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, n INT)` + binary,
+			`CREATE TABLE Foo (id INT PRIMARY KEY, n INT)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 2)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.S(0, `INSERT INTO t (t.id, t.n) VALUES (2, 3)`),
+			difftest.S(0, `INSERT INTO t (t.ID, n) VALUES (3, 3)`),
+			difftest.S(0, `INSERT INTO t SET t.id = 4, n = 3`),
+			difftest.S(0, `INSERT INTO t (t.id, n) SELECT 5, 3`),
+			difftest.S(0, `INSERT INTO t (wrong.t.id, n) VALUES (6, 3)`),
+			difftest.S(0, `INSERT INTO t (u.id, n) VALUES (7, 3)`),
+			difftest.S(0, `INSERT INTO t (T.id, n) VALUES (8, 3)`),
+			difftest.S(0, `INSERT INTO t (new.id, n) VALUES (9, 3) AS new`),
+			difftest.S(0, `INSERT INTO t SET u.id = 10, n = 3`),
+			difftest.S(0, `INSERT INTO t (u.id, n) SELECT 11, 3`),
+			difftest.S(0, `INSERT IGNORE INTO t (u.id, n) VALUES (12, 3)`),
+			difftest.S(0, `INSERT INTO t (u.id, n) VALUES (1, 3) ON DUPLICATE KEY UPDATE n = 9`),
+			difftest.S(0, `INSERT INTO Foo (Foo.id, Foo.n) VALUES (2, 3)`),
+			difftest.S(0, `INSERT INTO Foo (foo.id, n) VALUES (3, 3)`),
+			difftest.Q(0, `SELECT id, n FROM Foo ORDER BY id`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
+	{
 		// The upsert reads the existing row of a mixed case table by its
 		// own name.
 		Name: "ON DUPLICATE KEY UPDATE reads a mixed case table by its name",
