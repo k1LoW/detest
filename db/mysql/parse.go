@@ -80,11 +80,10 @@ func derivedColumnList(query string, err error) bool {
 // parser cuts that text at 2048 bytes and then gives its whole length.
 func syntaxErrorOffset(query string, err error) (int, bool) {
 	msg := err.Error()
-	i := strings.Index(msg, ` near "`)
-	if i < 0 {
+	_, body, ok := strings.Cut(msg, ` near "`)
+	if !ok {
 		return 0, false
 	}
-	body := msg[i+len(` near "`):]
 	if near, ok := strings.CutSuffix(body, `" `); ok {
 		if near == "" || !strings.HasSuffix(query, near) {
 			return 0, false
