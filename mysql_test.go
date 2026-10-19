@@ -5436,6 +5436,14 @@ func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 			t.Errorf("%s: %v", q, err)
 		}
 	}
+	// The same holds where neither table is declared, so detest does not
+	// know the outer item's columns.
+	undeclared, _ := s.DB("undeclared", mysqlBin())
+	mustExec(t, undeclared, `INSERT INTO t (id, n) VALUES (1, 2)`)
+	mustExec(t, undeclared, `INSERT INTO other.t (id, n) VALUES (5, 6)`)
+	if _, err := undeclared.Exec(`SELECT (SELECT app.t.n FROM other.t LIMIT 1) FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("undeclared tables: %v", err)
+	}
 }
 
 func TestColumnNamesOfViewsMySQL(t *testing.T) {

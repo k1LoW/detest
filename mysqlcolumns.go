@@ -815,6 +815,10 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			}
 		}
 		switch {
+		case unknown && len(hits) <= 1 && missed && r.Table != "" && s != sc:
+			// MySQL looks past the inner item, which the executor would
+			// read, even when the outer item's columns are not known.
+			return w.x.unsupported(fmt.Sprintf("column %s of an outer item whose name an inner item shadows", name))
 		case unknown && refuse != "" && len(hits) <= 1:
 			return w.x.unsupported(refuse)
 		case unknown && len(hits) <= 1:
