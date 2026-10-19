@@ -72,21 +72,34 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	}
 	walkNodes(stmt, func(n any) {
 		switch n := n.(type) {
-		case *sqlir.TableRef:
-			add(n.Name, n.Alias)
-			if n.Sub != nil && n.Alias != "" {
-				bodies[n.Alias] = append(bodies[n.Alias], n.Sub)
-			}
 		case *sqlir.SelectStmt:
 			with(n.With)
+		case *sqlir.UpdateStmt:
+			with(n.With)
+		case *sqlir.DeleteStmt:
+			with(n.With)
+		}
+	})
+	walkNodes(stmt, func(n any) {
+		switch n := n.(type) {
+		case *sqlir.TableRef:
+			add(n.Name, n.Alias)
+			switch {
+			case n.Sub != nil && n.Alias != "":
+				bodies[n.Alias] = append(bodies[n.Alias], n.Sub)
+			case n.Sub == nil && n.Alias != "" && bodies[n.Name] != nil:
+				// The name may read a WITH query rather than the table it
+				// hides; WITH scopes are not followed, so it is taken as
+				// both.
+				derived[n.Alias] = true
+				bodies[n.Alias] = append(bodies[n.Alias], bodies[n.Name]...)
+			}
 		case *sqlir.InsertStmt:
 			add(n.Table, n.Alias)
 		case *sqlir.UpdateStmt:
 			add(n.Table, n.Alias)
-			with(n.With)
 		case *sqlir.DeleteStmt:
 			add(n.Table, n.Alias)
-			with(n.With)
 		}
 	})
 	anyCI := false
@@ -104,6 +117,9 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	// lower cased output names it gives a case-insensitive column under
 	// another name, such as v of SELECT s AS v, which no table has.
 	renamed := map[string]map[string]bool{}
+	// opaque holds the names of the items whose output columns are not
+	// known by position, all of which are taken as case-insensitive.
+	opaque := map[string]bool{}
 	// A qualifier is not resolved to its query block, so a name that
 	// stands for several tables refuses a column case-insensitive in any,
 	// and one that may stand for an item other than a table refuses a
@@ -111,6 +127,11 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	isCI := func(c *sqlir.ColumnRef) bool {
 		whole := c.Table == "" || derived[c.Table] || len(tables[c.Table]) == 0
 		col := strings.ToLower(c.Column)
+		for k := range opaque {
+			if whole || k == c.Table {
+				return true
+			}
+		}
 		for k, names := range renamed {
 			if (whole || k == c.Table) && names[col] {
 				return true
@@ -143,7 +164,12 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		changed = false
 		for k, qs := range bodies {
 			for _, q := range qs {
-				for _, name := range ciOutputs(q, exprCI) {
+				names, known := ciOutputs(q, exprCI)
+				if !known && !opaque[k] {
+					opaque[k] = true
+					changed = true
+				}
+				for _, name := range names {
 					if renamed[k] == nil {
 						renamed[k] = map[string]bool{}
 					}
@@ -249,8 +275,9 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 // is taken as case-insensitive when any query's column at its position is.
 // That also refuses a _bin column beside a _ci one, which MySQL compares
 // by _bin, as weighing collations against each other is not worth it for a
-// form so rare.
-func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) []string {
+// form so rare. known is false when a query of a set operation has a *,
+// whose columns stand at positions the targets do not tell.
+func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) (names []string, known bool) {
 	var arms []*sqlir.SelectStmt
 	var leaves func(q *sqlir.SelectStmt)
 	leaves = func(q *sqlir.SelectStmt) {
@@ -262,7 +289,11 @@ func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) []string {
 		arms = append(arms, q)
 	}
 	leaves(q)
-	var out []string
+	if len(arms) > 1 && slices.ContainsFunc(arms, func(a *sqlir.SelectStmt) bool {
+		return slices.ContainsFunc(a.Targets, func(t sqlir.Target) bool { return t.Star })
+	}) {
+		return nil, false
+	}
 	for i, t := range arms[0].Targets {
 		name := t.Alias
 		if c, ok := t.Expr.(*sqlir.ColumnRef); ok && name == "" {
@@ -272,12 +303,12 @@ func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) []string {
 			continue
 		}
 		if slices.ContainsFunc(arms, func(a *sqlir.SelectStmt) bool {
-			return i < len(a.Targets) && (a.Targets[i].Star || ciExpr(a.Targets[i].Expr))
+			return i < len(a.Targets) && ciExpr(a.Targets[i].Expr)
 		}) {
-			out = append(out, strings.ToLower(name))
+			names = append(names, strings.ToLower(name))
 		}
 	}
-	return out
+	return names, true
 }
 
 // pkCI reports whether table's primary key holds a case-insensitive column.

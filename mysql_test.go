@@ -5537,6 +5537,11 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 		// may take its collation from any.
 		`SELECT v FROM (SELECT 'a' AS v UNION ALL SELECT s FROM ci) d WHERE v = 'x'`,
 		`SELECT id FROM (SELECT id FROM bin UNION ALL SELECT s FROM ci) d WHERE id = 'x'`,
+		// A query of a set operation with a * gives columns whose positions
+		// detest does not follow.
+		`SELECT v FROM (SELECT 0 AS n, 'a' AS v UNION ALL SELECT * FROM ci) d WHERE v = 'x'`,
+		// A WITH query read under an alias, hiding a table of its name.
+		`WITH bin AS (SELECT s AS v FROM ci) SELECT b.v FROM bin AS b WHERE b.v = 'x'`,
 		// An expression over the column keeps its collation.
 		`SELECT v FROM (SELECT concat(s, '') AS v FROM ci) d WHERE v = 'x'`,
 		`UPDATE bin JOIN (SELECT id, s AS v FROM ci) d ON d.id = bin.id SET bin.s = 'y' WHERE d.v = 'x'`,
