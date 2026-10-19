@@ -5407,6 +5407,36 @@ func TestQualifiedInsertColumnsMySQL(t *testing.T) {
 	}
 }
 
+// A VALUES() in a subquery of ON DUPLICATE KEY UPDATE is refused, as MySQL
+// reads NULL where its argument resolves to an item of the subquery.
+func TestValuesInSubqueryOfOnDuplicateMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `CREATE TABLE u (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 5)`)
+	for _, q := range []string{
+		`INSERT INTO t VALUES (1, 23) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(n) FROM u LIMIT 1)`,
+		`INSERT INTO t VALUES (1, 25) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(u.n) FROM u LIMIT 1)`,
+		`INSERT INTO t VALUES (1, 27) ON DUPLICATE KEY UPDATE n = (SELECT max(n) FROM u WHERE n < VALUES(n))`,
+		`INSERT INTO t VALUES (1, 24) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(t.n) FROM u LIMIT 1)`,
+		`INSERT INTO t VALUES (1, 26) ON DUPLICATE KEY UPDATE n = (SELECT VALUES(n))`,
+		`INSERT INTO t VALUES (1, 5) ON DUPLICATE KEY UPDATE n = IF(EXISTS (SELECT 1 FROM u WHERE n = VALUES(n)), 7, 8)`,
+		`INSERT INTO t VALUES (1, 5) ON DUPLICATE KEY UPDATE n = IF(5 IN (SELECT n FROM u WHERE n = VALUES(n)), 7, 8)`,
+		`INSERT INTO t VALUES (1, 29) ON DUPLICATE KEY UPDATE n = (SELECT x FROM (SELECT VALUES(n) AS x) d)`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	mustExec(t, db, `INSERT INTO t VALUES (1, 30) ON DUPLICATE KEY UPDATE n = VALUES(n) + (SELECT max(n) FROM u)`)
+	var n int
+	if err := db.QueryRow(`SELECT n FROM t WHERE id = 1`).Scan(&n); err != nil || n != 35 {
+		t.Errorf("VALUES() beside a subquery: %d, %v", n, err)
+	}
+}
+
 func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())

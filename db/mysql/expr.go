@@ -64,6 +64,13 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			// MySQL reads it as NULL outside ON DUPLICATE KEY UPDATE.
 			return nil, c.unsupported("VALUES(col) outside ON DUPLICATE KEY UPDATE")
 		}
+		if c.inQuery {
+			// MySQL resolves the argument in the subquery first and gives
+			// NULL when an inner item has the column. Telling that apart
+			// from an argument resolving to the target is not worth it for
+			// so rare a form.
+			return nil, c.unsupported("VALUES(col) in a subquery of ON DUPLICATE KEY UPDATE")
+		}
 		// VALUES(col) in ON DUPLICATE KEY UPDATE is the proposed row's column.
 		// Its qualifier names the target table, never the row alias.
 		col := e.Column.Name
