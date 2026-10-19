@@ -5384,6 +5384,29 @@ func TestColumnNamesMySQL(t *testing.T) {
 	}
 }
 
+// Two aliases that differ only in case name two tables, and a comparison
+// is refused by the collation of the column its qualifier names.
+func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE bin (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	for _, q := range []string{
+		`SELECT a.id FROM ci a JOIN bin A ON A.id = a.id WHERE a.s = 'x'`,
+		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE A.s = 'x'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT a.id FROM ci a JOIN bin A ON A.id = a.id WHERE A.s = 'x'`,
+		`SELECT a.id FROM bin a JOIN ci A ON A.id = a.id WHERE a.s = 'x'`,
+	} {
+		mustExec(t, db, q)
+	}
+}
+
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())

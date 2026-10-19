@@ -46,9 +46,9 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		if db.defs[t] == nil {
 			return
 		}
-		tables[strings.ToLower(relname(name))] = t
+		tables[relname(name)] = t
 		if alias != "" {
-			tables[strings.ToLower(alias)] = t
+			tables[alias] = t
 		}
 	}
 	walkNodes(stmt, func(n any) {
@@ -74,7 +74,7 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	}
 	isCI := func(c *sqlir.ColumnRef) bool {
 		if c.Table != "" {
-			t, ok := tables[strings.ToLower(c.Table)]
+			t, ok := tables[c.Table]
 			return ok && db.defs[t].ci[c.Column]
 		}
 		for _, t := range tables {
@@ -148,7 +148,7 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 				err = refuse("DISTINCT over")
 			case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
 				err = refuse(strings.ToUpper(n.SetOp) + " over")
-			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && pkCI(db, tables[strings.ToLower(cmp.Or(n.From.Alias, relname(n.From.Name)))]):
+			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && pkCI(db, tables[cmp.Or(n.From.Alias, relname(n.From.Name))]):
 				err = refuse("a locking LIMIT scan along a primary key that holds")
 			}
 		case *sqlir.UpdateStmt:
