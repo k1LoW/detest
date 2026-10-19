@@ -5611,6 +5611,39 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 	mustExec(t, db, `WITH c AS (SELECT id AS v FROM ci) `+strings.Join(arms, ` UNION ALL `))
 }
 
+func TestMySQLDerivedTableColumnListRefused(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
+	for _, q := range []string{
+		`SELECT v FROM (SELECT id FROM ci) AS d (v) WHERE v = 1`,
+		`SELECT v FROM (SELECT s FROM ci) AS d (v) WHERE v = 'x' ORDER BY v`,
+		"SELECT a FROM (SELECT id, s FROM ci) `d` (a, `b`)",
+		`SELECT v FROM (SELECT id FROM ci UNION SELECT 2) d (v)`,
+		`SELECT v, w FROM (SELECT 1) AS d (v), (SELECT 2) e (w)`,
+		`SELECT ci.id FROM ci JOIN (SELECT id FROM ci) AS d (v) ON d.v = ci.id`,
+		`UPDATE ci JOIN (SELECT id FROM ci) d (v) ON d.v = ci.id SET ci.s = 'y'`,
+		`SELECT d.v FROM ci AS t, LATERAL (SELECT s FROM ci) AS d (v) WHERE d.v = 'x'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: got %v, want unsupported", q, err)
+		}
+	}
+	// A list that follows no derived table, or a statement with another
+	// syntax error too, fails as on MySQL.
+	for _, q := range []string{
+		`SELECT (1) d (v) FROM ci`,
+		`SELECT v FROM ci d (v)`,
+		`SELECT v FROM (SELECT id FROM ci) AS d (v) WHERE WHERE`,
+		`SELECT v FROM (SELECT id FROM ci) AS d ()`,
+		`SELECT v FROM (SELECT id FROM ci) AS d (1)`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrSyntaxError) {
+			t.Errorf("%s: got %v, want a syntax error", q, err)
+		}
+	}
+}
+
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())

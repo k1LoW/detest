@@ -27,6 +27,9 @@ func (parser) Name() string { return "mysql" }
 func (parser) Parse(query string) (sqlir.Statement, error) {
 	stmts, _, err := tidb.New().ParseSQL(query)
 	if err != nil {
+		if derivedColumnList(query, err) {
+			return nil, sqlir.Unsupported("derived table column list", query)
+		}
 		return nil, &sqlir.ParseError{Query: query, Err: err}
 	}
 	c := &conv{query: query, params: paramIndexes(stmts)}
@@ -35,6 +38,136 @@ func (parser) Parse(query string) (sqlir.Statement, error) {
 	}
 	return c.stmt(stmts[0])
 }
+
+// derivedColumnList reports whether query fails to parse only for column
+// lists on derived tables, as in (SELECT id FROM t) AS d (v), which MySQL
+// runs. TiDB's grammar takes such a list only after LATERAL and fails at its
+// '(', so each failing list is cut out and the rest parsed again. The text
+// alone does not tell the form, since a list after a parenthesized
+// expression, as in SELECT (1) d (v), is a syntax error on MySQL too, so the
+// cut query has to parse and each list has to follow the alias of a derived
+// table in it.
+func derivedColumnList(query string, err error) bool {
+	var aliases []string
+	for {
+		off, ok := syntaxErrorOffset(query, err)
+		if !ok || query[off] != '(' {
+			return false
+		}
+		n := strings.IndexByte(query[off:], ')')
+		if n < 0 {
+			return false
+		}
+		list := query[off+1 : off+n]
+		for name := range strings.SplitSeq(list, ",") {
+			if !isIdentifier(strings.TrimSpace(name)) {
+				return false
+			}
+		}
+		alias, ok := aliasAfterParen(query[:off])
+		if !ok {
+			return false
+		}
+		aliases = append(aliases, alias)
+		query = query[:off] + query[off+n+1:]
+		var stmts []ast.StmtNode
+		if stmts, _, err = tidb.New().ParseSQL(query); err == nil {
+			v := &derivedAliases{found: map[string]bool{}}
+			for _, s := range stmts {
+				s.Accept(v)
+			}
+			for _, a := range aliases {
+				if !v.found[a] {
+					return false
+				}
+			}
+			return true
+		}
+	}
+}
+
+// syntaxErrorOffset finds where in query TiDB's parser failed, from the text
+// its syntax error quotes from the failing token to the end of the query.
+func syntaxErrorOffset(query string, err error) (int, bool) {
+	msg := err.Error()
+	i := strings.Index(msg, ` near "`)
+	if i < 0 || !strings.HasSuffix(msg, `" `) || i+len(` near "`) > len(msg)-2 {
+		return 0, false
+	}
+	near := msg[i+len(` near "`) : len(msg)-2]
+	if near == "" || !strings.HasSuffix(query, near) {
+		return 0, false
+	}
+	return len(query) - len(near), true
+}
+
+// aliasAfterParen returns the alias that ends s when s ends with ") alias"
+// or ") AS alias".
+func aliasAfterParen(s string) (string, bool) {
+	s = strings.TrimRight(s, " \t\r\n")
+	var alias string
+	if strings.HasSuffix(s, "`") {
+		i := strings.LastIndexByte(s[:len(s)-1], '`')
+		if i < 0 {
+			return "", false
+		}
+		alias, s = s[i+1:len(s)-1], s[:i]
+	} else {
+		i := len(s)
+		for i > 0 && isIdentByte(s[i-1]) {
+			i--
+		}
+		alias, s = s[i:], s[:i]
+		if !isIdentifier(alias) {
+			return "", false
+		}
+	}
+	if alias == "" {
+		return "", false
+	}
+	s = strings.TrimRight(s, " \t\r\n")
+	if len(s) >= 2 && strings.EqualFold(s[len(s)-2:], "as") {
+		s = strings.TrimRight(s[:len(s)-2], " \t\r\n")
+	}
+	return alias, strings.HasSuffix(s, ")")
+}
+
+// isIdentifier reports whether s is a quoted identifier or an unquoted one,
+// which may begin with a digit but not consist of digits alone.
+func isIdentifier(s string) bool {
+	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
+		return !strings.Contains(s[1:len(s)-1], "`")
+	}
+	digits := true
+	for i := range len(s) {
+		if !isIdentByte(s[i]) {
+			return false
+		}
+		digits = digits && '0' <= s[i] && s[i] <= '9'
+	}
+	return s != "" && !digits
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 0x80 || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
+}
+
+// derivedAliases gathers the aliases of the derived tables of a statement.
+type derivedAliases struct {
+	found map[string]bool
+}
+
+func (v *derivedAliases) Enter(n ast.Node) (ast.Node, bool) {
+	if ts, ok := n.(*ast.TableSource); ok {
+		switch ts.Source.(type) {
+		case *ast.SelectStmt, *ast.SetOprStmt:
+			v.found[ts.AsName.O] = true
+		}
+	}
+	return n, false
+}
+
+func (v *derivedAliases) Leave(n ast.Node) (ast.Node, bool) { return n, true }
 
 // conv converts one query's AST.
 type conv struct {
@@ -856,8 +989,11 @@ func (c *conv) tableRef(n ast.ResultSetNode) (sqlir.TableRef, error) {
 		// which this item would then shadow.
 		return out, c.unsupported("a FROM item named excluded in ON DUPLICATE KEY UPDATE")
 	}
-	for _, cn := range ts.ColumnNames {
-		out.Columns = append(out.Columns, cn.L)
+	if len(ts.ColumnNames) > 0 {
+		// The collation check does not follow a column a list renames, and
+		// the form without LATERAL fails before conversion with the same
+		// refusal.
+		return out, c.unsupported("derived table column list")
 	}
 	switch src := ts.Source.(type) {
 	case *ast.TableName:
