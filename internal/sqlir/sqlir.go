@@ -99,6 +99,9 @@ type Target struct {
 	Name  string
 	Star  bool   // SELECT * or t.*
 	Table string // qualifier of t.*
+	// Schema is the database a MySQL db.t.* names, as written; empty for
+	// none.
+	Schema string
 }
 
 // OrderKey is one ORDER BY item.
@@ -413,6 +416,9 @@ type Assignment struct {
 	// writes the column with, which tells a multi-table UPDATE's tables
 	// apart; empty for none.
 	Table string
+	// Schema is the database a MySQL target is qualified with, as
+	// written; empty for none.
+	Schema string
 }
 
 // Script is several statements run in order, as a migration file runs. A
@@ -485,7 +491,13 @@ type Expr interface{ isExpr() }
 
 // ColumnRef is [table.]column. Table "excluded" refers to the proposed row in
 // ON CONFLICT DO UPDATE.
-type ColumnRef struct{ Table, Column string }
+type ColumnRef struct {
+	Table, Column string
+	// Schema is the database a MySQL reference is qualified with, as
+	// written, which the column name check resolves and the executor
+	// does not read; empty for none.
+	Schema string
+}
 
 // Param is a positional parameter, 0-based.
 type Param struct{ Index int }

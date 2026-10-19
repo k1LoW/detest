@@ -48,21 +48,17 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 	case *ast.ParenthesesExpr:
 		return c.expr(e.Expr)
 	case *ast.ColumnNameExpr:
-		if e.Name.Schema.L != "" {
-			// The reference keeps the table's name only, and the database
-			// would go unchecked.
-			return nil, c.unsupported("a column qualified by its database")
-		}
-		table := e.Name.Table.L
+		table, schema := e.Name.Table.L, e.Name.Schema.O
 		switch {
 		case table != "" && table == c.rowAlias:
-			table = "excluded"
+			// MySQL reads the row alias under any database.
+			table, schema = "excluded", ""
 		case table == "excluded" && c.onDuplicate:
 			// It would read as the proposed row, which MySQL names
 			// only by VALUES() or the row alias.
 			return nil, c.unsupported("a column qualified excluded in ON DUPLICATE KEY UPDATE")
 		}
-		return &sqlir.ColumnRef{Table: table, Column: e.Name.Name.L}, nil
+		return &sqlir.ColumnRef{Table: table, Column: e.Name.Name.L, Schema: schema}, nil
 	case *ast.ValuesExpr:
 		if !c.onDuplicate {
 			// MySQL reads it as NULL outside ON DUPLICATE KEY UPDATE.
