@@ -161,7 +161,14 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		}
 		return false
 	}
-	exprCI := func(e sqlir.Expr) bool { return slices.ContainsFunc(sqlir.ColumnRefs(e), isCI) }
+	// A * in a subquery, such as (SELECT * FROM t), gives a column no
+	// ColumnRef names, so it is taken as case-insensitive, as a * is in
+	// starCI below.
+	exprCI := func(e sqlir.Expr) bool {
+		return slices.ContainsFunc(sqlir.ColumnRefs(e), isCI) || slices.ContainsFunc(sqlir.Selects(e), func(q *sqlir.SelectStmt) bool {
+			return slices.ContainsFunc(q.Targets, func(t sqlir.Target) bool { return t.Star })
+		})
+	}
 	starCI := func(targets []sqlir.Target) bool {
 		for _, t := range targets {
 			if t.Star || exprCI(t.Expr) {
@@ -288,7 +295,9 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 // That also refuses a _bin column beside a _ci one, which MySQL compares
 // by _bin, as weighing collations against each other is not worth it for a
 // form so rare. known is false when a query of a set operation has a *,
-// whose columns stand at positions the targets do not tell.
+// whose columns stand at positions the targets do not tell, and when a
+// VALUES list holds a case-insensitive value, which is not followed by
+// position for a form so rare.
 func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) (names []string, known bool) {
 	var arms []*sqlir.SelectStmt
 	var leaves func(q *sqlir.SelectStmt)
@@ -303,6 +312,11 @@ func ciOutputs(q *sqlir.SelectStmt, ciExpr func(sqlir.Expr) bool) (names []strin
 	leaves(q)
 	if len(arms) > 1 && slices.ContainsFunc(arms, func(a *sqlir.SelectStmt) bool {
 		return slices.ContainsFunc(a.Targets, func(t sqlir.Target) bool { return t.Star })
+	}) {
+		return nil, false
+	}
+	if slices.ContainsFunc(arms, func(a *sqlir.SelectStmt) bool {
+		return slices.ContainsFunc(a.Values, func(row []sqlir.Expr) bool { return slices.ContainsFunc(row, ciExpr) })
 	}) {
 		return nil, false
 	}

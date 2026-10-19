@@ -5520,6 +5520,7 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 	db, _ := s.DB("app", mysql.New())
 	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
 	mustExec(t, db, `CREATE TABLE bin (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	mustExec(t, db, `CREATE TABLE one (s VARCHAR(10))`)
 	for _, q := range []string{
 		`SELECT v FROM (SELECT s AS v FROM ci) d WHERE v = 'x'`,
 		`SELECT d.v FROM (SELECT s AS v FROM ci) d WHERE d.v = 'x'`,
@@ -5540,6 +5541,11 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 		// A query of a set operation with a * gives columns whose positions
 		// detest does not follow.
 		`SELECT v FROM (SELECT 0 AS n, 'a' AS v UNION ALL SELECT * FROM ci) d WHERE v = 'x'`,
+		// A VALUES list or a * in a subquery gives a column no name or
+		// ColumnRef ties to the case-insensitive one.
+		`SELECT v FROM (SELECT 'a' AS v UNION ALL VALUES ROW((SELECT s FROM ci WHERE id = 1))) d WHERE v = 'x'`,
+		`SELECT v FROM (SELECT (SELECT * FROM one) AS v) d WHERE v = 'x'`,
+		`SELECT 1 FROM ci WHERE (SELECT * FROM one) = 'x'`,
 		// A WITH query read under an alias, hiding a table of its name.
 		`WITH bin AS (SELECT s AS v FROM ci) SELECT b.v FROM bin AS b WHERE b.v = 'x'`,
 		// An expression over the column keeps its collation.
