@@ -47,8 +47,8 @@ type viewWalk struct {
 	// outputsOnly is set while walking the ORDER BY of a set operation or
 	// VALUES, whose names are its output columns, inside an expression too.
 	outputsOnly bool
-	renameRel [2]string // relation, new name
-	loose     map[string]bool
+	renameRel   [2]string // relation, new name
+	loose       map[string]bool
 }
 
 // bindView returns the query of a view bound as the server binds it when
