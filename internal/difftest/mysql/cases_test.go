@@ -1496,8 +1496,8 @@ var cases = []difftest.Case{
 		},
 	},
 	{
-		// The parser writes a qualifier in lower case, and the upsert reads
-		// the existing row of a mixed case table by its own name.
+		// The upsert reads the existing row of a mixed case table by its
+		// own name.
 		Name: "ON DUPLICATE KEY UPDATE reads a mixed case table by its name",
 		Schema: []string{
 			`CREATE TABLE Counters (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
@@ -1509,6 +1509,47 @@ var cases = []difftest.Case{
 		Steps: []difftest.Step{
 			difftest.S(0, `INSERT INTO Counters VALUES (1, 9) ON DUPLICATE KEY UPDATE n = Counters.n + 1`),
 			difftest.Q(0, `SELECT id, n FROM Counters ORDER BY id`),
+		},
+	},
+	{
+		// With the default lower_case_table_names=0, a qualifier must
+		// match the table's name or alias in its case, while column names
+		// fold case.
+		Name: "a qualifier matches a table name or alias in its case",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
+			`CREATE TABLE u (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
+			`CREATE TABLE Foo (id INT PRIMARY KEY, n INT NOT NULL)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 2)`,
+			`INSERT INTO u VALUES (1, 5)`,
+			`INSERT INTO Foo VALUES (1, 7)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT T.id FROM t`),
+			difftest.Q(0, `SELECT A.id FROM t AS a`),
+			difftest.Q(0, `SELECT a.id FROM t AS A`),
+			difftest.Q(0, `SELECT foo.id FROM Foo`),
+			difftest.Q(0, `SELECT Foo.id, Foo.N FROM Foo`),
+			difftest.Q(0, `WITH c AS (SELECT 1 AS x) SELECT C.x FROM c`),
+			difftest.Q(0, `SELECT D.x FROM (SELECT 1 AS x) d`),
+			difftest.Q(0, `SELECT a.id FROM t a WHERE EXISTS (SELECT 1 FROM u WHERE u.id = A.id)`),
+			difftest.Q(0, `SELECT a.id FROM t a JOIN u b ON B.id = a.id`),
+			difftest.Q(0, `SELECT a.id, A.n FROM t a JOIN u A ON A.id = a.id`),
+			difftest.S(0, `UPDATE t SET T.n = 3`),
+			difftest.S(0, `UPDATE t a SET A.n = 3`),
+			difftest.S(0, `UPDATE t SET u.n = 3`),
+			difftest.S(0, `UPDATE t a SET a.n = 3 WHERE a.id = 1`),
+			difftest.S(0, `DELETE FROM t a WHERE A.id = 0`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 2) ON DUPLICATE KEY UPDATE n = T.n + 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 2) ON DUPLICATE KEY UPDATE T.n = 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 2) AS new ON DUPLICATE KEY UPDATE n = NEW.n`),
+			difftest.S(0, `INSERT INTO Foo VALUES (1, 2) ON DUPLICATE KEY UPDATE n = foo.n + 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 2) AS T ON DUPLICATE KEY UPDATE n = T.n + t.n`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 2) AS New ON DUPLICATE KEY UPDATE n = New.n + 10`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
 		},
 	},
 }

@@ -5356,6 +5356,27 @@ func TestColumnNamesMySQL(t *testing.T) {
 	if err := db.QueryRow(`SELECT n FROM T2 WHERE id = 1`).Scan(&stored); err != nil || stored != 3 {
 		t.Errorf("upsert reading a mixed case table: %d, %v", stored, err)
 	}
+	// A * qualified in another case than its table or alias fails with
+	// 1051 on MySQL.
+	for _, q := range []string{
+		`SELECT T.* FROM t`,
+		`SELECT A.* FROM t AS a`,
+		`SELECT t2.* FROM T2`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// MySQL fails a locking clause naming a table in another case with
+	// 3568, and the error number does not depend on the data.
+	for _, q := range []string{
+		`SELECT id FROM t AS a FOR UPDATE OF A`,
+		`SELECT id FROM t FOR UPDATE OF T`,
+	} {
+		if _, err := db.Exec(q); err == nil {
+			t.Errorf("%s: no error", q)
+		}
+	}
 	// A set operation's ORDER BY names its first query's alias in any case.
 	var n int
 	if err := db.QueryRow(`SELECT 1 AS X UNION ALL SELECT 2 ORDER BY X DESC LIMIT 1`).Scan(&n); err != nil || n != 2 {

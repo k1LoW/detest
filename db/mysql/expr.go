@@ -53,7 +53,7 @@ func (c *conv) expr(n ast.ExprNode) (sqlir.Expr, error) {
 			// would go unchecked.
 			return nil, c.unsupported("a column qualified by its database")
 		}
-		table := e.Name.Table.L
+		table := e.Name.Table.O
 		switch {
 		case table != "" && table == c.rowAlias:
 			table = "excluded"
