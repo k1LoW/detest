@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.6.5](https://github.com/k1LoW/detest/compare/v0.6.4...v0.6.5) - 2026-10-19
+
+### Fix bug 🐛
+- fix: match a MySQL table qualifier or alias in its own case by @k1LoW in https://github.com/k1LoW/detest/pull/203
+- fix: resolve a qualified MySQL INSERT column against the target table by @k1LoW in https://github.com/k1LoW/detest/pull/208
+- fix: resolve a qualified MySQL VALUES() argument against the INSERT target by @k1LoW in https://github.com/k1LoW/detest/pull/209
+- fix: refuse a comparison on a case-insensitive column a derived table renames by @k1LoW in https://github.com/k1LoW/detest/pull/210
+- fix: refuse a MySQL VALUES() in a subquery of ON DUPLICATE KEY UPDATE by @k1LoW in https://github.com/k1LoW/detest/pull/214
+- fix: refuse a comparison on a case-insensitive column read through a view by @k1LoW in https://github.com/k1LoW/detest/pull/215
+- fix: refuse a MySQL derived table with a column list by @k1LoW in https://github.com/k1LoW/detest/pull/216
+### Other Changes
+- fix: resolve a MySQL column qualified by its database by @k1LoW in https://github.com/k1LoW/detest/pull/202
+- style: gofmt mysqlcolumns.go and viewbind.go by @k1LoW in https://github.com/k1LoW/detest/pull/217
+
 ## [v0.6.4](https://github.com/k1LoW/detest/compare/v0.6.3...v0.6.4) - 2026-10-17
 
 ### Fix bug 🐛
