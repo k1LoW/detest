@@ -5641,6 +5641,56 @@ func TestMySQLRenamedCaseInsensitiveColumn(t *testing.T) {
 	mustExec(t, db, `WITH c AS (SELECT id AS v FROM ci) `+strings.Join(arms, ` UNION ALL `))
 }
 
+func TestMySQLCaseInsensitiveColumnThroughView(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysql.New())
+	mustExec(t, db, `CREATE TABLE ci (id INT PRIMARY KEY, s VARCHAR(10))`)
+	mustExec(t, db, `CREATE TABLE bin (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	mustExec(t, db, `CREATE VIEW vw2 AS SELECT id, s FROM ci`)
+	mustExec(t, db, `CREATE VIEW vw AS SELECT id, s AS v FROM ci`)
+	mustExec(t, db, `CREATE VIEW vs AS SELECT * FROM ci`)
+	mustExec(t, db, `CREATE VIEW vc (k, w) AS SELECT id, s FROM ci`)
+	mustExec(t, db, `CREATE VIEW vv AS SELECT id AS i, v AS u FROM vw`)
+	mustExec(t, db, `CREATE VIEW vu AS SELECT id, s FROM bin UNION ALL SELECT id, s FROM ci`)
+	mustExec(t, db, `CREATE VIEW vb AS SELECT id, s, s AS v FROM bin`)
+	for _, q := range []string{
+		`SELECT id FROM vw2 WHERE s = 'x' ORDER BY id`,
+		`SELECT id FROM vw WHERE v = 'x' ORDER BY id`,
+		`SELECT s FROM vw2 ORDER BY s`,
+		`SELECT count(DISTINCT s) FROM vw2`,
+		`SELECT vw2.id FROM vw2 WHERE vw2.s = 'x'`,
+		`SELECT a.id FROM vw AS a WHERE a.v = 'x'`,
+		`SELECT id FROM vs WHERE s = 'x'`,
+		`SELECT k FROM vc WHERE w = 'x'`,
+		// The view reads another view.
+		`SELECT i FROM vv WHERE u = 'x'`,
+		// A set operation's column may take its collation from any query.
+		`SELECT id FROM vu WHERE s = 'x'`,
+		`SELECT b.id FROM bin b JOIN vw ON vw.id = b.id WHERE vw.v = 'x'`,
+		`SELECT id FROM (SELECT id, v AS z FROM vw) d WHERE z = 'x'`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT s FROM vw2 WHERE id = 1 ORDER BY id`,
+		`SELECT k, w FROM vc WHERE k = 1`,
+		`SELECT id FROM vb WHERE s = 'x' AND v = 'x' ORDER BY s`,
+	} {
+		mustExec(t, db, q)
+	}
+	// A comparison inside a view's query checked while its column was _bin
+	// is refused once an ALTER makes the column case-insensitive.
+	mustExec(t, db, `CREATE TABLE later (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	mustExec(t, db, `CREATE VIEW vl AS SELECT id FROM later WHERE s = 'x'`)
+	mustExec(t, db, `SELECT id FROM vl`)
+	mustExec(t, db, `ALTER TABLE later MODIFY s VARCHAR(10)`)
+	if _, err := db.Exec(`SELECT id FROM vl`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("SELECT id FROM vl after ALTER: %v", err)
+	}
+}
+
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
 	s := newSim(t)
 	db, _ := s.DB("app", mysqlBin())
