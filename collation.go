@@ -38,18 +38,24 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	}
 	// The tables the statement names, by the name each item is known by.
 	// One name may stand for other tables in other query blocks.
-	tables := map[string][]string{}
+	// derived holds the names of items that are not tables, such as a
+	// derived table or a WITH query, whose columns' collations detest does
+	// not follow through the query they are made of.
+	tables, derived := map[string][]string{}, map[string]bool{}
 	add := func(name, alias string) {
-		if name == "" {
-			return
-		}
-		t := db.resolve(name)
-		if db.defs[t] == nil {
-			return
-		}
 		// An alias hides the table's name, which may be another item's
 		// alias.
 		k := cmp.Or(alias, relname(name))
+		t := ""
+		if name != "" {
+			t = db.resolve(name)
+		}
+		if db.defs[t] == nil {
+			if k != "" {
+				derived[k] = true
+			}
+			return
+		}
 		if !slices.Contains(tables[k], t) {
 			tables[k] = append(tables[k], t)
 		}
@@ -78,10 +84,13 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		return nil
 	}
 	// A qualifier is not resolved to its query block, so a name that
-	// stands for several tables refuses a column case-insensitive in any.
+	// stands for several tables refuses a column case-insensitive in any,
+	// and one that may stand for an item other than a table refuses a
+	// column case-insensitive in any table, as an unqualified one does.
 	isCI := func(c *sqlir.ColumnRef) bool {
+		whole := c.Table == "" || derived[c.Table] || len(tables[c.Table]) == 0
 		for k, ts := range tables {
-			if c.Table != "" && k != c.Table {
+			if !whole && k != c.Table {
 				continue
 			}
 			for _, t := range ts {

@@ -5400,6 +5400,11 @@ func TestMySQLAliasesInTwoCasesKeepTheirCollations(t *testing.T) {
 		`SELECT id FROM ci AS a WHERE s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
 		`SELECT a.id FROM ci AS a WHERE a.s = 'x' AND EXISTS (SELECT 1 FROM bin AS a)`,
 		`SELECT id FROM ci a WHERE s = 'x' UNION ALL SELECT id FROM bin a`,
+		// A derived table or a WITH query passes ci's column through.
+		`SELECT CI.id FROM (SELECT id, s FROM ci) AS CI WHERE CI.s = 'x'`,
+		`SELECT ci.id FROM (SELECT a.id, a.s FROM ci AS a) AS ci WHERE ci.s = 'x'`,
+		`SELECT d.id FROM (SELECT id, s FROM ci) AS d WHERE d.s = 'x'`,
+		`WITH c AS (SELECT id, s FROM ci) SELECT c.id FROM c WHERE c.s = 'x'`,
 	} {
 		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
 			t.Errorf("%s: %v", q, err)
