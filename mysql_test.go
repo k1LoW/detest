@@ -5246,11 +5246,6 @@ func TestColumnNamesMySQL(t *testing.T) {
 		`SELECT t.n, (SELECT u.m AS n FROM u HAVING (SELECT n) > 0 LIMIT 1) FROM t`,
 		"SELECT 1 FROM (SELECT n+1, 2 AS `n+1` FROM t) d",
 		`SELECT 1 FROM (SELECT 1.0, 1.0) d`,
-		`SELECT wrong.t.id FROM t`,
-		`SELECT app.t.id FROM t`,
-		`SELECT wrong.t.* FROM t`,
-		`UPDATE t SET wrong.t.n = 3`,
-		`INSERT INTO t (id, n) VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 3`,
 		`INSERT INTO t (id, n) VALUES (1, 9) AS t ON DUPLICATE KEY UPDATE n = t.n`,
 		`SELECT t.n AS a, count(*) FROM t CROSS JOIN (SELECT 'a' UNION ALL SELECT 'b') d GROUP BY a, t.n`,
 		"SELECT d.`TRUE` FROM (SELECT TRUE) d",
@@ -5381,6 +5376,105 @@ func TestColumnNamesMySQL(t *testing.T) {
 	var n int
 	if err := db.QueryRow(`SELECT 1 AS X UNION ALL SELECT 2 ORDER BY X DESC LIMIT 1`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("set operation ordered by an upper case alias: %d, %v", n, err)
+	}
+}
+
+func TestDatabaseQualifiedColumnsMySQL(t *testing.T) {
+	s := newSim(t)
+	db, _ := s.DB("app", mysqlBin())
+	mustExec(t, db, `CREATE TABLE t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `CREATE TABLE u (id INT PRIMARY KEY, m INT)`)
+	mustExec(t, db, `CREATE VIEW v AS SELECT id, n FROM t`)
+	mustExec(t, db, `CREATE TABLE other.t (id INT PRIMARY KEY, n INT)`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 2)`)
+	mustExec(t, db, `INSERT INTO u VALUES (1, 5)`)
+	mustExec(t, db, `INSERT INTO other.t VALUES (5, 6)`)
+	for q, want := range map[string]int{
+		`SELECT app.t.id FROM t`: 1,
+		`SELECT app.t.n FROM app.t WHERE app.t.id = 1 ORDER BY app.t.n`: 2,
+		`SELECT app.x.n FROM t x`:                                              2,
+		`SELECT app.v.n FROM v`:                                                2,
+		`SELECT wrong.d.x FROM (SELECT 3 AS x) d`:                              3,
+		`WITH c AS (SELECT 4 AS x) SELECT wrong.c.x FROM c`:                    4,
+		`WITH t AS (SELECT 7 AS id) SELECT app.t.id FROM t`:                    7,
+		`SELECT (SELECT app.t.n FROM u LIMIT 1) FROM t`:                        2,
+		`SELECT app.t.n FROM t GROUP BY t.n ORDER BY t.n`:                      2,
+		`SELECT DISTINCT t.n FROM t ORDER BY app.t.n`:                          2,
+		`SELECT count(*) FROM t GROUP BY app.t.n HAVING app.t.n > 0`:           1,
+		`SELECT n FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = app.t.id)`: 2,
+		`SELECT other.x.n FROM other.t x`:                                      6,
+		`SELECT (SELECT other.t.n FROM other.t LIMIT 1) FROM t`:                6,
+	} {
+		var got int
+		if err := db.QueryRow(q).Scan(&got); err != nil || got != want {
+			t.Errorf("%s: %d, %v", q, got, err)
+		}
+	}
+	var id, n int
+	if err := db.QueryRow(`SELECT app.t.* FROM t`).Scan(&id, &n); err != nil || id != 1 || n != 2 {
+		t.Errorf("app.t.*: %d %d, %v", id, n, err)
+	}
+	mustExec(t, db, `UPDATE t SET app.t.n = 3 WHERE id = 1`)
+	mustExec(t, db, `UPDATE t x JOIN u ON u.id = x.id SET app.x.n = app.u.m + app.x.n`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE app.t.n = app.t.n + 1`)
+	mustExec(t, db, `INSERT INTO t VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = wrong.new.n + app.t.n`)
+	if err := db.QueryRow(`SELECT n FROM t WHERE id = 1`).Scan(&n); err != nil || n != 18 {
+		t.Errorf("writes through database qualified names: %d, %v", n, err)
+	}
+	// MySQL compares a database name in its case, and an alias hides the
+	// table's own name under its database too.
+	for _, q := range []string{
+		`SELECT wrong.t.id FROM t`,
+		`SELECT APP.t.id FROM t`,
+		`SELECT app.t.id FROM t x`,
+		`SELECT wrong.x.id FROM t x`,
+		`SELECT app.v.id FROM v x`,
+		`SELECT app.t.id FROM other.t`,
+		`SELECT app.x.id FROM other.t x`,
+		`SELECT id FROM t ORDER BY wrong.t.id`,
+		`DELETE FROM t WHERE wrong.t.id = 99`,
+		`UPDATE t SET wrong.t.n = 3`,
+		`UPDATE t x SET app.t.n = 3`,
+		`UPDATE t x SET wrong.x.n = 3`,
+		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 1`,
+		`INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = wrong.t.n`,
+	} {
+		if _, err := db.Exec(q); !errors.Is(err, ErrUndefinedColumn) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// MySQL fails these with 1051, and detest gives a * no columns. An
+	// inner item of the name in another database would be read by the
+	// executor, where MySQL reads the outer one.
+	for _, q := range []string{
+		`SELECT wrong.t.* FROM t`,
+		`SELECT app.t.* FROM t x`,
+		`SELECT app.d.* FROM (SELECT 1 AS x) d`,
+		`WITH c AS (SELECT 1 AS x) SELECT app.c.* FROM c`,
+		`SELECT (SELECT app.t.n FROM other.t LIMIT 1) FROM t`,
+	} {
+		if _, err := db.Exec(q); !errors.As(err, new(*ErrUnsupportedSQL)) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// CREATE TABLE ... SELECT resolves its query as a SELECT does.
+	mustExec(t, db, `CREATE TABLE cp AS SELECT app.t.n FROM t`)
+	if err := db.QueryRow(`SELECT n FROM cp`).Scan(&n); err != nil || n != 18 {
+		t.Errorf("CREATE TABLE AS through a database qualified name: %d, %v", n, err)
+	}
+	if _, err := db.Exec(`CREATE TABLE cp2 AS SELECT wrong.t.n FROM t`); !errors.Is(err, ErrUndefinedColumn) {
+		t.Errorf("CREATE TABLE AS of another database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE cp3 AS SELECT (SELECT app.t.n FROM other.t LIMIT 1) AS n FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("CREATE TABLE AS of a shadowed name: %v", err)
+	}
+	// The same holds where neither table is declared, so detest does not
+	// know the outer item's columns.
+	undeclared, _ := s.DB("undeclared", mysqlBin())
+	mustExec(t, undeclared, `INSERT INTO t (id, n) VALUES (1, 2)`)
+	mustExec(t, undeclared, `INSERT INTO other.t (id, n) VALUES (5, 6)`)
+	if _, err := undeclared.Exec(`SELECT (SELECT app.t.n FROM other.t LIMIT 1) FROM t`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("undeclared tables: %v", err)
 	}
 }
 

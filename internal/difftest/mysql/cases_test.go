@@ -1496,6 +1496,34 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		// MySQL resolves a column qualified by a database against the
+		// tables of that database only, so one naming no database of the
+		// statement's tables fails with 1054. A derived table, a CTE and
+		// the row alias take any database. Each case runs in a database
+		// of its own, which the statements cannot name, so the forms
+		// naming it are in mysql_test.go.
+		Name: "a column qualified by another database",
+		Schema: []string{
+			`CREATE TABLE t (id INT PRIMARY KEY, n INT)` + binary,
+		},
+		Seed: []string{
+			`INSERT INTO t VALUES (1, 2)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			difftest.Q(0, `SELECT wrong.t.id FROM t`),
+			difftest.Q(0, `SELECT id FROM t x WHERE wrong.x.n = 2`),
+			difftest.Q(0, `SELECT wrong.d.x FROM (SELECT 3 AS x) d`),
+			difftest.Q(0, `WITH c AS (SELECT 4 AS x) SELECT wrong.c.x FROM c`),
+			difftest.S(0, `UPDATE t SET wrong.t.n = 3 WHERE id = 1`),
+			difftest.S(0, `DELETE FROM t WHERE wrong.t.id = 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE wrong.t.n = 1`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) ON DUPLICATE KEY UPDATE n = wrong.t.n`),
+			difftest.S(0, `INSERT INTO t VALUES (1, 9) AS new ON DUPLICATE KEY UPDATE n = wrong.new.n + 1`),
+			difftest.Q(0, `SELECT id, n FROM t ORDER BY id`),
+		},
+	},
+	{
 		// The upsert reads the existing row of a mixed case table by its
 		// own name.
 		Name: "ON DUPLICATE KEY UPDATE reads a mixed case table by its name",

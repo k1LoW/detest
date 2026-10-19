@@ -215,6 +215,7 @@ func (x *sqlExec) checkColumns(stmt sqlir.Statement) error {
 						return x.unsupported(why)
 					}
 				}
+				return x.checkMySQLColumns(st.Select)
 			}
 		}
 		return nil

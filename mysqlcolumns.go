@@ -81,6 +81,11 @@ func literalName(e sqlir.Expr) (string, bool) {
 type myItem struct {
 	alias string
 	cols  myCols
+	// db is the database of a table or view, which a qualifier naming
+	// another one does not reach. It is empty for a derived table, a CTE,
+	// a table function and the proposed row, whose qualifier MySQL takes
+	// under any database.
+	db string
 	// refuse is why a reference that resolves to the item is refused,
 	// where detest would read another value than MySQL does.
 	refuse string
@@ -169,15 +174,29 @@ func (w *myWalk) cteCols(level, i int) (myCols, error) {
 	return e.cols, e.err
 }
 
-// tableCols are the columns of the table, view or CTE name refers to.
-func (w *myWalk) tableCols(name string) (myCols, error) {
+// tableCols are the columns of the table, view or CTE name refers to, and
+// the database of a table or view, empty for a CTE.
+func (w *myWalk) tableCols(name string) (myCols, string, error) {
 	for level, ctes := range slices.Backward(w.ctes) {
 		for i, e := range slices.Backward(ctes) {
 			if e.name == name {
-				return w.cteCols(level, i)
+				cols, err := w.cteCols(level, i)
+				return cols, "", err
 			}
 		}
 	}
+	cols, err := w.relationCols(name)
+	return cols, w.database(name), err
+}
+
+// database is the database the table or view name is in.
+func (w *myWalk) database(name string) string {
+	q := w.x.tx.db.resolve(name)
+	return q[:len(q)-len(relname(q))-1]
+}
+
+// relationCols are the columns of the table or view name refers to.
+func (w *myWalk) relationCols(name string) (myCols, error) {
 	db := w.x.tx.db
 	table := db.resolve(name)
 	if def := db.defs[table]; def != nil {
@@ -203,6 +222,12 @@ func (w *myWalk) tableCols(name string) (myCols, error) {
 	return myCols{unknown: true}, nil
 }
 
+// qualified joins the parts of a name that are given, as MySQL writes the
+// name in an error.
+func qualified(parts ...string) string {
+	return strings.Join(slices.DeleteFunc(parts, func(p string) bool { return p == "" }), ".")
+}
+
 // itemAlias is the name a FROM item is referred to by.
 func itemAlias(t sqlir.TableRef) string {
 	return cmp.Or(t.Alias, relname(t.Name))
@@ -222,11 +247,11 @@ func (w *myWalk) item(t sqlir.TableRef, outer *myScope) (myItem, error) {
 	case t.Func != nil:
 		it.cols = myCols{unknown: true}
 	default:
-		cols, err := w.tableCols(t.Name)
+		cols, db, err := w.tableCols(t.Name)
 		if err != nil {
 			return it, err
 		}
-		it.cols = cols
+		it.cols, it.db = cols, db
 	}
 	if len(t.Columns) > 0 {
 		it.cols = myCols{names: t.Columns}
@@ -328,9 +353,12 @@ func (w *myWalk) query(sel *sqlir.SelectStmt, outer *myScope) (myCols, *myScope,
 		}
 	}
 	for _, t := range sel.Targets {
-		if t.Star && t.Table != "" && !slices.ContainsFunc(sc.items, func(it myItem) bool { return it.alias == t.Table }) {
+		if t.Star && t.Table != "" && !slices.ContainsFunc(sc.items, func(it myItem) bool {
+			// MySQL takes db.t.* of a table or view of the database only.
+			return it.alias == t.Table && (t.Schema == "" || it.db != "" && it.db == t.Schema)
+		}) {
 			// MySQL fails it with 1051, and detest gives no columns.
-			return myCols{}, nil, w.x.unsupported(fmt.Sprintf("%s.* of a table not in FROM", t.Table))
+			return myCols{}, nil, w.x.unsupported(fmt.Sprintf("%s.* of a table not in FROM", qualified(t.Schema, t.Table)))
 		}
 	}
 	substituted := map[sqlir.Expr]string{}
@@ -730,10 +758,7 @@ func (w *myWalk) expr(e sqlir.Expr, ctx myCtx) error {
 
 // ref resolves a column reference in sc, innermost block first.
 func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
-	name := r.Column
-	if r.Table != "" {
-		name = r.Table + "." + r.Column
-	}
+	name := qualified(r.Schema, r.Table, r.Column)
 	missed := false // an item of the qualifier lacks the column
 	for s := sc; s != nil; s = s.outer {
 		var hits []myItem
@@ -741,6 +766,12 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 		refuse := ""
 		for _, it := range s.items {
 			if r.Table != "" && it.alias != r.Table || r.Table == "" && it.qualified {
+				continue
+			}
+			if r.Schema != "" && it.db != "" && it.db != r.Schema {
+				// MySQL looks past it, where the executor, which keys an
+				// item by its alias only, would read it.
+				missed = true
 				continue
 			}
 			if it.cols.unknown {
@@ -780,6 +811,10 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 			}
 		}
 		switch {
+		case unknown && len(hits) <= 1 && missed && r.Table != "" && s != sc:
+			// MySQL looks past the inner item, which the executor would
+			// read, even when the outer item's columns are not known.
+			return w.x.unsupported(fmt.Sprintf("column %s of an outer item whose name an inner item shadows", name))
 		case unknown && refuse != "" && len(hits) <= 1:
 			return w.x.unsupported(refuse)
 		case unknown && len(hits) <= 1:
@@ -822,7 +857,7 @@ func (w *myWalk) ref(r *sqlir.ColumnRef, sc *myScope, clause string) error {
 // target is the item of the table an INSERT, UPDATE or DELETE writes.
 func (w *myWalk) target(table, alias string) myItem {
 	db := w.x.tx.db
-	it := myItem{alias: itemAlias(sqlir.TableRef{Name: table, Alias: alias}), cols: myCols{unknown: true}}
+	it := myItem{alias: itemAlias(sqlir.TableRef{Name: table, Alias: alias}), cols: myCols{unknown: true}, db: w.database(table)}
 	if def := db.defs[db.resolve(table)]; def != nil {
 		it.cols = myCols{names: def.columns}
 	}
@@ -900,7 +935,7 @@ func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 		return w.x.unsupported("ON DUPLICATE KEY UPDATE of a table named excluded")
 	}
 	excluded := t
-	excluded.alias, excluded.qualified = "excluded", true
+	excluded.alias, excluded.qualified, excluded.db = "excluded", true, ""
 	sc := &myScope{items: []myItem{t, excluded}}
 	if selected != nil {
 		// MySQL reads the SELECT's columns too, detest none of them.
@@ -910,8 +945,8 @@ func (w *myWalk) insert(ins *sqlir.InsertStmt) error {
 		}
 	}
 	for _, a := range oc.Set {
-		if a.Table != "" && a.Table != t.alias {
-			return w.unknownColumn(a.Table+"."+a.Column, "field list")
+		if a.Table != "" && a.Table != t.alias || a.Schema != "" && a.Schema != t.db {
+			return w.unknownColumn(qualified(a.Schema, a.Table, a.Column), "field list")
 		}
 		if err := w.setColumn(a.Column, t, nil); err != nil {
 			return err
@@ -970,10 +1005,11 @@ func (w *myWalk) update(up *sqlir.UpdateStmt) error {
 	for _, a := range up.Set {
 		others := sc.items[1:]
 		if a.Table != "" {
-			if a.Table != t.alias {
+			if a.Table != t.alias || a.Schema != "" && a.Schema != t.db {
 				// The parser refuses a joined item's name, so this names
-				// no item, or the table an alias hides.
-				return w.unknownColumn(a.Table+"."+a.Column, "field list")
+				// no item, the table an alias hides, or one of another
+				// database.
+				return w.unknownColumn(qualified(a.Schema, a.Table, a.Column), "field list")
 			}
 			others = nil
 		}

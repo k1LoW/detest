@@ -618,10 +618,7 @@ func (c *conv) selectStmt(s *ast.SelectStmt) (*sqlir.SelectStmt, error) {
 	if s.Fields != nil {
 		for _, f := range s.Fields.Fields {
 			if f.WildCard != nil {
-				if f.WildCard.Schema.L != "" {
-					return nil, c.unsupported("a * qualified by its database")
-				}
-				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.O})
+				out.Targets = append(out.Targets, sqlir.Target{Star: true, Table: f.WildCard.Table.O, Schema: f.WildCard.Schema.O})
 				continue
 			}
 			e, err := c.expr(f.Expr)
@@ -971,10 +968,7 @@ func (c *conv) insert(s *ast.InsertStmt) (sqlir.Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			if a.Column.Schema.L != "" {
-				return nil, c.unsupported("an assignment target qualified by its database")
-			}
-			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O})
+			oc.Set = append(oc.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O, Schema: a.Column.Schema.O})
 		}
 		out.OnConflict = oc
 	case s.IgnoreErr:
@@ -1000,9 +994,6 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 	}
 	out := &sqlir.UpdateStmt{Table: t.Name, Alias: t.Alias, From: extra, JoinOn: ons}
 	for _, a := range s.List {
-		if a.Column.Schema.L != "" {
-			return nil, c.unsupported("an assignment target qualified by its database")
-		}
 		if q := a.Column.Table.O; q != "" && slices.ContainsFunc(extra, func(e sqlir.TableRef) bool { return q == e.Alias || e.Alias == "" && q == relname(e.Name) }) {
 			return nil, c.unsupported("UPDATE of more than one table")
 		}
@@ -1014,7 +1005,7 @@ func (c *conv) update(s *ast.UpdateStmt) (sqlir.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O})
+		out.Set = append(out.Set, sqlir.Assignment{Column: a.Column.Name.L, Value: e, Table: a.Column.Table.O, Schema: a.Column.Schema.O})
 	}
 	if s.Where != nil {
 		if out.Where, err = c.cond(s.Where); err != nil {
