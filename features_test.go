@@ -310,17 +310,11 @@ func TestWhenGatesTheStart(t *testing.T) {
 	})
 }
 
-// Instances and Pods let instances of a process type run at the same time.
+// Instances lets instances of a manual or a loop process type run at the
+// same time.
 func TestInstancesRunConcurrently(t *testing.T) {
-	for _, opt := range []struct {
-		name string
-		opts []Option
-		proc []ProcOption
-	}{
-		{"Instances", nil, []ProcOption{Instances(2)}},
-		{"Pods", []Option{Pods(2)}, nil},
-	} {
-		t.Run(opt.name, func(t *testing.T) {
+	for _, loop := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Manual", true: "Loop"}[loop], func(t *testing.T) {
 			Explore(t, func(t *testing.T, s *Sim) {
 				active := 0
 				s.Seed(func() { active = 0 })
@@ -330,13 +324,13 @@ func TestInstancesRunConcurrently(t *testing.T) {
 					active--
 					return nil
 				}
-				if opt.proc == nil {
-					s.Loop("worker", 2, work) // Pods sets the instances of loops
+				if loop {
+					s.Loop("worker", 2, work, Instances(2))
 				} else {
-					s.Manual("worker", 2, work, opt.proc...)
+					s.Manual("worker", 2, work, Instances(2))
 				}
 				s.Sometimes("two workers at once", func(*State) bool { return active == 2 })
-			}, opt.opts...)
+			})
 		})
 	}
 }

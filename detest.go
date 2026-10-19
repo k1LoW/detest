@@ -68,12 +68,6 @@ var (
 // Option configures a Sim.
 type Option func(*Sim)
 
-// Pods sets how many pods the system runs on. It is the default instance
-// count of loop and message process types. A manual process, such as an
-// operation a user issues, runs one instance at a time unless Instances says
-// otherwise.
-func Pods(n int) Option { return func(s *Sim) { s.pods = n } }
-
 // MaxFailures bounds the external-call failures per run. It is the fairness
 // assumption: the environment eventually cooperates, so a run cannot fail every
 // call forever.
@@ -310,7 +304,6 @@ func ObserveSQL(fn func(query string, err error)) Option {
 // types, seeds and invariants.
 type Sim struct {
 	t                *testing.T
-	pods             int
 	maxFailures      int
 	maxRedeliveries  int
 	maxCrashes       int
@@ -401,7 +394,7 @@ type Sim struct {
 }
 
 func newSimDefaults() *Sim {
-	return &Sim{pods: 1, maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100, eagerStart: true}
+	return &Sim{maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100, eagerStart: true}
 }
 
 func newSim(t *testing.T, opts ...Option) *Sim {
