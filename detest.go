@@ -289,10 +289,9 @@ func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 // Replay makes Explore run the one schedule a violation was reported with
 // (the value printed after DETEST_REPLAY=) instead of exploring. One printed
 // by an exploration that dropped EagerStart starts with "lazy:" and replays
-// without it. A
-// regression test pins the counterexample of a bug with it: with
-// ExpectViolation it fails once the bug is fixed, without it it fails while
-// the bug is there. A schedule recorded before the code under test changed
+// without it. A regression test pins the counterexample of a bug with it: with
+// ExpectViolation it fails once the bug is fixed, without it it fails while the
+// bug is there. A schedule recorded before the code under test changed
 // shape fails the test as stale. DETEST_REPLAY overrides it.
 func Replay(schedule string) Option { return func(s *Sim) { s.schedule = schedule } }
 

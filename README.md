@@ -356,6 +356,10 @@ The search space grows quickly. These options of `detest.Explore` bound it or ch
 | `detest.Shard(index, total, depth)` | Explores one shard of the schedule tree, for splitting across machines. Under `detest.Random` and `detest.Prioritized` it makes every `total`-th run instead, and `depth` is not used. `DETEST_SHARD` sets it from the environment |
 | `detest.MaxCrashes(n)` | Lets up to n processes per run crash at any step (none by default). Their transactions roll back, their mutexes are freed and their messages are redelivered, to check that work survives a process dying halfway |
 | `detest.MaxStalls(n, d)` | Lets up to n processes per run stall for `d` at any step (none by default). A stalled process sleeps on the fake clock while the others go on, and the clock reaches the end of the stall once none of them can run, to check that a lock's TTL or a lease running out under a process does not let another act alongside it |
+| `detest.Pods(n)` | Sets how many instances a `Loop` and an `OnMessage` consumer run by default, as pods of the system would (default 1) |
+| `detest.Replay(schedule)` | Runs the one schedule printed with a violation instead of exploring, to pin a counterexample in a regression test. With `s.ExpectViolation` it fails once the bug is fixed, without it while the bug is there. `DETEST_REPLAY` overrides it |
+| `detest.ObserveSQL(fn)` | Calls `fn` with every SQL statement the driver receives and the error detest produced for it, `nil` when it ran. Use it to measure which statements of a storage layer detest executes |
+| `detest.Verbose()` | Prints every run's trace |
 
 These environment variables override or add to them.
 
