@@ -94,6 +94,10 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 	// resolve and a statement over views alone is checked at all. seen
 	// walks each view's query once however often it is read.
 	seen := map[string]bool{}
+	// roots are the statement and the views' queries. A view's query was
+	// checked when the view was created, but a later ALTER may have made a
+	// column it compares case-insensitive, and reading the view runs it.
+	roots := []any{stmt}
 	view = func(k, name string, v *sqlir.SchemaChange) {
 		derived[k] = true
 		q := v.View
@@ -109,6 +113,7 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		body(k, q)
 		if !seen[name] {
 			seen[name] = true
+			roots = append(roots, v.View)
 			collect(v.View)
 		}
 	}
@@ -252,71 +257,73 @@ func (x *sqlExec) collationCheck(stmt sqlir.Statement) error {
 		return false
 	}
 	var err error
-	walkNodes(stmt, func(n any) {
-		if err != nil {
-			return
-		}
-		switch n := n.(type) {
-		case *sqlir.BinaryExpr:
-			if compareOps[n.Op] && (exprCI(n.L) || exprCI(n.R)) {
-				err = refuse("a comparison of")
+	for _, root := range roots {
+		walkNodes(root, func(n any) {
+			if err != nil {
+				return
 			}
-		case *sqlir.InExpr:
-			if exprCI(n.X) || slices.ContainsFunc(n.List, exprCI) || n.Sub != nil && starCI(n.Sub.Targets) {
-				err = refuse("IN over")
+			switch n := n.(type) {
+			case *sqlir.BinaryExpr:
+				if compareOps[n.Op] && (exprCI(n.L) || exprCI(n.R)) {
+					err = refuse("a comparison of")
+				}
+			case *sqlir.InExpr:
+				if exprCI(n.X) || slices.ContainsFunc(n.List, exprCI) || n.Sub != nil && starCI(n.Sub.Targets) {
+					err = refuse("IN over")
+				}
+			case *sqlir.CaseExpr:
+				if n.Arg != nil && (exprCI(n.Arg) || slices.ContainsFunc(n.Whens, func(w sqlir.CaseWhen) bool { return exprCI(w.When) })) {
+					err = refuse("CASE comparing")
+				}
+			case *sqlir.FuncCall:
+				if (orderingFuncs[n.Name] || n.Distinct) && slices.ContainsFunc(n.Args, exprCI) {
+					err = refuse(strings.ToUpper(n.Name) + " of")
+				}
+			case *sqlir.WindowFunc:
+				if slices.ContainsFunc(n.Partition, exprCI) || keysCI(n.Order, nil) {
+					err = refuse("a window over")
+				}
+			case *sqlir.SelectStmt:
+				switch {
+				case slices.ContainsFunc(n.GroupBy, exprCI):
+					err = refuse("GROUP BY")
+				case keysCI(n.OrderBy, n.Targets):
+					err = refuse("ORDER BY")
+				case slices.ContainsFunc(n.DistinctOn, exprCI) || n.Distinct && starCI(n.Targets):
+					err = refuse("DISTINCT over")
+				case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
+					err = refuse(strings.ToUpper(n.SetOp) + " over")
+				case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && slices.ContainsFunc(tables[cmp.Or(n.From.Alias, relname(n.From.Name))], func(t string) bool { return pkCI(db, t) }):
+					err = refuse("a locking LIMIT scan along a primary key that holds")
+				}
+			case *sqlir.UpdateStmt:
+				table := db.resolve(n.Table)
+				switch {
+				case keysCI(n.OrderBy, nil):
+					err = refuse("ORDER BY")
+				case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
+					err = refuse("a LIMIT scan along a primary key that holds")
+				case slices.ContainsFunc(n.Set, func(a sqlir.Assignment) bool { return uniqueCI(db, table, a.Column) || fkCI(db, table, a.Column) }):
+					err = refuse("a write a unique index or a foreign key checks, over")
+				}
+			case *sqlir.DeleteStmt:
+				table := db.resolve(n.Table)
+				switch {
+				case keysCI(n.OrderBy, nil):
+					err = refuse("ORDER BY")
+				case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
+					err = refuse("a LIMIT scan along a primary key that holds")
+				case referencedCI(db, table):
+					err = refuse("a delete a foreign key checks, over")
+				}
+			case *sqlir.InsertStmt:
+				table := db.resolve(n.Table)
+				if uniqueCI(db, table, "") || fkCI(db, table, "") {
+					err = refuse("an insert a unique index or a foreign key checks, over")
+				}
 			}
-		case *sqlir.CaseExpr:
-			if n.Arg != nil && (exprCI(n.Arg) || slices.ContainsFunc(n.Whens, func(w sqlir.CaseWhen) bool { return exprCI(w.When) })) {
-				err = refuse("CASE comparing")
-			}
-		case *sqlir.FuncCall:
-			if (orderingFuncs[n.Name] || n.Distinct) && slices.ContainsFunc(n.Args, exprCI) {
-				err = refuse(strings.ToUpper(n.Name) + " of")
-			}
-		case *sqlir.WindowFunc:
-			if slices.ContainsFunc(n.Partition, exprCI) || keysCI(n.Order, nil) {
-				err = refuse("a window over")
-			}
-		case *sqlir.SelectStmt:
-			switch {
-			case slices.ContainsFunc(n.GroupBy, exprCI):
-				err = refuse("GROUP BY")
-			case keysCI(n.OrderBy, n.Targets):
-				err = refuse("ORDER BY")
-			case slices.ContainsFunc(n.DistinctOn, exprCI) || n.Distinct && starCI(n.Targets):
-				err = refuse("DISTINCT over")
-			case n.SetOp != "" && !n.SetAll && n.Larg != nil && n.Rarg != nil && (starCI(n.Larg.Targets) || starCI(n.Rarg.Targets)):
-				err = refuse(strings.ToUpper(n.SetOp) + " over")
-			case n.Lock != nil && n.Limit != nil && len(n.OrderBy) == 0 && n.From != nil && slices.ContainsFunc(tables[cmp.Or(n.From.Alias, relname(n.From.Name))], func(t string) bool { return pkCI(db, t) }):
-				err = refuse("a locking LIMIT scan along a primary key that holds")
-			}
-		case *sqlir.UpdateStmt:
-			table := db.resolve(n.Table)
-			switch {
-			case keysCI(n.OrderBy, nil):
-				err = refuse("ORDER BY")
-			case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
-				err = refuse("a LIMIT scan along a primary key that holds")
-			case slices.ContainsFunc(n.Set, func(a sqlir.Assignment) bool { return uniqueCI(db, table, a.Column) || fkCI(db, table, a.Column) }):
-				err = refuse("a write a unique index or a foreign key checks, over")
-			}
-		case *sqlir.DeleteStmt:
-			table := db.resolve(n.Table)
-			switch {
-			case keysCI(n.OrderBy, nil):
-				err = refuse("ORDER BY")
-			case n.Limit != nil && len(n.OrderBy) == 0 && pkCI(db, table):
-				err = refuse("a LIMIT scan along a primary key that holds")
-			case referencedCI(db, table):
-				err = refuse("a delete a foreign key checks, over")
-			}
-		case *sqlir.InsertStmt:
-			table := db.resolve(n.Table)
-			if uniqueCI(db, table, "") || fkCI(db, table, "") {
-				err = refuse("an insert a unique index or a foreign key checks, over")
-			}
-		}
-	})
+		})
+	}
 	return err
 }
 

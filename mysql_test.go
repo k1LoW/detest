@@ -5650,6 +5650,15 @@ func TestMySQLCaseInsensitiveColumnThroughView(t *testing.T) {
 	} {
 		mustExec(t, db, q)
 	}
+	// A comparison inside a view's query checked while its column was _bin
+	// is refused once an ALTER makes the column case-insensitive.
+	mustExec(t, db, `CREATE TABLE later (id INT PRIMARY KEY, s VARCHAR(10) COLLATE utf8mb4_bin)`)
+	mustExec(t, db, `CREATE VIEW vl AS SELECT id FROM later WHERE s = 'x'`)
+	mustExec(t, db, `SELECT id FROM vl`)
+	mustExec(t, db, `ALTER TABLE later MODIFY s VARCHAR(10)`)
+	if _, err := db.Exec(`SELECT id FROM vl`); !errors.As(err, new(*ErrUnsupportedSQL)) {
+		t.Errorf("SELECT id FROM vl after ALTER: %v", err)
+	}
 }
 
 func TestColumnNamesOfViewsMySQL(t *testing.T) {
