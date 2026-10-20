@@ -688,10 +688,55 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"unique away", uniqueAwayModel, []Option{EagerStart(false)}},
 		{"unique savepoint", uniqueSavepointModel(false), []Option{EagerStart(false)}},
 		{"unique savepoint abort", uniqueSavepointModel(true), []Option{EagerStart(false)}},
+		{"idle sweeper", idleSweeperModel, []Option{idleByReads()}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			checkReduction(t, c.name, c.model, c.opts...)
 		})
 	}
+}
+
+// idleByReads applies PartialOrder's rule for waking idle loops without it,
+// so that the full tree the reduction is checked against has the same idle
+// ticks.
+func idleByReads() Option { return func(s *Sim) { s.idleByReads = true } }
+
+// idleSweeperModel declares a sweeper whose idle tick records that it swept,
+// beside a producer giving it work and a process committing to a table the
+// sweeper does not read.
+func idleSweeperModel(t *testing.T, s *Sim) {
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE TABLE accounts (id int PRIMARY KEY, n int NOT NULL)`,
+		`CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`,
+		`CREATE TABLE sweeps (id int PRIMARY KEY, n int NOT NULL)`,
+	} {
+		mustExec(t, db, q)
+	}
+	s.Seed(func() {
+		mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`)
+		mustExec(t, db, `INSERT INTO sweeps VALUES (1, 0)`)
+	})
+	s.Manual("producer", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), `INSERT INTO jobs VALUES (1, 'pending')`)
+		return err
+	})
+	s.Manual("other", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+		return err
+	})
+	s.Loop("sweeper", 2, func(p *Proc) error {
+		res, err := db.ExecContext(p.Context(), `UPDATE jobs SET status = 'done' WHERE status = 'pending'`)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+		if _, err := db.ExecContext(p.Context(), `UPDATE sweeps SET n = n + 1 WHERE id = 1`); err != nil {
+			return err
+		}
+		return ErrIdle
+	})
 }

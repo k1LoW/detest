@@ -257,6 +257,18 @@ func (c copier) copy(v reflect.Value) reflect.Value {
 // included, in the order they appear.
 func TableNames(n any) []string {
 	var out []string
+	for _, t := range TableRefs(n) {
+		if t.Name != "" {
+			out = append(out, t.Name)
+		}
+	}
+	return out
+}
+
+// TableRefs returns the FROM items under n, subqueries in expressions
+// included, in the order they appear.
+func TableRefs(n any) []TableRef {
+	var out []TableRef
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		switch v.Kind() {
@@ -265,8 +277,8 @@ func TableNames(n any) []string {
 				walk(v.Elem())
 			}
 		case reflect.Struct:
-			if t, ok := reflect.TypeAssert[TableRef](v); ok && t.Name != "" {
-				out = append(out, t.Name)
+			if t, ok := reflect.TypeAssert[TableRef](v); ok {
+				out = append(out, t)
 			}
 			for i := range v.NumField() {
 				if v.Type().Field(i).IsExported() {

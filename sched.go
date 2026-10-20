@@ -177,6 +177,13 @@ type run struct {
 	prev       *State
 	version    int
 	idleAt     map[*procType]int
+	// idle holds, under PartialOrder, the last idle tick of each loop, as
+	// idleAt does otherwise, changes every change of committed state, and
+	// idleChildren marks a run in which a loop's tick spawned or adopted a
+	// process (see idleGated).
+	idle         map[*procType]*idleTick
+	changes      []change
+	idleChildren bool
 	// progress counts the changes made by processes other than loops and
 	// the processes they spawned, and the loop ticks that did work. idleRun
 	// counts a loop's idle ticks since progress last moved, at idleSeen.
@@ -322,6 +329,11 @@ type Proc struct {
 	// time it finds nothing to do would wake its loop forever.
 	started int
 	bumps   int
+	// touched is what the process touched of the simulated resources, for
+	// a loop tick under PartialOrder, and touchedAll that it touched
+	// something the trace cannot place (see idleGated).
+	touched    map[string]bool
+	touchedAll bool
 	// spins counts the steps the process took with committed state at
 	// spinVersion, for MaxSpins. It is kept across the steps other processes
 	// take in between, or a schedule that switches at almost every step, as
@@ -874,7 +886,7 @@ func (r *run) enabled() []option {
 			continue
 		}
 		// A loop that went idle keeps ticking only once something changed.
-		if v, idle := r.idleAt[pt]; idle && v == r.version {
+		if r.idleGated(pt) {
 			continue
 		}
 		if pt.after != nil && !pt.after(r.snapshot()) {
@@ -1401,6 +1413,7 @@ func (r *run) familyAtStep(p *Proc) bool {
 // or nil for a change the scheduler made.
 func (r *run) bump(p *Proc) {
 	r.version++
+	r.recordChange(p)
 	if p != nil {
 		p.bumps++
 	}
@@ -1474,7 +1487,10 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			r.depRecord("queue:"+p.pt.queue.name, true) // the message is acked, or put back
 		}
 		if p.pt.kind == trigLoop || p.pt.fromLoop {
-			r.depRecord(depAll, false) // whether the tick was idle reads the state
+			// Whether the tick was idle reads the state, as far as the
+			// reduction can tell. It is no touch of the tick's own, which
+			// idleWoken reads.
+			r.depRecordAs(nil, depAll, false)
 		}
 		if p.tx != nil && !p.tx.closed {
 			p.tx.rollback()
@@ -1504,6 +1520,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 				} else {
 					r.idleAt[p.pt] = r.version
 				}
+				r.idleRecord(p)
 			}
 			ev.err = nil
 		case ev.err != nil && !errors.Is(ev.err, errNack):

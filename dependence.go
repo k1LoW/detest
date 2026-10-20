@@ -236,7 +236,10 @@ func (r *run) depBarrier(kind string) {
 // such as a goroutine the scheduler waits for calling in, the call is a
 // step of its own that touches everything, since whose step it belongs to
 // is not known and timing must not decide what is recorded.
-func (r *run) depRecord(res string, write bool) {
+func (r *run) depRecord(res string, write bool) { r.depRecordAs(r.current, res, write) }
+
+// depRecordAs is depRecord for a touch of p, nil for one of no process.
+func (r *run) depRecordAs(p *Proc, res string, write bool) {
 	if !r.depOn() || r.over() {
 		return
 	}
@@ -245,12 +248,14 @@ func (r *run) depRecord(res string, write bool) {
 		d.cur = &depEvent{proc: "-", kind: "outside", ci: -1, acc: map[string]bool{depAll: true}}
 		d.events = append(d.events, d.cur)
 		r.sleep = nil // every transition depends on it
+		r.idleTouchAll()
 	}
 	if write {
 		d.cur.acc[res] = true
 	} else if _, ok := d.cur.acc[res]; !ok {
 		d.cur.acc[res] = false
 	}
+	r.idleTouch(p, res)
 }
 
 // depChoice records a data choice made within the step.
@@ -294,6 +299,9 @@ func (r *run) depTouch(tx *Tx, res string, write bool) {
 		return
 	}
 	r.depRecord(res, write)
+	if tx != nil {
+		r.idleTouch(tx.p, res)
+	}
 	if tx == nil || tx.closed {
 		return
 	}
@@ -307,7 +315,9 @@ func (r *run) depTouch(tx *Tx, res string, write bool) {
 	// now.
 	if tx.block && tx.iso >= RepeatableRead && !tx.depSnapped {
 		tx.depSnapped = true
-		r.depRecord(depAll, false)
+		// An idle tick still reads only the tables it names from the
+		// snapshot, and idleWoken counts every change since the tick began.
+		r.depRecordAs(nil, depAll, false)
 	}
 }
 
@@ -545,7 +555,8 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 		all = true
 	}
 	if all {
-		r.depRecord(depAll, false)
+		r.depRecordAs(nil, depAll, false)
+		x.idleReads(stmt)
 	}
 	for t := range refs {
 		if t != target {

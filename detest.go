@@ -320,6 +320,7 @@ type Sim struct {
 	// none, so that tests can compare everything two explorations reach.
 	exploreAll  bool
 	maxRuns     int
+	idleByReads bool // the wake rule of PartialOrder without it, for tests (see idleOn)
 	maxDuration time.Duration
 	verbose     bool
 	sqlObserver func(query string, err error)
