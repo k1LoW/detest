@@ -688,10 +688,129 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"unique away", uniqueAwayModel, []Option{EagerStart(false)}},
 		{"unique savepoint", uniqueSavepointModel(false), []Option{EagerStart(false)}},
 		{"unique savepoint abort", uniqueSavepointModel(true), []Option{EagerStart(false)}},
+		{"idle sweeper", idleSweeperModel, nil},
+		{"idle sweeper both under the rule", idleSweeperModel, []Option{idleByReads()}},
+		{"read-only idle sweeper both under the rule", readOnlyIdleSweeperModel, []Option{idleByReads()}},
+		{"spawning idle sweeper", effectSweeperModel(true), nil},
+		{"read-locking idle sweeper", effectSweeperModel(false), nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			checkReduction(t, c.name, c.model, c.opts...)
+		})
+	}
+}
+
+// idleByReads applies PartialOrder's rule for waking idle loops without it,
+// so that the full tree the reduction is checked against has the same idle
+// ticks.
+func idleByReads() Option { return func(s *Sim) { s.idleByReads = true } }
+
+// idleSweeperModel declares a sweeper whose idle tick records that it swept,
+// beside a producer giving it work and a process committing to a table the
+// sweeper does not read. A tick that changes committed state is woken by
+// every change, so the reduction reaches what the full tree without the rule
+// reaches.
+func idleSweeperModel(t *testing.T, s *Sim) { sweeperModel(t, s, true) }
+
+// readOnlyIdleSweeperModel is idleSweeperModel with a sweeper whose idle tick
+// writes nothing.
+func readOnlyIdleSweeperModel(t *testing.T, s *Sim) { sweeperModel(t, s, false) }
+
+func sweeperModel(t *testing.T, s *Sim, records bool) {
+	db, _ := s.DB("app", postgres.New())
+	for _, q := range []string{
+		`CREATE TABLE accounts (id int PRIMARY KEY, n int NOT NULL)`,
+		`CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`,
+		`CREATE TABLE sweeps (id int PRIMARY KEY, n int NOT NULL)`,
+	} {
+		mustExec(t, db, q)
+	}
+	s.Seed(func() {
+		mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`)
+		mustExec(t, db, `INSERT INTO sweeps VALUES (1, 0)`)
+	})
+	s.Manual("producer", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), `INSERT INTO jobs VALUES (1, 'pending')`)
+		return err
+	})
+	s.Manual("other", 1, func(p *Proc) error {
+		_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+		return err
+	})
+	s.Loop("sweeper", 2, func(p *Proc) error {
+		res, err := db.ExecContext(p.Context(), `UPDATE jobs SET status = 'done' WHERE status = 'pending'`)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 || !records {
+			if n > 0 {
+				return nil
+			}
+			return ErrIdle
+		}
+		if _, err := db.ExecContext(p.Context(), `UPDATE sweeps SET n = n + 1 WHERE id = 1`); err != nil {
+			return err
+		}
+		return ErrIdle
+	})
+}
+
+// effectSweeperModel declares a sweeper whose idle tick does something other
+// processes see, beside a process committing to a table the sweeper does not
+// read: it spawns a process that counts the spawns, or takes a read lock a
+// writer may wait for. Such a tick is woken by every change, so the reduction
+// reaches what the full tree without the rule reaches.
+func effectSweeperModel(spawn bool) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		for _, q := range []string{
+			`CREATE TABLE accounts (id int PRIMARY KEY, n int NOT NULL)`,
+			`CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`,
+			`CREATE TABLE spawns (id int PRIMARY KEY, n int NOT NULL)`,
+		} {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`)
+			mustExec(t, db, `INSERT INTO spawns VALUES (1, 0)`)
+		})
+		rw := s.RWMutex("config")
+		s.Manual("other", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+			return err
+		})
+		if !spawn {
+			// Starting after the other's commit, the writer can be kept
+			// waiting only by a tick that commit wakes.
+			s.Manual("writer", 1, func(p *Proc) error {
+				rw.Lock()
+				rw.Unlock() //nolint:staticcheck // the writer only contends for the lock
+				return nil
+			}, After(func(st *State) bool {
+				row, _ := st.Row(store, "accounts", 1)
+				return row.Int("n") == 1
+			}))
+		}
+		s.Loop("sweeper", 2, func(p *Proc) error {
+			if !spawn {
+				rw.RLock()
+				defer rw.RUnlock()
+			}
+			rows, err := db.QueryContext(p.Context(), `SELECT count(*) FROM jobs`)
+			if err != nil {
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if spawn {
+				p.Spawn("counter", func(p *Proc) error {
+					_, err := db.ExecContext(p.Context(), `UPDATE spawns SET n = n + 1 WHERE id = 1`)
+					return err
+				})
+			}
+			return ErrIdle
 		})
 	}
 }

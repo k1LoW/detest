@@ -84,11 +84,12 @@ func (r *run) dep() *depTrace {
 	return r.depTrace
 }
 
-// depOn reports whether the run records its trace: under PartialOrder, and
-// for a test that observes the runs, whose full tree is compared by the
-// histories the trace gives.
+// depOn reports whether the run records its trace: under PartialOrder, for
+// a test that observes the runs, whose full tree is compared by the
+// histories the trace gives, and under the wake rule of idle loops that
+// PartialOrder applies, which a replay keeps without the option.
 func (r *run) depOn() bool {
-	return r != nil && (r.s.partialOrder || r.s.depObserve != nil) && !r.measuring
+	return r != nil && (r.s.partialOrder || r.s.depObserve != nil || r.s.idleByReads) && !r.measuring
 }
 
 // depIdent names an option so that the same option can be found at the same
@@ -236,7 +237,10 @@ func (r *run) depBarrier(kind string) {
 // such as a goroutine the scheduler waits for calling in, the call is a
 // step of its own that touches everything, since whose step it belongs to
 // is not known and timing must not decide what is recorded.
-func (r *run) depRecord(res string, write bool) {
+func (r *run) depRecord(res string, write bool) { r.depRecordAs(r.current, res, write) }
+
+// depRecordAs is depRecord for a touch of p, nil for one of no process.
+func (r *run) depRecordAs(p *Proc, res string, write bool) {
 	if !r.depOn() || r.over() {
 		return
 	}
@@ -245,12 +249,14 @@ func (r *run) depRecord(res string, write bool) {
 		d.cur = &depEvent{proc: "-", kind: "outside", ci: -1, acc: map[string]bool{depAll: true}}
 		d.events = append(d.events, d.cur)
 		r.sleep = nil // every transition depends on it
+		r.idleTouchAll()
 	}
 	if write {
 		d.cur.acc[res] = true
 	} else if _, ok := d.cur.acc[res]; !ok {
 		d.cur.acc[res] = false
 	}
+	r.idleTouch(p, res, write)
 }
 
 // depChoice records a data choice made within the step.
@@ -294,6 +300,9 @@ func (r *run) depTouch(tx *Tx, res string, write bool) {
 		return
 	}
 	r.depRecord(res, write)
+	if tx != nil {
+		r.idleTouch(tx.p, res, write)
+	}
 	if tx == nil || tx.closed {
 		return
 	}
@@ -307,7 +316,9 @@ func (r *run) depTouch(tx *Tx, res string, write bool) {
 	// now.
 	if tx.block && tx.iso >= RepeatableRead && !tx.depSnapped {
 		tx.depSnapped = true
-		r.depRecord(depAll, false)
+		// An idle tick still reads only the tables it names from the
+		// snapshot, and idleWoken counts every change since the tick began.
+		r.depRecordAs(nil, depAll, false)
 	}
 }
 
@@ -545,7 +556,8 @@ func (x *sqlExec) depStatement(stmt sqlir.Statement, write bool) {
 		all = true
 	}
 	if all {
-		r.depRecord(depAll, false)
+		r.depRecordAs(nil, depAll, false)
+		x.idleReads(stmt)
 	}
 	for t := range refs {
 		if t != target {
@@ -741,6 +753,7 @@ func (r *run) depLock(tx *Tx, lk lockKey) {
 	if !r.depOn() {
 		return
 	}
+	r.idleEffect(tx.p)
 	table, _ := entryIndex(lk)
 	if lk.table == table && lk.key != gapWaitKey {
 		r.depRow(tx, tx.db, table, lk.key, true)
@@ -753,7 +766,20 @@ func (r *run) depLock(tx *Tx, lk lockKey) {
 // from inserting into the gap: a write of the table, as the rows it covers
 // have no key to name, and the statement's own pin would name only the row
 // it found or missed.
+// depProbe records a probe of a lock that found it held, which reads what the
+// holder's end publishes, though it takes nothing.
+func (tx *Tx) depProbe(lk lockKey) {
+	if tx.p == nil || !tx.p.r.depOn() {
+		return
+	}
+	table, _ := entryIndex(lk)
+	tx.p.r.depRow(tx, tx.db, table, lk.key, false)
+}
+
 func (tx *Tx) depGap(table string) {
+	if tx.p != nil {
+		tx.p.r.idleEffect(tx.p)
+	}
 	tx.depTable(table, true)
 }
 
