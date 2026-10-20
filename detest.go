@@ -208,6 +208,14 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // option. A schedule found with it replays with DETEST_REPLAY as any other,
 // with or without the option.
 //
+// Under it, a loop that went idle is woken only by a change to what its idle
+// tick read, rather than by any change of committed state, which rests on
+// the same assumption: a loop that reads a variable another process sets is
+// not woken when it changes. A tick that did something another process sees
+// and one whose decision may rest on more than the tables it read are woken
+// as before. The schedules it prints start with "reads:", and replay under
+// the same rule with or without the option.
+//
 // It applies to a single worker exploring depth first: Workers above one,
 // Random, Prioritized, Shard, DETEST_SHARD and DETEST_CHECKPOINT are
 // refused with it, and so is a MaxSpins below the default, since the spin
@@ -242,6 +250,12 @@ func (e *eagerStartError) Error() string {
 // a counter of generated values, so that it replays without it in a test that
 // leaves it on.
 const lazyPrefix = "lazy:"
+
+// readsPrefix marks a schedule explored with idle loops woken only by a
+// change to what their idle tick read, as PartialOrder explores, so that it
+// replays under the same rule with or without the option, and a schedule
+// without it replays under the other rule.
+const readsPrefix = "reads:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
 // DETEST_MAX_RUNS overrides n.
@@ -283,7 +297,8 @@ func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 // Replay makes Explore run the one schedule a violation was reported with
 // (the value printed after DETEST_REPLAY=) instead of exploring. One printed
 // by an exploration that dropped EagerStart starts with "lazy:" and replays
-// without it. A regression test pins the counterexample of a bug with it: with
+// without it, and one printed under PartialOrder starts with "reads:" and
+// replays its wake rule for idle loops with or without the option. A regression test pins the counterexample of a bug with it: with
 // ExpectViolation it fails once the bug is fixed, without it it fails while the
 // bug is there. A schedule recorded before the code under test changed
 // shape fails the test as stale. DETEST_REPLAY overrides it.
@@ -320,7 +335,7 @@ type Sim struct {
 	// none, so that tests can compare everything two explorations reach.
 	exploreAll  bool
 	maxRuns     int
-	idleByReads bool // the wake rule of PartialOrder without it, for tests (see idleOn)
+	idleByReads bool // idle loops are woken by what their tick read (see idleOn)
 	maxDuration time.Duration
 	verbose     bool
 	sqlObserver func(query string, err error)
@@ -615,7 +630,7 @@ func (r *result) outcome() string {
 		what = r.Err.Error()
 	}
 	choices := 0
-	if picks := strings.TrimPrefix(r.Schedule, lazyPrefix); picks != "" {
+	if _, _, picks := cutSchedulePrefixes(r.Schedule); picks != "" {
 		choices = len(strings.Split(picks, ","))
 	}
 	seed := ""
@@ -651,17 +666,20 @@ func (s *Sim) countShared(r *run) {
 // one schedule instead.
 func (s *Sim) check() *result {
 	start := time.Now()
+	if s.partialOrder {
+		s.idleByReads = true
+	}
 	if sched, fromEnv := replaySchedule(s.schedule); sched != "" {
-		if rest, ok := strings.CutPrefix(sched, lazyPrefix); ok {
-			sched = rest
-			if s.lazy == "" {
-				s.eagerStart, s.lazy = false, "the schedule replayed was explored without it"
-			}
+		lazy, reads, rest := cutSchedulePrefixes(sched)
+		sched = rest
+		if lazy && s.lazy == "" {
+			s.eagerStart, s.lazy = false, "the schedule replayed was explored without it"
 		}
+		s.idleByReads = reads
 		var prefix []choice
 		for f := range strings.SplitSeq(sched, ",") {
 			if sched == "" {
-				break // "lazy:" alone, a run that made no choice
+				break // a prefix alone, a run that made no choice
 			}
 			v, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil {
@@ -761,6 +779,9 @@ func (s *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, s
 		sched = append(sched, strconv.Itoa(c.picked))
 	}
 	schedule := strings.Join(sched, ",")
+	if s.idleByReads {
+		schedule = readsPrefix + schedule
+	}
 	if s.lazy != "" {
 		schedule = lazyPrefix + schedule
 	}
@@ -770,4 +791,19 @@ func (s *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, s
 		res.Violated, res.Kind, res.Err = true, v.kind, v.err
 	}
 	return res
+}
+
+// cutSchedulePrefixes splits a schedule into the prefixes it carries and its
+// choices.
+func cutSchedulePrefixes(sched string) (lazy, reads bool, rest string) {
+	for {
+		switch {
+		case strings.HasPrefix(sched, lazyPrefix):
+			lazy, sched = true, sched[len(lazyPrefix):]
+		case strings.HasPrefix(sched, readsPrefix):
+			reads, sched = true, sched[len(readsPrefix):]
+		default:
+			return lazy, reads, sched
+		}
+	}
 }

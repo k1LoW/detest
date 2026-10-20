@@ -688,7 +688,9 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"unique away", uniqueAwayModel, []Option{EagerStart(false)}},
 		{"unique savepoint", uniqueSavepointModel(false), []Option{EagerStart(false)}},
 		{"unique savepoint abort", uniqueSavepointModel(true), []Option{EagerStart(false)}},
-		{"idle sweeper", idleSweeperModel, []Option{idleByReads()}},
+		{"idle sweeper", idleSweeperModel, nil},
+		{"idle sweeper both under the rule", idleSweeperModel, []Option{idleByReads()}},
+		{"read-only idle sweeper both under the rule", readOnlyIdleSweeperModel, []Option{idleByReads()}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -704,8 +706,16 @@ func idleByReads() Option { return func(s *Sim) { s.idleByReads = true } }
 
 // idleSweeperModel declares a sweeper whose idle tick records that it swept,
 // beside a producer giving it work and a process committing to a table the
-// sweeper does not read.
-func idleSweeperModel(t *testing.T, s *Sim) {
+// sweeper does not read. A tick that changes committed state is woken by
+// every change, so the reduction reaches what the full tree without the rule
+// reaches.
+func idleSweeperModel(t *testing.T, s *Sim) { sweeperModel(t, s, true) }
+
+// readOnlyIdleSweeperModel is idleSweeperModel with a sweeper whose idle tick
+// writes nothing.
+func readOnlyIdleSweeperModel(t *testing.T, s *Sim) { sweeperModel(t, s, false) }
+
+func sweeperModel(t *testing.T, s *Sim, records bool) {
 	db, _ := s.DB("app", postgres.New())
 	for _, q := range []string{
 		`CREATE TABLE accounts (id int PRIMARY KEY, n int NOT NULL)`,
@@ -731,8 +741,11 @@ func idleSweeperModel(t *testing.T, s *Sim) {
 		if err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			return nil
+		if n, _ := res.RowsAffected(); n > 0 || !records {
+			if n > 0 {
+				return nil
+			}
+			return ErrIdle
 		}
 		if _, err := db.ExecContext(p.Context(), `UPDATE sweeps SET n = n + 1 WHERE id = 1`); err != nil {
 			return err

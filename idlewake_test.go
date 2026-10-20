@@ -3,6 +3,7 @@ package detest
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -241,5 +242,202 @@ func TestIdleLoopWokenByAnyCommitWithoutPartialOrder(t *testing.T) {
 	}, nil, nil, 0)
 	if res.Violated || res.Fatal != nil || !res.Complete {
 		t.Fatalf("want the sweeper woken by the commit, got %s", res.report())
+	}
+}
+
+// wakeModel declares a sweeper whose idle tick reads jobs and calls look,
+// which tells whether there is work, and other, a process that then makes
+// the work appear by means other than a write to jobs, followed by a commit
+// to accounts. The sweeper must do the work by quiescence.
+func wakeModel(look func(p *Proc) bool, other func(p *Proc, db *sql.DB) error, decl func(s *Sim)) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		for _, q := range pgIdleSchema() {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() { mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`) })
+		if decl != nil {
+			decl(s)
+		}
+		done := false
+		s.Seed(func() { done = false })
+		s.Manual("other", 1, func(p *Proc) error {
+			if err := other(p, db); err != nil {
+				return err
+			}
+			_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+			return err
+		})
+		s.Loop("sweeper", 3, func(p *Proc) error {
+			if err := idleQuery(`SELECT count(*) FROM jobs`)(p, db); err != nil {
+				return err
+			}
+			if done || !look(p) {
+				return ErrIdle
+			}
+			done = true
+			return nil
+		})
+		s.AtQuiescence(func(*State) error {
+			if !done {
+				return fmt.Errorf("the sweeper never did the work")
+			}
+			return nil
+		})
+	}
+}
+
+// Under PartialOrder, an idle loop whose decision depends on more than the
+// tables it read is still woken by a change: the clock moving, a call to an
+// External the tick observes, a lock the tick failed to take, and an
+// enqueue.
+func TestPartialOrderWakesAnIdleLoopOnWhatItCannotName(t *testing.T) {
+	t.Parallel()
+	var ext *External
+	var q *Queue
+	for _, c := range []struct {
+		name  string
+		model func(t *testing.T, s *Sim)
+		opts  []Option
+	}{
+		{"clock", wakeModel(func(p *Proc) bool { return p.Now() >= 10 }, func(p *Proc, _ *sql.DB) error {
+			p.WaitUntil(10)
+			return nil
+		}, nil), nil},
+		{"external", func() func(t *testing.T, s *Sim) {
+			finished := false
+			return wakeModel(func(p *Proc) bool {
+				ext.Observe(p)
+				return finished
+			}, func(p *Proc, _ *sql.DB) error {
+				return ext.Do(p, "finish", func() error { finished = true; return nil })
+			}, func(s *Sim) {
+				ext = s.External("jobsvc")
+				s.Seed(func() { finished = false })
+			})
+		}(), []Option{MaxFailures(0)}},
+		{"enqueue", func() func(t *testing.T, s *Sim) {
+			queued := false
+			return wakeModel(func(*Proc) bool { return queued }, func(p *Proc, _ *sql.DB) error {
+				// After the enqueue, in its step: before it, the eager start
+				// would set it ahead of every tick.
+				q.Enqueue(p, Msg{"id": "1"})
+				queued = true
+				return nil
+			}, func(s *Sim) {
+				q = s.Queue("events")
+				s.Seed(func() { queued = false })
+			})
+		}(), nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, _ := exploreBubble(t, c.model, append(slices.Clone(c.opts), PartialOrder()), nil, 0)
+			if res.Violated || res.Fatal != nil || !res.Complete {
+				t.Fatalf("want the sweeper woken, got %s", res.report())
+			}
+		})
+	}
+}
+
+// Under PartialOrder, an idle loop whose tick failed to take an advisory
+// lock is woken once the holder lets it go, though the holder commits only
+// to a table the tick does not read.
+func TestPartialOrderWakesAnIdleLoopOnAnAdvisoryLockLetGo(t *testing.T) {
+	t.Parallel()
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		for _, q := range pgIdleSchema() {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() { mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`) })
+		s.Manual("holder", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SELECT pg_advisory_xact_lock(1)`); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("sweeper", 3, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var got bool
+			if err := tx.QueryRowContext(p.Context(), `SELECT pg_try_advisory_xact_lock(1)`).Scan(&got); err != nil {
+				return err
+			}
+			if !got {
+				return ErrIdle
+			}
+			if _, err := tx.ExecContext(p.Context(), `INSERT INTO jobs VALUES (1, 'swept') ON CONFLICT DO NOTHING`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(st.Rows(store, "jobs")) == 0 {
+				return fmt.Errorf("the sweeper never took the lock")
+			}
+			return nil
+		})
+	}, []Option{PartialOrder()}, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || len(res.Unsupported) > 0 {
+		t.Fatalf("want the sweeper woken, got %s", res.report())
+	}
+}
+
+// A schedule explored under PartialOrder carries its wake rule, so that it
+// replays the same run without the option, and one explored without it
+// replays the same run with the option.
+func TestIdleWakeRuleReplaysWithAndWithoutPartialOrder(t *testing.T) {
+	t.Parallel()
+	// The sweeper is declared first and the others start through After, so
+	// that the first run ticks it before their commits.
+	model := func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		for _, q := range pgIdleSchema() {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() { mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`) })
+		s.Loop("sweeper", 3, func(p *Proc) error {
+			if err := idleQuery(`SELECT count(*) FROM jobs`)(p, db); err != nil {
+				return err
+			}
+			return ErrIdle
+		})
+		for _, name := range []string{"alice", "bob"} {
+			s.Manual(name, 1, func(p *Proc) error {
+				_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+				return err
+			}, After(func(*State) bool { return true }))
+		}
+		s.AtQuiescence(func(*State) error { return fmt.Errorf("always") })
+	}
+	for _, c := range []struct {
+		name           string
+		explore, again []Option
+		prefix         bool
+	}{
+		{"found with PartialOrder", []Option{PartialOrder()}, nil, true},
+		{"found without PartialOrder", nil, []Option{PartialOrder()}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			found, _ := exploreBubble(t, model, c.explore, nil, 0)
+			if !found.Violated || strings.HasPrefix(found.Schedule, readsPrefix) != c.prefix {
+				t.Fatalf("want a violation whose schedule carries the rule: %v, got %s", c.prefix, found.report())
+			}
+			again, _ := exploreBubble(t, model, append(slices.Clone(c.again), Replay(found.Schedule)), nil, 0)
+			if !again.Violated || again.Trace != found.Trace {
+				t.Fatalf("want the same run replayed, got\n%s\nwant\n%s", again.Trace, found.Trace)
+			}
+		})
 	}
 }

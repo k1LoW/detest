@@ -84,11 +84,12 @@ func (r *run) dep() *depTrace {
 	return r.depTrace
 }
 
-// depOn reports whether the run records its trace: under PartialOrder, and
-// for a test that observes the runs, whose full tree is compared by the
-// histories the trace gives.
+// depOn reports whether the run records its trace: under PartialOrder, for
+// a test that observes the runs, whose full tree is compared by the
+// histories the trace gives, and under the wake rule of idle loops that
+// PartialOrder applies, which a replay keeps without the option.
 func (r *run) depOn() bool {
-	return r != nil && (r.s.partialOrder || r.s.depObserve != nil) && !r.measuring
+	return r != nil && (r.s.partialOrder || r.s.depObserve != nil || r.s.idleByReads) && !r.measuring
 }
 
 // depIdent names an option so that the same option can be found at the same
@@ -255,7 +256,7 @@ func (r *run) depRecordAs(p *Proc, res string, write bool) {
 	} else if _, ok := d.cur.acc[res]; !ok {
 		d.cur.acc[res] = false
 	}
-	r.idleTouch(p, res)
+	r.idleTouch(p, res, write)
 }
 
 // depChoice records a data choice made within the step.
@@ -300,7 +301,7 @@ func (r *run) depTouch(tx *Tx, res string, write bool) {
 	}
 	r.depRecord(res, write)
 	if tx != nil {
-		r.idleTouch(tx.p, res)
+		r.idleTouch(tx.p, res, write)
 	}
 	if tx == nil || tx.closed {
 		return
@@ -752,6 +753,7 @@ func (r *run) depLock(tx *Tx, lk lockKey) {
 	if !r.depOn() {
 		return
 	}
+	r.idleEffect(tx.p)
 	table, _ := entryIndex(lk)
 	if lk.table == table && lk.key != gapWaitKey {
 		r.depRow(tx, tx.db, table, lk.key, true)
@@ -765,6 +767,9 @@ func (r *run) depLock(tx *Tx, lk lockKey) {
 // have no key to name, and the statement's own pin would name only the row
 // it found or missed.
 func (tx *Tx) depGap(table string) {
+	if tx.p != nil {
+		tx.p.r.idleEffect(tx.p)
+	}
 	tx.depTable(table, true)
 }
 

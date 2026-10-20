@@ -183,6 +183,7 @@ type run struct {
 	// process (see idleGated).
 	idle         map[*procType]*idleTick
 	changes      []change
+	changeFrom   int // the first event of the trace the next change covers
 	idleChildren bool
 	// progress counts the changes made by processes other than loops and
 	// the processes they spawned, and the loop ticks that did work. idleRun
