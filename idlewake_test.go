@@ -487,3 +487,36 @@ func TestPartialOrderWakesAnIdleLoopOnALockACheckProbed(t *testing.T) {
 		t.Fatalf("want the sweeper woken, got %s", res.report())
 	}
 }
+
+// Under PartialOrder, a loop that starts a process does not wake another
+// idle loop by itself: a loop still ticks again only after a change by
+// another process, as without the option.
+func TestPartialOrderWakesNoIdleLoopOnAChildAlone(t *testing.T) {
+	t.Parallel()
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE counts (id int PRIMARY KEY, n int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO counts VALUES (1, 0)`) })
+		s.Loop("counter", 3, func(p *Proc) error {
+			if _, err := db.ExecContext(p.Context(), `UPDATE counts SET n = n + 1 WHERE id = 1`); err != nil {
+				return err
+			}
+			return ErrIdle
+		})
+		s.Loop("spawner", 1, func(p *Proc) error {
+			p.Spawn("child", func(*Proc) error { return nil })
+			return ErrIdle
+		})
+		s.AtQuiescence(func(st *State) error {
+			if row, _ := st.Row(store, "counts", 1); row.Int("n") > 1 {
+				return fmt.Errorf("the counter ticked %d times", row.Int("n"))
+			}
+			return nil
+		})
+	}, []Option{PartialOrder()}, nil, 0)
+	// A loop woken without a change wakes again at every spawn, and such a
+	// run is cut at MaxIdleTicks rather than checked.
+	if res.Violated || res.Fatal != nil || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want the counter to tick once and no run cut, got %s", res.report())
+	}
+}

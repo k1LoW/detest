@@ -129,15 +129,16 @@ func (r *run) idleOverlaps(tick *Proc, c change) bool {
 
 // idleChild records that a loop's tick started a process, spawned or
 // adopted, whose steps are not followed back to the tick. Every idle loop is
-// then woken by every change, including the ones idleWoken already read,
-// since what the process does may come after them.
+// then woken by every change by another process since its tick started, as
+// without the rule, including the ones idleWoken already read, since what
+// the process does may come after them, but not without one.
 func (r *run) idleChild() {
 	if !r.idleOn() {
 		return
 	}
 	r.idleChildren = true
 	for _, t := range r.idle {
-		t.woken = true
+		t.next = t.p.started
 	}
 }
 
