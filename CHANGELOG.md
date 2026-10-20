@@ -1,5 +1,14 @@
 # Changelog
 
+## [v0.7.0](https://github.com/k1LoW/detest/compare/v0.6.5...v0.7.0) - 2026-10-20
+
+### Breaking Changes 🛠
+- feat!: remove the Pods option by @k1LoW in https://github.com/k1LoW/detest/pull/219
+### New Features 🎉
+- feat: wake an idle loop under PartialOrder only on a change to what it read by @k1LoW in https://github.com/k1LoW/detest/pull/221
+### Other Changes
+- docs: list Replay, ObserveSQL and Verbose in the README's options table by @k1LoW in https://github.com/k1LoW/detest/pull/218
+
 ## [v0.6.5](https://github.com/k1LoW/detest/compare/v0.6.4...v0.6.5) - 2026-10-19
 
 ### Fix bug 🐛
