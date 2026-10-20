@@ -766,6 +766,16 @@ func (r *run) depLock(tx *Tx, lk lockKey) {
 // from inserting into the gap: a write of the table, as the rows it covers
 // have no key to name, and the statement's own pin would name only the row
 // it found or missed.
+// depProbe records a probe of a lock that found it held, which reads what the
+// holder's end publishes, though it takes nothing.
+func (tx *Tx) depProbe(lk lockKey) {
+	if tx.p == nil || !tx.p.r.depOn() {
+		return
+	}
+	table, _ := entryIndex(lk)
+	tx.p.r.depRow(tx, tx.db, table, lk.key, false)
+}
+
 func (tx *Tx) depGap(table string) {
 	if tx.p != nil {
 		tx.p.r.idleEffect(tx.p)

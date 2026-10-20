@@ -127,24 +127,38 @@ func (r *run) idleOverlaps(tick *Proc, c change) bool {
 	return false
 }
 
+// idleChild records that a loop's tick started a process, spawned or
+// adopted, whose steps are not followed back to the tick. Every idle loop is
+// then woken by every change, including the ones idleWoken already read,
+// since what the process does may come after them.
+func (r *run) idleChild() {
+	if !r.idleOn() {
+		return
+	}
+	r.idleChildren = true
+	for _, t := range r.idle {
+		t.woken = true
+	}
+}
+
 // idleTouch records that p touched res, when p is a loop tick. A write to
 // anything but the tables and rows of a statement, whose own target counts as
 // written even when it matches no row, is an effect another process may see,
 // such as a sequence drawn, a lock waited for or an External called, and the
-// tick then falls back to every change. Its own connection is no such
-// effect.
+// tick then falls back to every change. So is any use of a mutex, as a read
+// lock, which the reduction takes as a read, still keeps writers out. Its
+// own connection is no such effect.
 func (r *run) idleTouch(p *Proc, res string, write bool) {
 	if p == nil || !r.idleOn() {
 		return
 	}
 	if p.pt.fromLoop {
-		r.idleChildren = true
-		return
+		return // idleChild fell back when it was created
 	}
 	if p.pt.kind != trigLoop {
 		return
 	}
-	if res == depAll || write && !strings.HasPrefix(res, "db:") && !strings.HasPrefix(res, "txconn:") {
+	if res == depAll || strings.HasPrefix(res, "mutex:") || write && !strings.HasPrefix(res, "db:") && !strings.HasPrefix(res, "txconn:") {
 		p.touchedAll = true
 		return
 	}

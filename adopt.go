@@ -507,6 +507,9 @@ func (r *run) enlist(np *Proc) {
 		r.prio.spawned(np)
 	}
 	r.depCreated(np)
+	if fromLoop {
+		r.idleChild()
+	}
 	r.procs = append(r.procs, np)
 	r.mixString(name)
 	r.note(parent, "starts goroutine %s", name)

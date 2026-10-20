@@ -2093,6 +2093,7 @@ func (x *sqlExec) callFunc(name string, args []any) (any, error) {
 		}
 		lk := lockKey{"__advisory__", kb.String()}
 		if name == "pg_try_advisory_xact_lock" && x.tx.heldByOther(lk, lockUpdate) {
+			x.tx.depProbe(lk)
 			return false, nil
 		}
 		if err := x.tx.lock(lk); err != nil {

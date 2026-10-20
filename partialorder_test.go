@@ -691,6 +691,8 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 		{"idle sweeper", idleSweeperModel, nil},
 		{"idle sweeper both under the rule", idleSweeperModel, []Option{idleByReads()}},
 		{"read-only idle sweeper both under the rule", readOnlyIdleSweeperModel, []Option{idleByReads()}},
+		{"spawning idle sweeper", effectSweeperModel(true), nil},
+		{"read-locking idle sweeper", effectSweeperModel(false), nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -752,4 +754,63 @@ func sweeperModel(t *testing.T, s *Sim, records bool) {
 		}
 		return ErrIdle
 	})
+}
+
+// effectSweeperModel declares a sweeper whose idle tick does something other
+// processes see, beside a process committing to a table the sweeper does not
+// read: it spawns a process that counts the spawns, or takes a read lock a
+// writer may wait for. Such a tick is woken by every change, so the reduction
+// reaches what the full tree without the rule reaches.
+func effectSweeperModel(spawn bool) func(t *testing.T, s *Sim) {
+	return func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		for _, q := range []string{
+			`CREATE TABLE accounts (id int PRIMARY KEY, n int NOT NULL)`,
+			`CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL)`,
+			`CREATE TABLE spawns (id int PRIMARY KEY, n int NOT NULL)`,
+		} {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() {
+			mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`)
+			mustExec(t, db, `INSERT INTO spawns VALUES (1, 0)`)
+		})
+		rw := s.RWMutex("config")
+		s.Manual("other", 1, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`)
+			return err
+		})
+		if !spawn {
+			// Starting after the other's commit, the writer can be kept
+			// waiting only by a tick that commit wakes.
+			s.Manual("writer", 1, func(p *Proc) error {
+				rw.Lock()
+				rw.Unlock() //nolint:staticcheck // the writer only contends for the lock
+				return nil
+			}, After(func(st *State) bool {
+				row, _ := st.Row(store, "accounts", 1)
+				return row.Int("n") == 1
+			}))
+		}
+		s.Loop("sweeper", 2, func(p *Proc) error {
+			if !spawn {
+				rw.RLock()
+				defer rw.RUnlock()
+			}
+			rows, err := db.QueryContext(p.Context(), `SELECT count(*) FROM jobs`)
+			if err != nil {
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if spawn {
+				p.Spawn("counter", func(p *Proc) error {
+					_, err := db.ExecContext(p.Context(), `UPDATE spawns SET n = n + 1 WHERE id = 1`)
+					return err
+				})
+			}
+			return ErrIdle
+		})
+	}
 }

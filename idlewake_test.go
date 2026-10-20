@@ -2,6 +2,7 @@ package detest
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -439,5 +440,50 @@ func TestIdleWakeRuleReplaysWithAndWithoutPartialOrder(t *testing.T) {
 				t.Fatalf("want the same run replayed, got\n%s\nwant\n%s", again.Trace, found.Trace)
 			}
 		})
+	}
+}
+
+// Under PartialOrder, an idle loop whose write failed a CHECK that probes an
+// advisory lock is woken once the holder lets the lock go, though the holder
+// commits only to a table the tick does not read.
+func TestPartialOrderWakesAnIdleLoopOnALockACheckProbed(t *testing.T) {
+	t.Parallel()
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, store := s.DB("app", postgres.New())
+		for _, q := range append(pgIdleSchema(), `CREATE TABLE claims (id int PRIMARY KEY, CHECK (pg_try_advisory_xact_lock(1)))`) {
+			mustExec(t, db, q)
+		}
+		s.Seed(func() { mustExec(t, db, `INSERT INTO accounts VALUES (1, 0)`) })
+		s.Manual("holder", 1, func(p *Proc) error {
+			tx, err := db.BeginTx(p.Context(), nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(p.Context(), `SELECT pg_advisory_xact_lock(1)`); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(p.Context(), `UPDATE accounts SET n = n + 1 WHERE id = 1`); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
+		s.Loop("sweeper", 3, func(p *Proc) error {
+			_, err := db.ExecContext(p.Context(), `INSERT INTO claims VALUES (1)`)
+			var dbErr *DBError
+			if errors.As(err, &dbErr) && dbErr.Code == "23514" {
+				return ErrIdle
+			}
+			return err
+		})
+		s.AtQuiescence(func(st *State) error {
+			if len(st.Rows(store, "claims")) == 0 {
+				return fmt.Errorf("the sweeper never claimed")
+			}
+			return nil
+		})
+	}, []Option{PartialOrder()}, nil, 0)
+	if res.Violated || res.Fatal != nil || !res.Complete || len(res.Unsupported) > 0 {
+		t.Fatalf("want the sweeper woken, got %s", res.report())
 	}
 }

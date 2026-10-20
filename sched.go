@@ -1071,6 +1071,9 @@ func (r *run) spawn(pt *procType, msg *qmsg) *Proc {
 		// A process sends at most one event before it parks or exits, so with
 		// room for it the send never blocks, saving a goroutine wakeup per step.
 		resume: make(chan struct{}), ev: make(chan procEvent, 1), exited: make(chan struct{}), msg: msg, started: r.version}
+	if pt.fromLoop {
+		r.idleChild()
+	}
 	if r.prio != nil {
 		r.prio.spawned(p)
 	}
