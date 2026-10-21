@@ -593,8 +593,8 @@ func (f *frontier) remaining() (explored float64, left int) {
 // minExplored is the share of the tree explored from which the runs left
 // are estimated. On small scenarios the runs left came out as low as a
 // fifth of the true count up to about 20% explored, and within two times
-// from there. Below 10% the first runs alone set the estimate.
-const minExplored = 0.1
+// from there.
+const minExplored = 0.2
 
 // roughly rounds n to one significant figure, as the estimate is no more
 // precise than that, and its exact value would differ between workers'
