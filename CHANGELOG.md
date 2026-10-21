@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.8.0](https://github.com/k1LoW/detest/compare/v0.7.0...v0.8.0) - 2026-10-21
+
+### New Features 🎉
+- feat: estimate the runs left when an exploration is cut short by @k1LoW in https://github.com/k1LoW/detest/pull/223
+### Other Changes
+- feat: raise the default MaxRuns from 200000 to 1000000 by @k1LoW in https://github.com/k1LoW/detest/pull/224
+
 ## [v0.7.0](https://github.com/k1LoW/detest/compare/v0.6.5...v0.7.0) - 2026-10-20
 
 ### Breaking Changes 🛠
