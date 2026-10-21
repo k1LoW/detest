@@ -523,7 +523,8 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		return merged
 	}
 	if best == nil && f.incomplete && !f.random && merged.Shard == "" {
-		merged.Remaining = f.remaining()
+		merged.Estimated = true
+		merged.Explored, merged.Remaining = f.remaining()
 	}
 	if best != nil {
 		v := *best
@@ -539,7 +540,8 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // subtree's weight is the share of the tree it would hold if every node's
 // subtrees were the same size, the product of 1/d over the nodes above it
 // with d their number of subtrees, so the subtrees left on the stack hold
-// a share w and the runs made 1-w. It returns 0 when it cannot tell.
+// a share w and the runs made 1-w. It returns that share and the runs left,
+// which it gives only from minExplored on.
 //
 // The estimator sums the weights of the runs made, as they finish. Summing
 // the stack's instead gives the same share, since the runs made and the
@@ -552,7 +554,13 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // not the options of its choice, which would count the subtrees the
 // reduction leaves out. A later run may still add some, so the estimate may
 // be off either way.
-func (f *frontier) remaining() int {
+//
+// Early in an exploration the share explored comes out several times too
+// large, since the first runs follow the paths with the fewest choices,
+// and the runs left as many times too few, which would read as nearly done.
+// Below minExplored no count is given, which also keeps 1-w clear of the
+// rounding of a w near 1 and the runs left within a few times the runs made.
+func (f *frontier) remaining() (explored float64, left int) {
 	var subtrees map[string]int
 	if f.partial {
 		subtrees = map[string]int{}
@@ -563,23 +571,30 @@ func (f *frontier) remaining() int {
 			}
 		}
 	}
-	left := 0.0
+	w := 0.0
 	for _, sub := range f.stack {
-		w := 1.0
+		share := 1.0
 		for i, c := range sub.prefix {
 			d := c.n
 			if f.partial {
 				d = subtrees[prefixKey(sub.prefix[:i])]
 			}
-			w /= float64(max(d, 1))
+			share /= float64(max(d, 1))
 		}
-		left += w
+		w += share
 	}
-	if left <= 0 || left >= 1 {
-		return 0
+	explored = max(1-w, 0)
+	if explored < minExplored {
+		return explored, 0
 	}
-	return roughly(float64(f.prior+f.runs) * left / (1 - left))
+	return explored, roughly(float64(f.prior+f.runs) * w / explored)
 }
+
+// minExplored is the share of the tree explored from which the runs left
+// are estimated. On small scenarios the runs left came out as low as a
+// fifth of the true count up to about 20% explored, and within two times
+// from there. Below 10% the first runs alone set the estimate.
+const minExplored = 0.1
 
 // roughly rounds n to one significant figure, as the estimate is no more
 // precise than that, and its exact value would differ between workers'
