@@ -305,7 +305,7 @@ Always end with a report the user can act on without knowing detest. It answers 
 
 Be exact about the bounds. A pass is a statement about the schedules explored, not a proof that the code is correct, and the user should be able to tell how far it reaches. When the exploration did not cover every interleaving of the scenario, say so at the top of the result, in plain words, and do not let a pass read as "no bug". This applies when:
 
-- it stopped at `MaxRuns` or `MaxDuration` (`complete=false`). Give the runs made and say the rest is unexplored;
+- it stopped at `MaxRuns` or `MaxDuration` (`complete=false`). Give the runs made and say the rest is unexplored. The summary line then estimates the runs left and the share explored (`roughly N runs left, about P% explored`) from the shape of the tree explored so far, or says it is too early to estimate under 20% explored. Quote the estimate as an order of magnitude, since it can still be off two times, to help the user choose between resuming, a higher bound and a smaller scenario. Too early means most of the tree is left;
 - runs were cut at `MaxIdleTicks` (`N runs cut at MaxIdleTicks` in the summary line). Those runs went no further than a loop's last allowed idle tick and their invariants at quiescence were not checked;
 - `MaxPreemptions` or another bound cut the search (`complete=true` then means complete within that bound only). Name the bound and what it leaves out;
 - it explored one shard (`DETEST_SHARD`) of the space;

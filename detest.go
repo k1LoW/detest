@@ -546,6 +546,13 @@ type result struct {
 	// Checkpoint is the file the rest of the exploration was saved to.
 	PriorRuns  int
 	Checkpoint string
+	// Estimated tells whether the rest of an exploration cut short was
+	// estimated. Explored is then the share of the tree the runs made cover
+	// by its shape, and Remaining the runs left, 0 while Explored is under
+	// minExplored.
+	Estimated bool
+	Explored  float64
+	Remaining int
 	// Interrupted is the SIGINT or SIGTERM that stopped the exploration.
 	Interrupted os.Signal
 	// Fatal is a misuse that stopped the exploration, which fails the test
@@ -614,6 +621,12 @@ func (r *result) outcome() string {
 			workers += ", PartialOrder (assumes no state shared outside detest)"
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
+		switch {
+		case r.Estimated && r.Explored < minExplored:
+			msg += fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
+		case r.Estimated:
+			msg += fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", r.Remaining, r.Explored*100)
+		}
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
 		}
