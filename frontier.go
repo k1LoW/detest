@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -520,12 +522,74 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	if merged.Fatal != nil {
 		return merged
 	}
+	if best == nil && f.incomplete && !f.random && merged.Shard == "" {
+		merged.Remaining = f.remaining()
+	}
 	if best != nil {
 		v := *best
 		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial
 		return &v
 	}
 	return merged
+}
+
+// remaining estimates the runs left in an exploration MaxRuns, MaxDuration
+// or a signal cut short, with the weighted backtrack estimator of Kilby,
+// Slaney, Thiébaux and Walsh ("Estimating Search Tree Size", AAAI 2006). A
+// subtree's weight is the share of the tree it would hold if every node's
+// subtrees were the same size, the product of 1/d over the nodes above it
+// with d their number of subtrees, so the subtrees left on the stack hold
+// a share w and the runs made 1-w. It returns 0 when it cannot tell.
+//
+// The estimator sums the weights of the runs made, as they finish. Summing
+// the stack's instead gives the same share, since the runs made and the
+// subtrees left partition the tree, and needs nothing saved in a checkpoint
+// to go on with a resumed exploration. A shard's or a violation's dropped
+// subtrees break the partition, so the caller asks for neither. f.mu need
+// not be held: every worker has returned.
+//
+// Under PartialOrder a node's subtrees are the ones pushed or run from it,
+// not the options of its choice, which would count the subtrees the
+// reduction leaves out. A later run may still add some, so the estimate may
+// be off either way.
+func (f *frontier) remaining() int {
+	var subtrees map[string]int
+	if f.partial {
+		subtrees = map[string]int{}
+		for k := range f.pushed {
+			if k != "" {
+				parent := k[:strings.LastIndexByte(k[:len(k)-1], ',')+1]
+				subtrees[parent]++
+			}
+		}
+	}
+	left := 0.0
+	for _, sub := range f.stack {
+		w := 1.0
+		for i, c := range sub.prefix {
+			d := c.n
+			if f.partial {
+				d = subtrees[prefixKey(sub.prefix[:i])]
+			}
+			w /= float64(max(d, 1))
+		}
+		left += w
+	}
+	if left <= 0 || left >= 1 {
+		return 0
+	}
+	return roughly(float64(f.prior+f.runs) * left / (1 - left))
+}
+
+// roughly rounds n to one significant figure, as the estimate is no more
+// precise than that, and its exact value would differ between workers'
+// orders of finishing.
+func roughly(n float64) int {
+	if n < 1 {
+		return 1
+	}
+	e := math.Pow(10, math.Floor(math.Log10(n)))
+	return int(math.Round(n/e) * e)
 }
 
 // checkpoint is the rest of an exploration MaxRuns, MaxDuration or a signal cut short: the subtrees
