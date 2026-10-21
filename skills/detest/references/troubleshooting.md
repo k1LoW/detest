@@ -58,7 +58,7 @@ A process kept stepping, through `p.Step`, a mutex or a query, without a commit 
 
 ## The exploration is too large or slow
 
-The summary line shows `complete=false` or the run takes minutes.
+The summary line shows `complete=false` or the run takes minutes. With `complete=false` the line also gives a rough estimate of the runs left (`roughly N runs left`). When it is within a few times the runs made, resuming from a checkpoint or a higher `MaxRuns` finishes it; when it is orders of magnitude more, cut the scenario down first.
 
 - Fewer actors (two), fewer runs per actor (one), fewer seeded rows.
 - `store.Ignore(...)` for tables nothing in the flow reads back (see `wiring.md` for the conditions).
