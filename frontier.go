@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -520,12 +522,89 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	if merged.Fatal != nil {
 		return merged
 	}
+	if best == nil && f.incomplete && !f.random && merged.Shard == "" {
+		merged.Estimated = true
+		merged.Explored, merged.Remaining = f.remaining()
+	}
 	if best != nil {
 		v := *best
 		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial
 		return &v
 	}
 	return merged
+}
+
+// remaining estimates the runs left in an exploration MaxRuns, MaxDuration
+// or a signal cut short, with the weighted backtrack estimator of Kilby,
+// Slaney, Thiébaux and Walsh ("Estimating Search Tree Size", AAAI 2006). A
+// subtree's weight is the share of the tree it would hold if every node's
+// subtrees were the same size, the product of 1/d over the nodes above it
+// with d their number of subtrees, so the subtrees left on the stack hold
+// a share w and the runs made 1-w. It returns that share and the runs left,
+// which it gives only from minExplored on.
+//
+// The estimator sums the weights of the runs made, as they finish. Summing
+// the stack's instead gives the same share, since the runs made and the
+// subtrees left partition the tree, and needs nothing saved in a checkpoint
+// to go on with a resumed exploration. A shard's or a violation's dropped
+// subtrees break the partition, so the caller asks for neither. f.mu need
+// not be held: every worker has returned.
+//
+// Under PartialOrder a node's subtrees are the ones pushed or run from it,
+// not the options of its choice, which would count the subtrees the
+// reduction leaves out. A later run may still add some, so the estimate may
+// be off either way.
+//
+// Early in an exploration the share explored comes out several times too
+// large, since the first runs follow the paths with the fewest choices,
+// and the runs left as many times too few, which would read as nearly done.
+// Below minExplored no count is given, which also keeps 1-w clear of the
+// rounding of a w near 1 and the runs left within a few times the runs made.
+func (f *frontier) remaining() (explored float64, left int) {
+	var subtrees map[string]int
+	if f.partial {
+		subtrees = map[string]int{}
+		for k := range f.pushed {
+			if k != "" {
+				parent := k[:strings.LastIndexByte(k[:len(k)-1], ',')+1]
+				subtrees[parent]++
+			}
+		}
+	}
+	w := 0.0
+	for _, sub := range f.stack {
+		share := 1.0
+		for i, c := range sub.prefix {
+			d := c.n
+			if f.partial {
+				d = subtrees[prefixKey(sub.prefix[:i])]
+			}
+			share /= float64(max(d, 1))
+		}
+		w += share
+	}
+	explored = max(1-w, 0)
+	if explored < minExplored {
+		return explored, 0
+	}
+	return explored, roughly(float64(f.prior+f.runs) * w / explored)
+}
+
+// minExplored is the share of the tree explored from which the runs left
+// are estimated. On small scenarios the runs left came out as low as a
+// fifth of the true count up to about 20% explored, and within two times
+// from there.
+const minExplored = 0.2
+
+// roughly rounds n to one significant figure, as the estimate is no more
+// precise than that, and its exact value would differ between workers'
+// orders of finishing.
+func roughly(n float64) int {
+	if n < 1 {
+		return 1
+	}
+	e := math.Pow(10, math.Floor(math.Log10(n)))
+	return int(math.Round(n/e) * e)
 }
 
 // checkpoint is the rest of an exploration MaxRuns, MaxDuration or a signal cut short: the subtrees
