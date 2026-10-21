@@ -409,7 +409,7 @@ type Sim struct {
 }
 
 func newSimDefaults() *Sim {
-	return &Sim{maxFailures: 1, maxRedeliveries: 1, maxRuns: 200000, maxIdleTicks: 3, maxSpins: 100, eagerStart: true}
+	return &Sim{maxFailures: 1, maxRedeliveries: 1, maxRuns: 1000000, maxIdleTicks: 3, maxSpins: 100, eagerStart: true}
 }
 
 func newSim(t *testing.T, opts ...Option) *Sim {
