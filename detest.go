@@ -133,7 +133,10 @@ func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 func MaxSpins(n int) Option { return func(s *Sim) { s.maxSpins = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per
-// run (CHESS-style). 0 means unbounded.
+// run (CHESS-style). 0 allows none, and without it the runs are unbounded.
+// The passes of IterativeBounding with PartialOrder apply the pass's bound
+// instead, up to n, and the replay of a schedule one of them printed applies
+// the bound the schedule carries.
 func MaxPreemptions(n int) Option {
 	return func(s *Sim) { s.maxPreemptions = n; s.boundPreemptions = true }
 }
@@ -216,11 +219,11 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // as before. The schedules it prints start with "reads:", and replay under
 // the same rule with or without the option.
 //
-// It applies to a single worker exploring depth first: Workers above one,
-// IterativeBounding, Random, Prioritized, Shard, DETEST_SHARD and
-// DETEST_CHECKPOINT are refused with it, and so is a MaxSpins below the default, since the spin
-// verdicts depend on the order of commits the reduction takes as
-// independent.
+// It applies to a single worker exploring depth first, or in the passes of
+// IterativeBounding, and Workers above one, Random, Prioritized, Shard,
+// DETEST_SHARD and DETEST_CHECKPOINT are refused with it, and so is a
+// MaxSpins below the default, since the spin verdicts depend on the order
+// of commits the reduction takes as independent.
 func PartialOrder() Option { return func(s *Sim) { s.partialOrder = true } }
 
 // withoutEagerStart is EagerStart(false) after a start moved a counter of
@@ -257,8 +260,13 @@ const lazyPrefix = "lazy:"
 // without it replays under the other rule.
 const readsPrefix = "reads:"
 
+// boundPrefix marks a schedule explored under IterativeBounding with
+// PartialOrder by the bound of its pass, as "bound:2:", so that it replays
+// with the options that bound leaves, with or without either option.
+const boundPrefix = "bound:"
+
 // MaxRuns caps the number of runs an exhaustive exploration performs.
-// Under IterativeBounding the runs a pass makes again on the way to its own
+// Under IterativeBounding the runs of fewer preemptions a pass makes again
 // are not counted. DETEST_MAX_RUNS overrides n.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
@@ -301,7 +309,11 @@ func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 // (the value printed after DETEST_REPLAY=) instead of exploring. One printed
 // by an exploration that dropped EagerStart starts with "lazy:" and replays
 // without it, and one printed under PartialOrder starts with "reads:" and
-// replays its wake rule for idle loops with or without the option. A regression test pins the counterexample of a bug with it: with
+// replays its wake rule for idle loops with or without the option. One
+// printed by a pass of IterativeBounding under PartialOrder carries
+// "bound:" and the pass's number after "reads:", and replays under that
+// preemption bound. A regression test pins
+// the counterexample of a bug with it: with
 // ExpectViolation it fails once the bug is fixed, without it it fails while the
 // bug is there. A schedule recorded before the code under test changed
 // shape fails the test as stale. DETEST_REPLAY overrides it.
@@ -339,6 +351,12 @@ type Sim struct {
 	exploreAll  bool
 	maxRuns     int
 	idleByReads bool // idle loops are woken by what their tick read (see idleOn)
+	// passBound is the preemption bound the runs apply instead of
+	// MaxPreemptions when passBounded, which is the level of the pass under
+	// IterativeBounding with PartialOrder, or the bound a replayed schedule
+	// was found under.
+	passBound   int
+	passBounded bool
 	maxDuration time.Duration
 	verbose     bool
 	sqlObserver func(query string, err error)
@@ -665,7 +683,7 @@ func (r *result) outcome() string {
 		what = r.Err.Error()
 	}
 	choices := 0
-	if _, _, picks := cutSchedulePrefixes(r.Schedule); picks != "" {
+	if _, _, _, picks := cutSchedulePrefixes(r.Schedule); picks != "" {
 		choices = len(strings.Split(picks, ","))
 	}
 	seed := ""
@@ -705,12 +723,15 @@ func (s *Sim) check() *result {
 		s.idleByReads = true
 	}
 	if sched, fromEnv := replaySchedule(s.schedule); sched != "" {
-		lazy, reads, rest := cutSchedulePrefixes(sched)
+		lazy, reads, bound, rest := cutSchedulePrefixes(sched)
 		sched = rest
 		if lazy && s.lazy == "" {
 			s.eagerStart, s.lazy = false, "the schedule replayed was explored without it"
 		}
 		s.idleByReads = reads
+		if bound >= 0 {
+			s.passBound, s.passBounded = bound, true
+		}
 		var prefix []choice
 		for f := range strings.SplitSeq(sched, ",") {
 			if sched == "" {
@@ -764,9 +785,10 @@ func (s *Sim) printRun(n int, r *run) {
 // one reported is easier to read. It goes through the choices in order and
 // tries the default option where the run took another, keeping the other
 // picks, and adopts the change when the run still breaks the same way. The
-// default is the first option, or under IterativeBounding the first that
-// preempts nothing, so that shrinking spends no preemption the exploration
-// avoided. The result departs from the default schedule at fewer choices,
+// default is the first option, or under IterativeBounding without
+// PartialOrder the first that preempts nothing, so that shrinking spends no
+// preemption the exploration avoided. Under PartialOrder a pass's bound,
+// which the shrinking runs apply too, keeps them within its level. The result departs from the default schedule at fewer choices,
 // and the search costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 	for i := 0; i < len(r.choices); i++ {
@@ -817,6 +839,9 @@ func (s *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, s
 		sched = append(sched, strconv.Itoa(c.picked))
 	}
 	schedule := strings.Join(sched, ",")
+	if r.passBounded {
+		schedule = boundPrefix + strconv.Itoa(r.passBound) + ":" + schedule
+	}
 	if s.idleByReads {
 		schedule = readsPrefix + schedule
 	}
@@ -832,16 +857,25 @@ func (s *Sim) makeResult(r *run, v *violation, runs, depth int, complete bool, s
 }
 
 // cutSchedulePrefixes splits a schedule into the prefixes it carries and its
-// choices.
-func cutSchedulePrefixes(sched string) (lazy, reads bool, rest string) {
+// choices. bound is the preemption bound a "bound:" prefix names, -1 when
+// there is none.
+func cutSchedulePrefixes(sched string) (lazy, reads bool, bound int, rest string) {
+	bound = -1
 	for {
 		switch {
 		case strings.HasPrefix(sched, lazyPrefix):
 			lazy, sched = true, sched[len(lazyPrefix):]
 		case strings.HasPrefix(sched, readsPrefix):
 			reads, sched = true, sched[len(readsPrefix):]
+		case strings.HasPrefix(sched, boundPrefix):
+			n, after, ok := strings.Cut(sched[len(boundPrefix):], ":")
+			k, err := strconv.Atoi(n)
+			if !ok || err != nil || k < 0 {
+				return lazy, reads, bound, sched // a bad schedule, reported as one
+			}
+			bound, sched = k, after
 		default:
-			return lazy, reads, sched
+			return lazy, reads, bound, sched
 		}
 	}
 }

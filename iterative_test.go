@@ -2,8 +2,10 @@ package detest
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -241,10 +243,120 @@ func TestIterativeBoundingCheckpointRefusesLevelsOutsideItsPass(t *testing.T) {
 	}
 }
 
-func TestIterativeBoundingRefusesPartialOrder(t *testing.T) {
-	err := partialOrderRefusal([]Option{PartialOrder(), IterativeBounding()}, false)
-	if err == nil || !strings.Contains(err.Error(), "IterativeBounding") {
-		t.Fatalf("got %v, want a refusal naming IterativeBounding", err)
+// levelOutcomes explores model under IterativeBounding to the end and returns
+// the outcomes of the runs each pass made at its own level. The runs a pass
+// makes again report nothing, so an outcome only they reach is one the
+// exploration misses.
+func levelOutcomes(t *testing.T, model func(t *testing.T, s *Sim), opts ...Option) []outcome {
+	t.Helper()
+	var out []outcome
+	opts = append(opts, IterativeBounding(), exploreAll(), func(s *Sim) {
+		s.depObserve = func(r *run, v *violation) {
+			if r.preempts == r.s.frontier.level {
+				out = append(out, outcomeOf(r, v))
+			}
+		}
+	})
+	res, _ := exploreBubble(t, model, opts, nil, 0)
+	if res.Fatal != nil {
+		t.Fatal(res.Fatal)
+	}
+	if !res.Complete && !res.Violated {
+		t.Fatalf("the exploration did not finish: %s", res.report())
+	}
+	return out
+}
+
+// Under PartialOrder each pass is a reduced exploration under its level, and
+// the runs the passes make at their own level reach every outcome the passes
+// without the reduction reach at theirs.
+func TestIterativeBoundingPartialOrderReachesEveryOutcome(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		model func(t *testing.T, s *Sim)
+		opts  []Option
+	}{
+		{"counter", func(t *testing.T, s *Sim) { counterModel(s, true) }, nil},
+		{"lost update", func(t *testing.T, s *Sim) { counterModel(s, false) }, nil},
+		{"lock", lockModel, []Option{MaxPreemptions(1)}},
+		{"lock unbounded", lockModel, nil},
+		{"contended c=2", contendedModel, []Option{MaxPreemptions(2)}},
+		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}},
+		{"dropped", droppedModel, nil},
+		{"unique savepoint", uniqueSavepointModel(false), []Option{EagerStart(false)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			full := levelOutcomes(t, c.model, slices.Clone(c.opts)...)
+			reduced := levelOutcomes(t, c.model, append(slices.Clone(c.opts), PartialOrder())...)
+			keys := map[string]bool{}
+			for _, o := range reduced {
+				keys[o.key()] = true
+			}
+			missing := 0
+			for _, o := range full {
+				if !keys[o.key()] {
+					missing++
+					if missing <= 3 {
+						t.Errorf("the reduction misses the outcome of the run %s, verdict %q, histories %v", o.picks, o.verdict, slices.Sorted(maps.Keys(o.locals)))
+					}
+				}
+			}
+			t.Logf("%d runs at their level, %d under PartialOrder", len(full), len(reduced))
+			if missing > 0 {
+				t.Errorf("%d outcomes missed", missing)
+			}
+			if len(reduced) > len(full) {
+				t.Errorf("the reduction made more runs at their level than the passes without it")
+			}
+		})
+	}
+}
+
+// A pass under PartialOrder makes the runs of exactly its level once each,
+// and the runs of fewer again, as the passes without it do.
+func TestIterativeBoundingPartialOrderOrdersRunsByPreemptions(t *testing.T) {
+	var levels []int
+	model := func(t *testing.T, s *Sim) {
+		counterModel(s, true)
+		s.AtQuiescence(func(*State) error {
+			switch level := s.frontier.level; {
+			case s.run.preempts == level:
+				levels = append(levels, level)
+			case s.run.preempts > level:
+				return fmt.Errorf("a run of %d preemptions in the pass of %d", s.run.preempts, level)
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(2), IterativeBounding(), PartialOrder()}, nil, 0)
+	if !res.Complete || res.Violated || len(levels) != res.Runs {
+		t.Fatalf("%d runs at their level: %s", len(levels), res.report())
+	}
+	for i := 1; i < len(levels); i++ {
+		if levels[i] < levels[i-1] {
+			t.Fatalf("run %d spent %d preemptions after a run that spent %d", i, levels[i], levels[i-1])
+		}
+	}
+	if levels[len(levels)-1] != 2 {
+		t.Fatalf("the last run spent %d preemptions, want 2", levels[len(levels)-1])
+	}
+}
+
+// A schedule found in a pass under PartialOrder carries the pass's bound,
+// and replays under it with or without either option.
+func TestIterativeBoundingPartialOrderViolationReplays(t *testing.T) {
+	model := func(t *testing.T, s *Sim) { earlyRaceModel(s, 4) }
+	found, _ := exploreBubble(t, model, []Option{IterativeBounding(), PartialOrder()}, nil, 0)
+	if !found.Violated || !strings.Contains(found.Schedule, "bound:1:") {
+		t.Fatalf("want a violation in the pass of 1 preemption, got %s", found.report())
+	}
+	for _, opts := range [][]Option{nil, {PartialOrder()}, {IterativeBounding()}, {IterativeBounding(), PartialOrder()}} {
+		replayed, _ := exploreBubble(t, model, append(opts, Replay(found.Schedule)), nil, 0)
+		if replayed.Fatal != nil || !replayed.Violated || replayed.Err.Error() != found.Err.Error() {
+			t.Fatalf("replaying %s with %d options: %s", found.Schedule, len(opts), replayed.report())
+		}
 	}
 }
 

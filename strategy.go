@@ -52,16 +52,25 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // one together. The summary line gives how many there were, and neither
 // Runs nor MaxRuns counts them.
 //
-// A complete exploration makes the same runs as DepthFirst. One cut short
-// reports the number of preemptions up to which it made every run, and a
-// checkpoint resumes it in the same pass. The violation reported is the
-// first one depth first among the runs of the fewest preemptions, which
-// may be another than the one DepthFirst reports. Workers wait for a pass
+// Without PartialOrder, a complete exploration makes the same runs as
+// DepthFirst, and one cut short is saved to a checkpoint that resumes it in
+// the same pass. One cut short reports the number of preemptions up to
+// which it made every run. The violation reported is the first one depth
+// first among the runs of the fewest preemptions, which may be another
+// than the one DepthFirst reports. Workers wait for a pass
 // to finish before they start the next.
 //
-// It does not apply with PartialOrder yet, whose sleep sets and backtrack
-// points are computed for one depth-first order. Of DepthFirst,
-// IterativeBounding, Random and Prioritized, the one passed last applies.
+// With PartialOrder each pass is a reduced exploration under its number of
+// preemptions as the bound, rather than a pass that leaves out the subtrees
+// costing more, since the reduction's backtrack points and sleep sets hold
+// for the bound the options were cut at. Nothing of the reduction is
+// carried from one pass to the next. A run may then spend preemptions past
+// the choices its subtree fixes, and the ones of fewer than the pass's are
+// made again. The schedules it prints carry "bound:" and the pass's number
+// after "reads:", and replay under that bound with or without either
+// option. Of
+// DepthFirst, IterativeBounding, Random and Prioritized, the one passed
+// last applies.
 func IterativeBounding() Option { return func(s *Sim) { s.strategy = strategy{iterative: true} } }
 
 // Random makes Explore run schedules whose every choice is drawn uniformly

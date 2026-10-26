@@ -34,9 +34,11 @@ type frontier struct {
 	stack   []subtree // LIFO keeps the order depth first and the stack small
 	// iterative is IterativeBounding, under which the tree is explored in
 	// one pass per level, each from the root and depth first, leaving out
-	// the subtrees whose prefix costs more preemptions than level. higher
-	// records that the pass left one out, so that the next pass has runs to
-	// make, and again counts the runs made again on the way to the level's.
+	// the subtrees whose prefix costs more preemptions than level, or under
+	// PartialOrder exploring with level as the bound. higher records that
+	// the pass left a subtree or an option out, so that the next pass has
+	// runs to make, and again counts the runs of fewer preemptions it made
+	// again.
 	iterative  bool
 	level      int
 	higher     bool
@@ -178,7 +180,9 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
 	f.busy++
-	if p.again = p.level < f.level; p.again {
+	// Under PartialOrder a run may spend preemptions past its prefix, so
+	// passRun tells a run made again after it is made.
+	if p.again = !f.partial && p.level < f.level; p.again {
 		f.again++
 	} else {
 		f.runs++
@@ -188,13 +192,40 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 
 // nextLevel starts the pass of the next level under IterativeBounding, from
 // the root, once the pass before has finished and left out a subtree of a
-// higher level. It reports whether it started one. f.mu is held.
+// higher level, or under PartialOrder an option its bound cut. It reports
+// whether it started one. f.mu is held.
 func (f *frontier) nextLevel() bool {
 	if !f.iterative || !f.higher || f.best != nil && !f.exploreAll {
 		return false
 	}
 	f.level, f.higher = f.level+1, false
 	f.stack = append(f.stack, subtree{})
+	if f.partial {
+		// The backtrack points and sleep sets of a pass hold for its bound
+		// only, and the next pass explores under another. Carried over, a
+		// prefix pushed under the lower bound would keep the higher one
+		// from pushing it, and a sleep set from waking what the higher
+		// bound makes a preemption cost.
+		f.pushed, f.zIn, f.explored = map[string]*subtree{"": {}}, map[string][]sleeper{}, map[string][]explored{}
+	}
+	return true
+}
+
+// passRun records a run of a pass of IterativeBounding with PartialOrder,
+// which spent preempts preemptions and left an option of a higher bound out
+// when higher. It reports whether the run was one of an earlier pass, made
+// again, which it then counts as one.
+func (f *frontier) passRun(preempts int, higher bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if higher {
+		f.higher = true
+	}
+	if preempts >= f.level {
+		return false
+	}
+	f.runs--
+	f.again++
 	return true
 }
 
@@ -256,8 +287,9 @@ func (f *frontier) finish(children []subtree) {
 
 // push adds the subtrees not after the best violation and, under
 // PartialOrder where several runs' backtrack points name one subtree, not
-// pushed before. Under IterativeBounding it leaves the subtrees above the
-// pass's level to a later pass. It returns how many it added. f.mu is held.
+// pushed before. Under IterativeBounding without PartialOrder it leaves the
+// subtrees above the pass's level to a later pass. It returns how many it
+// added. f.mu is held.
 func (f *frontier) push(children []subtree) int {
 	pushed := 0
 	for i := range children {
@@ -426,9 +458,9 @@ func precedes(a, b []int) bool {
 // are the alternatives it did not pick at every choice it made past the
 // prefix, with what their prefix costs under IterativeBounding. They are
 // ordered so that the stack yields the deepest first, and at one choice the
-// first option first. Past the prefix a run
-// picks the first option, or under IterativeBounding the first that
-// preempts nothing, so the alternatives before the pick are subtrees too.
+// first option first. Past the prefix a run picks the first option, or under
+// IterativeBounding without PartialOrder the first that preempts nothing, so
+// the alternatives before the pick are subtrees too.
 func (s *Sim) children(r *run, prefix int) []subtree {
 	c := r.choices
 	var out []subtree
@@ -487,6 +519,12 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		if !taken.again {
 			runs++
 		}
+		if s.partialOrder && f.iterative {
+			// The runs a violation is shrunk and retraced with apply it too.
+			f.mu.Lock()
+			s.passBound, s.passBounded = f.level, true
+			f.mu.Unlock()
+		}
 		r := s.newRun(prefix)
 		if s.partialOrder {
 			f.mu.Lock()
@@ -531,6 +569,17 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			f.walked(r.choices)
 		case v == nil || s.exploreAll:
 			children = s.children(r, len(prefix))
+		}
+		if s.partialOrder && f.iterative && (v == nil || v.kind != "fatal") {
+			// A pass's level is the bound, and a run of fewer preemptions
+			// is a run of an earlier pass, which reported what it broke.
+			// Only the bound the user set leaves no higher pass to make.
+			higher := r.boundCut && (!s.boundPreemptions || s.passBound < s.maxPreemptions)
+			if f.passRun(r.preempts, higher) {
+				runs--
+				f.finish(children)
+				continue
+			}
 		}
 		maxDepth = max(maxDepth, len(r.choices))
 		if r.cut {

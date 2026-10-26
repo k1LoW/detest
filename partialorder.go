@@ -38,9 +38,11 @@ type subtree struct {
 	prefix       []choice
 	ident        string // the option's identity, "" for a data or fault choice
 	conservative bool   // added for the bound alone
-	// level is, under IterativeBounding, the preemptions the prefix spends,
-	// and again marks a subtree taken in the pass of a higher level, whose
-	// run was made in its own pass and is made again for its subtrees.
+	// level is, under IterativeBounding without PartialOrder, the
+	// preemptions the prefix spends, and again marks a subtree taken in the
+	// pass of a higher level, whose run was made in its own pass and is made
+	// again for its subtrees. Under PartialOrder a run may spend more than
+	// its prefix, and passRun tells a run made again once it is made.
 	level int
 	again bool
 }
