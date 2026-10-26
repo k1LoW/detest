@@ -30,7 +30,9 @@ import (
 //
 // The exploration is bounded (preemptions, failures, MaxRuns, MaxDuration), and the log
 // line Explore writes states how far it got. A violating schedule is run once
-// more to record its trace, so seeds and invariants see that run twice.
+// more to record its trace, so seeds and invariants see that run twice, and
+// under IterativeBounding they see the runs a pass makes again as often as
+// it makes them.
 func Explore(t *testing.T, fn func(t *testing.T, s *Sim), opts ...Option) {
 	t.Helper()
 	if sig, _ := interruptedBy.Load().(os.Signal); sig != nil {

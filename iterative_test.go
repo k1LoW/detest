@@ -220,9 +220,86 @@ func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 	}
 }
 
+// A checkpoint whose levels do not fit its pass is refused, rather than made
+// again unchecked or counted at another pass.
+func TestIterativeBoundingCheckpointRefusesLevelsOutsideItsPass(t *testing.T) {
+	for _, body := range []string{
+		`{"version":3,"runs":0,"subtrees":[[]],"level":-1,"levels":[0]}`,
+		`{"version":3,"runs":0,"subtrees":[[]],"level":1,"levels":[2]}`,
+		`{"version":3,"runs":0,"subtrees":[[]],"level":1,"levels":[-1]}`,
+		`{"version":3,"runs":0,"subtrees":[[]],"level":1}`,
+	} {
+		path := filepath.Join(t.TempDir(), "ckpt.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := newFrontier(1, 10)
+		f.iterative = true
+		if err := f.load(path); err == nil || !strings.Contains(err.Error(), "is not a checkpoint of this detest") {
+			t.Errorf("%s: got %v, want a refusal", body, err)
+		}
+	}
+}
+
 func TestIterativeBoundingRefusesPartialOrder(t *testing.T) {
 	err := partialOrderRefusal([]Option{PartialOrder(), IterativeBounding()}, false)
 	if err == nil || !strings.Contains(err.Error(), "IterativeBounding") {
 		t.Fatalf("got %v, want a refusal naming IterativeBounding", err)
+	}
+}
+
+// One worker stops at the first violation of a pass, as depth first does,
+// rather than going on through the subtrees of the options before the one
+// each run took.
+func TestIterativeBoundingStopsAtTheFirstViolation(t *testing.T) {
+	var made, first int
+	model := func(t *testing.T, s *Sim) {
+		var x, r1, r2 int
+		s.Seed(func() { x, r1, r2 = 0, 0, 0 })
+		s.Manual("a", 1, func(p *Proc) error {
+			for i := range 3 {
+				p.Step("a %d", i)
+			}
+			x = 1
+			p.Step("between")
+			x = 2
+			return nil
+		})
+		s.Manual("b", 1, func(p *Proc) error {
+			for i := range 3 {
+				p.Step("b %d", i)
+			}
+			r1 = x
+			p.Step("between")
+			r2 = x
+			return nil
+		})
+		s.AtQuiescence(func(*State) error {
+			if s.run.preempts < s.frontier.level {
+				return nil // made again
+			}
+			made++
+			if r1 == 1 && r2 == 2 {
+				if first == 0 {
+					first = made
+				}
+				return fmt.Errorf("saw x between its writes")
+			}
+			return nil
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{IterativeBounding()}, nil, 0)
+	if !res.Violated || res.Runs != first {
+		t.Fatalf("%d runs, the first violation at run %d: %s", res.Runs, first, res.report())
+	}
+}
+
+func TestChoiceRankFollowsTheOrderOfAPass(t *testing.T) {
+	var got []int
+	for v := range 4 {
+		got = append(got, choice{picked: v, free: 2}.rank())
+	}
+	if want := []int{1, 2, 0, 3}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ranks %v, want %v", got, want)
 	}
 }

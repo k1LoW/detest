@@ -31,9 +31,9 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // IterativeBounding makes Explore enumerate the schedules in order of the
 // preemptions they spend, as iterative context bounding (Musuvathi and
 // Qadeer, "Iterative Context Bounding for Systematic Testing of
-// Multithreaded Programs", PLDI 2007) does: every run with no preemption,
-// then every run with one, and so on up to MaxPreemptions, or without end
-// when it is not set. Depth first, the last choices of a run are varied
+// Multithreaded Programs", PLDI 2007) does. It makes every run with no
+// preemption, then every run with one, and so on up to MaxPreemptions, or
+// without end when it is not set. Depth first, the last choices of a run are varied
 // first, so a race between its first steps is tried only after the whole
 // tree below the earlier order, which an exploration cut by MaxRuns or
 // MaxDuration may never reach however few preemptions the race needs. Most

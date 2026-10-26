@@ -19,8 +19,9 @@ import (
 // frontier holds the subtrees of the schedule tree no worker has explored yet,
 // each as the choice prefix all of its runs share. A finished run reveals the
 // unexplored siblings along its path, and every one of them is an independent
-// subtree, so idle workers take them as they appear: the load balances itself
-// and every run is executed once.
+// subtree, so idle workers take them as they appear, the load balances itself
+// and every run is executed once. Under IterativeBounding a pass makes again
+// the runs of earlier passes that lead to its own (see IterativeBounding).
 //
 // Workers wait for subtrees on channels created outside every bubble. A
 // sync.Cond would not do: synctest counts a goroutine in Cond.Wait as durably
@@ -54,8 +55,9 @@ type frontier struct {
 	runs      int
 	maxRuns   int
 	expired   atomic.Bool // MaxDuration has passed, or a signal came
-	// best is the choices of the earliest violating run found so far, in the
-	// depth-first order one worker explores in, with its result. Subtrees
+	// best is the ranks of the choices (see choice.rank) of the earliest
+	// violating run found so far, in the depth-first order one worker
+	// explores in, with its result. Subtrees
 	// after it are dropped and the ones before it still explored, so the
 	// violation reported is the one a single worker would report.
 	best       []int
@@ -198,7 +200,7 @@ func (f *frontier) nextLevel() bool {
 
 // completeLevel returns, under IterativeBounding, the preemptions up to
 // which every run was made, -1 when not every run without one was. f.mu
-// need not be held: every worker has returned.
+// need not be held, as every worker has returned.
 func (f *frontier) completeLevel() int {
 	if len(f.stack) > 0 {
 		return f.level - 1
@@ -254,7 +256,8 @@ func (f *frontier) finish(children []subtree) {
 
 // push adds the subtrees not after the best violation and, under
 // PartialOrder where several runs' backtrack points name one subtree, not
-// pushed before. It returns how many it added. f.mu is held.
+// pushed before. Under IterativeBounding it leaves the subtrees above the
+// pass's level to a later pass. It returns how many it added. f.mu is held.
 func (f *frontier) push(children []subtree) int {
 	pushed := 0
 	for i := range children {
@@ -377,12 +380,12 @@ func (f *frontier) found(choices []choice, index int, res *result, children []su
 		f.settled(0)
 		return
 	}
-	picks := make([]int, len(choices))
+	ranks := make([]int, len(choices))
 	for i, c := range choices {
-		picks[i] = c.picked
+		ranks[i] = c.rank()
 	}
-	if f.best == nil || precedes(picks, f.best) {
-		f.best, f.bestResult = picks, res
+	if f.best == nil || precedes(ranks, f.best) {
+		f.best, f.bestResult = ranks, res
 	}
 	// Under PartialOrder the violating run's backtrack points go to its
 	// ancestors, where the alternatives before its own are before it in
@@ -403,8 +406,8 @@ func (f *frontier) after(prefix []choice) bool {
 		if i >= len(f.best) {
 			return false
 		}
-		if c.picked != f.best[i] {
-			return c.picked > f.best[i]
+		if k := c.rank(); k != f.best[i] {
+			return k > f.best[i]
 		}
 	}
 	return false // the prefix leads to the best run, and may to earlier ones
@@ -419,10 +422,11 @@ func precedes(a, b []int) bool {
 	return len(a) < len(b)
 }
 
-// children returns the subtrees below prefix that run r did not enter: at
-// every choice the run made past the prefix, the alternatives it did not
-// pick, with what their prefix costs under IterativeBounding. They are
-// ordered so that the stack yields the deepest first. Past the prefix a run
+// children returns the subtrees below prefix that run r did not enter, which
+// are the alternatives it did not pick at every choice it made past the
+// prefix, with what their prefix costs under IterativeBounding. They are
+// ordered so that the stack yields the deepest first, and at one choice the
+// first option first. Past the prefix a run
 // picks the first option, or under IterativeBounding the first that
 // preempts nothing, so the alternatives before the pick are subtrees too.
 func (s *Sim) children(r *run, prefix int) []subtree {
@@ -435,7 +439,7 @@ func (s *Sim) children(r *run, prefix int) []subtree {
 			}
 			p := make([]choice, j+1)
 			copy(p, c[:j])
-			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp}
+			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp, free: c[j].free}
 			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
 				continue // another machine's subtree
 			}
@@ -619,7 +623,9 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // the stack's instead gives the same share, since the runs made and the
 // subtrees left partition the tree, and needs nothing saved in a checkpoint
 // to go on with a resumed exploration. A shard's or a violation's dropped
-// subtrees break the partition, so the caller asks for neither. f.mu need
+// subtrees break the partition, and so do the ones a pass of
+// IterativeBounding leaves to later passes, so the caller asks for none of
+// them. f.mu need
 // not be held: every worker has returned.
 //
 // Under PartialOrder a node's subtrees are the ones pushed or run from it,
@@ -679,8 +685,11 @@ func roughly(n float64) int {
 	return int(math.Round(n/e) * e)
 }
 
-// checkpoint is the rest of an exploration MaxRuns, MaxDuration or a signal cut short: the subtrees
-// not explored yet, each as the choices that lead to it.
+// checkpoint is the rest of an exploration MaxRuns, MaxDuration or a signal
+// cut short, as the subtrees not explored yet, each as the choices that lead
+// to it. Under IterativeBounding they are the rest of the current pass,
+// whose subtrees of lower levels lead to runs of its level through runs made
+// before, and the later passes start from the root again.
 // checkpointVersion is the version of the checkpoint format. 2 is the tree
 // of eager starts and of INSERT yielding first, whose prefixes a checkpoint
 // of version 1 does not name. An exploration under IterativeBounding saves
@@ -714,6 +723,7 @@ type savedChoice struct {
 	N      int    `json:"n"`
 	Picked int    `json:"picked"`
 	FP     uint64 `json:"fp,omitempty"`
+	Free   int    `json:"free,omitempty"` // under IterativeBounding (see choice.free)
 }
 
 // load resumes from the checkpoint at path, if there is one.
@@ -734,15 +744,18 @@ func (f *frontier) load(path string) error {
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration without IterativeBounding, which it cannot resume in its order", path)
 	case ck.Version == iterativeCheckpointVersion && !f.iterative:
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration under IterativeBounding, which only IterativeBounding resumes", path)
-	case ck.Version != checkpointVersion && ck.Version != iterativeCheckpointVersion,
-		ck.Version == iterativeCheckpointVersion && len(ck.Levels) != len(ck.Subtrees):
+	case ck.Version != checkpointVersion && ck.Version != iterativeCheckpointVersion:
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
+	case !validLevels(ck):
+		// A level the runs do not spend would make them again unchecked,
+		// or count them at another pass, where nothing in the runs tells.
+		return fmt.Errorf("detest: %s is not a checkpoint of this detest: its levels do not fit its pass", path)
 	}
 	f.stack = f.stack[:0]
 	for k, st := range ck.Subtrees {
 		p := make([]choice, len(st))
 		for i, c := range st {
-			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP}
+			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP, free: c.Free}
 		}
 		sub := subtree{prefix: p}
 		if f.iterative {
@@ -772,7 +785,7 @@ func (f *frontier) save(path string) error {
 	for _, sub := range f.stack {
 		st := make([]savedChoice, len(sub.prefix))
 		for i, c := range sub.prefix {
-			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp}
+			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp, Free: c.free}
 		}
 		ck.Subtrees = append(ck.Subtrees, st)
 		if f.iterative {
@@ -787,4 +800,22 @@ func (f *frontier) save(path string) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
+}
+
+// validLevels reports whether the pass and the subtrees' levels of a
+// checkpoint of version iterativeCheckpointVersion fit together, as a pass
+// holds subtrees of its level or lower only.
+func validLevels(ck checkpoint) bool {
+	if ck.Version != iterativeCheckpointVersion {
+		return true
+	}
+	if ck.Level < 0 || len(ck.Levels) != len(ck.Subtrees) {
+		return false
+	}
+	for _, l := range ck.Levels {
+		if l < 0 || l > ck.Level {
+			return false
+		}
+	}
+	return true
 }

@@ -28,6 +28,26 @@ type choice struct {
 	// arrive at it with the same fingerprint; 0 when unknown, as for
 	// DETEST_REPLAY.
 	fp uint64
+	// free is, under IterativeBounding, the option a run takes at a step
+	// choice past its prefix, the first that preempts nothing, and 0
+	// otherwise.
+	free int
+}
+
+// rank is the place of the picked option in the order a pass explores the
+// options of the choice in. The run takes free first and its subtrees take
+// the others from the first on, so comparing picks alone would put a
+// subtree of an option before free ahead of the runs explored before it.
+// Without IterativeBounding free is 0 and the rank is the pick.
+func (c choice) rank() int {
+	switch {
+	case c.picked == c.free:
+		return 0
+	case c.picked < c.free:
+		return c.picked + 1
+	default:
+		return c.picked
+	}
 }
 
 type violation struct {
@@ -145,11 +165,11 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 
 type run struct {
 	s       *Sim
-	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option
+	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option, or want
 	seen    seenChoices  // under Random, the worker's earlier runs' shallow choices
 	path    uint64       // under Random, a hash of the picks so far, which keys seen
 	prio    *prioritized // under Prioritized, how the steps are picked
-	want    int          // under Prioritized, the option the next step choice takes
+	want    int          // the option the next step choice takes, under Prioritized, PartialOrder or IterativeBounding
 	steps   int          // the steps taken, which Prioritized measures a run in
 	prefix  []choice
 	choices []choice
@@ -261,13 +281,12 @@ type run struct {
 }
 
 // stepCost is what the alternatives of a choice cost under
-// IterativeBounding: the preemptions the run spent before it, and for a
-// step choice which options take the CPU from a process that could go on,
-// with free the first that does not. A data or fault choice costs none.
+// IterativeBounding, as the preemptions the run spent before it and, for a
+// step choice, which options take the CPU from a process that could go on.
+// A data or fault choice costs none.
 type stepCost struct {
 	before  int
 	preempt []bool
-	free    int
 }
 
 // level returns the preemptions a run taking option v at this choice has
@@ -464,7 +483,7 @@ func (r *run) choose(label string, n int) int {
 		}
 		r.path = hashInt(r.path, int64(picked))
 	} else if r.want >= 0 && label == "step" {
-		picked = r.want // PartialOrder's default (see defaultPick)
+		picked = r.want // PartialOrder's default (see defaultPick), or IterativeBounding's
 	}
 	r.want = -1
 	if r.sleepPending != nil && r.pos+1 == len(r.prefix) {
@@ -473,15 +492,16 @@ func (r *run) choose(label string, n int) int {
 		r.sleep, r.sleepPending = r.sleepPending, nil
 	}
 	r.depChoice(label, picked)
+	free := 0
 	if r.s.strategy.iterative {
 		c := stepCost{before: r.preempts}
 		if label == "step" {
 			c.preempt, r.stepPreempt = r.stepPreempt, nil
-			c.free = max(slices.Index(c.preempt, false), 0)
+			free = max(slices.Index(c.preempt, false), 0)
 		}
 		r.costs = append(r.costs, c)
 	}
-	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
+	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp, free: free})
 	r.pos++
 	r.mixString(label)
 	r.mixInt(int64(picked))

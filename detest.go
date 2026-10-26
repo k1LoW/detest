@@ -258,13 +258,15 @@ const lazyPrefix = "lazy:"
 const readsPrefix = "reads:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
-// DETEST_MAX_RUNS overrides n.
+// Under IterativeBounding the runs a pass makes again on the way to its own
+// are not counted. DETEST_MAX_RUNS overrides n.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
 // MaxDuration caps the wall-clock time an exhaustive exploration takes. Once
 // d has passed, no worker starts another run, and the runs under way finish.
 // The first run is always made, so an exploration resumed from a checkpoint
-// makes progress however short d is; a negative d has passed already.
+// makes progress however short d is, even when under IterativeBounding it is
+// a run made again; a negative d has passed already.
 // 0 (the default) means unbounded. DETEST_MAX_DURATION overrides d, as a
 // duration such as 10m.
 func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
@@ -286,7 +288,8 @@ func Shard(index, total, depth int) Option {
 
 // Workers explores with n workers running in parallel, each in its own
 // synctest bubble and subtest. Every finished run reveals the subtrees it did
-// not enter, and idle workers take them, so each run is executed once. Explore
+// not enter, and idle workers take them, so each run is executed once, apart
+// from the runs a pass of IterativeBounding makes again. Explore
 // calls the declaration function once per worker: state the function shares
 // across runs through captured variables is shared across workers too and
 // needs synchronization. When Explore starts the exploration over without
@@ -759,19 +762,15 @@ func (s *Sim) printRun(n int, r *run) {
 // the original violation is reported with the code's nondeterminism noted.
 // shrink looks for a simpler schedule with the same violation, so that the
 // one reported is easier to read. It goes through the choices in order and
-// tries the first option where the run took a later one, keeping the other
+// tries the default option where the run took another, keeping the other
 // picks, and adopts the change when the run still breaks the same way. The
-// result departs from the default schedule at fewer choices, and the search
-// costs one run per choice it tries.
+// default is the first option, or under IterativeBounding the first that
+// preempts nothing, so that shrinking spends no preemption the exploration
+// avoided. The result departs from the default schedule at fewer choices,
+// and the search costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 	for i := 0; i < len(r.choices); i++ {
-		// Under IterativeBounding the default is the first option that
-		// preempts nothing, so that shrinking spends no preemption the
-		// exploration avoided.
-		def := 0
-		if i < len(r.costs) {
-			def = r.costs[i].free
-		}
+		def := r.choices[i].free
 		if r.choices[i].picked == def {
 			continue
 		}
