@@ -1169,13 +1169,13 @@ func TestChangesOfAWorkingTicksSpawnStartTheIdleCountAgain(t *testing.T) {
 			return ErrIdle
 		})
 	}
-	res, _ := exploreBubble(t, model, []Option{MaxIdleTicks(3)}, nil, 0)
+	res, _ := exploreBubble(t, model, []Option{MaxIdleTicks(2)}, nil, 0)
 	if res.Violated || !res.Complete {
 		t.Fatalf("want a complete exploration, got %s", res.report())
 	}
-	// The reaper ticks idle at most three times in a row before the
-	// scheduler returns, at its start and after two of the runner's
-	// commits, and every commit after counts as progress.
+	// The scheduler returns in the step it spawns the runner in, so the
+	// reaper ticks idle at most twice before, at its start and after the
+	// claim, and each of the runner's three commits counts as progress.
 	if res.CutRuns > 0 {
 		t.Errorf("want no run cut, got %s", res.report())
 	}
@@ -1200,8 +1200,9 @@ func TestLoopWorkStartsTheIdleCountAgain(t *testing.T) {
 			}
 			if !spawned {
 				spawned = true
-				// Changes by a process a loop spawned are no progress, so
-				// only the worker's own tick can start the count again.
+				// Changes by a process an idle tick spawned are no
+				// progress, so only the worker's own tick can start the
+				// count again.
 				p.Spawn("feeder", func(c *Proc) error {
 					if _, err := db.ExecContext(c.Context(), `INSERT INTO jobs VALUES ('j1', false)`); err != nil {
 						return err
