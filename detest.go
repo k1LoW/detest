@@ -217,8 +217,8 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // the same rule with or without the option.
 //
 // It applies to a single worker exploring depth first: Workers above one,
-// Random, Prioritized, Shard, DETEST_SHARD and DETEST_CHECKPOINT are
-// refused with it, and so is a MaxSpins below the default, since the spin
+// IterativeBounding, Random, Prioritized, Shard, DETEST_SHARD and
+// DETEST_CHECKPOINT are refused with it, and so is a MaxSpins below the default, since the spin
 // verdicts depend on the order of commits the reduction takes as
 // independent.
 func PartialOrder() Option { return func(s *Sim) { s.partialOrder = true } }
@@ -258,13 +258,15 @@ const lazyPrefix = "lazy:"
 const readsPrefix = "reads:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
-// DETEST_MAX_RUNS overrides n.
+// Under IterativeBounding the runs a pass makes again on the way to its own
+// are not counted. DETEST_MAX_RUNS overrides n.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
 // MaxDuration caps the wall-clock time an exhaustive exploration takes. Once
 // d has passed, no worker starts another run, and the runs under way finish.
 // The first run is always made, so an exploration resumed from a checkpoint
-// makes progress however short d is; a negative d has passed already.
+// makes progress however short d is, even when under IterativeBounding it is
+// a run made again; a negative d has passed already.
 // 0 (the default) means unbounded. DETEST_MAX_DURATION overrides d, as a
 // duration such as 10m.
 func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
@@ -286,7 +288,8 @@ func Shard(index, total, depth int) Option {
 
 // Workers explores with n workers running in parallel, each in its own
 // synctest bubble and subtest. Every finished run reveals the subtrees it did
-// not enter, and idle workers take them, so each run is executed once. Explore
+// not enter, and idle workers take them, so each run is executed once, apart
+// from the runs a pass of IterativeBounding makes again. Explore
 // calls the declaration function once per worker: state the function shares
 // across runs through captured variables is shared across workers too and
 // needs synchronization. When Explore starts the exploration over without
@@ -558,6 +561,13 @@ type result struct {
 	// Fatal is a misuse that stopped the exploration, which fails the test
 	// rather than being reported as a violation.
 	Fatal error
+	// CompleteLevel is, under IterativeBounding, the preemptions up to which
+	// an exploration cut short made every run, -1 when not every run without
+	// one.
+	CompleteLevel int
+	// Again counts, under IterativeBounding, the runs made again in the
+	// pass of a higher level to reach its runs, which Runs leaves out.
+	Again int
 	// Unreached are the Sometimes conditions no run explored so far met.
 	Unreached []string
 	// Unsupported are the statements refused with ErrUnsupportedSQL in any
@@ -620,12 +630,24 @@ func (r *result) outcome() string {
 		if r.partial {
 			workers += ", PartialOrder (assumes no state shared outside detest)"
 		}
+		if r.strategy.iterative {
+			workers += fmt.Sprintf(", IterativeBounding with %d runs made again", r.Again)
+		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		switch {
 		case r.Estimated && r.Explored < minExplored:
 			msg += fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
 		case r.Estimated:
 			msg += fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", r.Remaining, r.Explored*100)
+		}
+		switch {
+		case !r.strategy.iterative || r.Complete:
+		case r.CompleteLevel < 0:
+			msg += "; not every run without a preemption explored yet"
+		case r.CompleteLevel == 1:
+			msg += "; every run of up to 1 preemption explored"
+		default:
+			msg += fmt.Sprintf("; every run of up to %d preemptions explored", r.CompleteLevel)
 		}
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
@@ -722,7 +744,7 @@ func (s *Sim) check() *result {
 		// A lone exploration, as the package's own tests start one; Explore
 		// always passes the frontier it saves and resumes.
 		f = newFrontier(1, s.maxRuns)
-		f.random = s.strategy.random
+		f.random, f.iterative = s.strategy.random, s.strategy.iterative
 		f.exploreAll = s.exploreAll
 		f.partial = s.partialOrder
 		s.frontier = f
@@ -740,20 +762,23 @@ func (s *Sim) printRun(n int, r *run) {
 // the original violation is reported with the code's nondeterminism noted.
 // shrink looks for a simpler schedule with the same violation, so that the
 // one reported is easier to read. It goes through the choices in order and
-// tries the first option where the run took a later one, keeping the other
+// tries the default option where the run took another, keeping the other
 // picks, and adopts the change when the run still breaks the same way. The
-// result departs from the default schedule at fewer choices, and the search
-// costs one run per choice it tries.
+// default is the first option, or under IterativeBounding the first that
+// preempts nothing, so that shrinking spends no preemption the exploration
+// avoided. The result departs from the default schedule at fewer choices,
+// and the search costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 	for i := 0; i < len(r.choices); i++ {
-		if r.choices[i].picked == 0 {
+		def := r.choices[i].free
+		if r.choices[i].picked == def {
 			continue
 		}
 		prefix := make([]choice, len(r.choices))
 		for j, c := range r.choices {
 			prefix[j] = choice{picked: c.picked, replay: true}
 		}
-		prefix[i].picked = 0
+		prefix[i].picked = def
 		cr := s.newRun(prefix)
 		cv := cr.execute()
 		if cv != nil && cv.same(v) {
