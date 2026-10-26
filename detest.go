@@ -133,7 +133,9 @@ func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 func MaxSpins(n int) Option { return func(s *Sim) { s.maxSpins = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per
-// run (CHESS-style). 0 means unbounded.
+// run (CHESS-style). 0 allows none, and without it the runs are unbounded.
+// The passes of IterativeBounding with PartialOrder, and the replay of a
+// schedule one of them printed, apply the pass's bound instead, up to n.
 func MaxPreemptions(n int) Option {
 	return func(s *Sim) { s.maxPreemptions = n; s.boundPreemptions = true }
 }
