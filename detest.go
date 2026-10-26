@@ -134,8 +134,9 @@ func MaxSpins(n int) Option { return func(s *Sim) { s.maxSpins = n } }
 
 // MaxPreemptions bounds the context switches away from a runnable process per
 // run (CHESS-style). 0 allows none, and without it the runs are unbounded.
-// The passes of IterativeBounding with PartialOrder, and the replay of a
-// schedule one of them printed, apply the pass's bound instead, up to n.
+// The passes of IterativeBounding with PartialOrder apply the pass's bound
+// instead, up to n, and the replay of a schedule one of them printed applies
+// the bound the schedule carries.
 func MaxPreemptions(n int) Option {
 	return func(s *Sim) { s.maxPreemptions = n; s.boundPreemptions = true }
 }
@@ -309,8 +310,9 @@ func Workers(n int) Option { return func(s *Sim) { s.workers = n } }
 // by an exploration that dropped EagerStart starts with "lazy:" and replays
 // without it, and one printed under PartialOrder starts with "reads:" and
 // replays its wake rule for idle loops with or without the option. One
-// printed by a pass of IterativeBounding under PartialOrder starts with
-// "bound:" and replays under that preemption bound. A regression test pins
+// printed by a pass of IterativeBounding under PartialOrder carries
+// "bound:" and the pass's number after "reads:", and replays under that
+// preemption bound. A regression test pins
 // the counterexample of a bug with it: with
 // ExpectViolation it fails once the bug is fixed, without it it fails while the
 // bug is there. A schedule recorded before the code under test changed
