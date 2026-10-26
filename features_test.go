@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1178,6 +1179,41 @@ func TestChangesOfAWorkingTicksSpawnStartTheIdleCountAgain(t *testing.T) {
 	// claim, and each of the runner's three commits counts as progress.
 	if res.CutRuns > 0 {
 		t.Errorf("want no run cut, got %s", res.report())
+	}
+}
+
+// A goroutine a working tick starts with a go statement makes progress like
+// a process it spawns, as detest adopts it as the tick's child.
+func TestChangesOfAWorkingTicksGoroutineStartTheIdleCountAgain(t *testing.T) {
+	var wg sync.WaitGroup
+	res, _ := exploreBubble(t, func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE jobs (id text PRIMARY KEY, state text NOT NULL, step int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO jobs VALUES ('j1', 'pending', 0)`) })
+		s.Loop("scheduler", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE jobs SET state = 'claimed' WHERE state = 'pending'`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			wg.Go(func() {
+				for range 3 {
+					if _, err := db.Exec(`UPDATE jobs SET step = step + 1 WHERE id = 'j1'`); err != nil {
+						return
+					}
+				}
+			})
+			return nil
+		})
+		s.Loop("reaper", 1, func(p *Proc) error {
+			p.Step("finds nothing to reap")
+			return ErrIdle
+		})
+	}, []Option{MaxIdleTicks(2)}, nil, 0)
+	if res.Violated || !res.Complete || res.CutRuns > 0 {
+		t.Fatalf("want a complete exploration with no run cut, got %s", res.report())
 	}
 }
 
