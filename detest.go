@@ -107,10 +107,16 @@ func MaxStalls(n int, d time.Duration) Option {
 // budget unspent while nothing else makes progress (3 by default). An idle
 // tick is free so that a sweep keeps ticking until it has work, and a change
 // by a manual process, a message handler or a loop tick that did work starts
-// the count again. Loops whose idle ticks lock or write rows can still wake
-// each other without end with no progress in between, so a run whose loop
-// goes idle once more is cut there, without checking the invariants at
-// quiescence, and the result counts it.
+// the count again, and so does a change by a process such a tick spawned,
+// once the tick returned. A change by a process an idle tick spawned does
+// not count, as it would let loops wake each other without end. Whether a
+// tick did work is known only when it returns, so a tick that waits for the
+// processes it started, such as with a sync.WaitGroup, gets no progress
+// from their changes, and other loops woken by them may need a higher n.
+// Loops whose idle ticks lock or write rows can still wake each other
+// without end with no progress in between, so a run whose loop goes idle
+// once more is cut there, without checking the invariants at quiescence,
+// and the result counts it.
 func MaxIdleTicks(n int) Option { return func(s *Sim) { s.maxIdleTicks = n } }
 
 // MaxSpins bounds how many steps one process takes without changing

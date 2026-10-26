@@ -110,8 +110,11 @@ type procType struct {
 	after     func(st *State) bool
 	when      func() bool
 	// fromLoop marks a type spawned by a loop, or by a process a loop
-	// spawned, whose changes are the loop's activity rather than progress.
+	// spawned, whose changes are the loop's activity rather than progress
+	// until tick, the loop's tick it descends from, returns having done
+	// work.
 	fromLoop bool
+	tick     *Proc
 }
 
 // ProcOption configures a process type.
@@ -215,7 +218,8 @@ type run struct {
 	changeFrom   int // the first event of the trace the next change covers
 	idleChildren bool
 	// progress counts the changes made by processes other than loops and
-	// the processes they spawned, and the loop ticks that did work. idleRun
+	// the processes they spawned, the loop ticks that did work, and the
+	// changes of processes such a tick spawned once it returned. idleRun
 	// counts a loop's idle ticks since progress last moved, at idleSeen.
 	progress int
 	idleRun  map[*procType]int
@@ -390,6 +394,9 @@ type Proc struct {
 	// time it finds nothing to do would wake its loop forever.
 	started int
 	bumps   int
+	// worked marks a loop tick that returned without ErrIdle, whose spawned
+	// processes then make progress with their changes.
+	worked bool
 	// touched is what the process touched of the simulated resources, for
 	// a loop tick under PartialOrder, and touchedAll that it touched
 	// something the trace cannot place (see idleGated).
@@ -1533,7 +1540,12 @@ func (r *run) bump(p *Proc) {
 	if p != nil {
 		p.bumps++
 	}
-	if p == nil || (p.pt.kind != trigLoop && !p.pt.fromLoop) {
+	// A change of a process a tick spawned counts only once the tick
+	// returned having done work, as the work it carries on. Before that the
+	// tick's own return counts for it, and after an idle tick it is the
+	// loop's activity, which counted would let loops wake each other
+	// without end.
+	if p == nil || (p.pt.kind != trigLoop && !p.pt.fromLoop) || p.pt.fromLoop && p.pt.tick.worked {
 		r.progress++
 	}
 }
@@ -1649,6 +1661,7 @@ func (r *run) handleEvent(p *Proc, ev procEvent) {
 			r.note(p, "done")
 		}
 		if p.pt.kind == trigLoop && !idle {
+			p.worked = true
 			r.progress++ // a tick that did work, or failed at it
 		}
 		if p.msg != nil && ev.err != nil {
@@ -1801,7 +1814,7 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 			return
 		}
 	}
-	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop}
+	pt := &procType{name: name, kind: trigSpawn, instances: 1 << 30, loopFn: fn, fromLoop: p.pt.kind == trigLoop || p.pt.fromLoop, tick: p.loopTick()}
 	np := p.r.spawn(pt, nil)
 	p.r.noteAt(p, "spawns %s", np.name)
 }
@@ -1810,6 +1823,15 @@ func (p *Proc) Spawn(name string, fn func(p *Proc) error) {
 // is canceled when the run ends, which lets database/sql roll back a
 // transaction the process left open when the run was cut short.
 func (p *Proc) Context() context.Context { return p.r.ctx }
+
+// loopTick is the loop's tick p is or descends from, nil for a process that
+// no loop started.
+func (p *Proc) loopTick() *Proc {
+	if p.pt.kind == trigLoop {
+		return p
+	}
+	return p.pt.tick
+}
 
 // drain lets every goroutine running alongside p, such as one it started
 // that runs a statement on a transaction it shares with p, get to where it

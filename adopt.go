@@ -492,15 +492,17 @@ func parentName(p *Proc) string {
 func (r *run) enlist(np *Proc) {
 	parent := np.parent
 	fromLoop := false
+	var tick *Proc
 	name := "goroutine"
 	if parent != nil {
 		parent.kids++
 		name = parent.name + "." + strconv.Itoa(parent.kids)
 		fromLoop = parent.pt.kind == trigLoop || parent.pt.fromLoop
+		tick = parent.loopTick()
 		np.family = parent.root()
 	}
 	np.name = name
-	np.pt = &procType{name: name, kind: trigSpawn, instances: 1 << 30, fromLoop: fromLoop}
+	np.pt = &procType{name: name, kind: trigSpawn, instances: 1 << 30, fromLoop: fromLoop, tick: tick}
 	np.started = r.version
 	np.state = stateBlockedOutside
 	if r.prio != nil {
