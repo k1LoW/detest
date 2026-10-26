@@ -6,7 +6,7 @@ import (
 )
 
 // strategy is how Explore picks the schedules it runs, set by DepthFirst,
-// Random or Prioritized.
+// IterativeBounding, Random or Prioritized.
 type strategy struct {
 	random      bool // the runs are drawn from seed, under Random or Prioritized
 	seed        uint64
