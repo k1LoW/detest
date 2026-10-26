@@ -521,6 +521,45 @@ func TestDuplicates(t *testing.T) {
 	})
 }
 
+// A consumer handles a duplicate while its original is by default, as a
+// broker that pushes does, and Instances(1) keeps them apart.
+func TestOnMessageHandlesDeliveriesAtOnce(t *testing.T) {
+	model := func(opts ...ProcOption) func(t *testing.T, s *Sim) {
+		return func(t *testing.T, s *Sim) {
+			q := s.Queue("events", Duplicates(1))
+			s.Seed(func() { q.SeedMsg(Msg{"id": "e1"}) })
+			inFlight, overlapped := 0, false
+			s.Seed(func() { inFlight, overlapped = 0, false })
+			s.OnMessage("consumer", q, func(p *Proc, msg Msg) error {
+				inFlight++
+				overlapped = overlapped || inFlight == 2
+				p.Step("work")
+				inFlight--
+				return nil
+			}, opts...)
+			s.Sometimes("overlapped", func(*State) bool { return overlapped })
+		}
+	}
+	for _, tt := range []struct {
+		name       string
+		fn         func(t *testing.T, s *Sim)
+		overlapped bool
+	}{
+		{"default", model(), true},
+		{"one instance", model(Instances(1)), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res, _ := exploreBubble(t, tt.fn, nil, nil, 0)
+			if res.Fatal != nil || res.Violated || !res.Complete {
+				t.Fatalf("got %s", res.report())
+			}
+			if overlapped := len(res.Unreached) == 0; overlapped != tt.overlapped {
+				t.Errorf("overlapped %v, want %v:\n%s", overlapped, tt.overlapped, res.report())
+			}
+		})
+	}
+}
+
 // A message whose handler keeps failing is redelivered MaxRedeliveries
 // times, then dropped.
 func TestMaxRedeliveries(t *testing.T) {
