@@ -263,7 +263,7 @@ const readsPrefix = "reads:"
 const boundPrefix = "bound:"
 
 // MaxRuns caps the number of runs an exhaustive exploration performs.
-// Under IterativeBounding the runs a pass makes again on the way to its own
+// Under IterativeBounding the runs of fewer preemptions a pass makes again
 // are not counted. DETEST_MAX_RUNS overrides n.
 func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 
@@ -781,9 +781,10 @@ func (s *Sim) printRun(n int, r *run) {
 // one reported is easier to read. It goes through the choices in order and
 // tries the default option where the run took another, keeping the other
 // picks, and adopts the change when the run still breaks the same way. The
-// default is the first option, or under IterativeBounding the first that
-// preempts nothing, so that shrinking spends no preemption the exploration
-// avoided. The result departs from the default schedule at fewer choices,
+// default is the first option, or under IterativeBounding without
+// PartialOrder the first that preempts nothing, so that shrinking spends no
+// preemption the exploration avoided. Under PartialOrder a pass's bound,
+// which the shrinking runs apply too, keeps them within its level. The result departs from the default schedule at fewer choices,
 // and the search costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 	for i := 0; i < len(r.choices); i++ {

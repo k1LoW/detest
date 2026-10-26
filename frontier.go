@@ -34,9 +34,11 @@ type frontier struct {
 	stack   []subtree // LIFO keeps the order depth first and the stack small
 	// iterative is IterativeBounding, under which the tree is explored in
 	// one pass per level, each from the root and depth first, leaving out
-	// the subtrees whose prefix costs more preemptions than level. higher
-	// records that the pass left one out, so that the next pass has runs to
-	// make, and again counts the runs made again on the way to the level's.
+	// the subtrees whose prefix costs more preemptions than level, or under
+	// PartialOrder exploring with level as the bound. higher records that
+	// the pass left a subtree or an option out, so that the next pass has
+	// runs to make, and again counts the runs of fewer preemptions it made
+	// again.
 	iterative  bool
 	level      int
 	higher     bool
@@ -190,7 +192,8 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 
 // nextLevel starts the pass of the next level under IterativeBounding, from
 // the root, once the pass before has finished and left out a subtree of a
-// higher level. It reports whether it started one. f.mu is held.
+// higher level, or under PartialOrder an option its bound cut. It reports
+// whether it started one. f.mu is held.
 func (f *frontier) nextLevel() bool {
 	if !f.iterative || !f.higher || f.best != nil && !f.exploreAll {
 		return false
@@ -284,8 +287,9 @@ func (f *frontier) finish(children []subtree) {
 
 // push adds the subtrees not after the best violation and, under
 // PartialOrder where several runs' backtrack points name one subtree, not
-// pushed before. Under IterativeBounding it leaves the subtrees above the
-// pass's level to a later pass. It returns how many it added. f.mu is held.
+// pushed before. Under IterativeBounding without PartialOrder it leaves the
+// subtrees above the pass's level to a later pass. It returns how many it
+// added. f.mu is held.
 func (f *frontier) push(children []subtree) int {
 	pushed := 0
 	for i := range children {
@@ -454,9 +458,9 @@ func precedes(a, b []int) bool {
 // are the alternatives it did not pick at every choice it made past the
 // prefix, with what their prefix costs under IterativeBounding. They are
 // ordered so that the stack yields the deepest first, and at one choice the
-// first option first. Past the prefix a run
-// picks the first option, or under IterativeBounding the first that
-// preempts nothing, so the alternatives before the pick are subtrees too.
+// first option first. Past the prefix a run picks the first option, or under
+// IterativeBounding without PartialOrder the first that preempts nothing, so
+// the alternatives before the pick are subtrees too.
 func (s *Sim) children(r *run, prefix int) []subtree {
 	c := r.choices
 	var out []subtree

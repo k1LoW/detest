@@ -28,9 +28,9 @@ type choice struct {
 	// arrive at it with the same fingerprint; 0 when unknown, as for
 	// DETEST_REPLAY.
 	fp uint64
-	// free is, under IterativeBounding, the option a run takes at a step
-	// choice past its prefix, the first that preempts nothing, and 0
-	// otherwise.
+	// free is, under IterativeBounding without PartialOrder, the first
+	// option of a step choice that preempts nothing, which a run takes past
+	// its prefix, and 0 otherwise.
 	free int
 }
 
@@ -38,7 +38,8 @@ type choice struct {
 // options of the choice in. The run takes free first and its subtrees take
 // the others from the first on, so comparing picks alone would put a
 // subtree of an option before free ahead of the runs explored before it.
-// Without IterativeBounding free is 0 and the rank is the pick.
+// Without IterativeBounding, or under PartialOrder, free is 0 and the rank
+// is the pick.
 func (c choice) rank() int {
 	switch {
 	case c.picked == c.free:
@@ -273,9 +274,10 @@ type run struct {
 	sleepPending []sleeper
 	sleepIn      map[int][]sleeper
 	covered      bool
-	// costs holds, under IterativeBounding, what each choice of the run
-	// costs in preemptions, aligned with choices, and stepPreempt the
-	// options of the step choice being made that preempt (see stepCost).
+	// costs holds, under IterativeBounding without PartialOrder (see
+	// passesByCost), what each choice of the run costs in preemptions,
+	// aligned with choices, and stepPreempt the options of the step choice
+	// being made that preempt (see stepCost).
 	costs       []stepCost
 	stepPreempt []bool
 	// passBound is the bound of a pass of IterativeBounding with
@@ -288,7 +290,7 @@ type run struct {
 }
 
 // stepCost is what the alternatives of a choice cost under
-// IterativeBounding, as the preemptions the run spent before it and, for a
+// IterativeBounding without PartialOrder, as the preemptions the run spent before it and, for a
 // step choice, which options take the CPU from a process that could go on.
 // A data or fault choice costs none.
 type stepCost struct {

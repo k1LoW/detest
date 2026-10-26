@@ -52,9 +52,9 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // one together. The summary line gives how many there were, and neither
 // Runs nor MaxRuns counts them.
 //
-// A complete exploration makes the same runs as DepthFirst. One cut short
-// reports the number of preemptions up to which it made every run, and a
-// checkpoint resumes it in the same pass. The violation reported is the
+// A complete exploration makes the same runs as DepthFirst, without
+// PartialOrder. One cut short reports the number of preemptions up to which
+// it made every run, and a checkpoint resumes it in the same pass. The violation reported is the
 // first one depth first among the runs of the fewest preemptions, which
 // may be another than the one DepthFirst reports. Workers wait for a pass
 // to finish before they start the next.
