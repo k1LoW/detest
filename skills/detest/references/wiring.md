@@ -172,7 +172,7 @@ s.OnMessage("shipper", q, func(p *detest.Proc, m detest.Msg) error {
 })
 ```
 
-`Duplicates(1)` checks idempotency, `Losses(1)` checks that a sweeper (`s.Loop`) covers a lost message, `MaxCrashes(1)` checks a publish between commit and crash. A transactional outbox in the app's own tables needs no fake: the relay is a `Loop` reading the outbox table.
+`Duplicates(1)` checks idempotency, with the duplicate handled while its original is as well as after it, `Losses(1)` checks that a sweeper (`s.Loop`) covers a lost message, `MaxCrashes(1)` checks a publish between commit and crash. A transactional outbox in the app's own tables needs no fake: the relay is a `Loop` reading the outbox table.
 
 ## Mutexes and in-memory state
 

@@ -318,6 +318,8 @@ For MySQL, these fail with `detest.ErrUnsupportedSQL` besides the forms above.
 
 `s.Queue(name)` is an at-least-once, unordered queue, and `s.OnMessage(name, q, fn)` its consumer.
 
+A consumer can handle every message waiting in the queue at once, as a broker that pushes to a handler, such as Pub/Sub push, does, so a duplicate can be handled while its original is. `detest.Instances(k)` bounds how many deliveries it handles at once, such as `detest.Instances(1)` for a pull consumer with one worker.
+
 - A handler that returns an error has its message redelivered, up to `detest.MaxRedeliveries` times, and the message is then dropped. `st.Dropped(q)` lists the dropped messages, so that an invariant that the work completes can skip a run the broker would still be redelivering in
 - `detest.Duplicates(n)` delivers up to n messages twice per run
 - `detest.Losses(n)` loses up to n messages per run, to check that a backstop covers them

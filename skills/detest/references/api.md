@@ -20,7 +20,7 @@ The function declares the simulation and returns; the exploration runs after it,
 | `s.Manual(name, n, fn, opts...)` | A process type started at any point, up to `n` times per run, **one instance at a time** unless `detest.Instances(k)` |
 | `s.Loop(name, n, fn, opts...)` | A periodic process (sweeper, poller, reaper), up to `n` ticks per run. Return `detest.ErrIdle` from a tick that found nothing to do |
 | `s.Queue(name, detest.Duplicates(n), detest.Losses(n))` | At-least-once unordered queue |
-| `s.OnMessage(name, q, func(p *detest.Proc, m detest.Msg) error, opts...)` | Consumer. A returned error redelivers, up to `MaxRedeliveries` |
+| `s.OnMessage(name, q, func(p *detest.Proc, m detest.Msg) error, opts...)` | Consumer. A returned error redelivers, up to `MaxRedeliveries`. Can handle every waiting message at once, as a push broker does, unless `detest.Instances(k)` bounds it, such as `Instances(1)` for a pull consumer with one worker |
 | `s.External(name, detest.Failures(...), detest.ReadOnly())` | A call to another service: success, failure before effect, failure after effect (response lost) |
 | `ext.Transport(handler)` | `http.RoundTripper` serving an `http.Handler` in process, with those outcomes |
 | `ext.Do(p, desc, func() error)` | Wrap any call with those outcomes |

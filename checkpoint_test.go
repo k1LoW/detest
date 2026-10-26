@@ -151,12 +151,20 @@ func TestCheckpointKeepsRefusedStatements(t *testing.T) {
 // A checkpoint of an earlier format names prefixes of another tree, so it is
 // refused rather than resumed.
 func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ckpt.json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"runs":0,"subtrees":[[]]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := newFrontier(1, 10).load(path); err == nil || !strings.Contains(err.Error(), "version 1") {
-		t.Fatalf("got %v, want a refusal of version 1", err)
+	for _, tt := range []struct {
+		version   int
+		iterative bool
+	}{{1, false}, {2, false}, {3, true}} {
+		path := filepath.Join(t.TempDir(), "ckpt.json")
+		if err := os.WriteFile(path, fmt.Appendf(nil, `{"version":%d,"runs":0,"subtrees":[[]]}`, tt.version), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := newFrontier(1, 10)
+		f.iterative = tt.iterative
+		want := fmt.Sprintf("version %d", tt.version)
+		if err := f.load(path); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("got %v, want a refusal of %s", err, want)
+		}
 	}
 }
 

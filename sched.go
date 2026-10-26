@@ -118,6 +118,8 @@ type procType struct {
 type ProcOption func(*procType)
 
 // Instances sets how many instances of a process type may run concurrently.
+// A Loop or Manual type runs one at a time by default, and an OnMessage
+// type has no limit.
 func Instances(n int) ProcOption { return func(pt *procType) { pt.instances = n } }
 
 // After restricts a manual process to start only once the predicate holds.
@@ -131,10 +133,16 @@ func After(pred func(st *State) bool) ProcOption { return func(pt *procType) { p
 func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = pred } }
 
 // OnMessage registers a process type started by delivering a message of q.
-// A returned error redelivers the message, bounded by MaxRedeliveries.
+// A returned error redelivers the message, bounded by MaxRedeliveries. Every
+// message waiting in q may be handled at once, as a broker that pushes to a
+// handler, such as Pub/Sub push, runs deliveries concurrently, and a
+// duplicate may then be handled while its original is. Instances(k) bounds
+// it, such as Instances(1) for a pull consumer with one worker.
 func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
 	s.declare("OnMessage")
-	pt := &procType{name: name, kind: trigMessage, instances: 1, queue: q, msgFn: fn}
+	// There is no limit by default, because a limit the test did not choose
+	// keeps deliveries from overlapping without anything reporting it.
+	pt := &procType{name: name, kind: trigMessage, instances: 1 << 30, queue: q, msgFn: fn}
 	for _, o := range opts {
 		o(pt)
 	}
