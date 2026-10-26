@@ -17,8 +17,9 @@ import (
 )
 
 // Explore declares a simulation with fn and explores every schedule of it,
-// depth first, failing the test on a violation. Under Random it runs
-// schedules drawn from a seed instead. fn registers simulated resources,
+// depth first, failing the test on a violation. Under IterativeBounding it
+// explores them in order of the preemptions they spend, and under Random it
+// runs schedules drawn from a seed instead. fn registers simulated resources,
 // processes, seeds and invariants on s and returns; the exploration starts
 // after it returns.
 //
@@ -117,7 +118,7 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	}
 	for {
 		f = newFrontier(n, maxRuns)
-		f.random = st.random
+		f.random, f.iterative = st.random, st.iterative
 		f.exploreAll = exploreAllOf(opts)
 		f.partial = partialOrderRefusal(opts, false) == nil && partialOrderOf(opts)
 		if maxDuration != 0 {
@@ -209,6 +210,8 @@ func partialOrderRefusal(opts []Option, checkpoint bool) error {
 		return fmt.Errorf("detest: PartialOrder applies to a single worker; Workers(%d) is refused with it", probe.workers)
 	case probe.strategy.random:
 		return fmt.Errorf("detest: PartialOrder does not apply to Random or Prioritized, which explore no tree to reduce")
+	case probe.strategy.iterative:
+		return fmt.Errorf("detest: PartialOrder does not apply to IterativeBounding yet; its sleep sets and backtrack points hold for the depth-first order only")
 	case probe.shardTotal > 1 || os.Getenv("DETEST_SHARD") != "":
 		return fmt.Errorf("detest: PartialOrder does not apply under Shard or DETEST_SHARD; the shards would not agree on the backtrack points")
 	case checkpoint:

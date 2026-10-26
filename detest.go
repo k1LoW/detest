@@ -217,8 +217,8 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // the same rule with or without the option.
 //
 // It applies to a single worker exploring depth first: Workers above one,
-// Random, Prioritized, Shard, DETEST_SHARD and DETEST_CHECKPOINT are
-// refused with it, and so is a MaxSpins below the default, since the spin
+// IterativeBounding, Random, Prioritized, Shard, DETEST_SHARD and
+// DETEST_CHECKPOINT are refused with it, and so is a MaxSpins below the default, since the spin
 // verdicts depend on the order of commits the reduction takes as
 // independent.
 func PartialOrder() Option { return func(s *Sim) { s.partialOrder = true } }
@@ -558,6 +558,10 @@ type result struct {
 	// Fatal is a misuse that stopped the exploration, which fails the test
 	// rather than being reported as a violation.
 	Fatal error
+	// CompleteLevel is, under IterativeBounding, the preemptions up to which
+	// an exploration cut short made every run, -1 when not every run without
+	// one.
+	CompleteLevel int
 	// Unreached are the Sometimes conditions no run explored so far met.
 	Unreached []string
 	// Unsupported are the statements refused with ErrUnsupportedSQL in any
@@ -620,12 +624,24 @@ func (r *result) outcome() string {
 		if r.partial {
 			workers += ", PartialOrder (assumes no state shared outside detest)"
 		}
+		if r.strategy.iterative {
+			workers += ", IterativeBounding"
+		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		switch {
 		case r.Estimated && r.Explored < minExplored:
 			msg += fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
 		case r.Estimated:
 			msg += fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", r.Remaining, r.Explored*100)
+		}
+		switch {
+		case !r.strategy.iterative || r.Complete:
+		case r.CompleteLevel < 0:
+			msg += "; not every run without a preemption explored yet"
+		case r.CompleteLevel == 1:
+			msg += "; every run of up to 1 preemption explored"
+		default:
+			msg += fmt.Sprintf("; every run of up to %d preemptions explored", r.CompleteLevel)
 		}
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
@@ -722,7 +738,7 @@ func (s *Sim) check() *result {
 		// A lone exploration, as the package's own tests start one; Explore
 		// always passes the frontier it saves and resumes.
 		f = newFrontier(1, s.maxRuns)
-		f.random = s.strategy.random
+		f.random, f.iterative = s.strategy.random, s.strategy.iterative
 		f.exploreAll = s.exploreAll
 		f.partial = s.partialOrder
 		s.frontier = f
@@ -746,14 +762,21 @@ func (s *Sim) printRun(n int, r *run) {
 // costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
 	for i := 0; i < len(r.choices); i++ {
-		if r.choices[i].picked == 0 {
+		// Under IterativeBounding the default is the first option that
+		// preempts nothing, so that shrinking spends no preemption the
+		// exploration avoided.
+		def := 0
+		if i < len(r.costs) {
+			def = r.costs[i].free
+		}
+		if r.choices[i].picked == def {
 			continue
 		}
 		prefix := make([]choice, len(r.choices))
 		for j, c := range r.choices {
 			prefix[j] = choice{picked: c.picked, replay: true}
 		}
-		prefix[i].picked = 0
+		prefix[i].picked = def
 		cr := s.newRun(prefix)
 		cv := cr.execute()
 		if cv != nil && cv.same(v) {

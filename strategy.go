@@ -11,7 +11,8 @@ type strategy struct {
 	random      bool // the runs are drawn from seed, under Random or Prioritized
 	seed        uint64
 	prioritized bool
-	depth       int // under Prioritized, the PCT depth
+	depth       int  // under Prioritized, the PCT depth
+	iterative   bool // IterativeBounding
 }
 
 func (st strategy) String() string {
@@ -23,9 +24,36 @@ func (st strategy) String() string {
 
 // DepthFirst makes Explore enumerate the schedules depth first, which is the
 // default. An exploration that completes means no schedule within the bounds
-// breaks an invariant. Of DepthFirst, Random and Prioritized, the one passed
-// last applies.
+// breaks an invariant. Of DepthFirst, IterativeBounding, Random and
+// Prioritized, the one passed last applies.
 func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
+
+// IterativeBounding makes Explore enumerate the schedules in order of the
+// preemptions they spend, as iterative context bounding (Musuvathi and
+// Qadeer, "Iterative Context Bounding for Systematic Testing of
+// Multithreaded Programs", PLDI 2007) does: every run with no preemption,
+// then every run with one, and so on up to MaxPreemptions, or without end
+// when it is not set. Depth first, the last choices of a run are varied
+// first, so a race between its first steps is tried only after the whole
+// tree below the earlier order, which an exploration cut by MaxRuns or
+// MaxDuration may never reach however few preemptions the race needs. Most
+// bugs need few preemptions, and under IterativeBounding they are found
+// early wherever in the run the preemptions fall.
+//
+// Every run is still made once, and a complete exploration covers the same
+// schedules as DepthFirst. One cut short reports the number of preemptions
+// up to which it explored every run, and a checkpoint resumes it in the
+// same order. The violation reported is the first one in that order, with
+// the fewest preemptions, which may be another than the one DepthFirst
+// reports. Past the choices a subtree fixes, a run takes the first option
+// that preempts nothing, rather than the first option, so that it costs
+// what the subtree costs. Workers wait for the runs of one number of
+// preemptions to finish before they start the next.
+//
+// It does not apply with PartialOrder yet, whose sleep sets and backtrack
+// points are computed for one depth-first order. Of DepthFirst,
+// IterativeBounding, Random and Prioritized, the one passed last applies.
+func IterativeBounding() Option { return func(s *Sim) { s.strategy = strategy{iterative: true} } }
 
 // Random makes Explore run schedules whose every choice is drawn uniformly
 // from a generator seeded with seed, until MaxRuns or MaxDuration stops it.
@@ -40,8 +68,9 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // then, which differs from one execution to the next. Shard splits the runs
 // rather than the tree: shard index of total makes the runs whose index
 // leaves index when divided by total, and depth is not used. Of DepthFirst,
-// Random and Prioritized, the one passed last applies. DETEST_SEED overrides
-// seed, and leaves a test under DepthFirst as it is.
+// IterativeBounding, Random and Prioritized, the one passed last applies.
+// DETEST_SEED overrides seed, and leaves a test under DepthFirst or
+// IterativeBounding as it is.
 func Random(seed uint64) Option {
 	return func(s *Sim) { s.strategy = strategy{random: true, seed: seed} }
 }
@@ -75,8 +104,8 @@ func Random(seed uint64) Option {
 // Everything else is as under Random: the exploration is never complete,
 // violations replay with DETEST_REPLAY, Workers and Shard split the runs,
 // and DETEST_SEED overrides seed. depth is at least 1, which switches
-// nowhere. Of DepthFirst, Random and Prioritized, the one passed last
-// applies.
+// nowhere. Of DepthFirst, IterativeBounding, Random and Prioritized, the
+// one passed last applies.
 func Prioritized(seed uint64, depth int) Option {
 	return func(s *Sim) { s.strategy = strategy{random: true, seed: seed, prioritized: true, depth: depth} }
 }

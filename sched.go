@@ -253,6 +253,30 @@ type run struct {
 	sleepPending []sleeper
 	sleepIn      map[int][]sleeper
 	covered      bool
+	// costs holds, under IterativeBounding, what each choice of the run
+	// costs in preemptions, aligned with choices, and stepPreempt the
+	// options of the step choice being made that preempt (see stepCost).
+	costs       []stepCost
+	stepPreempt []bool
+}
+
+// stepCost is what the alternatives of a choice cost under
+// IterativeBounding: the preemptions the run spent before it, and for a
+// step choice which options take the CPU from a process that could go on,
+// with free the first that does not. A data or fault choice costs none.
+type stepCost struct {
+	before  int
+	preempt []bool
+	free    int
+}
+
+// level returns the preemptions a run taking option v at this choice has
+// spent once it is made.
+func (c stepCost) level(v int) int {
+	if v < len(c.preempt) && c.preempt[v] {
+		return c.before + 1
+	}
+	return c.before
 }
 
 type step struct {
@@ -449,6 +473,14 @@ func (r *run) choose(label string, n int) int {
 		r.sleep, r.sleepPending = r.sleepPending, nil
 	}
 	r.depChoice(label, picked)
+	if r.s.strategy.iterative {
+		c := stepCost{before: r.preempts}
+		if label == "step" {
+			c.preempt, r.stepPreempt = r.stepPreempt, nil
+			c.free = max(slices.Index(c.preempt, false), 0)
+		}
+		r.costs = append(r.costs, c)
+	}
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp})
 	r.pos++
 	r.mixString(label)
@@ -498,6 +530,14 @@ func (r *run) apply(o option, preempt bool) {
 	case optStall:
 		r.stallProc(o.p)
 	}
+}
+
+// preempting reports whether o takes the CPU from the current process while
+// that process could still run. Moving off a spinner is fairness rather
+// than a preemption, and a fault takes no step of another process.
+func (r *run) preempting(o option) bool {
+	cur := r.current
+	return !o.kind.fault() && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur)
 }
 
 func (r *run) execute() (v *violation) {
@@ -591,6 +631,20 @@ func (r *run) execute() (v *violation) {
 		} else if r.covered {
 			return nil
 		}
+		if len(opts) > 1 && r.s.strategy.iterative {
+			r.stepPreempt = make([]bool, len(opts))
+			for k, o := range opts {
+				r.stepPreempt[k] = r.preempting(o)
+			}
+			// Past the prefix the run spends no preemption, so that every
+			// run of a subtree costs what its prefix costs and the levels
+			// partition the tree (see IterativeBounding).
+			if r.pos >= len(r.prefix) {
+				if k := slices.Index(r.stepPreempt, false); k >= 0 {
+					r.want, i = k, k
+				}
+			}
+		}
 		if len(opts) > 1 {
 			if r.prio != nil {
 				// Only the step choice takes the pick, or a lone option would
@@ -602,7 +656,6 @@ func (r *run) execute() (v *violation) {
 			i = r.choose("step", len(opts))
 		}
 		o := opts[i]
-		cur := r.current
 		gaveWay, before := r.spinner(), r.version
 		ci := -1
 		if len(opts) > 1 {
@@ -618,7 +671,7 @@ func (r *run) execute() (v *violation) {
 		stepEvent := r.depCur()
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
-		r.apply(o, !o.kind.fault() && cur != nil && cur.state == stateReady && !r.keptOut(cur) && (o.kind != optResume || o.p != cur))
+		r.apply(o, r.preempting(o))
 		r.depEnd()
 		r.wake(stepEvent)
 		r.countSpin(o, before)
