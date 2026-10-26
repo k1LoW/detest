@@ -1138,6 +1138,49 @@ func TestIdleLoopSpawningWorkIsCut(t *testing.T) {
 	}
 }
 
+// Changes of a process spawned by a tick that did work are progress once the
+// tick returned, as the rest of its work, so the loops they wake to tick idle
+// are not cut. A tick that found nothing spawns no progress.
+func TestChangesOfAWorkingTicksSpawnStartTheIdleCountAgain(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		db, _ := s.DB("app", postgres.New())
+		mustExec(t, db, `CREATE TABLE jobs (id text PRIMARY KEY, state text NOT NULL, step int NOT NULL)`)
+		s.Seed(func() { mustExec(t, db, `INSERT INTO jobs VALUES ('j1', 'pending', 0)`) })
+		s.Loop("scheduler", 1, func(p *Proc) error {
+			res, err := db.ExecContext(p.Context(), `UPDATE jobs SET state = 'claimed' WHERE state = 'pending'`)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return ErrIdle
+			}
+			p.Spawn("runner", func(c *Proc) error {
+				for range 3 {
+					if _, err := db.ExecContext(c.Context(), `UPDATE jobs SET step = step + 1 WHERE id = 'j1'`); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return nil
+		})
+		s.Loop("reaper", 1, func(p *Proc) error {
+			p.Step("finds nothing to reap")
+			return ErrIdle
+		})
+	}
+	res, _ := exploreBubble(t, model, []Option{MaxIdleTicks(3)}, nil, 0)
+	if res.Violated || !res.Complete {
+		t.Fatalf("want a complete exploration, got %s", res.report())
+	}
+	// The reaper ticks idle at most three times in a row before the
+	// scheduler returns, at its start and after two of the runner's
+	// commits, and every commit after counts as progress.
+	if res.CutRuns > 0 {
+		t.Errorf("want no run cut, got %s", res.report())
+	}
+}
+
 // A tick that did work starts the loop's count of idle ticks again, even
 // when nothing but the loop and what it spawned made changes around it.
 func TestLoopWorkStartsTheIdleCountAgain(t *testing.T) {
