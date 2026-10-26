@@ -138,8 +138,8 @@ func When(pred func() bool) ProcOption { return func(pt *procType) { pt.when = p
 // it, such as Instances(1) for a pull consumer with one worker.
 func (s *Sim) OnMessage(name string, q *Queue, fn func(p *Proc, msg Msg) error, opts ...ProcOption) {
 	s.declare("OnMessage")
-	// No limit by default: a limit the test did not choose keeps deliveries
-	// from overlapping without anything reporting it.
+	// There is no limit by default, because a limit the test did not choose
+	// keeps deliveries from overlapping without anything reporting it.
 	pt := &procType{name: name, kind: trigMessage, instances: 1 << 30, queue: q, msgFn: fn}
 	for _, o := range opts {
 		o(pt)
