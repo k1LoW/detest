@@ -118,6 +118,8 @@ type procType struct {
 type ProcOption func(*procType)
 
 // Instances sets how many instances of a process type may run concurrently.
+// A Loop or Manual type runs one at a time by default, and an OnMessage
+// type has no limit.
 func Instances(n int) ProcOption { return func(pt *procType) { pt.instances = n } }
 
 // After restricts a manual process to start only once the predicate holds.

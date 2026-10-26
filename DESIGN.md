@@ -168,6 +168,8 @@ Isolation levels are implemented per kind of server, since their semantics diffe
 
 A queue is at least once and unordered. A consumer whose handler returns an error has its message redelivered up to `MaxRedeliveries`, and then dropped. The bound keeps the search finite, where a broker would go on redelivering, so `State.Dropped` lists the drops for an invariant to tell such a run from a settled one. `Duplicates` and `Losses` add duplicate delivery and loss as choices, to check idempotency and backstops. A lost message is not listed among the drops, as the invariants are to hold without it.
 
+A consumer may handle every waiting message at once unless `Instances` bounds it. A broker that pushes to a handler runs deliveries concurrently, and a default of one at a time would keep a duplicate from overlapping its original without anything reporting it, while a pull consumer with one worker is a bound its test knows of and states.
+
 ### External services
 
 `External` models a call to another service. `Do` wraps a call, and `Transport` serves an `http.Handler` through an `http.RoundTripper`, so a generated client can call the real handler of another service in process. Each call is a choice among success, failure before the effect and failure after it, the case most retry logic gets wrong.
