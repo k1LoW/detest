@@ -743,12 +743,12 @@ func roughly(n float64) int {
 // of eager starts and of INSERT yielding first, whose prefixes a checkpoint
 // of version 1 does not name, 4 the tree of consumers that handle
 // deliveries at once, which versions 2 and 3 do not name, and 6 the tree
-// whose runs go on past idle ticks that the changes of a working tick's
-// spawned process now count as progress for, which versions 4 and 5 cut
-// short and name no subtree below. An exploration under IterativeBounding
-// saves version iterativeCheckpointVersion, with its pass and each subtree's
-// level, so that one of another strategy, or a detest that knows no levels,
-// refuses it rather than resume it in another order.
+// in which a change by a process a working tick spawned counts as
+// progress, so that runs versions 4 and 5 cut at MaxIdleTicks go on into
+// subtrees those versions do not name. An exploration under
+// IterativeBounding saves version iterativeCheckpointVersion, with its pass
+// and each subtree's level, so that one of another strategy, or a detest
+// that knows no levels, refuses it rather than resume it in another order.
 const (
 	checkpointVersion          = 6
 	iterativeCheckpointVersion = 7
