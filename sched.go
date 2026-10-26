@@ -278,6 +278,13 @@ type run struct {
 	// options of the step choice being made that preempt (see stepCost).
 	costs       []stepCost
 	stepPreempt []bool
+	// passBound is the bound of a pass of IterativeBounding with
+	// PartialOrder, when passBounded, which enabled applies instead of
+	// MaxPreemptions, and boundCut records that the bound left an option
+	// out, so that a pass at a higher bound has runs to make.
+	passBound   int
+	passBounded bool
+	boundCut    bool
 }
 
 // stepCost is what the alternatives of a choice cost under
@@ -493,7 +500,7 @@ func (r *run) choose(label string, n int) int {
 	}
 	r.depChoice(label, picked)
 	free := 0
-	if r.s.strategy.iterative {
+	if r.s.passesByCost() {
 		c := stepCost{before: r.preempts}
 		if label == "step" {
 			c.preempt, r.stepPreempt = r.stepPreempt, nil
@@ -651,7 +658,7 @@ func (r *run) execute() (v *violation) {
 		} else if r.covered {
 			return nil
 		}
-		if len(opts) > 1 && r.s.strategy.iterative {
+		if len(opts) > 1 && r.s.passesByCost() {
 			r.stepPreempt = make([]bool, len(opts))
 			for k, o := range opts {
 				r.stepPreempt[k] = r.preempting(o)
@@ -887,12 +894,14 @@ func (r *run) enabled() []option {
 	curRunnable := cur != nil && cur.state == stateReady
 	// A spinning process gives way, spent preemption budget or not, as the
 	// switch is the scheduler's fairness rather than a choice to explore.
-	bounded := r.s.boundPreemptions && r.preempts >= r.s.maxPreemptions && curRunnable && !r.keptOut(cur)
+	limit, on := r.bound()
+	bounded := on && r.preempts >= limit && curRunnable && !r.keptOut(cur)
 	for _, p := range r.procs {
 		if p.state != stateReady || r.keptOut(p) {
 			continue
 		}
 		if bounded && p != cur {
+			r.boundCut = true
 			continue
 		}
 		opts = append(opts, option{kind: optResume, p: p})
@@ -971,8 +980,28 @@ func (r *run) enabled() []option {
 		}
 		*dst = append(*dst, option{kind: optStart, pt: pt})
 	}
+	if len(r.depExtra) > 0 {
+		r.boundCut = true
+	}
 	return opts
 }
+
+// bound returns the preemption bound the run applies and whether it applies
+// one, the pass's under IterativeBounding with PartialOrder (see
+// Sim.passBound), else MaxPreemptions.
+func (r *run) bound() (int, bool) {
+	if r.passBounded {
+		return r.passBound, true
+	}
+	return r.s.maxPreemptions, r.s.boundPreemptions
+}
+
+// passesByCost reports whether a pass of IterativeBounding leaves out the
+// subtrees by what their prefix costs, as without PartialOrder. Under it a
+// pass is a reduced exploration under its level as the bound instead, as
+// the reduction's backtrack points and sleep sets are sound only for the
+// bound the options were cut at.
+func (s *Sim) passesByCost() bool { return s.strategy.iterative && !s.partialOrder }
 
 // startsEagerly reports whether EagerStart starts processes of pt without a
 // choice. After and When read state, so when such a process starts can
@@ -2248,7 +2277,7 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, passBound: s.passBound, passBounded: s.passBounded, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.

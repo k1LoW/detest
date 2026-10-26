@@ -59,9 +59,16 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // may be another than the one DepthFirst reports. Workers wait for a pass
 // to finish before they start the next.
 //
-// It does not apply with PartialOrder yet, whose sleep sets and backtrack
-// points are computed for one depth-first order. Of DepthFirst,
-// IterativeBounding, Random and Prioritized, the one passed last applies.
+// With PartialOrder each pass is a reduced exploration under its number of
+// preemptions as the bound, rather than a pass that leaves out the subtrees
+// costing more, since the reduction's backtrack points and sleep sets hold
+// for the bound the options were cut at. Nothing of the reduction is
+// carried from one pass to the next. A run may then spend preemptions past
+// the choices its subtree fixes, and the ones of fewer than the pass's are
+// made again. The schedules it prints start with "bound:" and the pass's
+// number, and replay under that bound with or without either option. Of
+// DepthFirst, IterativeBounding, Random and Prioritized, the one passed
+// last applies.
 func IterativeBounding() Option { return func(s *Sim) { s.strategy = strategy{iterative: true} } }
 
 // Random makes Explore run schedules whose every choice is drawn uniformly

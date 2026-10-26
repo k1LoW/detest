@@ -178,7 +178,9 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
 	f.busy++
-	if p.again = p.level < f.level; p.again {
+	// Under PartialOrder a run may spend preemptions past its prefix, so
+	// passRun tells a run made again after it is made.
+	if p.again = !f.partial && p.level < f.level; p.again {
 		f.again++
 	} else {
 		f.runs++
@@ -195,6 +197,32 @@ func (f *frontier) nextLevel() bool {
 	}
 	f.level, f.higher = f.level+1, false
 	f.stack = append(f.stack, subtree{})
+	if f.partial {
+		// The backtrack points and sleep sets of a pass hold for its bound
+		// only, and the next pass explores under another. Carried over, a
+		// prefix pushed under the lower bound would keep the higher one
+		// from pushing it, and a sleep set from waking what the higher
+		// bound makes a preemption cost.
+		f.pushed, f.zIn, f.explored = map[string]*subtree{"": {}}, map[string][]sleeper{}, map[string][]explored{}
+	}
+	return true
+}
+
+// passRun records a run of a pass of IterativeBounding with PartialOrder,
+// which spent preempts preemptions and left an option of a higher bound out
+// when higher. It reports whether the run was one of an earlier pass, made
+// again, which it then counts as one.
+func (f *frontier) passRun(preempts int, higher bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if higher {
+		f.higher = true
+	}
+	if preempts >= f.level {
+		return false
+	}
+	f.runs--
+	f.again++
 	return true
 }
 
@@ -487,6 +515,12 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		if !taken.again {
 			runs++
 		}
+		if s.partialOrder && f.iterative {
+			// The runs a violation is shrunk and retraced with apply it too.
+			f.mu.Lock()
+			s.passBound, s.passBounded = f.level, true
+			f.mu.Unlock()
+		}
 		r := s.newRun(prefix)
 		if s.partialOrder {
 			f.mu.Lock()
@@ -531,6 +565,17 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			f.walked(r.choices)
 		case v == nil || s.exploreAll:
 			children = s.children(r, len(prefix))
+		}
+		if s.partialOrder && f.iterative && (v == nil || v.kind != "fatal") {
+			// A pass's level is the bound, and a run of fewer preemptions
+			// is a run of an earlier pass, which reported what it broke.
+			// Only the bound the user set leaves no higher pass to make.
+			higher := r.boundCut && (!s.boundPreemptions || s.passBound < s.maxPreemptions)
+			if f.passRun(r.preempts, higher) {
+				runs--
+				f.finish(children)
+				continue
+			}
 		}
 		maxDepth = max(maxDepth, len(r.choices))
 		if r.cut {

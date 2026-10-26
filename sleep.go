@@ -125,7 +125,8 @@ func (f *frontier) record(r *run, prefix int) {
 			f.zIn[k] = r.sleepIn[e.ci]
 		}
 		conservative := e.ci == prefix-1 && me != nil && me.conservative
-		awake := conservative || e.free || (r.s.boundPreemptions && e.preempt)
+		_, bounded := r.bound()
+		awake := conservative || e.free || (bounded && e.preempt)
 		f.explored[k] = append(f.explored[k], explored{ident: e.ident, acc: e.acc, conservative: awake})
 	}
 }

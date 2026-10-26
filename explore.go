@@ -212,8 +212,6 @@ func partialOrderRefusal(opts []Option, checkpoint bool) error {
 		return fmt.Errorf("detest: PartialOrder applies to a single worker; Workers(%d) is refused with it", probe.workers)
 	case probe.strategy.random:
 		return fmt.Errorf("detest: PartialOrder does not apply to Random or Prioritized, which explore no tree to reduce")
-	case probe.strategy.iterative:
-		return fmt.Errorf("detest: PartialOrder does not apply to IterativeBounding yet; its sleep sets and backtrack points hold for the depth-first order only")
 	case probe.shardTotal > 1 || os.Getenv("DETEST_SHARD") != "":
 		return fmt.Errorf("detest: PartialOrder does not apply under Shard or DETEST_SHARD; the shards would not agree on the backtrack points")
 	case checkpoint:
