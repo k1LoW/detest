@@ -741,13 +741,15 @@ func roughly(n float64) int {
 // before, and the later passes start from the root again.
 // checkpointVersion is the version of the checkpoint format. 2 is the tree
 // of eager starts and of INSERT yielding first, whose prefixes a checkpoint
-// of version 1 does not name. An exploration under IterativeBounding saves
-// version iterativeCheckpointVersion, with its pass and each subtree's
-// level, so that one of another strategy, or a detest that knows no levels,
-// refuses it rather than resume it in another order.
+// of version 1 does not name, and 4 the tree of consumers that handle
+// deliveries at once, which versions 2 and 3 do not name. An exploration
+// under IterativeBounding saves version iterativeCheckpointVersion, with its
+// pass and each subtree's level, so that one of another strategy, or a
+// detest that knows no levels, refuses it rather than resume it in another
+// order.
 const (
-	checkpointVersion          = 2
-	iterativeCheckpointVersion = 3
+	checkpointVersion          = 4
+	iterativeCheckpointVersion = 5
 )
 
 type checkpoint struct {

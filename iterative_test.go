@@ -226,10 +226,10 @@ func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 // again unchecked or counted at another pass.
 func TestIterativeBoundingCheckpointRefusesLevelsOutsideItsPass(t *testing.T) {
 	for _, body := range []string{
-		`{"version":3,"runs":0,"subtrees":[[]],"level":-1,"levels":[0]}`,
-		`{"version":3,"runs":0,"subtrees":[[]],"level":1,"levels":[2]}`,
-		`{"version":3,"runs":0,"subtrees":[[]],"level":1,"levels":[-1]}`,
-		`{"version":3,"runs":0,"subtrees":[[]],"level":1}`,
+		`{"version":5,"runs":0,"subtrees":[[]],"level":-1,"levels":[0]}`,
+		`{"version":5,"runs":0,"subtrees":[[]],"level":1,"levels":[2]}`,
+		`{"version":5,"runs":0,"subtrees":[[]],"level":1,"levels":[-1]}`,
+		`{"version":5,"runs":0,"subtrees":[[]],"level":1}`,
 	} {
 		path := filepath.Join(t.TempDir(), "ckpt.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
