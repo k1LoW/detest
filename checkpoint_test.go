@@ -154,7 +154,7 @@ func TestCheckpointOfAnEarlierVersionIsRefused(t *testing.T) {
 	for _, tt := range []struct {
 		version   int
 		iterative bool
-	}{{1, false}, {2, false}, {3, true}} {
+	}{{1, false}, {2, false}, {3, true}, {4, false}, {5, true}} {
 		path := filepath.Join(t.TempDir(), "ckpt.json")
 		if err := os.WriteFile(path, fmt.Appendf(nil, `{"version":%d,"runs":0,"subtrees":[[]]}`, tt.version), 0o600); err != nil {
 			t.Fatal(err)
