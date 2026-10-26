@@ -562,6 +562,9 @@ type result struct {
 	// an exploration cut short made every run, -1 when not every run without
 	// one.
 	CompleteLevel int
+	// Again counts, under IterativeBounding, the runs made again in the
+	// pass of a higher level to reach its runs, which Runs leaves out.
+	Again int
 	// Unreached are the Sometimes conditions no run explored so far met.
 	Unreached []string
 	// Unsupported are the statements refused with ErrUnsupportedSQL in any
@@ -625,7 +628,7 @@ func (r *result) outcome() string {
 			workers += ", PartialOrder (assumes no state shared outside detest)"
 		}
 		if r.strategy.iterative {
-			workers += ", IterativeBounding"
+			workers += fmt.Sprintf(", IterativeBounding with %d runs made again", r.Again)
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		switch {

@@ -46,7 +46,7 @@ func TestShrinkSimplifiesTheSchedule(t *testing.T) {
 				continue
 			}
 			for _, c := range s.children(r, len(prefix)) {
-				stack = append(stack, c.choices())
+				stack = append(stack, c.prefix)
 			}
 		}
 		if worst == nil {

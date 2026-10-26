@@ -60,19 +60,25 @@ func TestIterativeBoundingMakesEveryRunOnce(t *testing.T) {
 	}
 }
 
-// One worker makes the runs in order of the preemptions they spend.
+// One worker makes the runs in order of the preemptions they spend, and a
+// run made again on the way to a level's runs spends fewer.
 func TestIterativeBoundingOrdersRunsByPreemptions(t *testing.T) {
 	var levels []int
 	model := func(t *testing.T, s *Sim) {
 		counterModel(s, true)
 		s.AtQuiescence(func(*State) error {
-			levels = append(levels, s.run.preempts)
+			switch level := s.frontier.level; {
+			case s.run.preempts == level:
+				levels = append(levels, level)
+			case s.run.preempts > level:
+				return fmt.Errorf("a run of %d preemptions in the pass of %d", s.run.preempts, level)
+			}
 			return nil
 		})
 	}
 	res, _ := exploreBubble(t, model, []Option{MaxPreemptions(2), IterativeBounding()}, nil, 0)
-	if !res.Complete || res.Violated {
-		t.Fatal(res.report())
+	if !res.Complete || res.Violated || len(levels) != res.Runs || res.Again == 0 {
+		t.Fatalf("%d runs at their level: %s", len(levels), res.report())
 	}
 	for i := 1; i < len(levels); i++ {
 		if levels[i] < levels[i-1] {
@@ -180,12 +186,12 @@ func TestIterativeBoundingCheckpointResumes(t *testing.T) {
 	}
 }
 
-// A checkpoint keeps each subtree's level, and one strategy does not resume
-// another's.
+// A checkpoint keeps the pass and each subtree's level, and one strategy
+// does not resume another's.
 func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ckpt.json")
 	f := newFrontier(1, 10)
-	f.iterative, f.stack = true, nil
+	f.iterative, f.stack, f.level, f.higher = true, nil, 2, true
 	f.push([]subtree{
 		{prefix: []choice{{label: "step", n: 2, picked: 1}}, level: 1},
 		{prefix: []choice{{label: "step", n: 3, picked: 2}}, level: 2},
@@ -198,8 +204,8 @@ func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 	if err := g.load(path); err != nil {
 		t.Fatal(err)
 	}
-	if g.level != 1 || len(g.stack) != 1 || g.stack[0].level != 1 || len(g.deferred) < 3 || len(g.deferred[2]) != 1 {
-		t.Fatalf("level %d, stack %v, deferred %v", g.level, g.stack, g.deferred)
+	if g.level != 2 || !g.higher || len(g.stack) != 2 || g.stack[0].level != 1 || g.stack[1].level != 2 {
+		t.Fatalf("level %d, higher %v, stack %v", g.level, g.higher, g.stack)
 	}
 	if err := newFrontier(1, 10).load(path); err == nil || !strings.Contains(err.Error(), "only IterativeBounding resumes") {
 		t.Fatalf("DepthFirst resuming it: %v", err)
@@ -211,41 +217,6 @@ func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 	}
 	if err := g.load(dfs); err == nil || !strings.Contains(err.Error(), "without IterativeBounding") {
 		t.Fatalf("IterativeBounding resuming DepthFirst's: %v", err)
-	}
-}
-
-// The subtrees of one run are saved as branches off its path, and a
-// checkpoint resumed and saved again keeps every branch's prefix.
-func TestIterativeBoundingCheckpointSharesPaths(t *testing.T) {
-	run := []choice{{label: "step", n: 2}, {label: "step", n: 3, picked: 1}, {label: "external", n: 2}}
-	want := []subtree{
-		{from: run[:3], pick: 1, level: 0},
-		{from: run[:1], pick: 1, level: 1},
-	}
-	f := newFrontier(1, 10)
-	f.iterative, f.stack = true, nil
-	f.push(want)
-	dir := t.TempDir()
-	for round := range 2 {
-		path := filepath.Join(dir, fmt.Sprint(round))
-		if err := f.save(path); err != nil {
-			t.Fatal(err)
-		}
-		f = newFrontier(1, 10)
-		f.iterative = true
-		if err := f.load(path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := f.subtrees()
-	if len(got) != len(want) {
-		t.Fatalf("%d subtrees, want %d", len(got), len(want))
-	}
-	for i := range want {
-		g, w := got[i].choices(), want[i].choices()
-		if fmt.Sprint(g) != fmt.Sprint(w) || got[i].level != want[i].level {
-			t.Fatalf("subtree %d: %v at level %d, want %v at level %d", i, g, got[i].level, w, want[i].level)
-		}
 	}
 }
 

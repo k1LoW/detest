@@ -31,13 +31,15 @@ type frontier struct {
 	wake    []chan struct{} // per worker, buffered so a wakeup is never lost
 	waiting []bool
 	stack   []subtree // LIFO keeps the order depth first and the stack small
-	// iterative is IterativeBounding, under which stack holds the subtrees
-	// whose prefix costs level preemptions, and deferred, by their cost, the
-	// ones that cost more. level only rises: a run spends no more than its
-	// prefix (see IterativeBounding).
+	// iterative is IterativeBounding, under which the tree is explored in
+	// one pass per level, each from the root and depth first, leaving out
+	// the subtrees whose prefix costs more preemptions than level. higher
+	// records that the pass left one out, so that the next pass has runs to
+	// make, and again counts the runs made again on the way to the level's.
 	iterative  bool
 	level      int
-	deferred   [][]subtree
+	higher     bool
+	again      int
 	busy       int // workers running a prefix taken from the stack
 	stopped    bool
 	incomplete bool // MaxRuns, MaxDuration or a signal cut the exploration short
@@ -57,7 +59,6 @@ type frontier struct {
 	// after it are dropped and the ones before it still explored, so the
 	// violation reported is the one a single worker would report.
 	best       []int
-	bestLevel  int
 	bestResult *result
 	prior      int   // runs of the explorations a checkpoint resumes
 	cuts       int   // runs cut at MaxIdleTicks, the resumed explorations' too
@@ -125,8 +126,7 @@ func (f *frontier) wakeN(n int) {
 }
 
 // settled wakes the workers a change of the stack concerns: one per subtree
-// pushed, or all of them once nothing is left to take or wait for, which
-// under IterativeBounding is also when the next level may start. f.mu is
+// pushed, or all of them once nothing is left to take or wait for. f.mu is
 // held.
 func (f *frontier) settled(pushed int) {
 	if f.busy == 0 && len(f.stack) == 0 {
@@ -146,10 +146,10 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 		return f.takeRandom(worker)
 	}
 	for {
-		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1], f.level) {
+		for len(f.stack) > 0 && f.after(f.stack[len(f.stack)-1].prefix) {
 			f.stack = f.stack[:len(f.stack)-1] // after the best violation
 		}
-		if len(f.stack) == 0 && f.busy == 0 && !f.stopped && f.promote() {
+		if len(f.stack) == 0 && f.busy == 0 && !f.stopped && f.nextLevel() {
 			continue
 		}
 		if len(f.stack) > 0 || f.busy == 0 || f.stopped {
@@ -167,7 +167,7 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 		f.wakeAll() // the exploration is over: let the others see it
 		return subtree{}, 0, false
 	}
-	if f.runs >= f.maxRuns || (f.runs > 0 && f.expired.Load()) {
+	if f.runs >= f.maxRuns || (f.runs+f.again > 0 && f.expired.Load()) {
 		f.incomplete, f.stopped = true, true
 		f.progress[worker].idle.Store(true)
 		f.wakeAll()
@@ -176,21 +176,24 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 	p := f.stack[len(f.stack)-1]
 	f.stack = f.stack[:len(f.stack)-1]
 	f.busy++
-	f.runs++
+	if p.again = p.level < f.level; p.again {
+		f.again++
+	} else {
+		f.runs++
+	}
 	return p, 0, true
 }
 
-// promote moves the subtrees of the next level that has any onto the stack,
-// once every run of the level before has finished and can add none to it.
-// It reports whether it moved any. f.mu is held.
-func (f *frontier) promote() bool {
-	for l := f.level + 1; l < len(f.deferred); l++ {
-		if len(f.deferred[l]) > 0 {
-			f.level, f.stack, f.deferred[l] = l, f.deferred[l], nil
-			return true
-		}
+// nextLevel starts the pass of the next level under IterativeBounding, from
+// the root, once the pass before has finished and left out a subtree of a
+// higher level. It reports whether it started one. f.mu is held.
+func (f *frontier) nextLevel() bool {
+	if !f.iterative || !f.higher || f.best != nil && !f.exploreAll {
+		return false
 	}
-	return false
+	f.level, f.higher = f.level+1, false
+	f.stack = append(f.stack, subtree{})
+	return true
 }
 
 // completeLevel returns, under IterativeBounding, the preemptions up to
@@ -257,7 +260,7 @@ func (f *frontier) push(children []subtree) int {
 	for i := range children {
 		c := children[i]
 		if f.partial {
-			k := prefixKey(c.choices())
+			k := prefixKey(c.prefix)
 			if prev := f.pushed[k]; prev != nil {
 				if prev.conservative && !c.conservative {
 					prev.conservative = false // the bound is not the only reason any more
@@ -266,20 +269,14 @@ func (f *frontier) push(children []subtree) int {
 			}
 			f.pushed[k] = &c
 		}
-		if f.after(c, c.level) {
+		if f.iterative && c.level > f.level {
+			f.higher = true // for a later pass
 			continue
 		}
-		if c.level > f.level {
-			// Pushed onto the stack only once its level starts, so it wakes
-			// no worker now.
-			for len(f.deferred) <= c.level {
-				f.deferred = append(f.deferred, nil)
-			}
-			f.deferred[c.level] = append(f.deferred[c.level], c)
-			continue
+		if !f.after(c.prefix) {
+			f.stack = append(f.stack, c)
+			pushed++
 		}
-		f.stack = append(f.stack, c)
-		pushed++
 	}
 	return pushed
 }
@@ -367,10 +364,9 @@ func (f *frontier) halt() {
 }
 
 // found records a violating run, keeping the earliest one: the first in
-// depth-first order, among the runs of the fewest preemptions under
-// IterativeBounding, which level is the run's, or the one of the lowest
-// index under the Random strategy.
-func (f *frontier) found(choices []choice, level, index int, res *result, children []subtree) {
+// depth-first order, or the one of the lowest index under the Random
+// strategy.
+func (f *frontier) found(choices []choice, index int, res *result, children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.random {
@@ -385,8 +381,8 @@ func (f *frontier) found(choices []choice, level, index int, res *result, childr
 	for i, c := range choices {
 		picks[i] = c.picked
 	}
-	if f.best == nil || level < f.bestLevel || level == f.bestLevel && precedes(picks, f.best) {
-		f.best, f.bestLevel, f.bestResult = picks, level, res
+	if f.best == nil || precedes(picks, f.best) {
+		f.best, f.bestResult = picks, res
 	}
 	// Under PartialOrder the violating run's backtrack points go to its
 	// ancestors, where the alternatives before its own are before it in
@@ -396,18 +392,14 @@ func (f *frontier) found(choices []choice, level, index int, res *result, childr
 	f.settled(pushed)
 }
 
-// after reports whether every run under prefix, of level preemptions or
-// more, comes after the best violation: it costs more, or as much and at
-// the first choice they differ the prefix took a later alternative.
-func (f *frontier) after(sub subtree, level int) bool {
+// after reports whether every run under prefix comes after the best
+// violation in depth-first order: at the first choice they differ, the
+// prefix took a later alternative.
+func (f *frontier) after(prefix []choice) bool {
 	if f.best == nil || f.exploreAll {
 		return false
 	}
-	if level != f.bestLevel {
-		return level > f.bestLevel
-	}
-	for i := range sub.depth() {
-		c := sub.at(i)
+	for i, c := range prefix {
 		if i >= len(f.best) {
 			return false
 		}
@@ -434,17 +426,20 @@ func precedes(a, b []int) bool {
 // picks the first option, or under IterativeBounding the first that
 // preempts nothing, so the alternatives before the pick are subtrees too.
 func (s *Sim) children(r *run, prefix int) []subtree {
-	c := slices.Clip(r.choices)
+	c := r.choices
 	var out []subtree
 	for j := prefix; j < len(c); j++ {
 		for v := c[j].n - 1; v >= 0; v-- {
 			if v == c[j].picked {
 				continue
 			}
-			sub := subtree{from: c[:j+1], pick: v}
-			if s.shardTotal > 1 && j+1 >= s.shardDepth && !s.ownsPrefix(sub.choices()) {
+			p := make([]choice, j+1)
+			copy(p, c[:j])
+			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp}
+			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
 				continue // another machine's subtree
 			}
+			sub := subtree{prefix: p}
 			if j < len(r.costs) {
 				sub.level = r.costs[j].level(v)
 			}
@@ -484,8 +479,10 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		if !ok {
 			return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 		}
-		prefix := taken.choices()
-		runs++
+		prefix := taken.prefix
+		if !taken.again {
+			runs++
+		}
 		r := s.newRun(prefix)
 		if s.partialOrder {
 			f.mu.Lock()
@@ -506,6 +503,20 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		v := r.execute()
 		if s.depObserve != nil && !r.covered {
 			s.depObserve(r, v) // a run cut where its siblings cover the rest is no run of its own
+		}
+		if taken.again {
+			// The run was made, and checked, in the pass of its own level.
+			// Only its subtrees are wanted here.
+			var children []subtree
+			if v == nil || s.exploreAll {
+				children = s.children(r, len(prefix))
+			}
+			if v != nil && v.kind == "fatal" {
+				f.fail(v.err)
+				return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
+			}
+			f.finish(children)
+			continue
 		}
 		var children []subtree
 		switch {
@@ -532,7 +543,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			if f.random {
 				f.halt() // shrinking takes a run per choice
 			}
-			choices, level := r.choices, r.preempts
+			choices := r.choices
 			if !s.exploreAll {
 				r, v = s.shrink(r, v)
 				if !r.tracing {
@@ -545,7 +556,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, level, index, s.makeResult(r, v, runs, maxDepth, false, start), children)
+			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start), children)
 			continue
 		}
 		f.finish(children)
@@ -580,8 +591,10 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	if merged.Fatal != nil {
 		return merged
 	}
-	merged.CompleteLevel = f.completeLevel()
-	if best == nil && f.incomplete && !f.random && merged.Shard == "" {
+	merged.CompleteLevel, merged.Again = f.completeLevel(), f.again
+	// A pass covers the tree up to its level only, so the share of the
+	// stack says nothing of the runs left.
+	if best == nil && f.incomplete && !f.random && !f.iterative && merged.Shard == "" {
 		merged.Estimated = true
 		merged.Explored, merged.Remaining = f.remaining()
 	}
@@ -631,12 +644,12 @@ func (f *frontier) remaining() (explored float64, left int) {
 		}
 	}
 	w := 0.0
-	for _, sub := range f.subtrees() {
+	for _, sub := range f.stack {
 		share := 1.0
-		for i := range sub.depth() {
-			d := sub.at(i).n
+		for i, c := range sub.prefix {
+			d := c.n
 			if f.partial {
-				d = subtrees[prefixKey(sub.choices()[:i])]
+				d = subtrees[prefixKey(sub.prefix[:i])]
 			}
 			share /= float64(max(d, 1))
 		}
@@ -647,15 +660,6 @@ func (f *frontier) remaining() (explored float64, left int) {
 		return explored, 0
 	}
 	return explored, roughly(float64(f.prior+f.runs) * w / explored)
-}
-
-// subtrees returns the subtrees left, the stack's and the deferred ones.
-func (f *frontier) subtrees() []subtree {
-	out := slices.Clip(f.stack)
-	for _, d := range f.deferred {
-		out = append(out, d...)
-	}
-	return out
 }
 
 // minExplored is the share of the tree explored from which the runs left
@@ -680,13 +684,9 @@ func roughly(n float64) int {
 // checkpointVersion is the version of the checkpoint format. 2 is the tree
 // of eager starts and of INSERT yielding first, whose prefixes a checkpoint
 // of version 1 does not name. An exploration under IterativeBounding saves
-// version iterativeCheckpointVersion, with each subtree's level, so that one
-// of another strategy, or a detest that knows no levels, refuses it rather
-// than resume it in another order. It saves the subtrees as branches off the
-// paths of the runs that found them, each path once, since it keeps about
-// one subtree per preemption a run could have made, and a prefix written
-// out for each would make the file as large as gigabytes after some
-// thousands of runs.
+// version iterativeCheckpointVersion, with its pass and each subtree's
+// level, so that one of another strategy, or a detest that knows no levels,
+// refuses it rather than resume it in another order.
 const (
 	checkpointVersion          = 2
 	iterativeCheckpointVersion = 3
@@ -697,25 +697,16 @@ type checkpoint struct {
 	Runs     int             `json:"runs"`           // explored before, in all the explorations so far
 	Cuts     int             `json:"cuts,omitempty"` // of those runs, the ones cut at MaxIdleTicks
 	Subtrees [][]savedChoice `json:"subtrees"`
-	// Paths and Branches are the subtrees of version
-	// iterativeCheckpointVersion instead.
-	Paths    [][]savedChoice `json:"paths,omitempty"`
-	Branches []savedBranch   `json:"branches,omitempty"`
-	Reached  []string        `json:"reached,omitempty"` // Sometimes conditions met so far
-	Refused  []string        `json:"refused,omitempty"` // statements refused as unsupported so far
+	// Level, Higher and Levels are the pass of IterativeBounding, whether
+	// it left out a subtree of a higher level, and each subtree's level.
+	Level   int      `json:"level,omitempty"`
+	Higher  bool     `json:"higher,omitempty"`
+	Levels  []int    `json:"levels,omitempty"`
+	Reached []string `json:"reached,omitempty"` // Sometimes conditions met so far
+	Refused []string `json:"refused,omitempty"` // statements refused as unsupported so far
 	// Lazy is why EagerStart was dropped, so that a resumed exploration
 	// goes on in the tree its subtrees belong to.
 	Lazy string `json:"lazy,omitempty"`
-}
-
-// savedBranch is a subtree whose prefix is the first Depth choices of path
-// Path with Pick taken at the last, and that costs Level preemptions.
-// Depth 0 is the whole tree.
-type savedBranch struct {
-	Path  int `json:"path"`
-	Depth int `json:"depth"`
-	Pick  int `json:"pick"`
-	Level int `json:"level"`
 }
 
 type savedChoice struct {
@@ -743,34 +734,23 @@ func (f *frontier) load(path string) error {
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration without IterativeBounding, which it cannot resume in its order", path)
 	case ck.Version == iterativeCheckpointVersion && !f.iterative:
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration under IterativeBounding, which only IterativeBounding resumes", path)
-	case ck.Version != checkpointVersion && ck.Version != iterativeCheckpointVersion:
+	case ck.Version != checkpointVersion && ck.Version != iterativeCheckpointVersion,
+		ck.Version == iterativeCheckpointVersion && len(ck.Levels) != len(ck.Subtrees):
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
 	}
 	f.stack = f.stack[:0]
-	var subs []subtree
-	for _, st := range ck.Subtrees {
-		subs = append(subs, subtree{prefix: loadChoices(st)})
-	}
-	paths := make([][]choice, len(ck.Paths))
-	for k, st := range ck.Paths {
-		paths[k] = loadChoices(st)
-	}
-	for _, br := range ck.Branches {
-		if br.Path < 0 || br.Path >= len(paths) || br.Depth < 0 || br.Depth > len(paths[br.Path]) || br.Level < 0 {
-			return fmt.Errorf("detest: %s is not a checkpoint of this detest: a branch off no path", path)
+	for k, st := range ck.Subtrees {
+		p := make([]choice, len(st))
+		for i, c := range st {
+			p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP}
 		}
-		sub := subtree{level: br.Level}
-		if br.Depth > 0 {
-			// Not capped, so that saving it again writes the whole path,
-			// which the other branches off it may reach further into.
-			sub.from, sub.pick = paths[br.Path][:br.Depth], br.Pick
+		sub := subtree{prefix: p}
+		if f.iterative {
+			sub.level = ck.Levels[k]
 		}
-		subs = append(subs, sub)
+		f.stack = append(f.stack, sub)
 	}
-	if len(subs) > 0 {
-		f.level = slices.MinFunc(subs, func(a, b subtree) int { return a.level - b.level }).level
-	}
-	f.push(subs)
+	f.level, f.higher = ck.Level, ck.Higher
 	f.prior, f.cuts, f.lazy = ck.Runs, ck.Cuts, ck.Lazy
 	for _, n := range ck.Reached {
 		f.reach(n)
@@ -789,67 +769,22 @@ func (f *frontier) save(path string) error {
 	}
 	sort.Strings(ck.Reached)
 	ck.Refused = slices.Sorted(maps.Keys(f.refused))
-	if f.iterative {
-		ck.Version = iterativeCheckpointVersion
-		f.saveBranches(&ck)
-	} else {
-		for _, sub := range f.subtrees() {
-			st := make([]savedChoice, sub.depth())
-			for i := range st {
-				st[i] = saveChoice(sub.at(i))
-			}
-			ck.Subtrees = append(ck.Subtrees, st)
+	for _, sub := range f.stack {
+		st := make([]savedChoice, len(sub.prefix))
+		for i, c := range sub.prefix {
+			st[i] = savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp}
 		}
+		ck.Subtrees = append(ck.Subtrees, st)
+		if f.iterative {
+			ck.Levels = append(ck.Levels, sub.level)
+		}
+	}
+	if f.iterative {
+		ck.Version, ck.Level, ck.Higher = iterativeCheckpointVersion, f.level, f.higher
 	}
 	b, err := json.Marshal(ck)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
-}
-
-// saveBranches writes the subtrees left as branches off paths, each path
-// that subtrees share written once.
-func (f *frontier) saveBranches(ck *checkpoint) {
-	index := map[*choice]int{}
-	for _, sub := range f.subtrees() {
-		br := savedBranch{Depth: sub.depth(), Level: sub.level}
-		switch {
-		case br.Depth == 0:
-		case sub.from != nil:
-			// The subtrees of one run share the array of its choices.
-			whole := sub.from[:cap(sub.from)]
-			k, ok := index[&whole[0]]
-			if !ok {
-				k = len(ck.Paths)
-				index[&whole[0]] = k
-				ck.Paths = append(ck.Paths, saveChoices(whole))
-			}
-			br.Path, br.Pick = k, sub.pick
-		default:
-			br.Path, br.Pick = len(ck.Paths), sub.prefix[br.Depth-1].picked
-			ck.Paths = append(ck.Paths, saveChoices(sub.prefix))
-		}
-		ck.Branches = append(ck.Branches, br)
-	}
-}
-
-func saveChoice(c choice) savedChoice {
-	return savedChoice{Label: c.label, N: c.n, Picked: c.picked, FP: c.fp}
-}
-
-func saveChoices(cs []choice) []savedChoice {
-	out := make([]savedChoice, len(cs))
-	for i, c := range cs {
-		out[i] = saveChoice(c)
-	}
-	return out
-}
-
-func loadChoices(st []savedChoice) []choice {
-	p := make([]choice, len(st))
-	for i, c := range st {
-		p[i] = choice{label: c.Label, n: c.N, picked: c.Picked, fp: c.FP}
-	}
-	return p
 }

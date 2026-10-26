@@ -34,51 +34,15 @@ import (
 
 // subtree is a prefix the frontier holds, with what the reduction knows of
 // the option it ends in.
-//
-// A subtree children() found holds the choices of its run up to and
-// including the one it departs at, in from, shared with the run's other
-// subtrees, and the alternative it takes there, in pick, rather than a copy
-// of its prefix. Under IterativeBounding the frontier keeps the subtrees of
-// the next levels for as long as the current one lasts, about one per
-// preemption a run could have made, and copies would hold a run's choices
-// once per subtree.
 type subtree struct {
 	prefix       []choice
-	from         []choice
-	pick         int
 	ident        string // the option's identity, "" for a data or fault choice
 	conservative bool   // added for the bound alone
-	level        int    // under IterativeBounding, the preemptions the prefix spends
-}
-
-// depth returns the number of choices of the prefix.
-func (s subtree) depth() int {
-	if s.from != nil {
-		return len(s.from)
-	}
-	return len(s.prefix)
-}
-
-// at returns the prefix's choice i.
-func (s subtree) at(i int) choice {
-	if s.from == nil {
-		return s.prefix[i]
-	}
-	c := s.from[i]
-	if i == len(s.from)-1 {
-		c.picked = s.pick
-	}
-	return c
-}
-
-// choices returns the prefix, copied when it is shared.
-func (s subtree) choices() []choice {
-	if s.from == nil {
-		return s.prefix
-	}
-	p := slices.Clone(s.from)
-	p[len(p)-1].picked = s.pick
-	return p
+	// level is, under IterativeBounding, the preemptions the prefix spends,
+	// and again marks a subtree taken in the pass of a higher level, whose
+	// run was made in its own pass and is made again for its subtrees.
+	level int
+	again bool
 }
 
 type backtrackPoint struct{ ci, v int }

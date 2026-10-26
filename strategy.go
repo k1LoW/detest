@@ -40,15 +40,24 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // bugs need few preemptions, and under IterativeBounding they are found
 // early wherever in the run the preemptions fall.
 //
-// Every run is still made once, and a complete exploration covers the same
-// schedules as DepthFirst. One cut short reports the number of preemptions
-// up to which it explored every run, and a checkpoint resumes it in the
-// same order. The violation reported is the first one in that order, with
-// the fewest preemptions, which may be another than the one DepthFirst
-// reports. Past the choices a subtree fixes, a run takes the first option
-// that preempts nothing, rather than the first option, so that it costs
-// what the subtree costs. Workers wait for the runs of one number of
-// preemptions to finish before they start the next.
+// It explores the tree once per number of preemptions, each pass from the
+// root and depth first, as CHESS does. A pass leaves out the subtrees that
+// spend more preemptions than its number, and makes again the runs of
+// fewer that lead to its own, reporting nothing they break a second time. Past
+// the choices a subtree fixes, a run takes the first option that preempts
+// nothing, rather than the first option, so that it spends what the
+// subtree spends. Its memory and its checkpoint stay those of one
+// depth-first pass, and the runs made again are a small share of the runs,
+// since each number of preemptions has many more runs than every smaller
+// one together. The summary line gives how many there were, and neither
+// Runs nor MaxRuns counts them.
+//
+// A complete exploration makes the same runs as DepthFirst. One cut short
+// reports the number of preemptions up to which it made every run, and a
+// checkpoint resumes it in the same pass. The violation reported is the
+// first one depth first among the runs of the fewest preemptions, which
+// may be another than the one DepthFirst reports. Workers wait for a pass
+// to finish before they start the next.
 //
 // It does not apply with PartialOrder yet, whose sleep sets and backtrack
 // points are computed for one depth-first order. Of DepthFirst,
