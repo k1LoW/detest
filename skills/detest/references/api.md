@@ -28,6 +28,7 @@ The function declares the simulation and returns; the exploration runs after it,
 | `s.Always(func(st *detest.State) error)` | Invariant after every commit and process completion. `st.Prev()` is the previous state |
 | `s.AtQuiescence(func(st *detest.State) error)` | Invariant when all processes are done, queues drained, budgets spent |
 | `s.Sometimes(name, func(st *detest.State) bool)` | Must hold in at least one run; a complete exploration fails otherwise |
+| `s.ExploreAfter(func(st *detest.State) bool)` | Every run follows one fixed schedule until fn holds and branches only from there. The real code produces the state, where a `Seed` would write it by hand. A run that ends before fn holds fails the test |
 | `s.ExpectViolation(substr)` | Pin a known bug: passes while found, fails once gone |
 | `s.Current()` | The process running the calling goroutine, for fakes that need a `*Proc` |
 
