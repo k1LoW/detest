@@ -386,6 +386,8 @@ type Sim struct {
 	atQuiesce []func(st *State) error
 	sqlDBs    []*sql.DB
 	expect    *string // ExpectViolation
+	// exploreAfter is the state ExploreAfter explores from.
+	exploreAfter func(st *State) bool
 
 	frozen   bool            // the declaration function returned
 	progress *workerProgress // bumped on every scheduler step, read by the stall watchdog
@@ -501,6 +503,33 @@ func (s *Sim) AtQuiescence(fn func(st *State) error) {
 	s.atQuiesce = append(s.atQuiesce, fn)
 }
 
+// ExploreAfter makes every run follow one fixed schedule until fn holds, and
+// explores only from the state it holds in. Use it when the race under test
+// needs a state that takes many steps to reach, such as a job dispatched and
+// its completion event delivered twice, and the interleavings before that
+// state are not what the test is about. The code under test leads to the
+// state, so it is the one production would leave, where a Seed would have
+// to write it by hand.
+//
+// Until fn holds, every choice takes its first option, a step the first
+// that is no crash, stall or loss, and spends no preemption. No run branches
+// there, so the exploration starts from the state fn holds in, and under
+// PartialOrder that state is the root of the reduction. Invariants and
+// Sometimes are checked along the way as in any run, and the choices stay in
+// the schedule a violation is reported with, so that it replays as any.
+// fn is checked on the state before every step, the one the seeds leave
+// included.
+//
+// A run that ends before fn holds explored nothing, and fails the test. The
+// report says that the interleavings before fn held were not explored.
+func (s *Sim) ExploreAfter(fn func(st *State) bool) {
+	s.declare("ExploreAfter")
+	if s.exploreAfter != nil {
+		panic("detest: Sim.ExploreAfter called twice")
+	}
+	s.exploreAfter = fn
+}
+
 // ExpectViolation declares that the exploration must find a violation whose
 // message contains substr. Explore then fails the test when it finds none or a
 // different one. Use it to pin a known bug, such as the code before a fix.
@@ -567,6 +596,7 @@ type result struct {
 	eager    bool   // EagerStart applied
 	lazy     string // why EagerStart was dropped, if it was
 	partial  bool   // PartialOrder applied
+	after    bool   // ExploreAfter applied
 	Workers  int
 	Replay   bool // one schedule replayed rather than an exploration
 	// PriorRuns are the runs of the earlier explorations a checkpoint resumes;
@@ -657,6 +687,9 @@ func (r *result) outcome() string {
 		if r.strategy.iterative {
 			workers += fmt.Sprintf(", IterativeBounding with %d runs made again", r.Again)
 		}
+		if r.after {
+			workers += ", " + afterNote
+		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
 		switch {
 		case r.Estimated && r.Explored < minExplored:
@@ -701,9 +734,15 @@ func (r *result) outcome() string {
 		// found only because the reduction took the steps it did.
 		seed += ", PartialOrder (assumes no state shared outside detest)"
 	}
+	if r.after && !r.Replay {
+		seed += ", " + afterNote
+	}
 	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		what, r.Runs, seed, choices, r.Schedule, r.Trace)
 }
+
+// afterNote says in the report what ExploreAfter left out.
+const afterNote = "ExploreAfter (interleavings before its state not explored)"
 
 // refuse records a statement refused as unsupported, for the report.
 func (s *Sim) refuse(err *ErrUnsupportedSQL) {

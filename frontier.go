@@ -96,6 +96,9 @@ type frontier struct {
 	// exploreAll keeps the exploration going past violations (see
 	// Sim.exploreAll).
 	exploreAll bool
+	// leadEnd is the number of choices every run makes before the state
+	// ExploreAfter waits for, which have no subtrees (see run.leadEnd).
+	leadEnd atomic.Int64
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -517,11 +520,12 @@ func precedes(a, b []int) bool {
 // ordered so that the stack yields the deepest first, and at one choice the
 // first option first. Past the prefix a run picks the first option, or under
 // IterativeBounding without PartialOrder the first that preempts nothing, so
-// the alternatives before the pick are subtrees too.
+// the alternatives before the pick are subtrees too. The choices made before
+// the state ExploreAfter waits for have none.
 func (s *Sim) children(r *run, prefix int) []subtree {
 	c := r.choices
 	var out []subtree
-	for j := prefix; j < len(c); j++ {
+	for j := max(prefix, r.leadEnd); j < len(c); j++ {
 		for v := c[j].n - 1; v >= 0; v-- {
 			if v == c[j].picked {
 				continue
@@ -529,7 +533,9 @@ func (s *Sim) children(r *run, prefix int) []subtree {
 			p := make([]choice, j+1)
 			copy(p, c[:j])
 			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp, free: c[j].free}
-			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
+			// The depth counts from ExploreAfter's state, as every subtree
+			// shares the choices before it.
+			if s.shardTotal > 1 && len(p)-r.leadEnd >= s.shardDepth && !s.ownsPrefix(p[r.leadEnd:]) {
 				continue // another machine's subtree
 			}
 			sub := subtree{prefix: p}
@@ -600,6 +606,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		}
 		r.tracing = s.verbose
 		v := r.execute()
+		f.leadEnd.Store(int64(r.leadEnd))
 		if s.depObserve != nil && !r.covered {
 			s.depObserve(r, v) // a run cut where its siblings cover the rest is no run of its own
 		}
@@ -682,7 +689,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
 		merged.strategy = r.strategy
-		merged.eager, merged.lazy, merged.partial = r.eager, r.lazy, r.partial
+		merged.eager, merged.lazy, merged.partial, merged.after = r.eager, r.lazy, r.partial, r.after
 		if r.Replay {
 			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule
@@ -710,7 +717,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial, v.after = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial, merged.after
 		return &v
 	}
 	return merged
@@ -755,9 +762,13 @@ func (f *frontier) remaining() (explored float64, left int) {
 		}
 	}
 	w := 0.0
+	lead := int(f.leadEnd.Load())
 	for _, sub := range f.stack {
 		share := 1.0
 		for i, c := range sub.prefix {
+			if i < lead {
+				continue // no subtree but the one taken
+			}
 			d := c.n
 			if f.partial {
 				d = subtrees[prefixKey(sub.prefix[:i])]
