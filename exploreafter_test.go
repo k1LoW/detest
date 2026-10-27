@@ -150,7 +150,7 @@ func TestExploreAfterFindsAndReplaysTheRace(t *testing.T) {
 	}
 }
 
-// Random and Prioritized draw nothing before the state, so every run gets
+// Random and Prioritized draw no choice before the state, so every run gets
 // there by the same choices.
 func TestExploreAfterDrawsAfterTheState(t *testing.T) {
 	for _, opt := range []Option{Random(1), Prioritized(1, 3)} {

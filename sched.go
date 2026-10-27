@@ -28,10 +28,10 @@ type choice struct {
 	// arrive at it with the same fingerprint; 0 when unknown, as for
 	// DETEST_REPLAY.
 	fp uint64
-	// free is, under IterativeBounding without PartialOrder, the first
-	// option of a step choice that preempts nothing, which a run takes past
-	// its prefix, before the state ExploreAfter waits for the pick, and 0
-	// otherwise.
+	// free is the option a run takes past its prefix by default, which
+	// shrinking goes back to. Before the state ExploreAfter waits for it is
+	// the pick, under IterativeBounding without PartialOrder the first
+	// option of a step choice that preempts nothing, and 0 otherwise.
 	free int
 }
 
@@ -40,7 +40,8 @@ type choice struct {
 // the others from the first on, so comparing picks alone would put a
 // subtree of an option before free ahead of the runs explored before it.
 // Without IterativeBounding, or under PartialOrder, free is 0 and the rank
-// is the pick.
+// is the pick, except before the state ExploreAfter waits for, where every
+// rank is 0.
 func (c choice) rank() int {
 	switch {
 	case c.picked == c.free:
@@ -178,12 +179,12 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 
 type run struct {
 	s       *Sim
-	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option, or want
+	rng     *rand.Rand   // the Random strategy's draws past the prefix and ExploreAfter's state; nil picks the first option, or want
 	seen    seenChoices  // under Random, the worker's earlier runs' shallow choices
 	path    uint64       // under Random, a hash of the picks so far, which keys seen
 	prio    *prioritized // under Prioritized, how the steps are picked
-	want    int          // the option the next step choice takes, under Prioritized, PartialOrder or IterativeBounding
-	steps   int          // the steps taken, which Prioritized measures a run in
+	want    int          // the option the next step choice takes, under Prioritized, PartialOrder or IterativeBounding, or before ExploreAfter's state
+	steps   int          // the steps taken past ExploreAfter's state, which Prioritized measures a run in
 	prefix  []choice
 	choices []choice
 	pos     int
@@ -546,8 +547,8 @@ func (r *run) choose(label string, n int) int {
 		r.costs = append(r.costs, c)
 	}
 	if r.lead {
-		// The pick is the default, which shrinking keeps: the first option
-		// may be a fault the fixed schedule does not take.
+		// The pick is the default, which shrinking keeps, as the first
+		// option may be a fault the fixed schedule does not take.
 		free = picked
 	}
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp, free: free})

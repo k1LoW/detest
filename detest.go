@@ -292,7 +292,7 @@ const defaultShardDepth = 12
 // exhaustive exploration can be split across machines. Schedules are assigned
 // by hashing their first depth choices: shard index of total explores the
 // subtrees whose hash maps to it. Runs shorter than depth are explored by
-// every shard. Each shard reports its own run count; a violation is found by
+// every shard. Under ExploreAfter the choices are counted from its state. Each shard reports its own run count; a violation is found by
 // the shard owning its subtree. Under Random, the shards split the runs
 // instead (see Random). DETEST_SHARD=index/total[/depth] sets it from the
 // environment.
@@ -832,7 +832,8 @@ func (s *Sim) printRun(n int, r *run) {
 // picks, and adopts the change when the run still breaks the same way. The
 // default is the first option, or under IterativeBounding without
 // PartialOrder the first that preempts nothing, so that shrinking spends no
-// preemption the exploration avoided. Under PartialOrder a pass's bound,
+// preemption the exploration avoided. Before the state ExploreAfter waits
+// for it is the pick, which shrinking keeps. Under PartialOrder a pass's bound,
 // which the shrinking runs apply too, keeps them within its level. The result departs from the default schedule at fewer choices,
 // and the search costs one run per choice it tries.
 func (s *Sim) shrink(r *run, v *violation) (*run, *violation) {
@@ -866,7 +867,8 @@ func (s *Sim) retrace(r *run, v *violation) (*run, *violation) {
 }
 
 // ownsPrefix reports whether the subtree under the first shardDepth choices
-// belongs to this shard.
+// of prefix belongs to this shard. The caller passes the choices from
+// ExploreAfter's state on, which every subtree shares the ones before.
 func (s *Sim) ownsPrefix(prefix []choice) bool {
 	// FNV-1a over the picks, which like the shard count are small and
 	// non-negative, so the conversions cannot overflow.
