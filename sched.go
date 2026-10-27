@@ -237,7 +237,8 @@ type run struct {
 	measuring bool
 	// lead holds while the run follows the fixed schedule before the state
 	// ExploreAfter waits for, and leadEnd is the number of choices made
-	// before that state held, which no run branches at.
+	// before that state held, or all of them in a run that ended before,
+	// which no run branches at.
 	lead    bool
 	leadEnd int
 	// spinProc took the last step, and is the spinner once its own count of
@@ -621,6 +622,10 @@ func (r *run) execute() (v *violation) {
 			if _, ok := rec.(abortSentinel); !ok {
 				panic(rec)
 			}
+		}
+		if r.lead {
+			// None of its choices is past the state, so none has subtrees.
+			r.leadEnd = len(r.choices)
 		}
 		if v == nil && r.lead && !r.measuring {
 			// Passed, it would count as a run explored when none was.

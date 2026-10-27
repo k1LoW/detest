@@ -275,3 +275,25 @@ func TestExploreAfterKeepsRandomsNondeterminismCheck(t *testing.T) {
 		t.Fatalf("want the nondeterminism found, got %v: %s", res.Fatal, res.report())
 	}
 }
+
+// A run that breaks before the state branches nowhere, so that an
+// exploration going on past it makes no run that leaves the fixed schedule.
+func TestExploreAfterBranchesNowhereInARunBrokenBeforeTheState(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		leadModel(true, true, nil)(t, s)
+		store := s.dbs[0]
+		s.Always(func(st *State) error {
+			row, _ := st.Row(store, "counters", "c")
+			if row.Int64("n") == 2 {
+				return fmt.Errorf("halfway")
+			}
+			return nil
+		})
+	}
+	for _, opts := range [][]Option{{exploreAll()}, {exploreAll(), PartialOrder()}} {
+		res, _ := exploreBubble(t, model, opts, nil, 0)
+		if res.Fatal != nil || !res.Violated || !strings.Contains(res.Err.Error(), "halfway") {
+			t.Fatalf("want the violation before the state alone, got %v: %s", res.Fatal, res.report())
+		}
+	}
+}

@@ -606,7 +606,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		}
 		r.tracing = s.verbose
 		v := r.execute()
-		f.leadEnd.Store(int64(r.leadEnd))
+		if !r.lead {
+			f.leadEnd.Store(int64(r.leadEnd))
+		}
 		if s.depObserve != nil && !r.covered {
 			s.depObserve(r, v) // a run cut where its siblings cover the rest is no run of its own
 		}
