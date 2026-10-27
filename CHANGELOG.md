@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.9.0](https://github.com/k1LoW/detest/compare/v0.8.0...v0.9.0) - 2026-10-27
+
+### New Features 🎉
+- feat: add IterativeBounding to explore schedules in order of preemptions by @k1LoW in https://github.com/k1LoW/detest/pull/231
+- feat: let IterativeBounding run with PartialOrder, one reduced pass per bound by @k1LoW in https://github.com/k1LoW/detest/pull/235
+- feat!: let an OnMessage consumer handle every waiting message at once by @k1LoW in https://github.com/k1LoW/detest/pull/236
+- feat: explore only from the state ExploreAfter waits for by @k1LoW in https://github.com/k1LoW/detest/pull/239
+### Fix bug 🐛
+- fix!: count changes of a working tick's spawned process as progress by @k1LoW in https://github.com/k1LoW/detest/pull/237
+- fix: drop PartialOrder's records of states no run goes through again by @k1LoW in https://github.com/k1LoW/detest/pull/238
+
 ## [v0.8.0](https://github.com/k1LoW/detest/compare/v0.7.0...v0.8.0) - 2026-10-21
 
 ### New Features 🎉
