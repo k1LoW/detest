@@ -59,6 +59,12 @@ func prefixKey(p []choice) string {
 	return b.String()
 }
 
+// parentKey is the prefix key of the state a non-empty key's prefix makes
+// its last choice in.
+func parentKey(k string) string {
+	return k[:strings.LastIndexByte(k[:len(k)-1], ',')+1]
+}
+
 // reduce returns the subtrees the run reveals under PartialOrder.
 func (s *Sim) reduce(r *run, prefix int, truncated bool, sleepAt func(ci int) map[string]bool) []subtree {
 	events := r.dep().events
