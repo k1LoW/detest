@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,14 +81,18 @@ type frontier struct {
 	// they share with their process (see sqlConn.runShared).
 	shared atomic.Int64
 	// partial is PartialOrder, under which pushed is the subtrees pushed or
-	// run so far, where the backtrack points of several runs name the same
-	// subtree.
+	// run from the states a run may still go through (see prune), where the
+	// backtrack points of several runs name the same subtree.
 	partial bool
 	pushed  map[string]*subtree
 	// zIn is, by a state's prefix key, the sleep set that arrived there,
 	// and explored the options run from it so far (see sleep.go).
 	zIn      map[string][]sleeper
 	explored map[string][]explored
+	// pruneAt is the size of pushed at which prune next drops the records
+	// of states no run reaches again, at least pruneFloor.
+	pruneAt    int
+	pruneFloor int
 	// exploreAll keeps the exploration going past violations (see
 	// Sim.exploreAll).
 	exploreAll bool
@@ -102,7 +107,7 @@ type workerProgress struct {
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
-	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}}
+	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}, pruneAt: pruneFloor, pruneFloor: pruneFloor}
 	for i := range f.wake {
 		f.wake[i] = make(chan struct{}, 1)
 	}
@@ -207,6 +212,7 @@ func (f *frontier) nextLevel() bool {
 		// from pushing it, and a sleep set from waking what the higher
 		// bound makes a preemption cost.
 		f.pushed, f.zIn, f.explored = map[string]*subtree{"": {}}, map[string][]sleeper{}, map[string][]explored{}
+		f.pruneAt = f.pruneFloor
 	}
 	return true
 }
@@ -281,6 +287,7 @@ func (f *frontier) finish(children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pushed := f.push(children)
+	f.prune()
 	f.busy--
 	f.settled(pushed)
 }
@@ -328,6 +335,55 @@ func (f *frontier) walked(choices []choice) {
 			f.pushed[k] = &subtree{}
 		}
 	}
+}
+
+// pruneFloor is the size of pushed below which prune keeps everything, as
+// dropping records saves nothing worth the walk over the stack.
+const pruneFloor = 4096
+
+// prune drops, under PartialOrder, the records of the states no run will go
+// through again, once pushed has doubled since it last did. A run goes
+// through a state reached before only on the way to its prefix, since a
+// prefix pushed leads to a state no run has reached. PartialOrder runs one
+// worker and prune comes after its run's subtrees are pushed, so the states
+// still reached are the ones on the path to a prefix on the stack, and a
+// state that drops out of them never comes back. The sleep sets are read
+// only at those states, and pushed, which keeps a backtrack point from
+// naming a subtree explored before, only for their options. Kept for the
+// whole exploration, the records grow with every state explored, and a
+// long exploration runs out of memory. f.mu is held.
+func (f *frontier) prune() {
+	if !f.partial || len(f.pushed) < f.pruneAt {
+		return
+	}
+	live := map[string]bool{"": true}
+	reach := func(prefix []choice) {
+		var b strings.Builder
+		for _, c := range prefix {
+			b.WriteString(strconv.Itoa(c.picked))
+			b.WriteByte(',')
+			live[b.String()] = true
+		}
+	}
+	for _, s := range f.stack {
+		reach(s.prefix)
+	}
+	for k := range f.pushed {
+		if k != "" && !live[parentKey(k)] {
+			delete(f.pushed, k)
+		}
+	}
+	for k := range f.zIn {
+		if !live[k] {
+			delete(f.zIn, k)
+		}
+	}
+	for k := range f.explored {
+		if !live[k] {
+			delete(f.explored, k)
+		}
+	}
+	f.pruneAt = max(f.pruneFloor, 2*len(f.pushed))
 }
 
 // declareSometimes records the conditions a worker declared. Every worker
@@ -423,6 +479,7 @@ func (f *frontier) found(choices []choice, index int, res *result, children []su
 	// ancestors, where the alternatives before its own are before it in
 	// depth-first order and still to be explored.
 	pushed := f.push(children)
+	f.prune()
 	f.busy--
 	f.settled(pushed)
 }
@@ -693,8 +750,7 @@ func (f *frontier) remaining() (explored float64, left int) {
 		subtrees = map[string]int{}
 		for k := range f.pushed {
 			if k != "" {
-				parent := k[:strings.LastIndexByte(k[:len(k)-1], ',')+1]
-				subtrees[parent]++
+				subtrees[parentKey(k)]++
 			}
 		}
 	}
