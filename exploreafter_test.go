@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -294,6 +295,27 @@ func TestExploreAfterBranchesNowhereInARunBrokenBeforeTheState(t *testing.T) {
 		res, _ := exploreBubble(t, model, opts, nil, 0)
 		if res.Fatal != nil || !res.Violated || !strings.Contains(res.Err.Error(), "halfway") {
 			t.Fatalf("want the violation before the state alone, got %v: %s", res.Fatal, res.report())
+		}
+	}
+}
+
+// A checkpoint resumes only under the ExploreAfter it was saved with, as the
+// schedule before the state takes no fault and spends no preemption.
+func TestExploreAfterCheckpointIsRefusedTheOtherWay(t *testing.T) {
+	for _, saved := range []bool{true, false} {
+		path := filepath.Join(t.TempDir(), "ckpt.json")
+		f := newFrontier(1, 2)
+		exploreBubble(t, leadModel(true, saved, nil), nil, f, 0)
+		if err := f.save(path); err != nil {
+			t.Fatal(err)
+		}
+		g := newFrontier(1, 1000000)
+		if err := g.load(path); err != nil {
+			t.Fatal(err)
+		}
+		res, _ := exploreBubble(t, leadModel(true, !saved, nil), nil, g, 0)
+		if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "ExploreAfter") {
+			t.Fatalf("want the checkpoint saved with ExploreAfter=%v refused, got %v", saved, res.Fatal)
 		}
 	}
 }
