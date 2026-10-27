@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -699,6 +700,70 @@ func TestPartialOrderReachesEveryOutcome(t *testing.T) {
 			checkReduction(t, c.name, c.model, c.opts...)
 		})
 	}
+}
+
+// Dropping the records of the states no run reaches again changes nothing
+// the reduction explores, and leaves, once the exploration is over, only
+// the root's.
+func TestPartialOrderDropsTheRecordsOfStatesLeftBehind(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name      string
+		model     func(t *testing.T, s *Sim)
+		opts      []Option
+		iterative bool
+	}{
+		{"counter", func(t *testing.T, s *Sim) { counterModel(s, true) }, nil, false},
+		{"lock unbounded", lockModel, nil, false},
+		{"contended c=2", contendedModel, []Option{MaxPreemptions(2)}, false},
+		{"contended iterative", contendedModel, []Option{MaxPreemptions(2), IterativeBounding()}, true},
+		{"duplicates", duplicatesModel, []Option{MaxRedeliveries(1)}, false},
+		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2)}, false},
+		{"idle sweeper", idleSweeperModel, nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			explore := func(floor int) ([]string, *frontier) {
+				var runs []string
+				opts := append(slices.Clone(c.opts), PartialOrder(), exploreAll(), func(s *Sim) {
+					s.depObserve = func(r *run, _ *violation) { runs = append(runs, prefixKey(r.choices)) }
+				})
+				f := newFrontier(1, 1000000)
+				f.partial, f.exploreAll = true, true
+				f.iterative = c.iterative
+				f.pruneAt, f.pruneFloor = floor, floor
+				res, _ := exploreBubble(t, c.model, opts, f, 0)
+				if res.Fatal != nil {
+					t.Fatal(res.Fatal)
+				}
+				return runs, f
+			}
+			kept, _ := explore(math.MaxInt)
+			pruned, f := explore(1)
+			if !slices.Equal(kept, pruned) {
+				t.Fatalf("%d runs keeping every record, %d dropping them, first apart at %d", len(kept), len(pruned), firstApart(kept, pruned))
+			}
+			f.pruneAt = 0
+			f.prune()
+			for k := range f.pushed {
+				if k != "" && parentKey(k) != "" {
+					t.Fatalf("the record of %q is kept after the exploration", k)
+				}
+			}
+			if len(f.zIn) > 1 || len(f.explored) > 1 {
+				t.Fatalf("%d sleep sets and %d explored options kept after the exploration", len(f.zIn), len(f.explored))
+			}
+		})
+	}
+}
+
+func firstApart(a, b []string) int {
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return min(len(a), len(b))
 }
 
 // idleByReads applies PartialOrder's rule for waking idle loops without it,
