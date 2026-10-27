@@ -81,8 +81,8 @@ type frontier struct {
 	// they share with their process (see sqlConn.runShared).
 	shared atomic.Int64
 	// partial is PartialOrder, under which pushed is the subtrees pushed or
-	// run so far, where the backtrack points of several runs name the same
-	// subtree.
+	// run from the states a run may still go through (see prune), where the
+	// backtrack points of several runs name the same subtree.
 	partial bool
 	pushed  map[string]*subtree
 	// zIn is, by a state's prefix key, the sleep set that arrived there,
