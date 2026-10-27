@@ -123,6 +123,7 @@ A test that pins a known violation calls `s.ExpectViolation(substr)`. It passes 
 | `s.Mutex(name)`, `s.RWMutex(name)` | Locks the scheduler can see, to inject in place of `sync.Mutex` |
 | `s.Always(fn)`, `s.AtQuiescence(fn)` | Invariants checked after every commit and every process completion, or once every process is done |
 | `s.Sometimes(name, fn)` | A condition at least one run must meet, so that an exploration that never gets near the bug fails |
+| `s.ExploreAfter(fn)` | A state the code under test leads to by one fixed schedule, from which the exploration starts, so that the steps a race needs before it do not multiply the runs |
 
 ## Simulated resources
 

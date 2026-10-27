@@ -349,6 +349,7 @@ func exploreBubble(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, f
 		res.strategy = s.strategy
 		res.eager, res.lazy = s.eagerStart, s.lazy
 		res.partial = s.partialOrder
+		res.after = s.exploreAfter != nil
 		expect = s.expect
 	})
 	return res, expect

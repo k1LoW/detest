@@ -286,7 +286,10 @@ func (s *Sim) reduce(r *run, prefix int, truncated bool, sleepAt func(ci int) ma
 	// and among the options of one choice the lowest.
 	ps := make([]backtrackPoint, 0, len(points))
 	for p := range points {
-		ps = append(ps, p)
+		// No run branches before ExploreAfter's state, which is the root.
+		if p.ci >= r.leadEnd {
+			ps = append(ps, p)
+		}
 	}
 	slices.SortFunc(ps, func(a, b backtrackPoint) int {
 		if a.ci != b.ci {

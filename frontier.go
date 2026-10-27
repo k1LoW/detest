@@ -96,6 +96,14 @@ type frontier struct {
 	// exploreAll keeps the exploration going past violations (see
 	// Sim.exploreAll).
 	exploreAll bool
+	// leadEnd is the number of choices every run makes before the state
+	// ExploreAfter waits for, which have no subtrees (see run.leadEnd).
+	leadEnd atomic.Int64
+	// exploreAfter is whether the workers explore under ExploreAfter, which the
+	// declaration function says only after a checkpoint is loaded, and
+	// afterLoaded that a checkpoint set it.
+	exploreAfter bool
+	afterLoaded  bool
 }
 
 // workerProgress is what the stall watchdog reads of a worker: the steps its
@@ -386,6 +394,24 @@ func (f *frontier) prune() {
 	f.pruneAt = max(f.pruneFloor, 2*len(f.pushed))
 }
 
+// declareAfter records whether a worker explores under ExploreAfter, and
+// refuses a checkpoint of an exploration the other way, whose subtrees
+// belong to another tree. The check in choose catches only a subtree that
+// branches before the state, and a checkpoint saved under ExploreAfter has
+// none.
+func (f *frontier) declareAfter(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.afterLoaded && f.exploreAfter != on {
+		if on {
+			return errors.New("detest: the checkpoint is of an exploration without ExploreAfter, which an exploration under it cannot resume")
+		}
+		return errors.New("detest: the checkpoint is of an exploration under ExploreAfter, which only one under it resumes")
+	}
+	f.exploreAfter = on
+	return nil
+}
+
 // declareSometimes records the conditions a worker declared. Every worker
 // declares the same ones; the first to come records them.
 func (f *frontier) declareSometimes(names []string) {
@@ -517,11 +543,12 @@ func precedes(a, b []int) bool {
 // ordered so that the stack yields the deepest first, and at one choice the
 // first option first. Past the prefix a run picks the first option, or under
 // IterativeBounding without PartialOrder the first that preempts nothing, so
-// the alternatives before the pick are subtrees too.
+// the alternatives before the pick are subtrees too. The choices made before
+// the state ExploreAfter waits for have none.
 func (s *Sim) children(r *run, prefix int) []subtree {
 	c := r.choices
 	var out []subtree
-	for j := prefix; j < len(c); j++ {
+	for j := max(prefix, r.leadEnd); j < len(c); j++ {
 		for v := c[j].n - 1; v >= 0; v-- {
 			if v == c[j].picked {
 				continue
@@ -529,7 +556,9 @@ func (s *Sim) children(r *run, prefix int) []subtree {
 			p := make([]choice, j+1)
 			copy(p, c[:j])
 			p[j] = choice{label: c[j].label, n: c[j].n, picked: v, fp: c[j].fp, free: c[j].free}
-			if s.shardTotal > 1 && len(p) >= s.shardDepth && !s.ownsPrefix(p) {
+			// The depth counts from ExploreAfter's state, as every subtree
+			// shares the choices before it.
+			if s.shardTotal > 1 && len(p)-r.leadEnd >= s.shardDepth && !s.ownsPrefix(p[r.leadEnd:]) {
 				continue // another machine's subtree
 			}
 			sub := subtree{prefix: p}
@@ -550,6 +579,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		names[i] = c.name
 	}
 	f.declareSometimes(names)
+	if err := f.declareAfter(s.exploreAfter != nil); err != nil {
+		return &result{Fatal: err}
+	}
 	runs, maxDepth := 0, 0
 	seen := seenChoices{}
 	k := 0
@@ -600,6 +632,9 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		}
 		r.tracing = s.verbose
 		v := r.execute()
+		if !r.lead {
+			f.leadEnd.Store(int64(r.leadEnd))
+		}
 		if s.depObserve != nil && !r.covered {
 			s.depObserve(r, v) // a run cut where its siblings cover the rest is no run of its own
 		}
@@ -682,7 +717,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		merged.MaxDepth = max(merged.MaxDepth, r.MaxDepth)
 		merged.Shard = r.Shard
 		merged.strategy = r.strategy
-		merged.eager, merged.lazy, merged.partial = r.eager, r.lazy, r.partial
+		merged.eager, merged.lazy, merged.partial, merged.after = r.eager, r.lazy, r.partial, r.after
 		if r.Replay {
 			// A replay does not go through the frontier, so its cut is its own.
 			merged.Replay, merged.Schedule = true, r.Schedule
@@ -710,7 +745,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 	}
 	if best != nil {
 		v := *best
-		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial
+		v.Runs, v.CutRuns, v.MaxDepth, v.Workers, v.Unsupported, v.Shared, v.strategy, v.eager, v.lazy, v.partial, v.after = merged.Runs, merged.CutRuns, merged.MaxDepth, workers, merged.Unsupported, merged.Shared, merged.strategy, merged.eager, merged.lazy, merged.partial, merged.after
 		return &v
 	}
 	return merged
@@ -755,9 +790,13 @@ func (f *frontier) remaining() (explored float64, left int) {
 		}
 	}
 	w := 0.0
+	lead := int(f.leadEnd.Load())
 	for _, sub := range f.stack {
 		share := 1.0
 		for i, c := range sub.prefix {
+			if i < lead {
+				continue // no subtree but the one taken
+			}
 			d := c.n
 			if f.partial {
 				d = subtrees[prefixKey(sub.prefix[:i])]
@@ -825,6 +864,9 @@ type checkpoint struct {
 	// Lazy is why EagerStart was dropped, so that a resumed exploration
 	// goes on in the tree its subtrees belong to.
 	Lazy string `json:"lazy,omitempty"`
+	// After is whether the exploration ran under ExploreAfter, whose tree
+	// takes no fault and spends no preemption before its state.
+	After bool `json:"after,omitempty"`
 }
 
 type savedChoice struct {
@@ -874,6 +916,7 @@ func (f *frontier) load(path string) error {
 	}
 	f.level, f.higher = ck.Level, ck.Higher
 	f.prior, f.cuts, f.lazy = ck.Runs, ck.Cuts, ck.Lazy
+	f.exploreAfter, f.afterLoaded = ck.After, true
 	for _, n := range ck.Reached {
 		f.reach(n)
 	}
@@ -885,7 +928,7 @@ func (f *frontier) load(path string) error {
 
 // save writes the subtrees left to path.
 func (f *frontier) save(path string) error {
-	ck := checkpoint{Version: checkpointVersion, Runs: f.prior + f.runs, Cuts: f.cutRuns(), Lazy: f.lazy}
+	ck := checkpoint{Version: checkpointVersion, Runs: f.prior + f.runs, Cuts: f.cutRuns(), Lazy: f.lazy, After: f.exploreAfter}
 	for n := range f.reached {
 		ck.Reached = append(ck.Reached, n)
 	}

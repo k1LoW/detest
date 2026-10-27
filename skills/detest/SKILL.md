@@ -298,6 +298,7 @@ Always end with a report the user can act on without knowing detest. It answers 
 - Guaranteed: <for every interleaving of the listed operations, with the listed faults, within the bounds, the listed invariants hold (or: this schedule breaks them, reproducibly)>
 - Not covered: <bounds not explored (more actors, more crashes or stalls, preemptions beyond N), faults not injected, invariants not written, code outside the scenario, data races on Go memory between DB calls (use `go test -race`), statements detest refused, behavior that depends on the real server's planner or settings beyond the defaults>
 - Assumed, when `detest.PartialOrder()` is on: <the processes share no state outside detest in an order that matters, named with what was checked (the fakes' records, the test's variables) and what the fake reports with `Observe`>
+- Not explored, when `s.ExploreAfter` is on: <the interleavings before its state, which one fixed schedule leads to, named with the state>
 
 ### Next steps
 <the recommended fix as a diff with why it works and what it costs, the offer to apply it and verify it with a complete exploration, the pinned regression test and how to run it, the remaining candidates from step 2, offered as the next round>

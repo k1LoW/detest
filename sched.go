@@ -28,9 +28,10 @@ type choice struct {
 	// arrive at it with the same fingerprint; 0 when unknown, as for
 	// DETEST_REPLAY.
 	fp uint64
-	// free is, under IterativeBounding without PartialOrder, the first
-	// option of a step choice that preempts nothing, which a run takes past
-	// its prefix, and 0 otherwise.
+	// free is the option a run takes past its prefix by default, which
+	// shrinking goes back to. Before the state ExploreAfter waits for it is
+	// the pick, under IterativeBounding without PartialOrder the first
+	// option of a step choice that preempts nothing, and 0 otherwise.
 	free int
 }
 
@@ -39,7 +40,8 @@ type choice struct {
 // the others from the first on, so comparing picks alone would put a
 // subtree of an option before free ahead of the runs explored before it.
 // Without IterativeBounding, or under PartialOrder, free is 0 and the rank
-// is the pick.
+// is the pick, except before the state ExploreAfter waits for, where every
+// rank is 0.
 func (c choice) rank() int {
 	switch {
 	case c.picked == c.free:
@@ -177,12 +179,12 @@ func (s *Sim) Manual(name string, maxRuns int, fn func(p *Proc) error, opts ...P
 
 type run struct {
 	s       *Sim
-	rng     *rand.Rand   // the Random strategy's draws past the prefix; nil picks the first option, or want
+	rng     *rand.Rand   // the Random strategy's draws past the prefix and ExploreAfter's state; nil picks the first option, or want
 	seen    seenChoices  // under Random, the worker's earlier runs' shallow choices
 	path    uint64       // under Random, a hash of the picks so far, which keys seen
 	prio    *prioritized // under Prioritized, how the steps are picked
-	want    int          // the option the next step choice takes, under Prioritized, PartialOrder or IterativeBounding
-	steps   int          // the steps taken, which Prioritized measures a run in
+	want    int          // the option the next step choice takes, under Prioritized, PartialOrder or IterativeBounding, or before ExploreAfter's state
+	steps   int          // the steps taken past ExploreAfter's state, which Prioritized measures a run in
 	prefix  []choice
 	choices []choice
 	pos     int
@@ -234,6 +236,12 @@ type run struct {
 	// measuring marks the run Prioritized measures k on, which is no run of
 	// the exploration and so reports nothing of what it reached or refused.
 	measuring bool
+	// lead holds while the run follows the fixed schedule before the state
+	// ExploreAfter waits for, and leadEnd is the number of choices made
+	// before that state held, or all of them in a run that ended before,
+	// which no run branches at.
+	lead    bool
+	leadEnd int
 	// spinProc took the last step, and is the spinner once its own count of
 	// steps without a change reaches MaxSpins (see MaxSpins).
 	spinProc *Proc
@@ -490,6 +498,10 @@ func (r *run) choose(label string, n int) int {
 		case c.fp != 0 && c.fp != fp:
 			mismatch = fmt.Errorf("detest: the simulation is nondeterministic, or the checkpoint is of another version of it: the operations before choice %d (%s) differ from the run that recorded it. Look for what varies between runs of the code under test: map iteration order, the wall clock, randomness, or goroutines detest does not schedule", r.pos, label)
 		}
+		if mismatch == nil && r.lead && !c.replay && c.picked != max(r.want, 0) {
+			// A subtree branches only past the state ExploreAfter waits for.
+			mismatch = fmt.Errorf("detest: the checkpoint is of an exploration without ExploreAfter, or of one waiting for another state: choice %d (%s) branches before the state held", r.pos, label)
+		}
 		if mismatch != nil {
 			// This may be a process's goroutine, which cannot fail the test.
 			// The scheduler ends the run after the step and Explore fails the
@@ -497,6 +509,15 @@ func (r *run) choose(label string, n int) int {
 			r.pending = &violation{kind: "fatal", err: mismatch}
 		} else {
 			picked = c.picked
+		}
+	} else if r.lead {
+		// The step's first option that is no fault (see execute), and else
+		// the first. The choice draws nothing from the seed, but is checked
+		// against earlier runs as a drawn one is.
+		picked = max(r.want, 0)
+		if r.rng != nil {
+			r.checkSeen(label, n, fp)
+			r.path = hashInt(r.path, int64(picked))
 		}
 	} else if r.rng != nil {
 		r.checkSeen(label, n, fp)
@@ -524,6 +545,11 @@ func (r *run) choose(label string, n int) int {
 			free = max(slices.Index(c.preempt, false), 0)
 		}
 		r.costs = append(r.costs, c)
+	}
+	if r.lead {
+		// The pick is the default, which shrinking keeps, as the first
+		// option may be a fault the fixed schedule does not take.
+		free = picked
 	}
 	r.choices = append(r.choices, choice{label: label, n: n, picked: picked, fp: fp, free: free})
 	r.pos++
@@ -598,6 +624,14 @@ func (r *run) execute() (v *violation) {
 				panic(rec)
 			}
 		}
+		if r.lead {
+			// None of its choices is past the state, so none has subtrees.
+			r.leadEnd = len(r.choices)
+		}
+		if v == nil && r.lead && !r.measuring {
+			// Passed, it would count as a run explored when none was.
+			v = &violation{kind: "fatal", err: fmt.Errorf("detest: the state ExploreAfter waits for never held: the run ended after %d choices without exploring anything; run with Verbose to see its trace", len(r.choices))}
+		}
 	}()
 	for {
 		if r.s.progress != nil {
@@ -616,6 +650,9 @@ func (r *run) execute() (v *violation) {
 		if v := r.eagerUnsound(); v != nil {
 			return v
 		}
+		if r.lead && r.s.exploreAfter(r.snapshot()) {
+			r.lead, r.leadEnd = false, len(r.choices)
+		}
 		if r.s.eagerStart {
 			started, v := r.startEager()
 			if v != nil {
@@ -631,7 +668,10 @@ func (r *run) execute() (v *violation) {
 		// With a spinner kept out, crashes and losses left alone are no step
 		// another process takes, and taking one would stand in for the
 		// progress violation every run without it ends in.
-		if len(opts) == 0 || (r.spinner() != nil || r.turnsSpent()) && onlyFaults(opts) {
+		// The fixed schedule before ExploreAfter's state takes no fault, so
+		// with only faults left it goes on as with nothing to run.
+		leadStuck := r.lead && onlyFaults(opts)
+		if len(opts) == 0 || leadStuck || (r.spinner() != nil || r.turnsSpent()) && onlyFaults(opts) {
 			if r.advanceClock() {
 				r.depBarrier("clock")
 				r.sleep = nil // the clock is a step every transition depends on
@@ -658,24 +698,30 @@ func (r *run) execute() (v *violation) {
 			if p := r.spinner(); p != nil {
 				return &violation{kind: "progress", err: fmt.Errorf("process %s took %d steps without changing committed state while nothing else could run, so it would spin for ever; raise MaxSpins if it does that much work alone", p.name, p.spins)}
 			}
-			if len(opts) == 0 {
+			if len(opts) == 0 || leadStuck {
 				if v := r.eagerUnsound(); v != nil {
 					return v
 				}
 				break
 			}
 		}
-		r.steps++
 		i := 0
-		if r.prio != nil {
-			i = r.prio.pick(r, opts)
+		if r.lead {
+			// Not counted in steps, so that Prioritized draws its switches
+			// and faults among the steps explored.
+			i = slices.IndexFunc(opts, func(o option) bool { return !o.kind.fault() })
+		} else {
+			r.steps++
+			if r.prio != nil {
+				i = r.prio.pick(r, opts)
+			}
+			if k := r.defaultPick(opts); k >= 0 {
+				r.want, i = k, k
+			} else if r.covered {
+				return nil
+			}
 		}
-		if k := r.defaultPick(opts); k >= 0 {
-			r.want, i = k, k
-		} else if r.covered {
-			return nil
-		}
-		if len(opts) > 1 && r.s.passesByCost() {
+		if len(opts) > 1 && r.s.passesByCost() && !r.lead {
 			r.stepPreempt = make([]bool, len(opts))
 			for k, o := range opts {
 				r.stepPreempt[k] = r.preempting(o)
@@ -690,7 +736,7 @@ func (r *run) execute() (v *violation) {
 			}
 		}
 		if len(opts) > 1 {
-			if r.prio != nil {
+			if r.prio != nil || r.lead {
 				// Only the step choice takes the pick, or a lone option would
 				// leave it to the next choice, such as an external call's
 				// outcome.
@@ -715,7 +761,7 @@ func (r *run) execute() (v *violation) {
 		stepEvent := r.depCur()
 		// Moving off a spinner is fairness, not a preemption: it could not
 		// have gone on, so the switch spends none of the budget.
-		r.apply(o, r.preempting(o))
+		r.apply(o, !r.lead && r.preempting(o))
 		r.depEnd()
 		r.wake(stepEvent)
 		r.countSpin(o, before)
@@ -912,7 +958,10 @@ func (r *run) enabled() []option {
 	// A spinning process gives way, spent preemption budget or not, as the
 	// switch is the scheduler's fairness rather than a choice to explore.
 	limit, on := r.bound()
-	bounded := on && r.preempts >= limit && curRunnable && !r.keptOut(cur)
+	// The fixed schedule before ExploreAfter's state is one whatever the
+	// bound, or the passes of IterativeBounding would explore from
+	// different states.
+	bounded := !r.lead && on && r.preempts >= limit && curRunnable && !r.keptOut(cur)
 	for _, p := range r.procs {
 		if p.state != stateReady || r.keptOut(p) {
 			continue
@@ -2309,7 +2358,7 @@ func (s *Sim) newRun(prefix []choice) *run { return s.newRunMeasuring(prefix, fa
 // newRunMeasuring is newRun with the run marked as the one Prioritized
 // measures k on, which the seeds already see.
 func (s *Sim) newRunMeasuring(prefix []choice, measuring bool) *run {
-	r := &run{measuring: measuring, s: s, prefix: prefix, passBound: s.passBound, passBounded: s.passBounded, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1}
+	r := &run{measuring: measuring, s: s, prefix: prefix, passBound: s.passBound, passBounded: s.passBounded, abort: make(chan struct{}), runs: map[*procType]int{}, ids: map[string]int{}, idleAt: map[*procType]int{}, idleRun: map[*procType]int{}, idleSeen: map[*procType]int{}, byGid: map[string]*Proc{}, adoptCh: make(chan struct{}, 1), cancelCh: make(chan struct{}, 1), fp: fnvOffset, want: -1, lead: s.exploreAfter != nil}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if s.schedGid == "" {
 		// Every run of a Sim is scheduled on the goroutine of its bubble.
