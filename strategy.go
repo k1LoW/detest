@@ -157,7 +157,8 @@ func (s *Sim) measuringRng() *rand.Rand {
 // two runs that made the same picks up to a choice must arrive at it with the
 // same operations. Only the shallow choices are kept, which runs keep
 // revisiting, and only so many, so that the table stays small however long
-// the exploration runs.
+// the exploration runs. Under ExploreAfter the choices before its state and
+// as many after it are kept, as the runs branch only from there.
 const (
 	seenDepth = 12
 	seenMax   = 1 << 16
@@ -172,7 +173,7 @@ type seenChoice struct {
 type seenChoices map[uint64]seenChoice
 
 func (r *run) checkSeen(label string, n int, fp uint64) {
-	if r.pos >= seenDepth {
+	if r.pos-r.leadEnd >= seenDepth {
 		return
 	}
 	c, ok := r.seen[r.path]

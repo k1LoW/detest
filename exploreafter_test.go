@@ -237,3 +237,41 @@ func TestExploreAfterLeadsTheSameWayUnderAnyBound(t *testing.T) {
 	exploreBubble(t, leadModel(true, true, &bounded), []Option{MaxPreemptions(0)}, nil, 0)
 	sameLeads(t, append(free, bounded...))
 }
+
+// Random checks its runs for nondeterminism against earlier runs at the
+// shallow choices, which under ExploreAfter are counted from its state, so a
+// long schedule before it leaves the check in place.
+func TestExploreAfterKeepsRandomsNondeterminismCheck(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		prepared, runs := 0, 0 // runs is left unreset by the seed on purpose
+		s.Seed(func() { prepared = 0 })
+		s.Manual("prep", 1, func(p *Proc) error {
+			for i := range 15 {
+				p.Step("prep %d", i)
+				prepared++
+			}
+			return nil
+		})
+		// Ready alongside prep, so that every step of prep is a choice.
+		s.Manual("idle", 1, func(p *Proc) error {
+			p.Step("idle")
+			return nil
+		})
+		s.Manual("a", 1, func(p *Proc) error {
+			runs++
+			for i := range 1 + runs%3 {
+				p.Step("a %d", i)
+			}
+			return nil
+		}, After(func(st *State) bool { return prepared == 15 }))
+		s.Manual("b", 1, func(p *Proc) error {
+			p.Step("b")
+			return nil
+		}, After(func(st *State) bool { return prepared == 15 }))
+		s.ExploreAfter(func(st *State) bool { return prepared == 15 })
+	}
+	res, _ := exploreBubble(t, model, []Option{Random(1), MaxRuns(50)}, nil, 0)
+	if res.Fatal == nil || !strings.Contains(res.Fatal.Error(), "nondeterministic") {
+		t.Fatalf("want the nondeterminism found, got %v: %s", res.Fatal, res.report())
+	}
+}

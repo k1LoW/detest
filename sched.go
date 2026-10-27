@@ -510,8 +510,13 @@ func (r *run) choose(label string, n int) int {
 		}
 	} else if r.lead {
 		// The step's first option that is no fault (see execute), and else
-		// the first, which draws nothing from Random's seed.
+		// the first. The choice draws nothing from the seed, but is checked
+		// against earlier runs as a drawn one is.
 		picked = max(r.want, 0)
+		if r.rng != nil {
+			r.checkSeen(label, n, fp)
+			r.path = hashInt(r.path, int64(picked))
+		}
 	} else if r.rng != nil {
 		r.checkSeen(label, n, fp)
 		if r.want >= 0 {
