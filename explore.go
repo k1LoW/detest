@@ -76,6 +76,11 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	opts = append(slices.Clip(opts), env...)
 	n := workerCount(opts)
 	maxRuns, maxDuration := limitsOf(opts)
+	every := progressOf(opts)
+	if every > 0 {
+		// Each line takes f.mu, which every worker waits for between runs.
+		every = max(every, time.Second)
+	}
 	st := strategyOf(opts)
 	if st.prioritized && st.depth < 1 {
 		t.Fatal("detest: Prioritized needs a depth of at least 1")
@@ -86,6 +91,7 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 	ckpt := os.Getenv("DETEST_CHECKPOINT")
 	if sched, _ := replaySchedule(scheduleOf(opts)); sched != "" {
 		ckpt = "" // a replay neither resumes nor ends an exploration
+		every = 0 // nor is it long enough to log progress
 	}
 	if ckpt != "" && st.random {
 		// A random exploration has no subtrees left to save: it goes on with
@@ -150,6 +156,12 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 		func() {
 			stop := watchStall(f)
 			defer stop()
+			// The estimate is given where merge gives one, as long as no
+			// violation is held: a pass of IterativeBounding, a shard and a
+			// violation's dropped subtrees break the partition it rests on.
+			estimate := !st.random && !st.iterative && !shardedOf(opts)
+			stopProgress := watchProgress(t.Log, f, every, start, estimate)
+			defer stopProgress()
 			if n == 1 {
 				var r *result
 				if r, expect = exploreBubble(t, fn, runOpts, f, 0); r != nil {
@@ -297,6 +309,22 @@ func exploreWorkers(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option, 
 	return f.merge(results, n), expects[0]
 }
 
+func progressOf(opts []Option) time.Duration {
+	probe := &Sim{}
+	for _, o := range opts {
+		o(probe)
+	}
+	return probe.progressEvery
+}
+
+func shardedOf(opts []Option) bool {
+	probe := &Sim{}
+	for _, o := range opts {
+		o(probe)
+	}
+	return probe.shardTotal > 1 || os.Getenv("DETEST_SHARD") != ""
+}
+
 func scheduleOf(opts []Option) string {
 	probe := &Sim{}
 	for _, o := range opts {
@@ -426,6 +454,69 @@ func watchStall(f *frontier) (stop func()) {
 		}
 	}()
 	return func() { close(done) }
+}
+
+// watchProgress logs a progress line every d of real time until stop (see
+// Progress). Like the stall watchdog it runs outside the bubbles, since
+// their clocks are fake, and reads only atomics and, under f.mu, the
+// frontier, so the runs explore as they would without it.
+//
+// Explore passes t.Log as log, not a write to stderr as the watchdog's
+// report is, so that the line stays in the test's output under -json and
+// ends up with the test it belongs to. It points at this file rather than
+// at the scenario: Helper is resolved on the stack of the goroutine that
+// logs, which has no frame of the scenario. stop waits for the goroutine,
+// since a Log after the test has ended panics.
+func watchProgress(log func(args ...any), f *frontier, d time.Duration, start time.Time, estimate bool) (stop func()) {
+	if d <= 0 {
+		return func() {}
+	}
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(d)
+		defer tick.Stop()
+		last := int64(0)
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
+			var runs, maxDepth int64
+			for i := range f.progress {
+				runs += f.progress[i].runs.Load()
+				maxDepth = max(maxDepth, f.progress[i].maxDepth.Load())
+			}
+			f.mu.Lock()
+			prior, level := f.prior, f.level-1 // the pass at f.level is under way
+			var explored float64
+			var left int
+			estimated := estimate && f.bestResult == nil
+			if estimated {
+				explored, left = f.remaining()
+			}
+			f.mu.Unlock()
+			now := time.Now()
+			made := fmt.Sprintf("%d runs", runs)
+			if prior > 0 {
+				made = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint", runs, runs+int64(prior))
+			}
+			msg := fmt.Sprintf("detest: still exploring at %s, %s in: explored %s, %d in the last %s (max depth %d)", now.Format(time.TimeOnly), now.Sub(start).Round(time.Second), made, runs-last, d, maxDepth)
+			if estimated {
+				msg += estimateNote(explored, left)
+			}
+			if f.iterative {
+				msg += levelNote(level)
+			}
+			last = runs
+			log(msg)
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 // onSQLLock reports whether one of stacks waits for a lock of database/sql,

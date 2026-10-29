@@ -107,12 +107,16 @@ type frontier struct {
 	afterLoaded  bool
 }
 
-// workerProgress is what the stall watchdog reads of a worker: the steps its
-// scheduler took, and whether it is idle, waiting for a subtree or done, so
-// that its standing still is no stall.
+// workerProgress is what the watchers outside the bubbles read of a worker.
+// The stall watchdog reads the steps its scheduler took, and whether it is
+// idle, waiting for a subtree or done, so that its standing still is no
+// stall. The progress line reads the runs it counted and its deepest run,
+// the counts its result gives at the end (see Progress).
 type workerProgress struct {
-	steps atomic.Int64
-	idle  atomic.Bool
+	steps    atomic.Int64
+	idle     atomic.Bool
+	runs     atomic.Int64
+	maxDepth atomic.Int64
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
@@ -608,6 +612,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		prefix := taken.prefix
 		if !taken.again {
 			runs++
+			f.progress[worker].runs.Store(int64(runs))
 		}
 		if s.partialOrder && f.iterative {
 			// The runs a violation is shrunk and retraced with apply it too.
@@ -670,11 +675,13 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			higher := r.boundCut && (!s.boundPreemptions || s.passBound < s.maxPreemptions)
 			if f.passRun(r.preempts, higher) {
 				runs--
+				f.progress[worker].runs.Store(int64(runs))
 				f.finish(children)
 				continue
 			}
 		}
 		maxDepth = max(maxDepth, len(r.choices))
+		f.progress[worker].maxDepth.Store(int64(maxDepth))
 		if r.cut {
 			f.cut()
 		}
@@ -767,8 +774,10 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // to go on with a resumed exploration. A shard's or a violation's dropped
 // subtrees break the partition, and so do the ones a pass of
 // IterativeBounding leaves to later passes, so the caller asks for none of
-// them. f.mu need
-// not be held: every worker has returned.
+// them. f.mu is held, or every worker has returned, which the progress
+// line does not wait for: there a taken subtree is neither on the stack nor
+// a run counted as made until its run ends, so the share is a little
+// further off.
 //
 // Under PartialOrder a node's subtrees are the ones pushed or run from it,
 // not the options of its choice, which would count the subtrees the
