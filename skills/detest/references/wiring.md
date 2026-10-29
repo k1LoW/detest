@@ -198,4 +198,4 @@ Goroutines the code under test starts itself, such as an `errgroup` polling jobs
 
 ## Time and randomness
 
-The simulation runs in a `testing/synctest` bubble, where `time.Now`, `time.Sleep` and timers use a fake clock, so sleeps and timeouts cost nothing. Random values (UUIDs, tokens) are fine as data. Randomness or map iteration that changes *which* operations run, or their order, makes the simulation nondeterministic; see troubleshooting.
+The simulation runs in a `testing/synctest` bubble, where `time.Now`, `time.Sleep` and timers use a fake clock, so sleeps and timeouts cost nothing. Random values (UUIDs, tokens) are fine as data. Randomness or map iteration that changes *which* operations run, or their order, makes the simulation nondeterministic; see troubleshooting. A random primary key does that when it breaks a tie in an `ORDER BY`, since detest returns tied rows in key order. Where the code takes its ID generator from outside, wire one the harness resets in a `Seed`.
