@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // frontier holds the subtrees of the schedule tree no worker has explored yet,
@@ -844,10 +845,31 @@ func roughly(n float64) int {
 // IterativeBounding saves version iterativeCheckpointVersion, with its pass
 // and each subtree's level, so that one of another strategy, or a detest
 // that knows no levels, refuses it rather than resume it in another order.
+// One under PartialOrder saves partialCheckpointVersion, or
+// partialIterativeCheckpointVersion under both, with the records of the
+// reduction: its stack holds only the subtrees the reduction kept, so an
+// exploration without it, or a detest that cannot restore the records,
+// would resume it missing the rest. The four move together when the tree
+// changes, as load tells the strategies apart by them.
 const (
-	checkpointVersion          = 6
-	iterativeCheckpointVersion = 7
+	checkpointVersion                 = 6
+	iterativeCheckpointVersion        = 7
+	partialCheckpointVersion          = 8
+	partialIterativeCheckpointVersion = 9
 )
+
+// checkpointVersionFor is the version an exploration saves and resumes.
+func checkpointVersionFor(iterative, partial bool) int {
+	switch {
+	case iterative && partial:
+		return partialIterativeCheckpointVersion
+	case partial:
+		return partialCheckpointVersion
+	case iterative:
+		return iterativeCheckpointVersion
+	}
+	return checkpointVersion
+}
 
 type checkpoint struct {
 	Version  int             `json:"version"`
@@ -867,6 +889,26 @@ type checkpoint struct {
 	// After is whether the exploration ran under ExploreAfter, whose tree
 	// takes no fault and spends no preemption before its state.
 	After bool `json:"after,omitempty"`
+	// Pushed, Asleep and Explored are, under PartialOrder, the records the
+	// frontier keeps after prune, by prefix key: the subtrees pushed or run,
+	// the sleep set that arrived at a state and the options run from it.
+	Pushed   []savedPushed          `json:"pushed,omitempty"`
+	Asleep   map[string][]savedStep `json:"asleep,omitempty"`
+	Explored map[string][]savedStep `json:"explored,omitempty"`
+}
+
+type savedPushed struct {
+	Key          string `json:"key"`
+	Ident        string `json:"ident,omitempty"`
+	Conservative bool   `json:"conservative,omitempty"`
+}
+
+// savedStep is a sleeper or an explored option, with the access set its
+// step had.
+type savedStep struct {
+	Ident        string          `json:"ident"`
+	Acc          map[string]bool `json:"acc,omitempty"`
+	Conservative bool            `json:"conservative,omitempty"`
 }
 
 type savedChoice struct {
@@ -890,13 +932,27 @@ func (f *frontier) load(path string) error {
 	if err := json.Unmarshal(b, &ck); err != nil {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %w", path, err)
 	}
-	switch {
-	case ck.Version == checkpointVersion && f.iterative:
-		return fmt.Errorf("detest: %s is a checkpoint of an exploration without IterativeBounding, which it cannot resume in its order", path)
-	case ck.Version == iterativeCheckpointVersion && !f.iterative:
-		return fmt.Errorf("detest: %s is a checkpoint of an exploration under IterativeBounding, which only IterativeBounding resumes", path)
-	case ck.Version != checkpointVersion && ck.Version != iterativeCheckpointVersion:
+	var iterative, partial bool
+	switch ck.Version {
+	case checkpointVersion:
+	case iterativeCheckpointVersion:
+		iterative = true
+	case partialCheckpointVersion:
+		partial = true
+	case partialIterativeCheckpointVersion:
+		iterative, partial = true, true
+	default:
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
+	}
+	switch {
+	case !iterative && f.iterative:
+		return fmt.Errorf("detest: %s is a checkpoint of an exploration without IterativeBounding, which it cannot resume in its order", path)
+	case iterative && !f.iterative:
+		return fmt.Errorf("detest: %s is a checkpoint of an exploration under IterativeBounding, which only IterativeBounding resumes", path)
+	case !partial && f.partial:
+		return fmt.Errorf("detest: %s is a checkpoint of an exploration without PartialOrder, whose subtrees the reduction has no records for", path)
+	case partial && !f.partial:
+		return fmt.Errorf("detest: %s is a checkpoint of an exploration under PartialOrder, whose stack lacks the subtrees the reduction left out, which only PartialOrder resumes", path)
 	case !validLevels(ck):
 		// A level the runs do not spend would make them again unchecked,
 		// or count them at another pass, where nothing in the runs tells.
@@ -923,6 +979,28 @@ func (f *frontier) load(path string) error {
 	for _, m := range ck.Refused {
 		f.refuse(m)
 	}
+	if partial {
+		f.pushed = map[string]*subtree{"": {}}
+		for _, p := range ck.Pushed {
+			f.pushed[p.Key] = &subtree{ident: p.Ident, conservative: p.Conservative}
+		}
+		f.zIn = map[string][]sleeper{}
+		for k, z := range ck.Asleep {
+			// A state recorded with no sleeper is still recorded, so that a
+			// later run does not record another sleep set for it.
+			f.zIn[k] = nil
+			for _, s := range z {
+				f.zIn[k] = append(f.zIn[k], sleeper{ident: s.Ident, acc: s.Acc})
+			}
+		}
+		f.explored = map[string][]explored{}
+		for k, xs := range ck.Explored {
+			for _, x := range xs {
+				f.explored[k] = append(f.explored[k], explored{ident: x.Ident, acc: x.Acc, conservative: x.Conservative})
+			}
+		}
+		f.pruneAt = max(f.pruneFloor, 2*len(f.pushed))
+	}
 	return nil
 }
 
@@ -944,8 +1022,41 @@ func (f *frontier) save(path string) error {
 			ck.Levels = append(ck.Levels, sub.level)
 		}
 	}
+	ck.Version = checkpointVersionFor(f.iterative, f.partial)
 	if f.iterative {
-		ck.Version, ck.Level, ck.Higher = iterativeCheckpointVersion, f.level, f.higher
+		ck.Level, ck.Higher = f.level, f.higher
+	}
+	if f.partial {
+		// Only the records of the states a run still goes through are
+		// saved, so the checkpoint is as large as the stack, whatever the
+		// runs made before.
+		f.pruneAt = 0
+		f.prune()
+		for _, k := range slices.Sorted(maps.Keys(f.pushed)) {
+			if k == "" {
+				continue
+			}
+			p := f.pushed[k]
+			ck.Pushed = append(ck.Pushed, savedPushed{Key: k, Ident: p.ident, Conservative: p.conservative})
+		}
+		ck.Asleep = map[string][]savedStep{}
+		for k, z := range f.zIn {
+			var out []savedStep
+			for _, s := range z {
+				if savable(s.ident, s.acc) {
+					out = append(out, savedStep{Ident: s.ident, Acc: s.acc})
+				}
+			}
+			ck.Asleep[k] = out
+		}
+		ck.Explored = map[string][]savedStep{}
+		for k, xs := range f.explored {
+			for _, x := range xs {
+				if savable(x.ident, x.acc) {
+					ck.Explored[k] = append(ck.Explored[k], savedStep{Ident: x.ident, Acc: x.acc, Conservative: x.conservative})
+				}
+			}
+		}
 	}
 	b, err := json.Marshal(ck)
 	if err != nil {
@@ -954,11 +1065,29 @@ func (f *frontier) save(path string) error {
 	return os.WriteFile(path, b, 0o600) //nolint:gosec // the path the user gave in DETEST_CHECKPOINT
 }
 
+// savable reports whether a sleeper or an explored option survives JSON as
+// it is. JSON turns invalid UTF-8, such as in a row key a Go string holds
+// raw bytes in, into U+FFFD, and a resource renamed so would no longer
+// conflict with the one it stands for, leaving asleep a step a dependent one
+// should wake. Leaving one out instead only makes runs again.
+func savable(ident string, acc map[string]bool) bool {
+	if !utf8.ValidString(ident) {
+		return false
+	}
+	for res := range acc {
+		if !utf8.ValidString(res) {
+			return false
+		}
+	}
+	return true
+}
+
 // validLevels reports whether the pass and the subtrees' levels of a
-// checkpoint of version iterativeCheckpointVersion fit together, as a pass
+// checkpoint of version iterativeCheckpointVersion or
+// partialIterativeCheckpointVersion fit together, as a pass
 // holds subtrees of its level or lower only.
 func validLevels(ck checkpoint) bool {
-	if ck.Version != iterativeCheckpointVersion {
+	if ck.Version != iterativeCheckpointVersion && ck.Version != partialIterativeCheckpointVersion {
 		return true
 	}
 	if ck.Level < 0 || len(ck.Levels) != len(ck.Subtrees) {

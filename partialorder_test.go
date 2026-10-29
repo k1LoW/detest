@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -15,23 +17,21 @@ import (
 )
 
 // PartialOrder applies to a single worker exploring the tree depth first,
-// and is refused with what would split, randomize or resume the exploration.
+// and is refused with what would split or randomize the exploration.
 func TestPartialOrderRefusals(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name  string
 		opts  []Option
-		ckpt  bool
 		wants string
 	}{
-		{"workers", []Option{PartialOrder(), Workers(2)}, false, "single worker"},
-		{"random", []Option{PartialOrder(), Random(1)}, false, "Random"},
-		{"prioritized", []Option{PartialOrder(), Prioritized(1, 2)}, false, "Random"},
-		{"shard", []Option{PartialOrder(), Shard(0, 2, 3)}, false, "Shard"},
-		{"checkpoint", []Option{PartialOrder()}, true, "DETEST_CHECKPOINT"},
-		{"maxspins", []Option{PartialOrder(), MaxSpins(3)}, false, "MaxSpins"},
+		{"workers", []Option{PartialOrder(), Workers(2)}, "single worker"},
+		{"random", []Option{PartialOrder(), Random(1)}, "Random"},
+		{"prioritized", []Option{PartialOrder(), Prioritized(1, 2)}, "Random"},
+		{"shard", []Option{PartialOrder(), Shard(0, 2, 3)}, "Shard"},
+		{"maxspins", []Option{PartialOrder(), MaxSpins(3)}, "MaxSpins"},
 	} {
-		err := partialOrderRefusal(c.opts, c.ckpt)
+		err := partialOrderRefusal(c.opts)
 		if err == nil || !strings.Contains(err.Error(), c.wants) {
 			t.Errorf("%s: got %v, want an error naming %q", c.name, err, c.wants)
 		}
@@ -41,7 +41,7 @@ func TestPartialOrderRefusals(t *testing.T) {
 		{PartialOrder(), Workers(1), MaxSpins(100), MaxPreemptions(2)},
 		{Workers(2), Random(1)},
 	} {
-		if err := partialOrderRefusal(opts, false); err != nil {
+		if err := partialOrderRefusal(opts); err != nil {
 			t.Errorf("%v refused: %v", opts, err)
 		}
 	}
@@ -755,6 +755,210 @@ func TestPartialOrderDropsTheRecordsOfStatesLeftBehind(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An exploration under PartialOrder cut short at any point and resumed from
+// its checkpoint, again and again, makes the runs of one exploration to the
+// end in the same order, and the checkpoint holds the records of the states
+// a run still goes through only.
+func TestPartialOrderCheckpointResumes(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name      string
+		model     func(t *testing.T, s *Sim)
+		opts      []Option
+		iterative bool
+	}{
+		{"counter", func(t *testing.T, s *Sim) { counterModel(s, true) }, nil, false},
+		{"lock unbounded", lockModel, nil, false},
+		{"contended c=2", contendedModel, []Option{MaxPreemptions(2)}, false},
+		{"contended iterative", contendedModel, []Option{MaxPreemptions(2), IterativeBounding()}, true},
+		{"duplicates", duplicatesModel, []Option{MaxRedeliveries(1)}, false},
+		{"crash tx", crashTxModel, []Option{MaxCrashes(1), MaxPreemptions(2), IterativeBounding()}, true},
+		{"idle sweeper", idleSweeperModel, nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var runs []string
+			opts := append(slices.Clone(c.opts), PartialOrder(), exploreAll(), func(s *Sim) {
+				s.depObserve = func(r *run, _ *violation) { runs = append(runs, prefixKey(r.choices)) }
+			})
+			// explore makes one execution of at most maxRuns runs, resuming
+			// from path, and reports whether the exploration is over.
+			explore := func(path string, maxRuns int) bool {
+				f := newFrontier(1, maxRuns)
+				f.partial, f.exploreAll, f.iterative = true, true, c.iterative
+				if err := f.load(path); err != nil {
+					t.Fatal(err)
+				}
+				res, _ := exploreBubble(t, c.model, opts, f, 0)
+				if res.Fatal != nil {
+					t.Fatal(res.Fatal)
+				}
+				if !f.incomplete {
+					return true
+				}
+				if err := f.save(path); err != nil {
+					t.Fatal(err)
+				}
+				live := map[string]bool{"": true}
+				for _, s := range f.stack {
+					for j := range s.prefix {
+						live[prefixKey(s.prefix[:j+1])] = true
+					}
+				}
+				for k := range f.pushed {
+					if k != "" && !live[parentKey(k)] {
+						t.Fatalf("the checkpoint keeps the record of %q, which no run goes through again", k)
+					}
+				}
+				for k := range f.zIn {
+					if !live[k] {
+						t.Fatalf("the checkpoint keeps the sleep set of %q, which no run goes through again", k)
+					}
+				}
+				for k := range f.explored {
+					if !live[k] {
+						t.Fatalf("the checkpoint keeps the options explored from %q, which no run goes through again", k)
+					}
+				}
+				g := newFrontier(1, maxRuns)
+				g.partial, g.iterative = true, c.iterative
+				if err := g.load(path); err != nil {
+					t.Fatal(err)
+				}
+				a, b := pushedRecords(f), pushedRecords(g)
+				for _, k := range slices.Sorted(maps.Keys(a)) {
+					if a[k] != b[k] {
+						t.Fatalf("saved the pushed subtree %q as %q, loaded %q", k, a[k], b[k])
+					}
+				}
+				if len(a) != len(b) {
+					t.Fatalf("saved %d pushed subtrees, loaded %d", len(a), len(b))
+				}
+				if a, b := fmt.Sprint(f.zIn), fmt.Sprint(g.zIn); a != b {
+					t.Fatalf("saved the sleep sets %s, loaded %s", a, b)
+				}
+				if a, b := fmt.Sprint(f.explored), fmt.Sprint(g.explored); a != b {
+					t.Fatalf("saved the explored options %s, loaded %s", a, b)
+				}
+				return false
+			}
+			explore(filepath.Join(t.TempDir(), "none"), math.MaxInt)
+			full := runs
+			for _, maxRuns := range []int{1, 3, 7, 20} {
+				runs = nil
+				path := filepath.Join(t.TempDir(), "ckpt")
+				for done := false; !done; {
+					done = explore(path, maxRuns)
+					if len(runs) > len(full) || !slices.Equal(full[:len(runs)], runs) {
+						t.Fatalf("MaxRuns(%d): %d runs in one exploration, %d resumed so far, first apart at %d", maxRuns, len(full), len(runs), firstApart(full, runs))
+					}
+				}
+				if !slices.Equal(full, runs) {
+					t.Fatalf("MaxRuns(%d): %d runs in one exploration, %d resumed, first apart at %d", maxRuns, len(full), len(runs), firstApart(full, runs))
+				}
+			}
+			t.Logf("%s: %d runs", c.name, len(full))
+		})
+	}
+}
+
+// DETEST_CHECKPOINT resumes an exploration under PartialOrder, and an
+// exploration does not resume a checkpoint saved with PartialOrder the other
+// way.
+func TestPartialOrderCheckpointThroughExplore(t *testing.T) {
+	for _, iterative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("iterative %v", iterative), func(t *testing.T) {
+			opts := []Option{MaxPreemptions(2), PartialOrder()}
+			if iterative {
+				opts = append(opts, IterativeBounding())
+			}
+			var full, resumed int
+			Explore(t, func(t *testing.T, s *Sim) {
+				counterModel(s, true)
+				s.Seed(func() { full++ })
+			}, opts...)
+
+			path := filepath.Join(t.TempDir(), "ckpt")
+			t.Setenv("DETEST_CHECKPOINT", path)
+			rounds := 0
+			for {
+				rounds++
+				Explore(t, func(t *testing.T, s *Sim) {
+					counterModel(s, true)
+					s.Seed(func() { resumed++ })
+				}, append(slices.Clone(opts), MaxRuns(5))...)
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					break
+				}
+				if rounds == 2 {
+					g := newFrontier(1, 10)
+					g.iterative = iterative
+					if err := g.load(path); err == nil || !strings.Contains(err.Error(), "only PartialOrder resumes") {
+						t.Fatalf("resumed without PartialOrder: %v", err)
+					}
+				}
+				if rounds > 100 {
+					t.Fatal("the exploration does not finish")
+				}
+			}
+			if rounds < 3 || resumed != full {
+				t.Fatalf("%d rounds explored %d runs, one exploration %d", rounds, resumed, full)
+			}
+
+			plain := filepath.Join(t.TempDir(), "plain.json")
+			p := newFrontier(1, 10)
+			p.iterative = iterative
+			if err := p.save(plain); err != nil {
+				t.Fatal(err)
+			}
+			g := newFrontier(1, 10)
+			g.iterative, g.partial = iterative, true
+			if err := g.load(plain); err == nil || !strings.Contains(err.Error(), "without PartialOrder") {
+				t.Fatalf("PartialOrder resuming a checkpoint without it: %v", err)
+			}
+		})
+	}
+}
+
+// A sleeper or an explored option whose footprint JSON would not keep as it
+// is, such as a row key of raw bytes, is left out of the checkpoint rather
+// than saved under another name, and its state stays recorded.
+func TestPartialOrderCheckpointLeavesOutWhatJSONWouldRename(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "ckpt.json")
+	f := newFrontier(1, 10)
+	f.partial = true
+	f.stack = []subtree{{prefix: []choice{{label: "step", n: 3, picked: 1}}}}
+	raw := map[string]bool{"db:app:t#a\xff": true}
+	plain := map[string]bool{"db:app:t#b": true}
+	f.zIn[""] = []sleeper{{ident: "r:p", acc: raw}, {ident: "r:q", acc: plain}, {ident: "r:\xff", acc: plain}}
+	f.explored[""] = []explored{{ident: "r:p", acc: raw}, {ident: "r:q", acc: plain}}
+	if err := f.save(path); err != nil {
+		t.Fatal(err)
+	}
+	g := newFrontier(1, 10)
+	g.partial = true
+	if err := g.load(path); err != nil {
+		t.Fatal(err)
+	}
+	z, ok := g.zIn[""]
+	if !ok || len(z) != 1 || z[0].ident != "r:q" {
+		t.Fatalf("sleep set loaded as %v (recorded %v)", z, ok)
+	}
+	if x := g.explored[""]; len(x) != 1 || x[0].ident != "r:q" {
+		t.Fatalf("explored options loaded as %v", x)
+	}
+}
+
+// pushedRecords is what the reduction reads of f.pushed, by prefix key.
+func pushedRecords(f *frontier) map[string]string {
+	out := map[string]string{}
+	for k, p := range f.pushed {
+		out[k] = fmt.Sprintf("%s/%v", p.ident, p.conservative)
+	}
+	return out
 }
 
 func firstApart(a, b []string) int {
