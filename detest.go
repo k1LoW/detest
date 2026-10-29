@@ -226,10 +226,12 @@ func EagerStart(on bool) Option { return func(s *Sim) { s.eagerStart = on } }
 // the same rule with or without the option.
 //
 // It applies to a single worker exploring depth first, or in the passes of
-// IterativeBounding, and Workers above one, Random, Prioritized, Shard,
-// DETEST_SHARD and DETEST_CHECKPOINT are refused with it, and so is a
+// IterativeBounding, and Workers above one, Random, Prioritized, Shard and
+// DETEST_SHARD are refused with it, and so is a
 // MaxSpins below the default, since the spin verdicts depend on the order
-// of commits the reduction takes as independent.
+// of commits the reduction takes as independent. DETEST_CHECKPOINT saves
+// the reduction's records with the subtrees, and a checkpoint saved with it
+// is resumed only with it.
 func PartialOrder() Option { return func(s *Sim) { s.partialOrder = true } }
 
 // withoutEagerStart is EagerStart(false) after a start moved a counter of
