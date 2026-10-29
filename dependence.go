@@ -94,7 +94,8 @@ func (r *run) depOn() bool {
 
 // depIdent names an option so that the same option can be found at the same
 // state in another run: a process by its name, a message by its id in its
-// queue, a start by its type.
+// queue, a start by its type. A checkpoint under PartialOrder saves these
+// names (see partialCheckpointVersion).
 func depIdent(o option) string {
 	switch o.kind {
 	case optResume:
@@ -233,10 +234,11 @@ func (r *run) depBarrier(kind string) {
 	d.events = append(d.events, &depEvent{proc: "-", kind: kind, ci: -1, acc: map[string]bool{depAll: true}})
 }
 
-// depRecord records that the step being run touches res. Outside any step,
-// such as a goroutine the scheduler waits for calling in, the call is a
-// step of its own that touches everything, since whose step it belongs to
-// is not known and timing must not decide what is recorded.
+// depRecord records that the step being run touches res, whose name a
+// checkpoint under PartialOrder saves (see partialCheckpointVersion).
+// Outside any step, such as a goroutine the scheduler waits for calling in,
+// the call is a step of its own that touches everything, since whose step
+// it belongs to is not known and timing must not decide what is recorded.
 func (r *run) depRecord(res string, write bool) { r.depRecordAs(r.current, res, write) }
 
 // depRecordAs is depRecord for a touch of p, nil for one of no process.
