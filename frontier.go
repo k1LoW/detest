@@ -850,7 +850,11 @@ func roughly(n float64) int {
 // reduction: its stack holds only the subtrees the reduction kept, so an
 // exploration without it, or a detest that cannot restore the records,
 // would resume it missing the rest. The four move together when the tree
-// changes, as load tells the strategies apart by them.
+// changes, as load tells the strategies apart by them. The records also
+// carry the names depIdent and depRecord give, and what record and sleepFor
+// make of them, so partialCheckpointVersion and
+// partialIterativeCheckpointVersion move when those change too: a sleeper
+// saved under an old name conflicts with no step and is never woken.
 const (
 	checkpointVersion                 = 6
 	iterativeCheckpointVersion        = 7
