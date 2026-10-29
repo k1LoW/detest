@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.10.0](https://github.com/k1LoW/detest/compare/v0.9.0...v0.10.0) - 2026-10-29
+
+### New Features 🎉
+- feat: resume an exploration under PartialOrder from DETEST_CHECKPOINT by @k1LoW in https://github.com/k1LoW/detest/pull/243
+### Other Changes
+- docs: tell the skill that random ids ordering tied rows make a run nondeterministic by @k1LoW in https://github.com/k1LoW/detest/pull/245
+
 ## [v0.9.0](https://github.com/k1LoW/detest/compare/v0.8.0...v0.9.0) - 2026-10-27
 
 ### New Features 🎉
