@@ -253,7 +253,7 @@ When the exploration is too slow to widen, `detest.PartialOrder()` skips the run
 
 Say in the proposal that the option is on and what it assumes, as the report must. If a violation the scenario was written for is found without the option and not with it, the assumption is broken somewhere above; find the shared state before trusting either result. `PartialOrder` applies to one worker exploring depth first, or in the passes of `IterativeBounding`, and is refused with `Workers`, `Random`, `Prioritized` and `Shard`, so leave `DETEST_WORKERS` unset for such a test.
 
-When the harness itself fails (unsupported SQL, "blocked outside the scheduler", "nondeterministic simulation", runs capped before completion, self-waits), read `references/troubleshooting.md`. Fix the harness, not the result. Never rewrite the production SQL inside the test or loosen an invariant to make a run pass.
+When the harness itself fails (unsupported SQL, "blocked outside the scheduler", "nondeterministic simulation", runs capped before completion, self-waits), read `references/troubleshooting.md`. One cause of a nondeterministic simulation is random IDs from `crypto/rand` ordering rows that tie in an `ORDER BY`, which it covers. Fix the harness, not the result. Never rewrite the production SQL inside the test or loosen an invariant to make a run pass.
 
 ## 6. Triage a violation
 
