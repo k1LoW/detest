@@ -11,8 +11,9 @@ import (
 // after the test's own, so they override those. They are the ones that
 // depend on where the tests run rather than on what a test checks: how many
 // workers, how many runs and how long, how often to log progress, and which
-// sample a random exploration draws. The bounds of the search, such as MaxPreemptions, are
-// part of what a test claims, and only its code sets them.
+// sample a random exploration draws. The bounds of the search, such as
+// MaxPreemptions, are part of what a test claims, and only its code sets
+// them.
 func envOptions() ([]Option, error) {
 	var opts []Option
 	if v, ok := os.LookupEnv("DETEST_WORKERS"); ok && v != "" {

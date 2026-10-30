@@ -466,8 +466,9 @@ func watchStall(f *frontier) (stop func()) {
 
 // watchProgress logs a progress line every d of real time until stop (see
 // Progress). Like the stall watchdog it runs outside the bubbles, since
-// their clocks are fake, and reads only atomics and, under f.mu, the
-// frontier, so the runs explore as they would without it.
+// their clocks are fake, and reads only atomics, fields of the frontier set
+// before it starts, and the rest of the frontier under f.mu, so the runs
+// explore as they would without it.
 //
 // Explore passes t.Log as log, not a write to stderr as the watchdog's
 // report is, so that the line stays in the test's output under -json and
