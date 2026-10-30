@@ -41,14 +41,14 @@ type frontier struct {
 	// the pass left a subtree or an option out, so that the next pass has
 	// runs to make, and again counts the runs of fewer preemptions it made
 	// again.
-	iterative  bool
-	level      int
-	higher     bool
-	again      int
-	busy       int // workers running a prefix taken from the stack
+	iterative bool
+	level     int
+	higher    bool
+	again     int
+	busy      int // workers running a prefix taken from the stack
 	// taken is, per worker, the subtree it runs, nil while it runs none,
 	// so that an estimate made while it runs counts the subtree as left.
-	taken []*subtree
+	taken      []*subtree
 	stopped    bool
 	incomplete bool // MaxRuns, MaxDuration or a signal cut the exploration short
 	// random hands out run indexes instead of subtrees, under the Random
@@ -812,15 +812,21 @@ func (f *frontier) remaining() (explored float64, left int) {
 	lead := int(f.leadEnd.Load())
 	weight := func(prefix []choice) float64 {
 		share := 1.0
+		// The key grows with the prefix rather than being made again at each
+		// choice, as a progress line computes this under f.mu for every
+		// subtree on the stack.
+		var key strings.Builder
 		for i, c := range prefix {
-			if i < lead {
-				continue // no subtree but the one taken
+			if i >= lead { // before lead, no subtree but the one taken
+				d := c.n
+				if f.partial {
+					d = subtrees[key.String()]
+				}
+				share /= float64(max(d, 1))
 			}
-			d := c.n
 			if f.partial {
-				d = subtrees[prefixKey(prefix[:i])]
+				writeKey(&key, c)
 			}
-			share /= float64(max(d, 1))
 		}
 		return share
 	}
