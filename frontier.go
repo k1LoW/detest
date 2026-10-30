@@ -41,11 +41,14 @@ type frontier struct {
 	// the pass left a subtree or an option out, so that the next pass has
 	// runs to make, and again counts the runs of fewer preemptions it made
 	// again.
-	iterative  bool
-	level      int
-	higher     bool
-	again      int
-	busy       int // workers running a prefix taken from the stack
+	iterative bool
+	level     int
+	higher    bool
+	again     int
+	busy      int // workers running a prefix taken from the stack
+	// taken is, per worker, the subtree it runs, nil while it runs none,
+	// so that an estimate made while it runs counts the subtree as left.
+	taken      []*subtree
 	stopped    bool
 	incomplete bool // MaxRuns, MaxDuration or a signal cut the exploration short
 	// random hands out run indexes instead of subtrees, under the Random
@@ -107,16 +110,20 @@ type frontier struct {
 	afterLoaded  bool
 }
 
-// workerProgress is what the stall watchdog reads of a worker: the steps its
-// scheduler took, and whether it is idle, waiting for a subtree or done, so
-// that its standing still is no stall.
+// workerProgress is what the watchers outside the bubbles read of a worker.
+// The stall watchdog reads the steps its scheduler took, and whether it is
+// idle, waiting for a subtree or done, so that its standing still is no
+// stall. The progress line reads the runs it counted and its deepest run,
+// the counts its result gives at the end (see Progress).
 type workerProgress struct {
-	steps atomic.Int64
-	idle  atomic.Bool
+	steps    atomic.Int64
+	idle     atomic.Bool
+	runs     atomic.Int64
+	maxDepth atomic.Int64
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
-	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}, pruneAt: pruneFloor, pruneFloor: pruneFloor}
+	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), taken: make([]*subtree, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}, pruneAt: pruneFloor, pruneFloor: pruneFloor}
 	for i := range f.wake {
 		f.wake[i] = make(chan struct{}, 1)
 	}
@@ -201,6 +208,7 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 	} else {
 		f.runs++
 	}
+	f.taken[worker] = &p
 	return p, 0, true
 }
 
@@ -292,9 +300,10 @@ func (f *frontier) cutRuns() int {
 func (f *frontier) expire() { f.expired.Store(true) }
 
 // finish returns a taken prefix with the subtrees its run revealed.
-func (f *frontier) finish(children []subtree) {
+func (f *frontier) finish(worker int, children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.taken[worker] = nil
 	pushed := f.push(children)
 	f.prune()
 	f.busy--
@@ -484,9 +493,10 @@ func (f *frontier) halt() {
 // found records a violating run, keeping the earliest one: the first in
 // depth-first order, or the one of the lowest index under the Random
 // strategy.
-func (f *frontier) found(choices []choice, index int, res *result, children []subtree) {
+func (f *frontier) found(worker int, choices []choice, index int, res *result, children []subtree) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.taken[worker] = nil
 	if f.random {
 		if f.bestResult == nil || index < f.bestIndex {
 			f.bestIndex, f.bestResult = index, res
@@ -650,7 +660,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 				f.fail(v.err)
 				return &result{Runs: runs, MaxDepth: maxDepth, Elapsed: time.Since(start)}
 			}
-			f.finish(children)
+			f.finish(worker, children)
 			continue
 		}
 		var children []subtree
@@ -670,11 +680,15 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			higher := r.boundCut && (!s.boundPreemptions || s.passBound < s.maxPreemptions)
 			if f.passRun(r.preempts, higher) {
 				runs--
-				f.finish(children)
+				f.finish(worker, children)
 				continue
 			}
 		}
 		maxDepth = max(maxDepth, len(r.choices))
+		// Published once the run is made and known to count, so that a
+		// progress line never takes back a run passRun gives back.
+		f.progress[worker].runs.Store(int64(runs))
+		f.progress[worker].maxDepth.Store(int64(maxDepth))
 		if r.cut {
 			f.cut()
 		}
@@ -702,10 +716,10 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			}
 			// Keep exploring: a subtree before this run may hold a violation
 			// a single worker would have found first.
-			f.found(choices, index, s.makeResult(r, v, runs, maxDepth, false, start), children)
+			f.found(worker, choices, index, s.makeResult(r, v, runs, maxDepth, false, start), children)
 			continue
 		}
-		f.finish(children)
+		f.finish(worker, children)
 	}
 }
 
@@ -767,8 +781,13 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // to go on with a resumed exploration. A shard's or a violation's dropped
 // subtrees break the partition, and so do the ones a pass of
 // IterativeBounding leaves to later passes, so the caller asks for none of
-// them. f.mu need
-// not be held: every worker has returned.
+// them. f.mu is held, or every worker has returned.
+//
+// A subtree a worker has taken is no longer on the stack and its run is
+// counted as made, though the subtrees the run reveals are not pushed until
+// it ends. While a worker runs it, as the progress line asks, its share is
+// counted as left, or the first run alone would make the tree look
+// explored whole.
 //
 // Under PartialOrder a node's subtrees are the ones pushed or run from it,
 // not the options of its choice, which would count the subtrees the
@@ -790,21 +809,35 @@ func (f *frontier) remaining() (explored float64, left int) {
 			}
 		}
 	}
-	w := 0.0
 	lead := int(f.leadEnd.Load())
-	for _, sub := range f.stack {
+	weight := func(prefix []choice) float64 {
 		share := 1.0
-		for i, c := range sub.prefix {
-			if i < lead {
-				continue // no subtree but the one taken
+		// The key grows with the prefix rather than being made again at each
+		// choice, as a progress line computes this under f.mu for every
+		// subtree on the stack.
+		var key strings.Builder
+		for i, c := range prefix {
+			if i >= lead { // before lead, no subtree but the one taken
+				d := c.n
+				if f.partial {
+					d = subtrees[key.String()]
+				}
+				share /= float64(max(d, 1))
 			}
-			d := c.n
 			if f.partial {
-				d = subtrees[prefixKey(sub.prefix[:i])]
+				writeKey(&key, c)
 			}
-			share /= float64(max(d, 1))
 		}
-		w += share
+		return share
+	}
+	w := 0.0
+	for _, sub := range f.stack {
+		w += weight(sub.prefix)
+	}
+	for _, sub := range f.taken {
+		if sub != nil {
+			w += weight(sub.prefix)
+		}
 	}
 	explored = max(1-w, 0)
 	if explored < minExplored {

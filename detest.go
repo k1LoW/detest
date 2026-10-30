@@ -287,6 +287,16 @@ func MaxRuns(n int) Option { return func(s *Sim) { s.maxRuns = n } }
 // duration such as 10m.
 func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration = d } }
 
+// Progress logs a line every d of wall-clock time while an exploration
+// runs, with the runs made so far, the runs made since the line before, the
+// deepest run and, where the summary line would give them, the preemptions
+// up to which every run was made and the estimate of the runs left. The
+// line goes through t.Log, so it shows as it is written only under go test
+// -v or -json. 0 (the default) logs nothing until the exploration ends. A d
+// under a second is raised to one. DETEST_PROGRESS overrides d, as a
+// duration such as 10m.
+func Progress(d time.Duration) Option { return func(s *Sim) { s.progressEvery = d } }
+
 // defaultShardDepth is how many leading choices pick a schedule's shard.
 const defaultShardDepth = 12
 
@@ -366,15 +376,17 @@ type Sim struct {
 	passBound   int
 	passBounded bool
 	maxDuration time.Duration
-	verbose     bool
-	sqlObserver func(query string, err error)
-	shardIndex  int
-	shardTotal  int
-	shardDepth  int
-	workers     int
-	strategy    strategy
-	frontier    *frontier // shared with the other workers, when Workers splits the exploration
-	worker      int
+	// progressEvery is how often a progress line is logged (see Progress).
+	progressEvery time.Duration
+	verbose       bool
+	sqlObserver   func(query string, err error)
+	shardIndex    int
+	shardTotal    int
+	shardDepth    int
+	workers       int
+	strategy      strategy
+	frontier      *frontier // shared with the other workers, when Workers splits the exploration
+	worker        int
 
 	dbs       []*DB
 	queues    []*Queue
@@ -693,20 +705,11 @@ func (r *result) outcome() string {
 			workers += ", " + afterNote
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
-		switch {
-		case r.Estimated && r.Explored < minExplored:
-			msg += fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
-		case r.Estimated:
-			msg += fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", r.Remaining, r.Explored*100)
+		if r.Estimated {
+			msg += estimateNote(r.Explored, r.Remaining)
 		}
-		switch {
-		case !r.strategy.iterative || r.Complete:
-		case r.CompleteLevel < 0:
-			msg += "; not every run without a preemption explored yet"
-		case r.CompleteLevel == 1:
-			msg += "; every run of up to 1 preemption explored"
-		default:
-			msg += fmt.Sprintf("; every run of up to %d preemptions explored", r.CompleteLevel)
+		if r.strategy.iterative && !r.Complete {
+			msg += levelNote(r.CompleteLevel)
 		}
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
@@ -741,6 +744,28 @@ func (r *result) outcome() string {
 	}
 	return fmt.Sprintf("detest: %s\nrun %d%s, schedule (%d choices): DETEST_REPLAY=%s\n%s",
 		what, r.Runs, seed, choices, r.Schedule, r.Trace)
+}
+
+// estimateNote is the estimate of the runs left (see frontier.remaining) as
+// the summary and progress lines give it.
+func estimateNote(explored float64, left int) string {
+	if explored < minExplored {
+		return fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
+	}
+	return fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", left, explored*100)
+}
+
+// levelNote is, under IterativeBounding, the preemptions up to which every
+// run was made, as the summary and progress lines give it.
+func levelNote(level int) string {
+	switch {
+	case level < 0:
+		return "; not every run without a preemption explored yet"
+	case level == 1:
+		return "; every run of up to 1 preemption explored"
+	default:
+		return fmt.Sprintf("; every run of up to %d preemptions explored", level)
+	}
 }
 
 // afterNote says in the report what ExploreAfter left out.

@@ -53,10 +53,14 @@ type backtrackPoint struct{ ci, v int }
 func prefixKey(p []choice) string {
 	var b strings.Builder
 	for _, c := range p {
-		b.WriteString(strconv.Itoa(c.picked))
-		b.WriteByte(',')
+		writeKey(&b, c)
 	}
 	return b.String()
+}
+
+func writeKey(b *strings.Builder, c choice) {
+	b.WriteString(strconv.Itoa(c.picked))
+	b.WriteByte(',')
 }
 
 // parentKey is the prefix key of the state a non-empty key's prefix makes
