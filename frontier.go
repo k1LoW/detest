@@ -618,7 +618,6 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		prefix := taken.prefix
 		if !taken.again {
 			runs++
-			f.progress[worker].runs.Store(int64(runs))
 		}
 		if s.partialOrder && f.iterative {
 			// The runs a violation is shrunk and retraced with apply it too.
@@ -681,12 +680,14 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			higher := r.boundCut && (!s.boundPreemptions || s.passBound < s.maxPreemptions)
 			if f.passRun(r.preempts, higher) {
 				runs--
-				f.progress[worker].runs.Store(int64(runs))
 				f.finish(worker, children)
 				continue
 			}
 		}
 		maxDepth = max(maxDepth, len(r.choices))
+		// Published once the run is made and known to count, so that a
+		// progress line never takes back a run passRun gives back.
+		f.progress[worker].runs.Store(int64(runs))
 		f.progress[worker].maxDepth.Store(int64(maxDepth))
 		if r.cut {
 			f.cut()
