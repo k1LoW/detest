@@ -87,3 +87,37 @@ func TestExploreWithProgress(t *testing.T) {
 		})
 	}
 }
+
+// While the first run is under way the root is off the stack, and the
+// estimate counts its subtree as left rather than the tree as explored.
+func TestRemainingCountsTakenSubtreesAsLeft(t *testing.T) {
+	f := newFrontier(1, 100)
+	if _, _, ok := f.take(0); !ok {
+		t.Fatal("take: want the root")
+	}
+	f.mu.Lock()
+	explored, _ := f.remaining()
+	f.mu.Unlock()
+	if explored != 0 {
+		t.Errorf("explored %v while the root runs, want 0", explored)
+	}
+	f.finish(0, nil)
+	if explored, _ := f.remaining(); explored != 1 {
+		t.Errorf("explored %v once the root ran, want 1", explored)
+	}
+}
+
+// A progress line leaves the estimate out for a shard as merge does, which
+// tells one from a total above one.
+func TestShardedOfMatchesMerge(t *testing.T) {
+	for env, want := range map[string]bool{"": false, "0/1": false, "0/2": true, "1/3/8": true} {
+		t.Setenv("DETEST_SHARD", env)
+		if got := shardedOf(nil); got != want {
+			t.Errorf("DETEST_SHARD=%q: sharded %v, want %v", env, got, want)
+		}
+	}
+	t.Setenv("DETEST_SHARD", "")
+	if !shardedOf([]Option{Shard(0, 2, 4)}) {
+		t.Error("Shard(0, 2, 4): want sharded")
+	}
+}
