@@ -157,7 +157,7 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 			stop := watchStall(f)
 			defer stop()
 			// The estimate is given where merge gives one, as long as no
-			// violation is held: a pass of IterativeBounding, a shard and a
+			// violation is held. A pass of IterativeBounding, a shard and a
 			// violation's dropped subtrees break the partition it rests on.
 			estimate := !st.random && !st.iterative && !shardedOf(opts)
 			stopProgress := watchProgress(t.Log, f, every, start, estimate)
@@ -317,12 +317,20 @@ func progressOf(opts []Option) time.Duration {
 	return probe.progressEvery
 }
 
+// shardedOf reports whether the exploration is a shard, as merge tells
+// from the result: one of more than one, by DETEST_SHARD as newSim reads
+// it or else by Shard.
 func shardedOf(opts []Option) bool {
+	if env := os.Getenv("DETEST_SHARD"); env != "" {
+		var idx, total int
+		_, _ = fmt.Sscanf(env, "%d/%d", &idx, &total)
+		return total > 1
+	}
 	probe := &Sim{}
 	for _, o := range opts {
 		o(probe)
 	}
-	return probe.shardTotal > 1 || os.Getenv("DETEST_SHARD") != ""
+	return probe.shardTotal > 1
 }
 
 func scheduleOf(opts []Option) string {
