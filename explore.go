@@ -318,8 +318,8 @@ func progressOf(opts []Option) time.Duration {
 }
 
 // shardedOf reports whether the exploration is a shard, as merge tells
-// from the result: one of more than one, by DETEST_SHARD as newSim reads
-// it or else by Shard.
+// from the result, which counts one of more than one, read from
+// DETEST_SHARD as newSim reads it or else from Shard.
 func shardedOf(opts []Option) bool {
 	if env := os.Getenv("DETEST_SHARD"); env != "" {
 		var idx, total int
@@ -473,8 +473,8 @@ func watchStall(f *frontier) (stop func()) {
 // Explore passes t.Log as log, not a write to stderr as the watchdog's
 // report is, so that the line stays in the test's output under -json and
 // ends up with the test it belongs to. It points at this file rather than
-// at the scenario: Helper is resolved on the stack of the goroutine that
-// logs, which has no frame of the scenario. stop waits for the goroutine,
+// at the scenario, since Helper is resolved on the stack of the goroutine
+// that logs, which has no frame of the scenario. stop waits for the goroutine,
 // since a Log after the test has ended panics.
 func watchProgress(log func(args ...any), f *frontier, d time.Duration, start time.Time, estimate bool) (stop func()) {
 	if d <= 0 {
