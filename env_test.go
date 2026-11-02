@@ -23,9 +23,10 @@ func TestEnvOverridesTheRunBudget(t *testing.T) {
 	t.Setenv("DETEST_WORKERS", "3")
 	t.Setenv("DETEST_MAX_RUNS", "10")
 	t.Setenv("DETEST_MAX_DURATION", "90s")
-	s := applyEnv(t, Workers(8), MaxRuns(1000), MaxDuration(time.Hour))
-	if s.workers != 3 || s.maxRuns != 10 || s.maxDuration != 90*time.Second {
-		t.Fatalf("workers %d, maxRuns %d, maxDuration %v; want 3, 10, 1m30s", s.workers, s.maxRuns, s.maxDuration)
+	t.Setenv("DETEST_PROGRESS", "10m")
+	s := applyEnv(t, Workers(8), MaxRuns(1000), MaxDuration(time.Hour), Progress(time.Minute))
+	if s.workers != 3 || s.maxRuns != 10 || s.maxDuration != 90*time.Second || s.progressEvery != 10*time.Minute {
+		t.Fatalf("workers %d, maxRuns %d, maxDuration %v, progress %v; want 3, 10, 1m30s, 10m", s.workers, s.maxRuns, s.maxDuration, s.progressEvery)
 	}
 }
 
@@ -43,12 +44,12 @@ func TestEnvSeedOverridesRandomOnly(t *testing.T) {
 }
 
 func TestEnvLeavesUnsetOptionsAlone(t *testing.T) {
-	for _, k := range []string{"DETEST_WORKERS", "DETEST_MAX_RUNS", "DETEST_MAX_DURATION", "DETEST_SEED"} {
+	for _, k := range []string{"DETEST_WORKERS", "DETEST_MAX_RUNS", "DETEST_MAX_DURATION", "DETEST_PROGRESS", "DETEST_SEED"} {
 		t.Setenv(k, "")
 	}
 	s := applyEnv(t, Workers(2), MaxRuns(7), Random(5))
-	if s.workers != 2 || s.maxRuns != 7 || s.strategy.seed != 5 {
-		t.Fatalf("workers %d, maxRuns %d, seed %d; want the test's 2, 7, 5", s.workers, s.maxRuns, s.strategy.seed)
+	if s.workers != 2 || s.maxRuns != 7 || s.strategy.seed != 5 || s.progressEvery != 0 {
+		t.Fatalf("workers %d, maxRuns %d, seed %d, progress %v; want the test's 2, 7, 5, 0", s.workers, s.maxRuns, s.strategy.seed, s.progressEvery)
 	}
 }
 
@@ -57,6 +58,7 @@ func TestEnvRefusesBadValues(t *testing.T) {
 		"DETEST_WORKERS":      "four",
 		"DETEST_MAX_RUNS":     "0",
 		"DETEST_MAX_DURATION": "10",
+		"DETEST_PROGRESS":     "-1m",
 		"DETEST_SEED":         "-1",
 	} {
 		t.Run(k, func(t *testing.T) {

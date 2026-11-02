@@ -62,6 +62,7 @@ dropped := st.Dropped(q)                    // dropped after MaxRedeliveries; no
 | `EagerStart(on)` | on | Starts a `Manual` without `After` or `When` at once instead of at every possible step, which leaves out the runs that differ only in where it started. Assumes the code before its first statement or call touches no package variable or other state outside detest in an order that matters, so record when a process began after a `p.Step`. A process that blocks or calls into detest without yielding before its first statement, a `SET` of a session setting, a `LAST_INSERT_ID()` read or a wait for a pool connection makes the exploration start over without it, which the summary line states; its schedules start with `lazy:`. Off under `Shard` |
 | `MaxRuns(n)` | 1000000 | Cap on runs; the exploration is then incomplete, and the summary line estimates the runs left (`roughly N runs left, about P% explored`), or says it is too early under 20% explored, unless it is sampled or a shard |
 | `MaxDuration(d)` | none | Wall-clock cap |
+| `Progress(d)` | none | Logs the runs made, the runs since the line before, the estimate or the preemptions every run was made up to, every `d` of wall-clock time; shows while running only under `go test -v` or `-json` |
 | `Workers(n)` | 1 | Parallel workers |
 | `DepthFirst()`, `IterativeBounding()`, `Random(seed)`, `Prioritized(seed, depth)` | `DepthFirst()` | `IterativeBounding()` makes every run with 0 preemptions, then 1, and so on, so a race needing few preemptions is found early wherever it falls, and a cut exploration reports `every run of up to K preemptions explored`; with `PartialOrder` each pass is reduced under its number as the bound, and its schedules carry `bound:K:` after `reads:`; `Random(seed)` draws every choice from a seeded generator until `MaxRuns` or `MaxDuration`; `Prioritized(seed, depth)` follows PCT, running each process on and switching at `depth`-1 drawn steps (depth 2 or 3 covers most races); both never complete, no `DETEST_CHECKPOINT` |
 | `Shard(index, total, depth)` | | One shard of the schedule tree, for splitting across machines (`DETEST_SHARD`); under `Random` or `Prioritized`, every `total`-th run, with `depth` unused |
@@ -69,7 +70,7 @@ dropped := st.Dropped(q)                    // dropped after MaxRedeliveries; no
 | `Replay(choices)` | | Run one schedule only |
 | `Verbose()` | | Print every run's trace |
 
-The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_MAX_RUNS`, `DETEST_MAX_DURATION=<dur>` and `DETEST_SEED` (for `Random` and `Prioritized` only) override their options, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped or interrupted exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
+The environment variables are `DETEST_REPLAY=<choices>` replays one run, `DETEST_WORKERS`, `DETEST_MAX_RUNS`, `DETEST_MAX_DURATION=<dur>`, `DETEST_PROGRESS=<dur>` and `DETEST_SEED` (for `Random` and `Prioritized` only) override their options, `DETEST_SHARD=i/n`, `DETEST_CHECKPOINT=<file>` (resume a capped or interrupted exploration), `DETEST_STALL=<dur>` (default 30s), `DETEST_DEBUG=1`. `GOGC=400` often speeds long explorations.
 
 ## Database servers
 
