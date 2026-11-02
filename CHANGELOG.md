@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.11.0](https://github.com/k1LoW/detest/compare/v0.10.0...v0.11.0) - 2026-11-02
+
+### New Features 🎉
+- feat: log a progress line while a long exploration runs by @k1LoW in https://github.com/k1LoW/detest/pull/247
+
 ## [v0.10.0](https://github.com/k1LoW/detest/compare/v0.9.0...v0.10.0) - 2026-10-29
 
 ### New Features 🎉
