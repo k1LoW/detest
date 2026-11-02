@@ -292,8 +292,8 @@ func MaxDuration(d time.Duration) Option { return func(s *Sim) { s.maxDuration =
 // deepest run and, where the summary line would give them, the preemptions
 // up to which every run was made and the estimate of the runs left. The
 // line goes through t.Log, so it shows as it is written only under go test
-// -v or -json. 0 (the default) logs nothing until the exploration ends. A d
-// under a second is raised to one. DETEST_PROGRESS overrides d, as a
+// -v or -json. 0 (the default) or a negative d logs nothing until the
+// exploration ends. A positive d under a second is raised to one. DETEST_PROGRESS overrides d, as a
 // duration such as 10m.
 func Progress(d time.Duration) Option { return func(s *Sim) { s.progressEvery = d } }
 
