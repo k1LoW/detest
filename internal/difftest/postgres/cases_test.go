@@ -552,6 +552,31 @@ var cases = []difftest.Case{
 		},
 	},
 	{
+		Name:   "a guard by IS NOT DISTINCT FROM waits and rechecks",
+		Schema: []string{`CREATE TABLE ex (id int PRIMARY KEY, status text NOT NULL, resumed_at timestamptz)`},
+		Seed:   []string{`INSERT INTO ex VALUES (1, 'running', NULL), (2, 'running', NULL), (3, 'running', '2026-01-02 03:04:05+00')`},
+		Conns:  2,
+		Steps: []difftest.Step{
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE ex SET resumed_at = '2026-01-02 03:04:05+00' WHERE id = 1`),
+			difftest.S(0, `UPDATE ex SET resumed_at = NULL WHERE id = 3`),
+			// Each guard waits for conn0 and reads the row again. Row 1 no
+			// longer holds a NULL, row 2 still does, and row 3 holds one
+			// now.
+			difftest.QA(1, `UPDATE ex SET status = 'done' WHERE id = 1 AND resumed_at IS NOT DISTINCT FROM $1 RETURNING id`, nil),
+			difftest.S(0, `COMMIT`),
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE ex SET status = 'running' WHERE id = 2`),
+			difftest.QA(1, `UPDATE ex SET status = 'done' WHERE id = 2 AND resumed_at IS NOT DISTINCT FROM $1 RETURNING id`, nil),
+			difftest.S(0, `COMMIT`),
+			difftest.S(0, `BEGIN`),
+			difftest.S(0, `UPDATE ex SET status = 'running' WHERE id = 3`),
+			difftest.QA(1, `UPDATE ex SET status = 'done' WHERE id = 3 AND resumed_at IS DISTINCT FROM $1 RETURNING id`, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)),
+			difftest.S(0, `COMMIT`),
+			difftest.Q(0, `SELECT id, status, resumed_at IS NULL FROM ex ORDER BY id`),
+		},
+	},
+	{
 		Name: "check constraint violation",
 		Schema: []string{
 			`CREATE TABLE acct (id int PRIMARY KEY, bal int NOT NULL CHECK (bal >= 0))`,

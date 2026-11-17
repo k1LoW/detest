@@ -3357,7 +3357,7 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 							return
 						}
 					}
-				case "=", "<>", "!=", "<", "<=", ">", ">=":
+				case "=", "<>", "!=", "<", "<=", ">", ">=", sqlir.NotDistinct:
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
 						return
 					}
