@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/k1LoW/detest/internal/difftest"
 )
@@ -1440,6 +1441,69 @@ var valueCases = []difftest.Case{
 			difftest.Q(0, `SELECT id FROM r WHERE (a, b) IS NOT NULL ORDER BY id`),
 			difftest.Q(0, `SELECT id FROM r WHERE NOT (a, b) IS NULL ORDER BY id`),
 			difftest.Q(0, `SELECT id, (a, b) IS NULL, (a, b) IS NOT NULL FROM r ORDER BY id`),
+		},
+	},
+	{
+		Name: "IS DISTINCT FROM and IS NOT DISTINCT FROM",
+		Schema: []string{
+			`CREATE TABLE ex (id int PRIMARY KEY, status text NOT NULL, resumed_at timestamptz, n int, m numeric, s text, c char(2), u uuid,
+				same boolean GENERATED ALWAYS AS (n IS NOT DISTINCT FROM id) STORED,
+				CHECK (s IS DISTINCT FROM 'no'))`,
+			`CREATE TABLE other (id int PRIMARY KEY, n int)`,
+		},
+		Seed: []string{
+			`INSERT INTO ex VALUES (1, 'running', NULL, NULL, NULL, NULL, NULL, NULL)`,
+			`INSERT INTO ex VALUES (2, 'running', '2026-01-02 03:04:05+00', 2, 2.0, 'ab', 'ab', '00000000-0000-0000-0000-000000000001')`,
+			`INSERT INTO ex VALUES (3, 'done', '2026-01-02 03:04:05+00', 1, 1.5, 'AB', 'AB', NULL)`,
+			`INSERT INTO other VALUES (1, NULL), (2, 2), (3, 3)`,
+		},
+		Conns: 1,
+		Steps: []difftest.Step{
+			// The guard of a conditional UPDATE over a nullable column, with
+			// a parameter that may be NULL.
+			difftest.QA(0, `UPDATE ex SET status = 'done' WHERE id = $1 AND status = $2 AND resumed_at IS NOT DISTINCT FROM $3 RETURNING id`, int64(1), "running", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)),
+			difftest.QA(0, `UPDATE ex SET status = 'done' WHERE id = $1 AND status = $2 AND resumed_at IS NOT DISTINCT FROM $3 RETURNING id`, int64(2), "running", nil),
+			difftest.QA(0, `UPDATE ex SET status = 'done' WHERE id = $1 AND status = $2 AND resumed_at IS NOT DISTINCT FROM $3 RETURNING id`, int64(1), "running", nil),
+			difftest.QA(0, `UPDATE ex SET status = 'done' WHERE id = $1 AND status = $2 AND resumed_at IS NOT DISTINCT FROM $3 RETURNING id`, int64(2), "running", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)),
+			difftest.S(0, `UPDATE ex SET status = 'running' WHERE resumed_at IS DISTINCT FROM NULL`),
+			difftest.S(0, `DELETE FROM other WHERE n IS DISTINCT FROM id`),
+			difftest.QA(0, `SELECT id FROM ex WHERE n IS DISTINCT FROM $1 ORDER BY id`, int64(2)),
+			difftest.QA(0, `SELECT id FROM ex WHERE n IS DISTINCT FROM $1 ORDER BY id`, nil),
+			difftest.QA(0, `SELECT id FROM ex WHERE $1 IS NOT DISTINCT FROM n ORDER BY id`, nil),
+			difftest.QA(0, `SELECT id FROM ex WHERE u IS NOT DISTINCT FROM $1 ORDER BY id`, "00000000-0000-0000-0000-000000000001"),
+			difftest.QA(0, `SELECT id FROM ex WHERE s IS NOT DISTINCT FROM $1 ORDER BY id`, "ab"),
+			difftest.QA(0, `SELECT id FROM ex WHERE $1 IS NOT DISTINCT FROM $2 ORDER BY id`, "a", "a"),
+			difftest.QA(0, `SELECT id FROM ex WHERE $1::int IS DISTINCT FROM $2 ORDER BY id`, nil, int64(1)),
+			difftest.Q(0, `SELECT id, n IS DISTINCT FROM 2, n IS NOT DISTINCT FROM 2, n IS NOT DISTINCT FROM NULL, NULL IS DISTINCT FROM n, same FROM ex ORDER BY id`),
+			difftest.Q(0, `SELECT NULL IS NOT DISTINCT FROM NULL, NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM 1, 1 IS NOT DISTINCT FROM 2, NULL::int IS NOT DISTINCT FROM NULL::int, NULL::int IS DISTINCT FROM 1`),
+			difftest.Q(0, `SELECT NOT (n IS DISTINCT FROM 2), (n IS NOT DISTINCT FROM 2) IS NULL, (n IS NOT DISTINCT FROM 2) AND NULL FROM ex ORDER BY id`),
+			// Operands of two types, compared as = compares them.
+			difftest.Q(0, `SELECT id FROM ex WHERE n IS NOT DISTINCT FROM '2' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE m IS NOT DISTINCT FROM n ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE m IS DISTINCT FROM 2 ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE 1.0 / 3 IS DISTINCT FROM m ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE c IS NOT DISTINCT FROM 'AB' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE s IS NOT DISTINCT FROM c ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE s COLLATE "C" IS DISTINCT FROM 'ab' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE lower(s) IS NOT DISTINCT FROM 'ab' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE resumed_at IS NOT DISTINCT FROM '2026-01-02 03:04:05+00' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE resumed_at IS DISTINCT FROM now() ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE (n = 2) IS NOT DISTINCT FROM true ORDER BY id`),
+			// Wherever = is taken.
+			difftest.Q(0, `SELECT e.id, o.id FROM ex e LEFT JOIN other o ON o.n IS NOT DISTINCT FROM e.n ORDER BY e.id, o.id`),
+			difftest.Q(0, `SELECT e.id, o.id FROM ex e JOIN other o ON e.n IS DISTINCT FROM o.n ORDER BY e.id, o.id`),
+			difftest.Q(0, `SELECT n IS NOT DISTINCT FROM NULL AS missing, count(*) FROM ex GROUP BY 1 ORDER BY 1`),
+			difftest.Q(0, `SELECT status FROM ex GROUP BY status HAVING max(n) IS NOT DISTINCT FROM 2 ORDER BY status`),
+			difftest.Q(0, `SELECT id, CASE WHEN n IS DISTINCT FROM (SELECT max(n) FROM other) THEN 'differs' ELSE 'same' END FROM ex ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE n IS NOT DISTINCT FROM (SELECT n FROM other WHERE other.id = ex.id) ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex ORDER BY n IS NOT DISTINCT FROM 2, id`),
+			difftest.S(0, `INSERT INTO ex (id, status, s) VALUES (4, 'running', 'no')`),
+			difftest.S(0, `INSERT INTO ex (id, status, s, n) VALUES (5, 'running', NULL, 5)`),
+			difftest.Q(0, `SELECT id, same FROM ex ORDER BY id`),
+			// What = fails, this fails.
+			difftest.Q(0, `SELECT id FROM ex WHERE n IS NOT DISTINCT FROM 'x' ORDER BY id`),
+			difftest.Q(0, `SELECT id FROM ex WHERE u IS DISTINCT FROM 'x' ORDER BY id`),
+			difftest.QA(0, `SELECT id FROM ex WHERE n IS DISTINCT FROM $1 ORDER BY id`, "x"),
 		},
 	},
 }

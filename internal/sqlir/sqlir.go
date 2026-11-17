@@ -520,9 +520,15 @@ type Const struct {
 
 // BinaryExpr is a binary operator: comparison, arithmetic, AND, OR, LIKE.
 type BinaryExpr struct {
-	Op   string // = <> < <= > >= + - * / % AND OR LIKE ILIKE NOT LIKE
+	Op   string // = <> < <= > >= + - * / % AND OR LIKE ILIKE NOT LIKE, <=> and NotDistinct
 	L, R Expr
 }
+
+// NotDistinct is the Op of Postgres's IS NOT DISTINCT FROM. It is not MySQL's
+// <=>, though both are a null-safe equality, because its operands are typed
+// as those of = are, by rules MySQL does not have, and <=> compares rows
+// where this is refused.
+const NotDistinct = "IS NOT DISTINCT FROM"
 
 // UnaryExpr is NOT or unary minus.
 type UnaryExpr struct {

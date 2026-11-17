@@ -224,22 +224,35 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		}
 		lw, rw := l, r
 		l, r = unscaled(l), unscaled(r)
-		if isRange(l) || isRange(r) {
-			return x.rangeBinary(v.Op, l, r)
+		// IS NOT DISTINCT FROM is = once neither operand is NULL. It takes
+		// every step of = below under that name, so that its operands are
+		// typed and refused as those of = are, a NULL one included.
+		op, nullSafe := v.Op, v.Op == sqlir.NotDistinct
+		if nullSafe {
+			op = "="
 		}
-		switch v.Op {
+		if isRange(l) || isRange(r) {
+			if out, ok := notDistinctNull(nullSafe, l, r); ok {
+				return out, nil
+			}
+			return x.rangeBinary(op, l, r)
+		}
+		switch op {
 		case "=", "<>", "!=", "<", "<=", ">", ">=":
 			lr, lok := v.L.(*sqlir.RowExpr)
 			rr, rok := v.R.(*sqlir.RowExpr)
 			if lok || rok {
-				if !lok || !rok || len(lr.Items) != len(rr.Items) {
+				if !lok || !rok || len(lr.Items) != len(rr.Items) || nullSafe {
 					return nil, x.unsupported("row comparison")
 				}
-				return x.compareRows(v.Op, lr.Items, l, rr.Items, r)
+				return x.compareRows(op, lr.Items, l, rr.Items, r)
 			}
 			if l, r, err = x.untypedPair(v.L, l, v.R, r); err != nil {
 				return nil, err
 			}
+		}
+		if out, ok := notDistinctNull(nullSafe, l, r); ok {
+			return out, nil
 		}
 		if v.Op == "||" || strings.HasSuffix(v.Op, "LIKE") {
 			// A []byte parameter is text a driver sent as bytes.
@@ -248,7 +261,7 @@ func (x *sqlExec) evalRaw(e sqlir.Expr, en *env) (any, error) {
 		if out, ok, err := x.orderedOperands(v, l, r); ok || err != nil {
 			return out, err
 		}
-		res, err := x.binary(v.Op, x.numericDividend(v, l, r), r)
+		res, err := x.binary(op, x.numericDividend(v, l, r), r)
 		if err != nil {
 			return nil, err
 		}
@@ -1140,6 +1153,15 @@ func (x *sqlExec) numericDividend(e *sqlir.BinaryExpr, l, r any) any {
 		return l
 	}
 	return float64(il)
+}
+
+// notDistinctNull is the result of IS NOT DISTINCT FROM when an operand is
+// NULL, which is the one case = does not decide for it.
+func notDistinctNull(nullSafe bool, l, r any) (any, bool) {
+	if !nullSafe || derefValue(l) != nil && derefValue(r) != nil {
+		return nil, false
+	}
+	return derefValue(l) == nil && derefValue(r) == nil, true
 }
 
 func (x *sqlExec) binary(op string, l, r any) (any, error) {

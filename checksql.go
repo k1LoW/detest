@@ -83,10 +83,10 @@ func windowArityMismatch(f *sqlir.FuncCall) string {
 
 // knownBinaryOps are the operators the executor's binary evaluates. <=> is
 // MySQL's, which its converter alone produces, since the Postgres converter
-// refuses it.
+// refuses it, and gives sqlir.NotDistinct for its own null-safe equality.
 var knownBinaryOps = map[string]bool{
 	"AND": true, "OR": true,
-	"=": true, "<>": true, "!=": true, "<": true, "<=": true, ">": true, ">=": true, "<=>": true,
+	"=": true, "<>": true, "!=": true, "<": true, "<=": true, ">": true, ">=": true, "<=>": true, sqlir.NotDistinct: true,
 	"LIKE": true, "ILIKE": true, "NOT LIKE": true, "NOT ILIKE": true,
 	"+": true, "-": true, "*": true, "/": true, "%": true, "||": true,
 }

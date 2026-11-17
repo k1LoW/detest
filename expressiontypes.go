@@ -129,7 +129,7 @@ func (t typer) of(e sqlir.Expr) string {
 				return ""
 			}
 			return res
-		case "=", "<>", "!=", "<", "<=", ">", ">=", "AND", "OR", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
+		case "=", "<>", "!=", "<", "<=", ">", ">=", sqlir.NotDistinct, "AND", "OR", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE":
 			return "bool"
 		}
 	case *sqlir.FuncCall:

@@ -2525,6 +2525,36 @@ func (c *pgConv) aExpr(e *pg.A_Expr) (sqlir.Expr, error) {
 			op = "NOT ILIKE"
 		}
 		return &sqlir.BinaryExpr{Op: op, L: l, R: r}, nil
+	case pg.A_Expr_Kind_AEXPR_DISTINCT, pg.A_Expr_Kind_AEXPR_NOT_DISTINCT:
+		l, err := c.expr(e.Lexpr)
+		if err != nil {
+			return nil, err
+		}
+		r, err := c.expr(e.Rexpr)
+		if err != nil {
+			return nil, err
+		}
+		for _, side := range [][2]sqlir.Expr{{l, r}, {r, l}} {
+			if _, ok := side[0].(*sqlir.RowExpr); ok {
+				return nil, c.unsupported("IS DISTINCT FROM over a row")
+			}
+			// Postgres's parser turns a NULL literal on either side into a
+			// NULL test of the other (transformAExprDistinct), which gives a
+			// parameter no type and fails it. It is not converted to IS
+			// NULL here, as that test is of the value as a whole, where IS
+			// NULL over a row tests its fields, and the comparison refuses a
+			// row whatever expression gives it.
+			_, param := side[0].(*sqlir.Param)
+			if k, ok := side[1].(*sqlir.Const); ok && k.Value == nil && param {
+				return nil, c.unsupported("a parameter IS DISTINCT FROM NULL without a cast")
+			}
+		}
+		var out sqlir.Expr = &sqlir.BinaryExpr{Op: sqlir.NotDistinct, L: l, R: r}
+		if e.Kind == pg.A_Expr_Kind_AEXPR_DISTINCT {
+			// It is never NULL, so NOT gives the other operator exactly.
+			out = &sqlir.UnaryExpr{Op: "NOT", X: out}
+		}
+		return out, nil
 	case pg.A_Expr_Kind_AEXPR_IN:
 		l, err := c.expr(e.Lexpr)
 		if err != nil {

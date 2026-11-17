@@ -477,6 +477,9 @@ func (f *folder) fold(e sqlir.Expr) (folded, error) {
 			// stable, as it calls the operand's output function.
 			c = maybe
 		}
+		if v.Op == sqlir.NotDistinct {
+			return f.apply(v, kids, c, notStrict)
+		}
 		return f.apply(v, kids, c, strict)
 	case *sqlir.UnaryExpr:
 		kids, err := f.exprs(v.X)
