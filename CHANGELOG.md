@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.12.0](https://github.com/k1LoW/detest/compare/v0.11.0...v0.12.0) - 2026-11-17
+
+### New Features 🎉
+- feat: support IS DISTINCT FROM and IS NOT DISTINCT FROM on PostgreSQL by @k1LoW in https://github.com/k1LoW/detest/pull/251
+### Dependency Updates ⬆️
+- build(deps): bump go.opentelemetry.io/otel/trace from 1.44.0 to 1.47.0 by @dependabot[bot] in https://github.com/k1LoW/detest/pull/249
+
 ## [v0.11.0](https://github.com/k1LoW/detest/compare/v0.10.0...v0.11.0) - 2026-11-02
 
 ### New Features 🎉
