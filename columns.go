@@ -3358,6 +3358,15 @@ func (c *columnChecker) exprs(n any, sc *colScope) error {
 						}
 					}
 				case "=", "<>", "!=", "<", "<=", ">", ">=", sqlir.NotDistinct:
+					if e.Op == sqlir.NotDistinct && slices.ContainsFunc([]sqlir.Expr{e.L, e.R}, func(a sqlir.Expr) bool {
+						return expressionTypeIn(a, sc.columnType, func(q *sqlir.SubQuery) string { return c.subqueryType(q, sc) }) == "void"
+					}) {
+						// A void value is not NULL in Postgres, so it is
+						// distinct from NULL there, while the evaluators
+						// hold it as NULL.
+						err = c.x.unsupported("IS DISTINCT FROM over a void value, which detest holds as NULL")
+						return
+					}
 					if err = c.operandTypes(sc, e.L, e.R); err != nil {
 						return
 					}

@@ -27,6 +27,10 @@ func TestNotDistinctOperandsTypedAsEquals(t *testing.T) {
 		// tests as a whole against NULL and field by field against a row.
 		`SELECT s.r IS NOT DISTINCT FROM NULL FROM (SELECT (n, s) AS r FROM t) s`,
 		`SELECT s.r IS DISTINCT FROM s.r FROM (SELECT (n, s) AS r FROM t) s`,
+		// Postgres holds a void value, which is not NULL.
+		`SELECT pg_advisory_xact_lock(1) IS NOT DISTINCT FROM NULL`,
+		`SELECT NULL IS DISTINCT FROM pg_advisory_xact_lock(1)`,
+		`SELECT id FROM t WHERE (SELECT pg_advisory_xact_lock(1)) IS DISTINCT FROM NULL`,
 		// IS DISTINCT FROM is NOT of the other, which detest does not
 		// evaluate over an aggregate.
 		`SELECT count(*) FROM t HAVING max(n) IS DISTINCT FROM 2`,
