@@ -1,6 +1,7 @@
 package detest
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -222,14 +223,19 @@ func TestIterativeBoundingCheckpointKeepsLevels(t *testing.T) {
 	}
 }
 
-// A checkpoint whose levels do not fit its pass is refused, rather than made
-// again unchecked or counted at another pass.
+// A checkpoint whose levels do not fit its pass, or whose weights do not fit
+// its subtrees, is refused, rather than made again unchecked, counted at
+// another pass or estimated from shares of no tree.
 func TestIterativeBoundingCheckpointRefusesLevelsOutsideItsPass(t *testing.T) {
 	for _, body := range []string{
 		`{"version":7,"runs":0,"subtrees":[[]],"level":-1,"levels":[0]}`,
 		`{"version":7,"runs":0,"subtrees":[[]],"level":1,"levels":[2]}`,
 		`{"version":7,"runs":0,"subtrees":[[]],"level":1,"levels":[-1]}`,
 		`{"version":7,"runs":0,"subtrees":[[]],"level":1}`,
+		`{"version":10,"runs":0,"subtrees":[[]],"level":1,"levels":[2],"weights":[1]}`,
+		`{"version":10,"runs":0,"subtrees":[[]],"level":1,"levels":[1]}`,
+		`{"version":10,"runs":0,"subtrees":[[]],"level":1,"levels":[1],"weights":[2]}`,
+		`{"version":10,"runs":0,"subtrees":[[]],"level":1,"levels":[1],"weights":[1],"passRuns":-1}`,
 	} {
 		path := filepath.Join(t.TempDir(), "ckpt.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -413,5 +419,93 @@ func TestChoiceRankFollowsTheOrderOfAPass(t *testing.T) {
 	}
 	if want := []int{1, 2, 0, 3}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("ranks %v, want %v", got, want)
+	}
+}
+
+// An exploration cut short in a pass, resumed from its checkpoint and cut
+// again estimates the runs left in the pass as one cut there at once does,
+// with and without PartialOrder.
+func TestIterativeBoundingCheckpointKeepsTheEstimate(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		model func(t *testing.T, s *Sim)
+		opts  []Option
+	}{
+		{"full tree", func(t *testing.T, s *Sim) { counterModel(s, true) }, nil},
+		{"partial order", contendedModel, []Option{PartialOrder()}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			opts := append([]Option{IterativeBounding(), MaxPreemptions(2)}, c.opts...)
+			before, _ := explore(t, c.model, append([]Option{IterativeBounding(), MaxPreemptions(1)}, c.opts...))
+			full, _ := explore(t, c.model, opts)
+			half := (full.Runs - before.Runs) / 2
+			once, _ := explore(t, c.model, append(slices.Clone(opts), MaxRuns(before.Runs+half)))
+			if !once.Estimated || once.Explored < minExplored {
+				t.Fatalf("cut once: %s", once.report())
+			}
+
+			t.Setenv("DETEST_CHECKPOINT", filepath.Join(t.TempDir(), "ckpt.json"))
+			explore(t, c.model, append(slices.Clone(opts), MaxRuns(before.Runs+half/2)))
+			resumed, _ := explore(t, c.model, append(slices.Clone(opts), MaxRuns(half-half/2)))
+			if !resumed.Estimated || resumed.Remaining != once.Remaining || resumed.Explored != once.Explored {
+				t.Fatalf("resumed: %s\ncut once: %s", resumed.report(), once.report())
+			}
+		})
+	}
+}
+
+// A checkpoint of the version before the estimate is resumed without an
+// estimate for the pass it was saved in, and saved again in that version
+// while the pass goes on, and with an estimate from the next pass on.
+func TestIterativeBoundingResumesAnUnweightedCheckpoint(t *testing.T) {
+	for _, c := range []struct {
+		name              string
+		opts              []Option
+		version, previous int
+	}{
+		{"full tree", nil, iterativeCheckpointVersion, unweightedIterativeCheckpointVersion},
+		{"partial order", []Option{PartialOrder()}, partialIterativeCheckpointVersion, unweightedPartialIterativeCheckpointVersion},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			model := func(t *testing.T, s *Sim) { counterModel(s, true) }
+			bounded := func(n int) []Option { return append([]Option{IterativeBounding(), MaxPreemptions(n)}, c.opts...) }
+			pass0, _ := explore(t, model, bounded(0))
+			pass1, _ := explore(t, model, bounded(1))
+			path := filepath.Join(t.TempDir(), "ckpt.json")
+			t.Setenv("DETEST_CHECKPOINT", path)
+			explore(t, model, append(bounded(2), MaxRuns(pass0.Runs+2)))
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ck checkpoint
+			if err := json.Unmarshal(b, &ck); err != nil {
+				t.Fatal(err)
+			}
+			if ck.Version != c.version || (c.opts == nil) != (len(ck.Weights) == len(ck.Subtrees)) || ck.PassRuns != 2 {
+				t.Fatalf("checkpoint %s, want version %d with the pass's runs, and weights without PartialOrder", b, c.version)
+			}
+			ck.Version, ck.Weights, ck.PassRuns = c.previous, nil, 0
+			if b, err = json.Marshal(ck); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			res, _ := explore(t, model, append(bounded(2), MaxRuns(1)))
+			if res.Estimated || res.CompleteLevel != 0 || strings.Contains(res.report(), "runs left") {
+				t.Fatalf("in the pass it was saved in: %s", res.report())
+			}
+			if b, err = os.ReadFile(path); err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf(`{"version":%d,`, c.previous); !strings.HasPrefix(string(b), want) || strings.Contains(string(b), "weights") || strings.Contains(string(b), "passRuns") {
+				t.Fatalf("saved again as %s, want version %d without weights", b, c.previous)
+			}
+			res, _ = explore(t, model, append(bounded(2), MaxRuns(pass1.Runs-pass0.Runs)))
+			if !res.Estimated || res.CompleteLevel != 1 || !strings.Contains(res.report(), "in the pass of 2 preemptions") {
+				t.Fatalf("in the next pass: %s", res.report())
+			}
+		})
 	}
 }

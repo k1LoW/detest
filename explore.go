@@ -157,9 +157,9 @@ func explore(t *testing.T, fn func(t *testing.T, s *Sim), opts []Option) (*resul
 			stop := watchStall(f)
 			defer stop()
 			// The estimate is given where merge gives one, as long as no
-			// violation is held. A pass of IterativeBounding, a shard and a
-			// violation's dropped subtrees break the partition it rests on.
-			estimate := !st.random && !st.iterative && !shardedOf(opts)
+			// violation is held. A shard and a violation's dropped subtrees
+			// break the partition it rests on.
+			estimate := !shardedOf(opts)
 			stopProgress := watchProgress(t.Log, f, every, start, estimate)
 			defer stopProgress()
 			if n == 1 {
@@ -501,7 +501,7 @@ func watchProgress(log func(args ...any), f *frontier, d time.Duration, start ti
 			prior, level := f.prior, f.level-1 // the pass at f.level is under way
 			var explored float64
 			var left int
-			estimated := estimate && f.bestResult == nil
+			estimated := estimate && f.bestResult == nil && f.estimable()
 			if estimated {
 				explored, left = f.remaining()
 			}
@@ -512,11 +512,11 @@ func watchProgress(log func(args ...any), f *frontier, d time.Duration, start ti
 				made = fmt.Sprintf("%d runs, %d in all with the ones before the checkpoint", runs, runs+int64(prior))
 			}
 			msg := fmt.Sprintf("detest: still exploring at %s, %s in: explored %s, %d in the last %s (max depth %d)", now.Format(time.TimeOnly), now.Sub(start).Round(time.Second), made, runs-last, d, maxDepth)
-			if estimated {
-				msg += estimateNote(explored, left)
-			}
 			if f.iterative {
 				msg += levelNote(level)
+			}
+			if estimated {
+				msg += estimateNote(explored, left, f.iterative, level+1)
 			}
 			last = runs
 			log(msg)

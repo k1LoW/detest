@@ -620,7 +620,8 @@ type result struct {
 	// Estimated tells whether the rest of an exploration cut short was
 	// estimated. Explored is then the share of the tree the runs made cover
 	// by its shape, and Remaining the runs left, 0 while Explored is under
-	// minExplored.
+	// minExplored. Under IterativeBounding both are of the pass under way,
+	// the one after CompleteLevel, and leave the later passes out.
 	Estimated bool
 	Explored  float64
 	Remaining int
@@ -705,11 +706,11 @@ func (r *result) outcome() string {
 			workers += ", " + afterNote
 		}
 		msg := fmt.Sprintf("detest: explored %s%s (max depth %d, complete=%v%s) in %s", runs, scope, r.MaxDepth, r.Complete, workers, r.Elapsed.Round(time.Millisecond))
-		if r.Estimated {
-			msg += estimateNote(r.Explored, r.Remaining)
-		}
 		if r.strategy.iterative && !r.Complete {
 			msg += levelNote(r.CompleteLevel)
+		}
+		if r.Estimated {
+			msg += estimateNote(r.Explored, r.Remaining, r.strategy.iterative, r.CompleteLevel+1)
 		}
 		if r.CutRuns > 0 {
 			msg += fmt.Sprintf("; %d runs cut at MaxIdleTicks", r.CutRuns)
@@ -747,12 +748,25 @@ func (r *result) outcome() string {
 }
 
 // estimateNote is the estimate of the runs left (see frontier.remaining) as
-// the summary and progress lines give it.
-func estimateNote(explored float64, left int) string {
-	if explored < minExplored {
-		return fmt.Sprintf("; too early to estimate the runs left, under %.0f%% explored by the tree's shape", minExplored*100)
+// the summary and progress lines give it, under IterativeBounding the runs
+// left in the pass of level pass, the one under way.
+func estimateNote(explored float64, left int, iterative bool, pass int) string {
+	in, of := "", ""
+	if iterative {
+		in = " in the pass of " + preemptions(pass)
+		of = " of it"
 	}
-	return fmt.Sprintf("; roughly %d runs left, about %.0f%% explored by the tree's shape", left, explored*100)
+	if explored < minExplored {
+		return fmt.Sprintf("; too early to estimate the runs left%s, under %.0f%%%s explored by the tree's shape", in, minExplored*100, of)
+	}
+	return fmt.Sprintf("; roughly %d runs left%s, about %.0f%%%s explored by the tree's shape", left, in, explored*100, of)
+}
+
+func preemptions(n int) string {
+	if n == 1 {
+		return "1 preemption"
+	}
+	return fmt.Sprintf("%d preemptions", n)
 }
 
 // levelNote is, under IterativeBounding, the preemptions up to which every
@@ -761,10 +775,8 @@ func levelNote(level int) string {
 	switch {
 	case level < 0:
 		return "; not every run without a preemption explored yet"
-	case level == 1:
-		return "; every run of up to 1 preemption explored"
 	default:
-		return fmt.Sprintf("; every run of up to %d preemptions explored", level)
+		return "; every run of up to " + preemptions(level) + " explored"
 	}
 }
 
