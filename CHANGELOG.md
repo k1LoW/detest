@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.13.0](https://github.com/k1LoW/detest/compare/v0.12.0...v0.13.0) - 2026-11-20
+
+### New Features 🎉
+- feat: estimate the runs left in a pass of IterativeBounding by @k1LoW in https://github.com/k1LoW/detest/pull/254
+
 ## [v0.12.0](https://github.com/k1LoW/detest/compare/v0.11.0...v0.12.0) - 2026-11-17
 
 ### New Features 🎉
