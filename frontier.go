@@ -45,7 +45,13 @@ type frontier struct {
 	level     int
 	higher    bool
 	again     int
-	busy      int // workers running a prefix taken from the stack
+	// passRuns counts the runs the pass under way made, apart from the
+	// runs made again, the ones before a checkpoint included, and
+	// passEstimated whether its subtrees carry their weights, which a
+	// checkpoint of an earlier version does not hold.
+	passRuns      int
+	passEstimated bool
+	busy          int // workers running a prefix taken from the stack
 	// taken is, per worker, the subtree it runs, nil while it runs none,
 	// so that an estimate made while it runs counts the subtree as left.
 	taken      []*subtree
@@ -123,7 +129,7 @@ type workerProgress struct {
 }
 
 func newFrontier(workers, maxRuns int) *frontier {
-	f := &frontier{stack: []subtree{{}}, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), taken: make([]*subtree, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}, pruneAt: pruneFloor, pruneFloor: pruneFloor}
+	f := &frontier{stack: []subtree{{weight: 1}}, passEstimated: true, maxRuns: maxRuns, wake: make([]chan struct{}, workers), waiting: make([]bool, workers), progress: make([]workerProgress, workers), taken: make([]*subtree, workers), pushed: map[string]*subtree{"": {}}, zIn: map[string][]sleeper{}, explored: map[string][]explored{}, pruneAt: pruneFloor, pruneFloor: pruneFloor}
 	for i := range f.wake {
 		f.wake[i] = make(chan struct{}, 1)
 	}
@@ -207,6 +213,7 @@ func (f *frontier) take(worker int) (subtree, int, bool) {
 		f.again++
 	} else {
 		f.runs++
+		f.passRuns++
 	}
 	f.taken[worker] = &p
 	return p, 0, true
@@ -221,7 +228,8 @@ func (f *frontier) nextLevel() bool {
 		return false
 	}
 	f.level, f.higher = f.level+1, false
-	f.stack = append(f.stack, subtree{})
+	f.passRuns, f.passEstimated = 0, true
+	f.stack = append(f.stack, subtree{weight: 1})
 	if f.partial {
 		// The backtrack points and sleep sets of a pass hold for its bound
 		// only, and the next pass explores under another. Carried over, a
@@ -248,6 +256,7 @@ func (f *frontier) passRun(preempts int, higher bool) bool {
 		return false
 	}
 	f.runs--
+	f.passRuns--
 	f.again++
 	return true
 }
@@ -548,18 +557,27 @@ func precedes(a, b []int) bool {
 	return len(a) < len(b)
 }
 
-// children returns the subtrees below prefix that run r did not enter, which
-// are the alternatives it did not pick at every choice it made past the
-// prefix, with what their prefix costs under IterativeBounding. They are
-// ordered so that the stack yields the deepest first, and at one choice the
-// first option first. Past the prefix a run picks the first option, or under
-// IterativeBounding without PartialOrder the first that preempts nothing, so
-// the alternatives before the pick are subtrees too. The choices made before
-// the state ExploreAfter waits for have none.
-func (s *Sim) children(r *run, prefix int) []subtree {
+// children returns the subtrees below the taken one that run r did not
+// enter, which are the alternatives it did not pick at every choice it made
+// past the taken prefix, with what their prefix costs under
+// IterativeBounding. They are ordered so that the stack yields the deepest
+// first, and at one choice the first option first. Past the prefix a run
+// picks the first option, or under IterativeBounding without PartialOrder
+// the first that preempts nothing, so the alternatives before the pick are
+// subtrees too. The choices made before the state ExploreAfter waits for
+// have none.
+//
+// Each carries its weight in the tree of the pass at level pass under
+// IterativeBounding, where a choice has as many subtrees as the options the
+// pass keeps (see frontier.remaining). The weight is worked out here rather
+// than when estimating, as only the run knows what each option costs.
+func (s *Sim) children(r *run, taken subtree, pass int) []subtree {
 	c := r.choices
+	prefix := len(taken.prefix)
 	var out []subtree
+	weight := taken.weight
 	for j := max(prefix, r.leadEnd); j < len(c); j++ {
+		weight /= float64(r.kept(j, pass))
 		for v := c[j].n - 1; v >= 0; v-- {
 			if v == c[j].picked {
 				continue
@@ -572,7 +590,7 @@ func (s *Sim) children(r *run, prefix int) []subtree {
 			if s.shardTotal > 1 && len(p)-r.leadEnd >= s.shardDepth && !s.ownsPrefix(p[r.leadEnd:]) {
 				continue // another machine's subtree
 			}
-			sub := subtree{prefix: p}
+			sub := subtree{prefix: p, weight: weight}
 			if j < len(r.costs) {
 				sub.level = r.costs[j].level(v)
 			}
@@ -580,6 +598,23 @@ func (s *Sim) children(r *run, prefix int) []subtree {
 		}
 	}
 	return out
+}
+
+// kept returns how many options of choice j the pass at level pass keeps,
+// every option outside IterativeBounding. The one the run picked is kept
+// whatever it costs, as the run went through it.
+func (r *run) kept(j, pass int) int {
+	c := r.choices[j]
+	if j >= len(r.costs) {
+		return c.n
+	}
+	n := 0
+	for v := range c.n {
+		if v == c.picked || r.costs[j].level(v) <= pass {
+			n++
+		}
+	}
+	return n
 }
 
 // checkShared is check for one of several workers sharing f.
@@ -619,12 +654,15 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 		if !taken.again {
 			runs++
 		}
+		// The pass cannot change while the run is taken, as the next starts
+		// only once no worker is busy.
+		f.mu.Lock()
+		pass := f.level
 		if s.partialOrder && f.iterative {
 			// The runs a violation is shrunk and retraced with apply it too.
-			f.mu.Lock()
-			s.passBound, s.passBounded = f.level, true
-			f.mu.Unlock()
+			s.passBound, s.passBounded = pass, true
 		}
+		f.mu.Unlock()
 		r := s.newRun(prefix)
 		if s.partialOrder {
 			f.mu.Lock()
@@ -654,7 +692,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			// Only its subtrees are wanted here.
 			var children []subtree
 			if v == nil || s.exploreAll {
-				children = s.children(r, len(prefix))
+				children = s.children(r, taken, pass)
 			}
 			if v != nil && v.kind == "fatal" {
 				f.fail(v.err)
@@ -671,7 +709,7 @@ func (s *Sim) checkShared(f *frontier, worker int) *result {
 			children = s.reduce(r, len(prefix), v != nil || r.cut || r.pending != nil, f.sleepAt(r, len(prefix)))
 			f.walked(r.choices)
 		case v == nil || s.exploreAll:
-			children = s.children(r, len(prefix))
+			children = s.children(r, taken, pass)
 		}
 		if s.partialOrder && f.iterative && (v == nil || v.kind != "fatal") {
 			// A pass's level is the bound, and a run of fewer preemptions
@@ -752,9 +790,7 @@ func (f *frontier) merge(results []*result, workers int) *result {
 		return merged
 	}
 	merged.CompleteLevel, merged.Again = f.completeLevel(), f.again
-	// A pass covers the tree up to its level only, so the share of the
-	// stack says nothing of the runs left.
-	if best == nil && f.incomplete && !f.random && !f.iterative && merged.Shard == "" {
+	if best == nil && f.incomplete && f.estimable() && merged.Shard == "" {
 		merged.Estimated = true
 		merged.Explored, merged.Remaining = f.remaining()
 	}
@@ -779,9 +815,19 @@ func (f *frontier) merge(results []*result, workers int) *result {
 // the stack's instead gives the same share, since the runs made and the
 // subtrees left partition the tree, and needs nothing saved in a checkpoint
 // to go on with a resumed exploration. A shard's or a violation's dropped
-// subtrees break the partition, and so do the ones a pass of
-// IterativeBounding leaves to later passes, so the caller asks for none of
-// them. f.mu is held, or every worker has returned.
+// subtrees break the partition, so the caller asks for neither. f.mu is
+// held, or every worker has returned.
+//
+// Under IterativeBounding the tree is the one of the pass under way, the
+// runs whose prefixes spend no more preemptions than its level, and the
+// runs left are the ones of that pass alone. A node's subtrees are then the
+// options the pass keeps rather than the options of its choice, as the
+// subtrees a pass leaves to later ones are in neither the runs made nor the
+// stack, and dividing by them would count their share as explored. What an
+// option costs is known to the run that went through the node only, so
+// each subtree carries the weight children worked out (see Sim.children),
+// and a checkpoint saves it. The runs the estimate scales are the pass's,
+// apart from the ones made again, which are a small share of them.
 //
 // A subtree a worker has taken is no longer on the stack and its run is
 // counted as made, though the subtrees the run reveals are not pushed until
@@ -810,7 +856,11 @@ func (f *frontier) remaining() (explored float64, left int) {
 		}
 	}
 	lead := int(f.leadEnd.Load())
-	weight := func(prefix []choice) float64 {
+	weight := func(sub subtree) float64 {
+		if f.iterative && !f.partial {
+			return sub.weight
+		}
+		prefix := sub.prefix
 		share := 1.0
 		// The key grows with the prefix rather than being made again at each
 		// choice, as a progress line computes this under f.mu for every
@@ -832,18 +882,30 @@ func (f *frontier) remaining() (explored float64, left int) {
 	}
 	w := 0.0
 	for _, sub := range f.stack {
-		w += weight(sub.prefix)
+		w += weight(sub)
 	}
 	for _, sub := range f.taken {
 		if sub != nil {
-			w += weight(sub.prefix)
+			w += weight(*sub)
 		}
 	}
 	explored = max(1-w, 0)
 	if explored < minExplored {
 		return explored, 0
 	}
-	return explored, roughly(float64(f.prior+f.runs) * w / explored)
+	runs := f.prior + f.runs
+	if f.iterative {
+		runs = f.passRuns
+	}
+	return explored, roughly(float64(runs) * w / explored)
+}
+
+// estimable reports whether remaining can estimate the runs left, which a
+// sampled exploration has no tree for, and the pass a checkpoint of an
+// earlier version was saved in no weights for. f.mu is held, or every
+// worker has returned.
+func (f *frontier) estimable() bool {
+	return !f.random && (!f.iterative || f.passEstimated)
 }
 
 // minExplored is the share of the tree explored from which the runs left
@@ -888,11 +950,20 @@ func roughly(n float64) int {
 // make of them, so partialCheckpointVersion and
 // partialIterativeCheckpointVersion move when those change too: a sleeper
 // saved under an old name conflicts with no step and is never woken.
+//
+// The two under IterativeBounding moved from 7 and 9 when the estimate of
+// the runs left in a pass came, which needs each subtree's weight and the
+// pass's runs. A checkpoint of 7 or 9 names the same tree and records, so
+// it is still resumed, without an estimate for the pass it was saved in,
+// until the tree changes and the four move again.
 const (
 	checkpointVersion                 = 6
-	iterativeCheckpointVersion        = 7
+	iterativeCheckpointVersion        = 10
 	partialCheckpointVersion          = 8
-	partialIterativeCheckpointVersion = 9
+	partialIterativeCheckpointVersion = 11
+
+	unweightedIterativeCheckpointVersion        = 7
+	unweightedPartialIterativeCheckpointVersion = 9
 )
 
 // checkpointVersionFor is the version an exploration saves and resumes.
@@ -915,11 +986,17 @@ type checkpoint struct {
 	Subtrees [][]savedChoice `json:"subtrees"`
 	// Level, Higher and Levels are the pass of IterativeBounding, whether
 	// it left out a subtree of a higher level, and each subtree's level.
-	Level   int      `json:"level,omitempty"`
-	Higher  bool     `json:"higher,omitempty"`
-	Levels  []int    `json:"levels,omitempty"`
-	Reached []string `json:"reached,omitempty"` // Sometimes conditions met so far
-	Refused []string `json:"refused,omitempty"` // statements refused as unsupported so far
+	Level  int   `json:"level,omitempty"`
+	Higher bool  `json:"higher,omitempty"`
+	Levels []int `json:"levels,omitempty"`
+	// Weights are, under IterativeBounding without PartialOrder, each
+	// subtree's weight in the pass's tree, and PassRuns, under
+	// IterativeBounding, the runs the pass made, so that the estimate of
+	// the runs left in it goes on.
+	Weights  []float64 `json:"weights,omitempty"`
+	PassRuns int       `json:"passRuns,omitempty"`
+	Reached  []string  `json:"reached,omitempty"` // Sometimes conditions met so far
+	Refused  []string  `json:"refused,omitempty"` // statements refused as unsupported so far
 	// Lazy is why EagerStart was dropped, so that a resumed exploration
 	// goes on in the tree its subtrees belong to.
 	Lazy string `json:"lazy,omitempty"`
@@ -969,15 +1046,19 @@ func (f *frontier) load(path string) error {
 	if err := json.Unmarshal(b, &ck); err != nil {
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: %w", path, err)
 	}
-	var iterative, partial bool
+	var iterative, partial, unweighted bool
 	switch ck.Version {
 	case checkpointVersion:
 	case iterativeCheckpointVersion:
 		iterative = true
+	case unweightedIterativeCheckpointVersion:
+		iterative, unweighted = true, true
 	case partialCheckpointVersion:
 		partial = true
 	case partialIterativeCheckpointVersion:
 		iterative, partial = true, true
+	case unweightedPartialIterativeCheckpointVersion:
+		iterative, partial, unweighted = true, true, true
 	default:
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: version %d", path, ck.Version)
 	}
@@ -990,10 +1071,12 @@ func (f *frontier) load(path string) error {
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration without PartialOrder, whose subtrees the reduction has no records for", path)
 	case partial && !f.partial:
 		return fmt.Errorf("detest: %s is a checkpoint of an exploration under PartialOrder, whose stack lacks the subtrees the reduction left out, which only PartialOrder resumes", path)
-	case !validLevels(ck):
+	case iterative && !validLevels(ck):
 		// A level the runs do not spend would make them again unchecked,
 		// or count them at another pass, where nothing in the runs tells.
 		return fmt.Errorf("detest: %s is not a checkpoint of this detest: its levels do not fit its pass", path)
+	case iterative && !partial && !unweighted && !validWeights(ck):
+		return fmt.Errorf("detest: %s is not a checkpoint of this detest: its weights do not fit its subtrees", path)
 	}
 	f.stack = f.stack[:0]
 	for k, st := range ck.Subtrees {
@@ -1005,9 +1088,13 @@ func (f *frontier) load(path string) error {
 		if f.iterative {
 			sub.level = ck.Levels[k]
 		}
+		if iterative && !partial && !unweighted {
+			sub.weight = ck.Weights[k]
+		}
 		f.stack = append(f.stack, sub)
 	}
 	f.level, f.higher = ck.Level, ck.Higher
+	f.passRuns, f.passEstimated = ck.PassRuns, !unweighted
 	f.prior, f.cuts, f.lazy = ck.Runs, ck.Cuts, ck.Lazy
 	f.exploreAfter, f.afterLoaded = ck.After, true
 	for _, n := range ck.Reached {
@@ -1058,10 +1145,23 @@ func (f *frontier) save(path string) error {
 		if f.iterative {
 			ck.Levels = append(ck.Levels, sub.level)
 		}
+		if f.iterative && !f.partial && f.passEstimated {
+			ck.Weights = append(ck.Weights, sub.weight)
+		}
 	}
 	ck.Version = checkpointVersionFor(f.iterative, f.partial)
-	if f.iterative {
+	switch {
+	case f.iterative && !f.passEstimated:
+		// Resumed from a checkpoint without the weights, the pass has none
+		// to save either, and saved as weighted it would be estimated from
+		// shares of 0.
 		ck.Level, ck.Higher = f.level, f.higher
+		ck.Version = unweightedIterativeCheckpointVersion
+		if f.partial {
+			ck.Version = unweightedPartialIterativeCheckpointVersion
+		}
+	case f.iterative:
+		ck.Level, ck.Higher, ck.PassRuns = f.level, f.higher, f.passRuns
 	}
 	if f.partial {
 		// Only the records of the states a run still goes through are
@@ -1120,18 +1220,29 @@ func savable(ident string, acc map[string]bool) bool {
 }
 
 // validLevels reports whether the pass and the subtrees' levels of a
-// checkpoint of version iterativeCheckpointVersion or
-// partialIterativeCheckpointVersion fit together, as a pass
-// holds subtrees of its level or lower only.
+// checkpoint under IterativeBounding fit together, as a pass holds subtrees
+// of its level or lower only.
 func validLevels(ck checkpoint) bool {
-	if ck.Version != iterativeCheckpointVersion && ck.Version != partialIterativeCheckpointVersion {
-		return true
-	}
 	if ck.Level < 0 || len(ck.Levels) != len(ck.Subtrees) {
 		return false
 	}
 	for _, l := range ck.Levels {
 		if l < 0 || l > ck.Level {
+			return false
+		}
+	}
+	return true
+}
+
+// validWeights reports whether a checkpoint under IterativeBounding without
+// PartialOrder holds a weight for each subtree, each a share of the pass's
+// tree, and a count of the pass's runs.
+func validWeights(ck checkpoint) bool {
+	if len(ck.Weights) != len(ck.Subtrees) || ck.PassRuns < 0 {
+		return false
+	}
+	for _, w := range ck.Weights {
+		if w < 0 || w > 1 {
 			return false
 		}
 	}

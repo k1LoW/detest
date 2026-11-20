@@ -55,7 +55,9 @@ func DepthFirst() Option { return func(s *Sim) { s.strategy = strategy{} } }
 // Without PartialOrder, a complete exploration makes the same runs as
 // DepthFirst, and one cut short is saved to a checkpoint that resumes it in
 // the same pass. One cut short reports the number of preemptions up to
-// which it made every run. The violation reported is the first one depth
+// which it made every run, and an estimate of the runs left in the pass
+// under way, which leaves the later passes out. A checkpoint saved by a
+// detest without that estimate is resumed without one until the next pass. The violation reported is the first one depth
 // first among the runs of the fewest preemptions, which may be another
 // than the one DepthFirst reports. Workers wait for a pass
 // to finish before they start the next.

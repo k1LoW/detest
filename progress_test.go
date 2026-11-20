@@ -57,15 +57,27 @@ func TestProgressLine(t *testing.T) {
 }
 
 // Under IterativeBounding a progress line gives the preemptions up to which
-// every run was made, the pass under way not counted, and no estimate; a
-// resumed exploration's line counts the runs before the checkpoint too.
+// every run was made, the pass under way not counted, and the estimate of
+// the runs left in that pass, or none for a pass resumed from a checkpoint
+// without the weights; a resumed exploration's line counts the runs before
+// the checkpoint too.
 func TestProgressLineIterative(t *testing.T) {
 	f := newFrontier(1, 100)
 	f.iterative, f.level, f.prior = true, 2, 4
 	f.progress[0].runs.Store(6)
-	lines, stop := progressLines(f, false)
-	defer stop()
+	lines, stop := progressLines(f, true)
 	l := waitLine(t, lines, "explored 6 runs, 10 in all with the ones before the checkpoint")
+	stop()
+	if !strings.HasSuffix(l, "; every run of up to 1 preemption explored; too early to estimate the runs left in the pass of 2 preemptions, under 20% of it explored by the tree's shape") {
+		t.Errorf("line %q, want the level completed and the estimate of the pass", l)
+	}
+
+	f.mu.Lock()
+	f.passEstimated = false
+	f.mu.Unlock()
+	lines, stop = progressLines(f, true)
+	defer stop()
+	l = waitLine(t, lines, "explored 6 runs")
 	if !strings.HasSuffix(l, "; every run of up to 1 preemption explored") || strings.Contains(l, "estimate") {
 		t.Errorf("line %q, want the level completed and no estimate", l)
 	}

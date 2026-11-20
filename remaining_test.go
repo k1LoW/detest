@@ -2,6 +2,7 @@ package detest
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,66 @@ func TestRemainingEstimateNotSampled(t *testing.T) {
 	res, _ := explore(t, func(t *testing.T, s *Sim) { counterModel(s, true) }, []Option{Random(1), MaxRuns(5)})
 	if res.Complete || res.Estimated {
 		t.Fatalf("complete=%v estimated=%v, want no estimate", res.Complete, res.Estimated)
+	}
+}
+
+// Under IterativeBounding an exploration cut short in a pass estimates the
+// runs left in that pass within a small factor of the runs it makes after
+// the cut, with and without PartialOrder. The model under PartialOrder is
+// one whose passes the reduction makes smaller.
+func TestRemainingEstimateIterative(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		model func(t *testing.T, s *Sim)
+		opts  []Option
+		fracs []int
+	}{
+		{"full tree", func(t *testing.T, s *Sim) { counterModel(s, true) }, nil, []int{4, 2}},
+		{"partial order", contendedModel, []Option{PartialOrder()}, []int{2}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			opts := append([]Option{IterativeBounding()}, c.opts...)
+			before, _ := explore(t, c.model, append(opts, MaxPreemptions(1)))
+			full, _ := explore(t, c.model, append(opts, MaxPreemptions(2)))
+			pass := full.Runs - before.Runs
+			for _, frac := range c.fracs {
+				cut := pass / frac
+				res, _ := explore(t, c.model, append(opts, MaxPreemptions(2), MaxRuns(before.Runs+cut)))
+				left := pass - cut
+				t.Logf("%d of %d runs of the pass of 2: estimated %d left, %d in fact", cut, pass, res.Remaining, left)
+				if res.Complete || !res.Estimated || res.CompleteLevel != 1 || res.Remaining*3 < left || res.Remaining > left*3 {
+					t.Errorf("%d of %d runs of the pass of 2: estimated %d left, %d in fact (complete level %d)", cut, pass, res.Remaining, left, res.CompleteLevel)
+				}
+				want := fmt.Sprintf("; every run of up to 1 preemption explored; roughly %d runs left in the pass of 2 preemptions, about", res.Remaining)
+				if !strings.Contains(res.report(), want) {
+					t.Errorf("report %q does not say %q", res.report(), want)
+				}
+			}
+		})
+	}
+}
+
+// The pass without a preemption runs each process to its end before the
+// next, so its tree is the orders of the processes, each run an equal share
+// of it. Half of its runs explore half of it, which the options the pass
+// leaves out at every step would make look more.
+func TestRemainingEstimateIterativeDividesByTheOptionsKept(t *testing.T) {
+	model := func(t *testing.T, s *Sim) {
+		for i := range 3 {
+			s.Manual(fmt.Sprintf("p%d", i), 1, func(p *Proc) error {
+				for j := range 3 {
+					p.Step("s%d", j)
+				}
+				return nil
+			})
+		}
+	}
+	pass0, _ := explore(t, model, []Option{IterativeBounding(), MaxPreemptions(0)})
+	if pass0.Runs != 6 {
+		t.Fatalf("the pass of 0 preemptions made %d runs, want the 6 orders of 3 processes", pass0.Runs)
+	}
+	res, _ := explore(t, model, []Option{IterativeBounding(), MaxPreemptions(1), MaxRuns(3)})
+	if !res.Estimated || res.CompleteLevel != -1 || math.Abs(res.Explored-0.5) > 1e-9 || res.Remaining != 3 {
+		t.Fatalf("explored %v, %d left, want half of the pass and 3 runs: %s", res.Explored, res.Remaining, res.report())
 	}
 }

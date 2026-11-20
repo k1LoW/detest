@@ -45,6 +45,9 @@ type subtree struct {
 	// its prefix, and passRun tells a run made again once it is made.
 	level int
 	again bool
+	// weight is, under IterativeBounding without PartialOrder, the share of
+	// the pass's tree the subtree holds (see frontier.remaining).
+	weight float64
 }
 
 type backtrackPoint struct{ ci, v int }

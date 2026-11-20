@@ -45,7 +45,7 @@ func TestShrinkSimplifiesTheSchedule(t *testing.T) {
 				}
 				continue
 			}
-			for _, c := range s.children(r, len(prefix)) {
+			for _, c := range s.children(r, subtree{prefix: prefix}, 0) {
 				stack = append(stack, c.prefix)
 			}
 		}
